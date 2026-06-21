@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration-10 — Both backend and frontend tested for 4 new features: (1) /api/items/suggestions autocomplete, (2) admin-only /api/approval-log, (3) reports_to admin restriction in /api/staff create+update, (4) new roles hr/senior_manager/center_staff. Added /app/backend/tests/test_iter10_new_features.py with 21 tests (suggestions auth + seed/list + query filter; approval-log 403/200/shape/sort/filters; reports_to admin allow vs manager-create-strip vs manager-update-preserve; new roles via register + admin PATCH; 7 regression smoke). 21/21 new + 93/93 prior = 114/114 PASS. UI verified live: admin sees Approval Log in sidebar and full /approvals page with all 6 data-testids; non-admin viewer correctly redirected/blocked with approval-log-forbidden panel and hidden sidebar entry; Transactions dialog renders <datalist id='txn-item-names'> with 13 options and item-name-0 input has list='txn-item-names'; Stock dialog renders <datalist id='stock-item-names'> with 13 options and stock-name input has correct list attr; HRMS Staff dialog shows 'Reports To' for admin only.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "All shadcn Dialog modals (New Transaction, Add Stock, Add Staff)", "issues": ["Console warning: 'Missing Description or aria-describedby={undefined} for DialogContent' — accessibility nit, add DialogDescription to each DialogContent."]},
+      {"screen": "Dashboard charts", "issues": ["Recharts width(-1)/height(-1) console warnings — container has zero size on initial render."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter10_new_features.py",
+    "/app/test_reports/pytest/iteration_10_new.xml",
+    "/app/test_reports/pytest/iteration_10_all.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py /api/items/suggestions: pipeline groups by lower(name) but emits first-seen original casing via $first — good for casing stability. The optional `q` regex is unescaped, so users typing special regex chars (e.g. '*', '(') will 500 or match unexpectedly. Wrap with re.escape() or use $regex with $literal-style sanitisation.",
+    "server.py /api/approval-log: 'leave' rows always emit by='—' because LeaveIn has no approver_id captured at decide_leave time — consider persisting `decided_by` and `decided_at` on leave docs so the audit log can show who approved/rejected. Same for `at` which currently uses created_at (not decision time).",
+    "server.py update_staff for non-admin reads existing reports_to_id then re-applies; reads only that projected field — minor: could project just {'reports_to_id': 1} and skip 'id' filter overhead. Fine as-is.",
+    "ROLE_LITERAL extended to include hr/senior_manager/center_staff but no role-based permissions are wired beyond appearing in the literal (per agent_to_agent_context_note). Validate that consumers (require_role checks across endpoints) explicitly include these where appropriate — e.g. HR likely needs access to /api/staff, /api/leaves, /api/payroll mutations; today they fall under 'viewer' defaults.",
+    "_txn_scope_for_user(): role ∈ {hr, senior_manager, center_staff} all fall into the 'viewer / own data only' bucket → they would NOT see global transactions in dashboard. Confirm with PM whether this is intended.",
+    "Frontend ApprovalLog page: confirm filters apply server-side via query params (type_filter/action/start/end) — backend supports them, just verify the UI wires them.",
+    "Frontend Transactions/Stock datalist: 13 options loaded on dialog open via /api/items/suggestions with no `q`. Good. Browser-native datalist UX varies by browser (esp. Safari truncation) — acceptable trade-off for zero JS overhead."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter10_new_features.py (new, 21 tests)",
+    "/app/test_reports/iteration_10.json (new)"
+  ],
+  "success_rate": {"backend": "100% (114/114)", "frontend": "100% (all 7 UI checks passed)"},
+  "test_credentials": "admin@finance.app / Admin@123. Test creates TEST_-prefixed users (managers/viewers) under @x.com with tag suffix.",
+  "seed_data_creation": "Per test run: 1 TEST manager, 1 TEST viewer, several TEST staff (Boss/Sub pairs for reports_to chain tests), 2 transactions with TestItem_/UniqueZZ_ items for autocomplete seeding, ~6 viewer-role users promoted to hr/senior_manager/center_staff. All tagged with random suffix so re-runs do not collide.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v` for full regression (114 tests, ~29s). Key data-testids verified live on public URL: filter-type, filter-action, filter-start, filter-end, approval-log-page, approval-log-table (admin /approvals); approval-log-forbidden (non-admin /approvals — confirmed visible, 1 element); item-name-0 (Transactions row 0 input with list='txn-item-names'); stock-name (Stock dialog input with list='stock-item-names'); datalist#txn-item-names and datalist#stock-item-names both present in DOM with 13 options each. Non-admin sidebar correctly hides 'Approval Log' entry. HRMS Add Staff dialog renders 'Reports To' Select for admin and Add Staff button is not present for viewer role at all (server-side: requires admin/manager). Note: hr/senior_manager/center_staff currently fall under 'viewer' scope in _txn_scope_for_user — not blocking but worth confirming intent. The /api/items/suggestions ?q= param uses raw $regex; special regex chars in user input could break the query (not exploited in current UI which sends raw text).",
+  "rca of the issue": "No bugs found. Initial test-side failure was due to running tests with REACT_APP_BACKEND_URL defaulted to http://localhost:8001 — the JWT cookie is secure=True+samesite=none, so the cookie was set by the HTTPS login response but NOT re-sent on the HTTP localhost follow-up requests. Fixed by reading the URL from /app/frontend/.env (HTTPS). This is a tester-side env config matter, not a server bug."
+}

@@ -14,7 +14,7 @@ import { toast } from "sonner";
 import { Pencil } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 
-const ROLES = ["admin", "manager", "center_manager", "partner", "accountant", "viewer"];
+const ROLES = ["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer"];
 
 export default function Users() {
   const { t } = useLang();

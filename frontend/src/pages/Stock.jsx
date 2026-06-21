@@ -24,6 +24,7 @@ export default function Stock() {
   const [rows, setRows] = useState([]);
   const [filters, setFilters] = useState({ center_id: "", txn_type: "", start: "", end: "", search: "" });
   const [loading, setLoading] = useState(false);
+  const [itemSuggestions, setItemSuggestions] = useState([]);
 
   // Quick-add stock dialog (creates a 1-line expense txn)
   const [open, setOpen] = useState(false);
@@ -33,6 +34,7 @@ export default function Stock() {
 
   useEffect(() => {
     api.get("/entities/center").then((r) => setCenters(r.data)).catch(() => {});
+    api.get("/items/suggestions").then((r) => setItemSuggestions(r.data || [])).catch(() => {});
   }, []);
 
   const params = useMemo(() => {
@@ -106,7 +108,7 @@ export default function Stock() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="col-span-2">
                     <Label>Item Name</Label>
-                    <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. A4 paper, Laptop, Cement bags…" className="rounded-none" data-testid="stock-name" />
+                    <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. A4 paper, Laptop, Cement bags…" list="stock-item-names" className="rounded-none" data-testid="stock-name" />
                   </div>
                   <div>
                     <Label>Quantity</Label>
@@ -146,6 +148,9 @@ export default function Stock() {
                   <Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">Cancel</Button>
                   <Button onClick={quickAdd} className="brand-btn rounded-none" data-testid="stock-save">Add</Button>
                 </DialogFooter>
+                <datalist id="stock-item-names">
+                  {itemSuggestions.map((s) => <option key={s.name} value={s.name} />)}
+                </datalist>
               </DialogContent>
             </Dialog>
           )}

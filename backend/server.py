@@ -105,7 +105,7 @@ def require_role(*roles: str):
 
 
 # ---------- Models ----------
-ROLE_LITERAL = Literal["admin", "manager", "center_manager", "partner", "accountant", "viewer"]
+ROLE_LITERAL = Literal["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer"]
 
 
 class UserOut(BaseModel):
@@ -989,8 +989,11 @@ async def list_staff(_=Depends(get_current_user)):
 
 
 @api.post("/staff", response_model=StaffOut)
-async def create_staff(body: StaffIn, _=Depends(require_role("admin", "manager"))):
+async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manager"))):
     doc = body.model_dump()
+    # Only admin can assign the reports_to chain (approval hierarchy)
+    if user.get("role") != "admin":
+        doc["reports_to_id"] = None
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     await db.staff.insert_one(doc)
@@ -998,9 +1001,14 @@ async def create_staff(body: StaffIn, _=Depends(require_role("admin", "manager")
 
 
 @api.put("/staff/{sid}", response_model=StaffOut)
-async def update_staff(sid: str, body: StaffIn, _=Depends(require_role("admin", "manager"))):
+async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin", "manager"))):
+    update = body.model_dump()
+    if user.get("role") != "admin":
+        # Preserve existing reports_to_id; only admin may change it
+        existing = await db.staff.find_one({"id": sid}, {"_id": 0, "reports_to_id": 1})
+        update["reports_to_id"] = (existing or {}).get("reports_to_id")
     res = await db.staff.find_one_and_update(
-        {"id": sid}, {"$set": body.model_dump()}, return_document=True
+        {"id": sid}, {"$set": update}, return_document=True
     )
     if not res:
         raise HTTPException(404, "Not found")
@@ -1454,6 +1462,139 @@ async def list_stock(
     # Sort newest first for display
     rows.sort(key=lambda r: (r.get("date") or "", r.get("txn_id") or ""), reverse=True)
     return rows
+
+
+# ---------- Item Suggestions (autocomplete) ----------
+@api.get("/items/suggestions")
+async def item_suggestions(q: Optional[str] = None, limit: int = 50, _=Depends(get_current_user)):
+    """Return distinct item names previously used in any transaction (case-insensitive prefix match)."""
+    pipeline = [
+        {"$unwind": "$items"},
+        {"$match": {"items.name": {"$ne": ""}}},
+        {"$group": {"_id": {"$toLower": "$items.name"}, "name": {"$first": "$items.name"}, "count": {"$sum": 1}}},
+    ]
+    if q and q.strip():
+        rx = {"$regex": q.strip(), "$options": "i"}
+        pipeline.append({"$match": {"name": rx}})
+    pipeline += [
+        {"$sort": {"count": -1, "name": 1}},
+        {"$limit": max(1, min(limit, 500))},
+        {"$project": {"_id": 0, "name": 1, "count": 1}},
+    ]
+    out = await db.transactions.aggregate(pipeline).to_list(500)
+    return out
+
+
+# ---------- Approval Log (admin-only) ----------
+@api.get("/approval-log")
+async def approval_log(
+    type_filter: Optional[str] = None,  # 'transaction', 'reimbursement', 'leave', 'payroll'
+    action: Optional[str] = None,        # 'approved', 'rejected', 'paid', 'l1_approved', 'accountant_approved'
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 500,
+    _=Depends(require_role("admin")),
+):
+    """Unified final-approval feed across transactions, reimbursements, leaves, payroll."""
+    rows: list = []
+
+    # User name lookup
+    users = await db.users.find({}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(2000)
+    uname = {u["id"]: (u.get("name") or u.get("email") or "—") for u in users}
+
+    def _in_range(iso: Optional[str]) -> bool:
+        if not iso:
+            return False
+        d = iso[:10]
+        if start and d < start:
+            return False
+        if end and d > end:
+            return False
+        return True
+
+    # Transactions: approved/rejected
+    if not type_filter or type_filter == "transaction":
+        async for d in db.transactions.find(
+            {"status": {"$in": ["approved", "rejected"]}}, {"_id": 0}
+        ).sort("approved_at", -1).limit(2000):
+            ts = d.get("approved_at") or d.get("created_at")
+            if (start or end) and not _in_range(ts):
+                continue
+            act = d.get("status")
+            if action and action != act:
+                continue
+            rows.append({
+                "type": "transaction",
+                "action": act,
+                "ref_id": d.get("id"),
+                "at": ts,
+                "by": uname.get(d.get("approved_by")) or "—",
+                "amount": d.get("amount"),
+                "summary": f"{d.get('type','').title()} — {d.get('description','') or ''}".strip(" —"),
+                "remarks": d.get("rejected_reason") or "",
+            })
+
+    # Reimbursements: emit a row for each completed stage
+    if not type_filter or type_filter == "reimbursement":
+        async for d in db.reimbursements.find({}, {"_id": 0}).sort("created_at", -1).limit(2000):
+            staff = await db.staff.find_one({"id": d.get("staff_id")}, {"_id": 0, "name": 1})
+            sname = (staff or {}).get("name", "")
+            base = {"type": "reimbursement", "ref_id": d.get("id"), "amount": d.get("amount"),
+                    "summary": f"Reimbursement — {sname}".strip(" —")}
+            stages = [
+                ("l1_approved",      d.get("l1_approved_at"),       d.get("l1_approved_by")),
+                ("accountant_approved", d.get("accountant_approved_at"), d.get("accountant_approved_by")),
+                ("paid",             d.get("paid_at"),              d.get("paid_by")),
+            ]
+            if d.get("status") == "rejected":
+                stages.append(("rejected", d.get("rejected_at"), None))
+            for act, at, by in stages:
+                if not at:
+                    continue
+                if (start or end) and not _in_range(at):
+                    continue
+                if action and action != act:
+                    continue
+                rows.append({**base, "action": act, "at": at,
+                             "by": uname.get(by) or "—",
+                             "remarks": d.get("rejected_reason", "") if act == "rejected" else ""})
+
+    # Leaves (approved/rejected)
+    if not type_filter or type_filter == "leave":
+        async for d in db.leaves.find({"status": {"$in": ["approved", "rejected"]}}, {"_id": 0}).sort("created_at", -1).limit(2000):
+            staff = await db.staff.find_one({"id": d.get("staff_id")}, {"_id": 0, "name": 1})
+            sname = (staff or {}).get("name", "")
+            at = d.get("created_at")
+            if (start or end) and not _in_range(at):
+                continue
+            act = d.get("status")
+            if action and action != act:
+                continue
+            rows.append({
+                "type": "leave", "action": act, "ref_id": d.get("id"),
+                "at": at, "by": "—", "amount": None,
+                "summary": f"Leave — {sname} ({d.get('start_date')} → {d.get('end_date')})",
+                "remarks": d.get("reason", "") or "",
+            })
+
+    # Payroll (paid)
+    if not type_filter or type_filter == "payroll":
+        async for d in db.payroll.find({"status": "paid"}, {"_id": 0}).sort("paid_at", -1).limit(2000):
+            at = d.get("paid_at")
+            if (start or end) and not _in_range(at):
+                continue
+            if action and action != "paid":
+                continue
+            rows.append({
+                "type": "payroll", "action": "paid", "ref_id": d.get("id"),
+                "at": at, "by": uname.get(d.get("paid_by")) or "—",
+                "amount": d.get("net"),
+                "summary": f"Payroll — {d.get('staff_name','')} {d.get('month')}/{d.get('year')}",
+                "remarks": "",
+            })
+
+    rows.sort(key=lambda r: r.get("at") or "", reverse=True)
+    return rows[: max(1, min(limit, 2000))]
 
 
 # ---------- Notifications ----------

@@ -52,6 +52,12 @@ export default function Register() {
             <SelectContent>
               <SelectItem value="admin">Admin</SelectItem>
               <SelectItem value="manager">Manager</SelectItem>
+              <SelectItem value="senior_manager">Senior Manager</SelectItem>
+              <SelectItem value="center_manager">Center Manager</SelectItem>
+              <SelectItem value="center_staff">Center Staff</SelectItem>
+              <SelectItem value="partner">Partner</SelectItem>
+              <SelectItem value="accountant">Accountant</SelectItem>
+              <SelectItem value="hr">HR</SelectItem>
               <SelectItem value="viewer">Viewer</SelectItem>
             </SelectContent>
           </Select>

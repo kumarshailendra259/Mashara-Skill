@@ -31,6 +31,12 @@ export default function Transactions() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [selected, setSelected] = useState(new Set());
+  const [itemSuggestions, setItemSuggestions] = useState([]);
+
+  // Load distinct item names for the datalist (autocomplete)
+  useEffect(() => {
+    api.get("/items/suggestions").then((r) => setItemSuggestions(r.data || [])).catch(() => {});
+  }, [open]);
   const emptyForm = { type: "expense", amount: "", date: new Date().toISOString().slice(0, 10), description: "", company_id: "", partner_id: "", center_id: "", project_id: "", items: [], attachments: [] };
   const [form, setForm] = useState(emptyForm);
   const fileRef = useRef(null);
@@ -414,7 +420,7 @@ export default function Transactions() {
                       return (
                       <tr key={itemKey} className="border-b border-[var(--border)]">
                         <td className="py-1.5 pr-2">
-                          <Input value={it.name} onChange={(e) => updateItem(idx, "name", e.target.value)} placeholder="Item name" className="rounded-none h-8" data-testid={`item-name-${idx}`} />
+                          <Input value={it.name} onChange={(e) => updateItem(idx, "name", e.target.value)} placeholder="Item name" list="txn-item-names" className="rounded-none h-8" data-testid={`item-name-${idx}`} />
                         </td>
                         <td className="py-1.5 pr-2 w-20">
                           <Input type="number" step="0.01" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="rounded-none h-8 num" />
@@ -475,6 +481,10 @@ export default function Transactions() {
             <Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">{t("cancel")}</Button>
             <Button onClick={save} className="brand-btn rounded-none" data-testid="txn-save">{t("save")}</Button>
           </DialogFooter>
+          {/* Shared datalist for item-name autocomplete */}
+          <datalist id="txn-item-names">
+            {itemSuggestions.map((s) => <option key={s.name} value={s.name} />)}
+          </datalist>
         </DialogContent>
       </Dialog>
     </div>
