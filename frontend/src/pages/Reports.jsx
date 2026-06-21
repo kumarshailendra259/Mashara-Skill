@@ -5,6 +5,7 @@ import { inr } from "@/lib/i18n";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Download } from "lucide-react";
+import PrintButton from "@/components/PrintButton";
 
 const DIMS = ["company", "partner", "center", "project", "item"];
 
@@ -32,9 +33,12 @@ export default function Reports() {
 
   return (
     <div className="space-y-5" data-testid="reports-page">
-      <div>
-        <div className="overline">{t("reports")}</div>
-        <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("reports")}</h1>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="overline">{t("reports")}</div>
+          <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("reports")}</h1>
+        </div>
+        <PrintButton />
       </div>
 
       <Tabs defaultValue="company">

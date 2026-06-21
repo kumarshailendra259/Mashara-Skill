@@ -1376,6 +1376,86 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant")
     return res
 
 
+# ---------- Stock View ----------
+@api.get("/stock")
+async def list_stock(
+    center_id: Optional[str] = None,
+    txn_type: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    search: Optional[str] = None,
+    _=Depends(get_current_user),
+):
+    """Flatten transaction line-items into a stock-view list.
+
+    Returns one row per item across every transaction (filtered by center / type / date).
+    Adds a `is_duplicate` flag = True if the same lowercased item-name appears in
+    an earlier transaction (globally, across all centers — chronological by date+created_at).
+    The earliest occurrence per name is marked is_duplicate=False ("First").
+    """
+    q: dict = {}
+    if center_id:
+        q["center_id"] = center_id
+    if txn_type:
+        q["type"] = txn_type
+    if start or end:
+        rng: dict = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end
+        q["date"] = rng
+
+    # Need *all* transactions globally (regardless of center filter) to compute duplicates
+    # but we only emit rows for the filtered set. Strategy: load all matching + a separate
+    # pass to find first-occurrence-per-name across the *entire* collection (ignoring filters
+    # so duplicate flag stays stable across views).
+    docs = await db.transactions.find(q, {"_id": 0}).sort([("date", 1), ("created_at", 1)]).to_list(20000)
+
+    # First-occurrence lookup: scan entire transactions collection (just the items + dates).
+    seen_first = {}
+    cursor = db.transactions.find({}, {"_id": 0, "id": 1, "date": 1, "created_at": 1, "items": 1}).sort([("date", 1), ("created_at", 1)])
+    async for d in cursor:
+        for it in (d.get("items") or []):
+            n = (it.get("name") or "").strip().lower()
+            if not n:
+                continue
+            if n not in seen_first:
+                seen_first[n] = (d.get("date"), d.get("created_at"), d.get("id"))
+
+    # Centers map for names
+    cdocs = await db.centers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+    cname_by_id = {c["id"]: c["name"] for c in cdocs}
+
+    rows: list = []
+    needle = (search or "").strip().lower()
+    for d in docs:
+        for it in (d.get("items") or []):
+            name = (it.get("name") or "").strip()
+            if needle and needle not in name.lower():
+                continue
+            n_low = name.lower()
+            first = seen_first.get(n_low)
+            is_first_here = first and first[2] == d.get("id") and \
+                (first[0] == d.get("date") and first[1] == d.get("created_at"))
+            rows.append({
+                "txn_id": d.get("id"),
+                "txn_type": d.get("type"),
+                "txn_status": d.get("status"),
+                "date": d.get("date"),
+                "center_id": d.get("center_id"),
+                "center_name": cname_by_id.get(d.get("center_id")) if d.get("center_id") else None,
+                "name": name,
+                "quantity": it.get("quantity") or 0,
+                "rate": it.get("rate") or 0,
+                "amount": it.get("amount") or 0,
+                "is_duplicate": bool(first) and not is_first_here,
+            })
+    # Sort newest first for display
+    rows.sort(key=lambda r: (r.get("date") or "", r.get("txn_id") or ""), reverse=True)
+    return rows
+
+
 # ---------- Notifications ----------
 async def _notify(user_ids, message: str, ntype: str = "info", ref_id: Optional[str] = None, link: Optional[str] = None):
     """Insert a notification for each user_id (skip falsy / duplicates)."""

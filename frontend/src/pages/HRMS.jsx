@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogT
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip } from "lucide-react";
+import PrintButton from "@/components/PrintButton";
 
 const STEPS = ["submitted", "l1_approved", "accountant_approved", "paid"];
 
@@ -232,9 +233,12 @@ export default function HRMS() {
 
   return (
     <div className="space-y-5" data-testid="hrms-page">
-      <div>
-        <div className="overline">HRMS · Payroll</div>
-        <h1 className="font-heading font-black tracking-tight text-3xl mt-1">HRMS &amp; Payroll</h1>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="overline">HRMS · Payroll</div>
+          <h1 className="font-heading font-black tracking-tight text-3xl mt-1">HRMS &amp; Payroll</h1>
+        </div>
+        <PrintButton />
       </div>
 
       <Tabs defaultValue="reimb">

@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { Pencil } from "lucide-react";
+import PrintButton from "@/components/PrintButton";
 
 const ROLES = ["admin", "manager", "center_manager", "partner", "accountant", "viewer"];
 
@@ -62,9 +63,12 @@ export default function Users() {
 
   return (
     <div className="space-y-5" data-testid="users-page">
-      <div>
-        <div className="overline">{t("user_management")}</div>
-        <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("user_management")}</h1>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="overline">{t("user_management")}</div>
+          <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("user_management")}</h1>
+        </div>
+        <PrintButton />
       </div>
       <div className="swiss-card overflow-x-auto">
         <table className="w-full text-sm">

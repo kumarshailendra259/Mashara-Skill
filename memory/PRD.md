@@ -37,6 +37,8 @@ Need a web application where company-wise, partner-wise, center-wise, project-wi
 - **Payroll** — admin/accountant runs monthly payroll; per-staff gross computed as `per_day_rate × days_present` (falls back to prorated monthly_salary). Pay action auto-creates the offsetting expense transaction.
 - Bilingual UI (English / Hindi) toggle in header, persists in localStorage
 - Swiss-style high-contrast light theme with International Klein Blue accents
+- **Stock module** (NEW 2026-06-21) — `/stock` page + sidebar item. Aggregates all transaction line-items into a stock list with Purchase Date, Center, Item, Qty, Rate, Amount, Type, Status. Includes filters (center / type / date range / item search), 4 summary cards (rows, total qty, total amount, duplicates count), totals row, and Quick-Add dialog that creates a 1-line expense/investment/income transaction. Global duplicate detection: items with the same lower-cased name across any earlier transaction are flagged "Duplicate" (orange) — first occurrence shown as "First" (green).
+- **Print-everywhere** (NEW 2026-06-21) — reusable `<PrintButton />` component + global `@media print` CSS hides sidebar / header / filters / action buttons and renders only the page content cleanly. Print buttons added to: Dashboard, Transactions, Reports, Stock, Entities (Companies/Partners/Centers/Projects), HRMS (all sub-tabs since they share header), Users.
 
 ## Backlog (P1)
 - Excel (.xlsx) export — currently CSV only

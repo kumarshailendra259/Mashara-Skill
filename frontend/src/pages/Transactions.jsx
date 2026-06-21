@@ -13,6 +13,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare } from "lucide-react";
+import PrintButton from "@/components/PrintButton";
 
 const TXN_TYPES = ["investment", "income", "expense"];
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
@@ -187,6 +188,7 @@ export default function Transactions() {
               <CheckSquare size={14} /> Approve ({selected.size})
             </Button>
           )}
+          <PrintButton />
           <Button variant="outline" onClick={exportCsv} className="rounded-none gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
           {canEdit && (
             <>

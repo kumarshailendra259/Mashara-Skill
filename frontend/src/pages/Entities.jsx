@@ -9,6 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Pencil, Trash2, Plus } from "lucide-react";
+import PrintButton from "@/components/PrintButton";
 
 export default function Entities({ etype }) {
   const { t } = useLang();
@@ -51,8 +52,10 @@ export default function Entities({ etype }) {
           <div className="overline">{t("entities") || t(titleKey)}</div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t(titleKey)}</h1>
         </div>
-        {canEdit && (
-          <Dialog open={open} onOpenChange={setOpen}>
+        <div className="flex gap-2">
+          <PrintButton />
+          {canEdit && (
+            <Dialog open={open} onOpenChange={setOpen}>
             <DialogTrigger asChild>
               <Button onClick={openNew} className="brand-btn rounded-none gap-2" data-testid={`btn-new-${etype}`}>
                 <Plus size={16} /> {t("add")}
@@ -80,7 +83,8 @@ export default function Entities({ etype }) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-        )}
+          )}
+        </div>
       </div>
 
       <div className="swiss-card overflow-hidden">

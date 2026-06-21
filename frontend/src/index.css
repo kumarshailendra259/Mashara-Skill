@@ -99,3 +99,29 @@ h1, h2, h3, h4, .font-heading {
   border: 1px solid var(--border);
   border-radius: 2px;
 }
+
+/* ---------- Print styles ---------- */
+@media print {
+  /* Hide chrome: sidebar, header, toolbars, filters, buttons */
+  aside, header, .no-print, [data-testid="sidebar-nav"], [data-testid="toaster"] {
+    display: none !important;
+  }
+  /* Reset main layout for print */
+  main, [data-testid="main-content"] {
+    overflow: visible !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+  body, html { background: #fff !important; color: #000 !important; }
+  /* Make cards print-friendly */
+  .swiss-card { border: 1px solid #000 !important; box-shadow: none !important; page-break-inside: avoid; }
+  /* Make tables print-friendly */
+  table { width: 100% !important; border-collapse: collapse !important; font-size: 11pt !important; }
+  th, td { border-bottom: 1px solid #ccc !important; }
+  /* Show URL hidden */
+  a[href]:after { content: ""; }
+  /* Page setup */
+  @page { margin: 14mm 12mm; }
+  /* Avoid breaking rows */
+  tr, td, th { page-break-inside: avoid; }
+}

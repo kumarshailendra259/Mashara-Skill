@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,7 @@ const navItems = [
   { to: "/centers", key: "centers", icon: MapPin },
   { to: "/projects", key: "projects", icon: Briefcase },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight },
+  { to: "/stock", key: "stock", icon: Package },
   { to: "/reports", key: "reports", icon: FileBarChart2 },
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },

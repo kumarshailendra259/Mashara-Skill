@@ -4,6 +4,7 @@ import { useLang } from "@/context/LangContext";
 import { useAuth } from "@/context/AuthContext";
 import { inr } from "@/lib/i18n";
 import KpiCard from "@/components/KpiCard";
+import PrintButton from "@/components/PrintButton";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -74,6 +75,7 @@ export default function Dashboard() {
           <div className="overline">{t("dashboard")}</div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("dashboard")}</h1>
         </div>
+        <PrintButton />
       </div>
 
       {/* Filters */}

@@ -12,6 +12,7 @@ import Transactions from "@/pages/Transactions";
 import Reports from "@/pages/Reports";
 import Users from "@/pages/Users";
 import HRMS from "@/pages/HRMS";
+import Stock from "@/pages/Stock";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
@@ -36,6 +37,7 @@ function App() {
             <Route path="/reports" element={<ProtectedRoute><Shell><Reports /></Shell></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute><Shell><Users /></Shell></ProtectedRoute>} />
             <Route path="/hrms" element={<ProtectedRoute><Shell><HRMS /></Shell></ProtectedRoute>} />
+            <Route path="/stock" element={<ProtectedRoute><Shell><Stock /></Shell></ProtectedRoute>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
