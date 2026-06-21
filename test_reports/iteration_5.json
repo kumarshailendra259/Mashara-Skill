@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration-5 regression: full backend suite executed against freshly restarted backend. 49/49 PASS. Previously failing test_non_admin_edit_approved_resets_to_pending now passes - confirms guard at server.py:561 no longer contains the `existing.get('status','pending')=='pending'` clause, so non-admin owner (manager/center_manager/partner/accountant) can edit own approved entry and status auto-resets to 'pending' with approved_by=None.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_finance_api.py",
+    "/app/backend/tests/test_finance_features.py",
+    "/app/backend/tests/test_finance_approval.py",
+    "/app/test_reports/pytest/pytest_iter5.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py update_transaction guard is now correctly: `if not (is_admin or (is_owner and role in (manager, center_manager, partner, accountant)))` with separate status-reset block. Logic is clean and matches the intended approval workflow."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "n/a"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Tests create their own TEST_ prefixed entities/transactions and clean up via admin delete where applicable.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Full backend suite (test_finance_api.py + test_finance_features.py + test_finance_approval.py) is the regression baseline. All 49 tests pass on iteration-5. The PUT /api/transactions/{id} edit-approved-resets-to-pending fix is verified end-to-end via pytest, not just curl.",
+  "rca of the issue": "Iteration-3 and Iteration-4 failure was due to an extra `existing.get('status','pending')=='pending'` clause in the guard at server.py:561 which blocked non-admin owners from editing their own approved transactions. Iteration-5: source verified to no longer contain that clause; backend restarted; pytest run confirms test_non_admin_edit_approved_resets_to_pending passes (POST as center_manager -> approve as admin -> PUT as center_manager returns 200 with status='pending', approved_by=None, amount updated)."
+}

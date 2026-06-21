@@ -556,8 +556,9 @@ async def update_transaction(tid: str, body: TransactionIn, user=Depends(get_cur
     role = user.get("role")
     is_admin = role == "admin"
     is_owner = existing.get("created_by") == user["id"]
-    # Only admin can always edit. Owner can edit only their own pending entries.
-    if not (is_admin or (is_owner and existing.get("status", "pending") == "pending" and role in ("manager", "center_manager", "partner", "accountant"))):
+    # Admin can edit any. Non-admin creator (with editor role) can edit own entry;
+    # if it was approved, editing resets status back to pending.
+    if not (is_admin or (is_owner and role in ("manager", "center_manager", "partner", "accountant"))):
         raise HTTPException(403, "Forbidden")
     update = body.model_dump()
     # Editing an approved entry sets it back to pending (unless admin)
