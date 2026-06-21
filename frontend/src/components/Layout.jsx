@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,14 +30,36 @@ export default function Layout({ children }) {
   const { lang, switchLang, t } = useLang();
   const nav = useNavigate();
   const [tasks, setTasks] = useState({ txn_pending: 0, reimb_l1: 0, reimb_accountant: 0, reimb_pay: 0, payroll_pay: 0, total: 0 });
+  const [notifs, setNotifs] = useState({ items: [], unread: 0 });
 
   useEffect(() => {
     if (!user) return;
-    const load = () => api.get("/tasks/my").then((r) => setTasks(r.data)).catch(() => {});
+    const load = () => {
+      api.get("/tasks/my").then((r) => setTasks(r.data)).catch(() => {});
+      api.get("/notifications?limit=10").then((r) => setNotifs(r.data)).catch(() => {});
+    };
     load();
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
   }, [user]);
+
+  const markAllRead = async () => {
+    try {
+      await api.patch("/notifications/mark-all-read");
+      setNotifs((n) => ({ items: n.items.map((it) => ({ ...it, read: true })), unread: 0 }));
+    } catch { /* best effort */ }
+  };
+
+  const onNotifClick = async (n) => {
+    if (!n.read) {
+      try { await api.patch(`/notifications/${n.id}/read`); } catch { /* best effort */ }
+      setNotifs((s) => ({
+        items: s.items.map((it) => it.id === n.id ? { ...it, read: true } : it),
+        unread: Math.max(0, s.unread - 1),
+      }));
+    }
+    if (n.link) nav(n.link);
+  };
 
   const badgeFor = (key) => {
     if (key === "transactions") return tasks.txn_pending;
@@ -94,6 +116,52 @@ export default function Layout({ children }) {
           <div className="md:hidden font-heading font-black tracking-tight text-lg">{t("app_name")}</div>
           <div className="hidden md:block overline">{t("dashboard")} · {user?.role}</div>
           <div className="flex items-center gap-2">
+            {/* Notifications */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="rounded-none relative h-9 px-2" data-testid="notif-bell">
+                  <Bell size={16} />
+                  {notifs.unread > 0 && (
+                    <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[16px] h-[16px] text-[10px] font-bold bg-[var(--danger)] text-white px-1" data-testid="notif-badge">
+                      {notifs.unread > 9 ? "9+" : notifs.unread}
+                    </span>
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="rounded-none w-80 max-h-96 overflow-y-auto p-0">
+                <div className="px-3 py-2 flex items-center justify-between border-b border-[var(--border)]">
+                  <DropdownMenuLabel className="p-0 font-heading tracking-tight">Notifications</DropdownMenuLabel>
+                  {notifs.unread > 0 && (
+                    <button type="button" onClick={markAllRead} className="text-xs text-[var(--brand)] hover:underline" data-testid="mark-all-read">Mark all read</button>
+                  )}
+                </div>
+                {notifs.items.length === 0 ? (
+                  <div className="py-6 text-center overline text-xs">No notifications</div>
+                ) : (
+                  <ul className="divide-y divide-[var(--border)]">
+                    {notifs.items.map((n) => (
+                      <li key={n.id}>
+                        <button
+                          type="button"
+                          onClick={() => onNotifClick(n)}
+                          data-testid={`notif-item-${n.id}`}
+                          className={`w-full text-left px-3 py-2 hover:bg-gray-50 ${n.read ? "" : "bg-[#f3f5fb]"}`}
+                        >
+                          <div className="flex items-start gap-2">
+                            {!n.read && <span className="mt-1.5 w-1.5 h-1.5 bg-[var(--brand)] shrink-0" />}
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-sm ${n.read ? "text-[var(--muted)]" : "font-medium"} truncate`}>{n.message}</div>
+                              <div className="overline text-[10px] mt-0.5">{new Date(n.created_at).toLocaleString()}</div>
+                            </div>
+                          </div>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm" data-testid="lang-toggle" className="rounded-none gap-2">

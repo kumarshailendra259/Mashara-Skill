@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List } from "lucide-react";
+import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare } from "lucide-react";
 
 const TXN_TYPES = ["investment", "income", "expense"];
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
@@ -29,6 +29,7 @@ export default function Transactions() {
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [selected, setSelected] = useState(new Set());
   const emptyForm = { type: "expense", amount: "", date: new Date().toISOString().slice(0, 10), description: "", company_id: "", partner_id: "", center_id: "", project_id: "", items: [], attachments: [] };
   const [form, setForm] = useState(emptyForm);
   const fileRef = useRef(null);
@@ -54,6 +55,28 @@ export default function Transactions() {
     const reason = window.prompt("Reason (optional):") || "";
     try { await api.post(`/transactions/${id}/reject`, { reason }); load(); toast.success("Rejected"); }
     catch (e) { toast.error(formatError(e)); }
+  };
+
+  const eligibleIds = items.filter((it) => it.status !== "approved").map((it) => it.id);
+  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selected.has(id));
+  const toggleOne = (id) => setSelected((s) => {
+    const n = new Set(s);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+  const toggleAll = () => setSelected((s) => {
+    if (eligibleIds.every((id) => s.has(id))) return new Set();
+    return new Set(eligibleIds);
+  });
+  const bulkApprove = async () => {
+    const ids = Array.from(selected).filter((id) => eligibleIds.includes(id));
+    if (ids.length === 0) { toast.error("Nothing to approve"); return; }
+    try {
+      const { data } = await api.post("/transactions/bulk-approve", { ids });
+      setSelected(new Set());
+      await load();
+      toast.success(`Approved ${data.approved} transaction${data.approved === 1 ? "" : "s"}`);
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   useEffect(() => { loadEntities(); }, []);
@@ -159,6 +182,11 @@ export default function Transactions() {
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("transactions")}</h1>
         </div>
         <div className="flex flex-wrap gap-2">
+          {isAdmin && selected.size > 0 && (
+            <Button onClick={bulkApprove} className="brand-btn rounded-none gap-2" data-testid="btn-bulk-approve">
+              <CheckSquare size={14} /> Approve ({selected.size})
+            </Button>
+          )}
           <Button variant="outline" onClick={exportCsv} className="rounded-none gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
           {canEdit && (
             <>
@@ -221,6 +249,11 @@ export default function Transactions() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] overline bg-gray-50">
+              {isAdmin && (
+                <th className="text-left p-3 w-10">
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} className="cursor-pointer" data-testid="select-all-txn" disabled={eligibleIds.length === 0} />
+                </th>
+              )}
               <th className="text-left p-3">{t("date")}</th>
               <th className="text-left p-3">{t("type")}</th>
               <th className="text-right p-3">{t("amount")}</th>
@@ -235,9 +268,21 @@ export default function Transactions() {
           </thead>
           <tbody>
             {items.length === 0 ? (
-              <tr><td colSpan={10} className="text-center py-8 overline">{t("no_data")}</td></tr>
+              <tr><td colSpan={isAdmin ? 11 : 10} className="text-center py-8 overline">{t("no_data")}</td></tr>
             ) : items.map((it) => (
               <tr key={it.id} className="border-b border-[var(--border)] hover:bg-gray-50">
+                {isAdmin && (
+                  <td className="p-3">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(it.id)}
+                      onChange={() => toggleOne(it.id)}
+                      disabled={it.status === "approved"}
+                      className="cursor-pointer disabled:cursor-not-allowed disabled:opacity-30"
+                      data-testid={`select-txn-${it.id}`}
+                    />
+                  </td>
+                )}
                 <td className="p-3 num">{it.date}</td>
                 <td className="p-3">
                   <span className={`inline-block px-2 py-0.5 text-xs border ${

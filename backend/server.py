@@ -229,8 +229,9 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications"):
         await db[col].create_index("id", unique=True)
+    await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -584,10 +585,20 @@ async def bulk_approve(body: BulkIds, user=Depends(require_role("admin"))):
     if not body.ids:
         return {"approved": 0}
     now = datetime.now(timezone.utc).isoformat()
+    # Snapshot creators before update so we can notify them
+    docs = await db.transactions.find(
+        {"id": {"$in": body.ids}, "status": {"$ne": "approved"}},
+        {"_id": 0, "id": 1, "created_by": 1, "amount": 1},
+    ).to_list(5000)
     r = await db.transactions.update_many(
         {"id": {"$in": body.ids}, "status": {"$ne": "approved"}},
         {"$set": {"status": "approved", "approved_by": user["id"], "approved_at": now, "rejected_reason": None}},
     )
+    # Fire notifications (best-effort)
+    for d in docs:
+        if d.get("created_by") and d["created_by"] != user["id"]:
+            await _notify(d["created_by"], f"Your transaction was approved (₹{d.get('amount', 0):,.0f})",
+                          ntype="txn_approved", ref_id=d["id"], link="/transactions")
     return {"approved": r.modified_count}
 
 
@@ -602,6 +613,9 @@ async def approve_transaction(tid: str, user=Depends(require_role("admin"))):
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
+    if res.get("created_by") and res["created_by"] != user["id"]:
+        await _notify(res["created_by"], f"Your transaction was approved (₹{res.get('amount', 0):,.0f})",
+                      ntype="txn_approved", ref_id=tid, link="/transactions")
     return TransactionOut(**res)
 
 
@@ -615,6 +629,10 @@ async def reject_transaction(tid: str, body: RejectIn, user=Depends(require_role
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
+    if res.get("created_by") and res["created_by"] != user["id"]:
+        await _notify(res["created_by"],
+                      "Your transaction was rejected" + (f": {body.reason}" if body.reason else ""),
+                      ntype="txn_rejected", ref_id=tid, link="/transactions")
     return TransactionOut(**res)
 
 
@@ -1093,6 +1111,11 @@ async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_u
     doc["rejected_at"] = None
     await db.reimbursements.insert_one(doc)
     doc.pop("_id", None)
+    # Notify L1 approver (via their linked user_id)
+    l1_uid = await _user_id_for_staff(doc.get("l1_approver_id"))
+    if l1_uid and l1_uid != user["id"]:
+        await _notify(l1_uid, f"New reimbursement awaiting your approval (₹{doc.get('amount', 0):,.0f})",
+                      ntype="reimb_l1_pending", ref_id=doc["id"], link="/hrms")
     return doc
 
 
@@ -1147,6 +1170,10 @@ async def reimb_l1_approve(rid: str, user=Depends(get_current_user)):
         return_document=True,
     )
     res.pop("_id", None)
+    # Notify all accountants + admins (next stage)
+    await _notify(await _accountant_admin_user_ids(),
+                  f"Reimbursement L1-approved, awaiting accountant (₹{res.get('amount', 0):,.0f})",
+                  ntype="reimb_acct_pending", ref_id=rid, link="/hrms")
     return res
 
 
@@ -1165,6 +1192,10 @@ async def reimb_accountant_approve(rid: str, user=Depends(require_role("admin", 
         return_document=True,
     )
     res.pop("_id", None)
+    # Notify all accountants + admins (next stage: ready to pay)
+    await _notify(await _accountant_admin_user_ids(),
+                  f"Reimbursement ready to pay (₹{res.get('amount', 0):,.0f})",
+                  ntype="reimb_pay_pending", ref_id=rid, link="/hrms")
     return res
 
 
@@ -1199,6 +1230,10 @@ async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant")))
         return_document=True,
     )
     res.pop("_id", None)
+    # Notify creator that reimbursement has been paid
+    if res.get("created_by") and res["created_by"] != user["id"]:
+        await _notify(res["created_by"], f"Your reimbursement was paid (₹{res.get('amount', 0):,.0f})",
+                      ntype="reimb_paid", ref_id=rid, link="/hrms")
     return res
 
 
@@ -1221,6 +1256,11 @@ async def reimb_reject(rid: str, body: RejectIn, user=Depends(get_current_user))
         return_document=True,
     )
     res.pop("_id", None)
+    # Notify creator that reimbursement was rejected
+    if res.get("created_by") and res["created_by"] != user["id"]:
+        await _notify(res["created_by"],
+                      "Your reimbursement was rejected" + (f": {body.reason}" if body.reason else ""),
+                      ntype="reimb_rejected", ref_id=rid, link="/hrms")
     return res
 
 
@@ -1334,6 +1374,67 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant")
     )
     res.pop("_id", None)
     return res
+
+
+# ---------- Notifications ----------
+async def _notify(user_ids, message: str, ntype: str = "info", ref_id: Optional[str] = None, link: Optional[str] = None):
+    """Insert a notification for each user_id (skip falsy / duplicates)."""
+    if not user_ids:
+        return
+    if isinstance(user_ids, str):
+        user_ids = [user_ids]
+    seen = set()
+    now = datetime.now(timezone.utc).isoformat()
+    docs = []
+    for uid in user_ids:
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        docs.append({
+            "id": str(uuid.uuid4()),
+            "user_id": uid,
+            "type": ntype,
+            "ref_id": ref_id,
+            "message": message,
+            "link": link,
+            "read": False,
+            "created_at": now,
+        })
+    if docs:
+        await db.notifications.insert_many(docs)
+
+
+async def _accountant_admin_user_ids() -> list:
+    docs = await db.users.find({"role": {"$in": ["admin", "accountant"]}}, {"_id": 0, "id": 1}).to_list(1000)
+    return [d["id"] for d in docs]
+
+
+async def _user_id_for_staff(sid: Optional[str]) -> Optional[str]:
+    if not sid:
+        return None
+    s = await db.staff.find_one({"id": sid}, {"_id": 0, "user_id": 1})
+    return (s or {}).get("user_id")
+
+
+@api.get("/notifications")
+async def list_notifications(user=Depends(get_current_user), limit: int = 50):
+    docs = await db.notifications.find({"user_id": user["id"]}, {"_id": 0}).sort([("read", 1), ("created_at", -1)]).to_list(limit)
+    unread = await db.notifications.count_documents({"user_id": user["id"], "read": False})
+    return {"items": docs, "unread": unread}
+
+
+@api.patch("/notifications/mark-all-read")
+async def mark_all_read(user=Depends(get_current_user)):
+    r = await db.notifications.update_many({"user_id": user["id"], "read": False}, {"$set": {"read": True}})
+    return {"updated": r.modified_count}
+
+
+@api.patch("/notifications/{nid}/read")
+async def mark_read(nid: str, user=Depends(get_current_user)):
+    r = await db.notifications.update_one({"id": nid, "user_id": user["id"]}, {"$set": {"read": True}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 
 # ---------- My Tasks ----------

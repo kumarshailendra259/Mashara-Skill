@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
@@ -13,7 +13,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip } from "lucide-react";
 
 const STEPS = ["submitted", "l1_approved", "accountant_approved", "paid"];
 
@@ -52,7 +52,9 @@ export default function HRMS() {
   const [staffForm, setStaffForm] = useState({ name: "", designation: "", reports_to_id: "", monthly_salary: 0, per_day_rate: 0, joining_date: "", user_id: "" });
 
   const [openR, setOpenR] = useState(false);
-  const [rForm, setRForm] = useState({ staff_id: "", amount: "", date: new Date().toISOString().slice(0,10), category: "", description: "" });
+  const [rForm, setRForm] = useState({ staff_id: "", amount: "", date: new Date().toISOString().slice(0,10), category: "", description: "", attachments: [] });
+  const reimbFileRef = useRef(null);
+  const [reimbUploading, setReimbUploading] = useState(false);
 
   const [pMonth, setPMonth] = useState(new Date().getMonth() + 1);
   const [pYear, setPYear] = useState(new Date().getFullYear());
@@ -182,9 +184,27 @@ export default function HRMS() {
   };
 
   const submitReimb = async () => {
-    try { await api.post("/reimbursements", { ...rForm, amount: parseFloat(rForm.amount) }); setOpenR(false); loadAll(); toast.success("Submitted"); }
-    catch (e) { toast.error(formatError(e)); }
+    try {
+      await api.post("/reimbursements", { ...rForm, amount: parseFloat(rForm.amount) });
+      setOpenR(false);
+      setRForm({ staff_id: "", amount: "", date: new Date().toISOString().slice(0,10), category: "", description: "", attachments: [] });
+      loadAll(); toast.success("Submitted");
+    } catch (e) { toast.error(formatError(e)); }
   };
+
+  const uploadReimbAttachment = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    setReimbUploading(true);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setRForm((s) => ({ ...s, attachments: [...(s.attachments || []), data] }));
+      toast.success("Attached");
+    } catch (err) { toast.error(formatError(err)); }
+    finally { setReimbUploading(false); e.target.value = ""; }
+  };
+
+  const removeReimbAttachment = (id) => setRForm((s) => ({ ...s, attachments: s.attachments.filter((a) => a.id !== id) }));
 
   const act = async (rid, action) => {
     try {
@@ -247,6 +267,36 @@ export default function HRMS() {
                   </div>
                   <div><Label>Category</Label><Input value={rForm.category} onChange={(e) => setRForm({ ...rForm, category: e.target.value })} placeholder="Travel, Meals, Supplies…" className="rounded-none" /></div>
                   <div><Label>Description</Label><Textarea value={rForm.description} onChange={(e) => setRForm({ ...rForm, description: e.target.value })} className="rounded-none" rows={2} /></div>
+
+                  {/* Attachments */}
+                  <div className="border-t border-[var(--border)] pt-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <Label className="overline">Attachments (bills / receipts)</Label>
+                      <div>
+                        <input ref={reimbFileRef} type="file" hidden onChange={uploadReimbAttachment} data-testid="reimb-attach-input" />
+                        <Button type="button" size="sm" variant="outline" disabled={reimbUploading} onClick={() => reimbFileRef.current?.click()} className="rounded-none gap-2" data-testid="btn-reimb-attach">
+                          <Upload size={14} /> {reimbUploading ? "Uploading…" : "Attach file"}
+                        </Button>
+                      </div>
+                    </div>
+                    {(rForm.attachments || []).length === 0 ? (
+                      <div className="overline text-center py-3 border border-dashed border-[var(--border)] text-xs">No attachments — upload bills/receipts (max 10MB).</div>
+                    ) : (
+                      <ul className="space-y-1">
+                        {rForm.attachments.map((a) => (
+                          <li key={a.id} className="flex items-center justify-between border border-[var(--border)] px-3 py-2 text-sm">
+                            <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate flex items-center gap-2">
+                              <Paperclip size={12} /> {a.filename}
+                            </a>
+                            <div className="flex items-center gap-3 ml-3">
+                              <span className="overline text-xs">{(a.size / 1024).toFixed(0)} KB</span>
+                              <Button type="button" size="icon" variant="ghost" onClick={() => removeReimbAttachment(a.id)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 </div>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setOpenR(false)} className="rounded-none">Cancel</Button>
@@ -269,7 +319,7 @@ export default function HRMS() {
                     <td className="p-3 num">{r.date}</td>
                     <td className="p-3">{sName(r.staff_id)}</td>
                     <td className="p-3 num font-medium">{inr(r.amount)}</td>
-                    <td className="p-3 text-[var(--muted)]">{r.category || "—"}</td>
+                    <td className="p-3 text-[var(--muted)]">{r.category || "—"}{r.attachments?.length ? <span className="ml-2 inline-flex items-center gap-1 text-xs text-[var(--brand)] border border-[var(--brand)] px-1 py-0.5" title={`${r.attachments.length} attachments`}><Paperclip size={10} /> {r.attachments.length}</span> : null}</td>
                     <td className="p-3"><Stepper status={r.status} /></td>
                     <td className="p-3 text-right">
                       <div className="inline-flex gap-1">

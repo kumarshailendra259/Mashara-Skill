@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration-9 — Backend + Frontend testing of 3 new features: P0 Bulk Approve Transactions, P1 Reimbursement attachments UI, P1 In-app notification badges + bell. Added /app/backend/tests/test_finance_notifications.py with 15 new tests (bulk approve auth/empty/skip, notification CRUD, txn-approve/reject/bulk emit, reimb L1/accountant chain notifications, attachments persistence). 15/15 new + 78/78 prior regression = 93/93 PASS. Playwright UI run validated all key data-testids and end-to-end mark-all-read flow against the public URL.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Header notification bell popover", "issues": ["Items list uses fixed-width popover that can overflow on narrow viewports; consider max-width + truncation for long messages."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_finance_notifications.py",
+    "/app/test_reports/pytest/iteration_9_notif.xml",
+    "/app/test_reports/pytest/iteration_9_all.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_notify() does in-line awaits inside per-document loops (bulk-approve fires N sequential inserts). For large bulk batches this serialises notification writes. Consider batching docs across creators then calling insert_many once. Functionally fine; perf-only.",
+    "bulk-approve snapshots `created_by, amount` BEFORE update_many — good (avoids reading approved docs). But there is no transaction/atomicity between the snapshot read and the update; if a concurrent approve happens, a few users could get duplicate notifs. Acceptable tradeoff.",
+    "_accountant_admin_user_ids() is called twice per reimbursement (l1_approve and accountant_approve). Cache in module-level lru_cache (with short TTL) if user count grows. Currently O(users) reads — fine for <1000 users.",
+    "_user_id_for_staff() returns None silently when staff has no `user_id` link — submit_reimbursement will then create no L1 notification at all even though l1_approver_id is set. Consider falling back to notifying all managers/admins when the L1 staff is unlinked (currently silent miss).",
+    "GET /api/notifications has no pagination cursor; uses `limit` query param (default 50) and sort by (read asc, created_at desc). At 50/user this is fine; expose `?before=<iso>` if usage grows.",
+    "Layout.jsx polls /api/notifications every 30s alongside /api/tasks/my — two independent setInterval timers; combine into one shared poll to halve requests.",
+    "Transactions.jsx 'select-all' selects only eligible rows, but `setSelected(new Set([...eligibleIds]))` will re-select on every render if the list updates while user has a partial selection. Minor UX nit — clear selection on filter/page change.",
+    "HRMS.jsx reimbFileRef.current.value reset uses raw DOM — fine, but in React typically use a key bump on the input. Not blocking.",
+    "_resolve_staff_for_user (server.py L976) is still dead code (returns None, never called). Recommend removing — same comment from iteration-7."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_finance_notifications.py (new, 15 tests)",
+    "/app/test_reports/iteration_9.json (new)"
+  ],
+  "success_rate": {"backend": "100% (93/93)", "frontend": "100% (11/11 UI checks)"},
+  "test_credentials": "admin@finance.app / Admin@123. Tests register TEST_-prefixed managers/employees under @x.com domain (e.g. TEST_mgr2_{tag}@x.com). Manager users are promoted via admin PATCH /api/auth/users/{id} so their POST /api/transactions yields status=pending (admin's auto-approves, which is why bulk-approve tests need a non-admin creator).",
+  "seed_data_creation": "Per test-module: 1 manager-promoted user, 1 employee user, 2 staff records (manager-linked + employee with reports_to chain), and ~10 transactions (mixed pending/approved/rejected), 3 reimbursements (one paid through full chain, one no-attachment, one with 1 attachment). All TAG-suffixed for isolation.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v` for full regression (93 tests, ~22s). Key data-testids verified live on the public URL: notif-bell (in header), notif-badge (red dot, only when unread>0), mark-all-read (in dropdown), select-all-txn (header checkbox; only checks eligible rows — i.e. not approved), select-txn-{id} (per-row; disabled when row.status=='approved'), btn-bulk-approve (top-right, shows 'Approve (N)'), btn-reimb-attach + reimb-attach-input (inside New Reimbursement dialog), paperclip count badge appears next to Category column when attachments.length>0. NOTE: file upload endpoint requires admin or manager role (require_role('admin','manager')); a 'viewer' or unmapped 'editor' submitting via UI will hit 403 on upload — non-blocking for current spec (admin/manager are the realistic users). The L1-approver notification ONLY fires if staff.l1_approver_id (staff.reports_to_id at submit time) has a linked user_id — staff with no user_id mapping silently get no L1 notification.",
+  "rca of the issue": "No issues found in this iteration. Earlier test setup failures (during script-development) were tester-side: (a) bulk-approve returned 0 because admin auto-approves new txns — fixed by creating txns as a 'manager' user; (b) StaffIn requires `designation`, ReimbursementIn uses `date` not `incurred_on`; (c) file upload via requests.Session inherits Content-Type:application/json which breaks multipart — fixed by using a fresh session for /api/files/upload. None of these are production bugs."
+}
