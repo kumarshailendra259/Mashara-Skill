@@ -62,6 +62,12 @@ export default function HRMS() {
   const [attMap, setAttMap] = useState({}); // staff_id -> status
   const [attRecent, setAttRecent] = useState([]);
 
+  // Calendar view state
+  const [calStaffId, setCalStaffId] = useState("");
+  const [calMonth, setCalMonth] = useState(new Date().getMonth() + 1);
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [calMap, setCalMap] = useState({}); // 'YYYY-MM-DD' -> status
+
   // Leaves state
   const [openL, setOpenL] = useState(false);
   const [lForm, setLForm] = useState({ staff_id: "", start_date: new Date().toISOString().slice(0,10), end_date: new Date().toISOString().slice(0,10), reason: "" });
@@ -112,6 +118,41 @@ export default function HRMS() {
     const m = {};
     staff.forEach((s) => { m[s.id] = status; });
     setAttMap(m);
+  };
+
+  // Calendar view: fetch attendance for the selected staff/month
+  useEffect(() => {
+    if (!calStaffId) { setCalMap({}); return; }
+    const mm = String(calMonth).padStart(2, "0");
+    const start = `${calYear}-${mm}-01`;
+    const lastDay = new Date(calYear, calMonth, 0).getDate();
+    const end = `${calYear}-${mm}-${String(lastDay).padStart(2,"0")}`;
+    api.get(`/attendance?staff_id=${calStaffId}&start=${start}&end=${end}`)
+      .then((res) => {
+        const m = {};
+        (res.data || []).forEach((a) => { m[a.date] = a.status; });
+        setCalMap(m);
+      }).catch(() => setCalMap({}));
+  }, [calStaffId, calMonth, calYear]);
+
+  // Click a calendar day to cycle status: empty → present → absent → half → leave → empty
+  const CYCLE = ["present", "absent", "half", "leave"];
+  const cycleDay = async (dateStr) => {
+    if (!canMarkAttendance || !calStaffId) return;
+    const current = calMap[dateStr];
+    const nextIdx = current ? (CYCLE.indexOf(current) + 1) % (CYCLE.length + 1) : 0;
+    const next = nextIdx < CYCLE.length ? CYCLE[nextIdx] : null;
+    try {
+      if (next) {
+        await api.post("/attendance", { staff_id: calStaffId, date: dateStr, status: next });
+        setCalMap((m) => ({ ...m, [dateStr]: next }));
+      } else {
+        // No DELETE endpoint — set explicit "absent" reset cycle; keep last status when cleared.
+        // For now, cycle wraps back to present.
+        await api.post("/attendance", { staff_id: calStaffId, date: dateStr, status: "present" });
+        setCalMap((m) => ({ ...m, [dateStr]: "present" }));
+      }
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   const applyLeave = async () => {
@@ -369,6 +410,98 @@ export default function HRMS() {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* Calendar (Month) View */}
+          <div className="swiss-card p-4 space-y-4" data-testid="att-calendar">
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="overline font-heading font-bold text-base text-[var(--brand)]">Calendar View</div>
+              <div className="ml-auto flex flex-wrap items-end gap-3">
+                <div>
+                  <Label className="overline">Staff</Label>
+                  <Select value={calStaffId} onValueChange={setCalStaffId}>
+                    <SelectTrigger className="rounded-none w-56" data-testid="cal-staff"><SelectValue placeholder="Select staff" /></SelectTrigger>
+                    <SelectContent>{staff.map((s) => <SelectItem key={s.id} value={s.id}>{s.name} — {s.designation}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="overline">Month</Label>
+                  <Input type="number" min={1} max={12} value={calMonth} onChange={(e) => setCalMonth(+e.target.value || 1)} className="rounded-none w-20" data-testid="cal-month" />
+                </div>
+                <div>
+                  <Label className="overline">Year</Label>
+                  <Input type="number" value={calYear} onChange={(e) => setCalYear(+e.target.value || new Date().getFullYear())} className="rounded-none w-24" data-testid="cal-year" />
+                </div>
+              </div>
+            </div>
+
+            {!calStaffId ? (
+              <div className="overline text-center py-8 border border-dashed border-[var(--border)]">Select a staff member to view the monthly calendar.</div>
+            ) : (() => {
+              const firstDow = new Date(calYear, calMonth - 1, 1).getDay();
+              const lastDay = new Date(calYear, calMonth, 0).getDate();
+              const cells = [];
+              for (let i = 0; i < firstDow; i++) cells.push(null);
+              for (let d = 1; d <= lastDay; d++) {
+                const mm = String(calMonth).padStart(2,"0");
+                const dd = String(d).padStart(2,"0");
+                cells.push({ day: d, dateStr: `${calYear}-${mm}-${dd}` });
+              }
+              while (cells.length % 7 !== 0) cells.push(null);
+              const statusClasses = {
+                present: "bg-[var(--success)] text-white",
+                absent: "bg-[var(--danger)] text-white",
+                half: "bg-[var(--warning)] text-[#3d2f00]",
+                leave: "bg-[var(--brand)] text-white",
+              };
+              const statusLetter = { present: "P", absent: "A", half: "H", leave: "L" };
+              const counts = { present: 0, absent: 0, half: 0, leave: 0 };
+              Object.values(calMap).forEach((s) => { if (counts[s] !== undefined) counts[s] += 1; });
+              const daysPresent = counts.present + counts.half * 0.5;
+
+              return (
+                <>
+                  <div className="grid grid-cols-7 gap-1 text-xs font-medium text-[var(--muted)] overline">
+                    {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((d) => (
+                      <div key={d} className="text-center py-1">{d}</div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-7 gap-1">
+                    {cells.map((c, i) => {
+                      if (!c) return <div key={`pad-${i}`} className="h-16 border border-transparent" />;
+                      const status = calMap[c.dateStr];
+                      const cls = status ? statusClasses[status] : "bg-white text-[var(--ink)]";
+                      const letter = status ? statusLetter[status] : "";
+                      const clickable = canMarkAttendance;
+                      return (
+                        <button
+                          type="button"
+                          key={c.dateStr}
+                          disabled={!clickable}
+                          onClick={() => cycleDay(c.dateStr)}
+                          data-testid={`cal-day-${c.dateStr}`}
+                          title={status ? `${c.dateStr} — ${status}` : c.dateStr + (clickable ? " (click to mark)" : "")}
+                          className={`h-16 border border-[var(--border)] flex flex-col items-start p-1.5 transition-colors ${cls} ${clickable ? "hover:opacity-80 cursor-pointer" : "cursor-default"}`}
+                        >
+                          <span className="text-xs font-medium">{c.day}</span>
+                          {letter && <span className="text-lg font-black tracking-tight mt-auto self-end leading-none">{letter}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-4 pt-2 border-t border-[var(--border)] text-xs">
+                    <div className="flex items-center gap-1.5"><span className="w-3 h-3 bg-[var(--success)] inline-block" /> Present <span className="num font-semibold">{counts.present}</span></div>
+                    <div className="flex items-center gap-1.5"><span className="w-3 h-3 bg-[var(--danger)] inline-block" /> Absent <span className="num font-semibold">{counts.absent}</span></div>
+                    <div className="flex items-center gap-1.5"><span className="w-3 h-3 bg-[var(--warning)] inline-block" /> Half <span className="num font-semibold">{counts.half}</span></div>
+                    <div className="flex items-center gap-1.5"><span className="w-3 h-3 bg-[var(--brand)] inline-block" /> Leave <span className="num font-semibold">{counts.leave}</span></div>
+                    <div className="ml-auto overline">Days Present: <span className="num font-bold text-[var(--ink)]">{daysPresent}</span> / {lastDay}</div>
+                  </div>
+                  {canMarkAttendance && (
+                    <div className="overline text-[var(--muted)]">Tip: click a day to cycle Present → Absent → Half → Leave.</div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </TabsContent>
 

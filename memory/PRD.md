@@ -32,6 +32,7 @@ Need a web application where company-wise, partner-wise, center-wise, project-wi
 - **HRMS module** — Staff master (designation, reports_to, monthly_salary, per_day_rate, linked user_id)
 - **Attendance UI** (NEW 2026-06-21) — date picker, per-staff status select (present/absent/half/leave), Mark all Present/Absent, Save Attendance, Recent 30-day view
 - **Leaves UI** (NEW 2026-06-21) — Apply Leave dialog, list with status badges, admin/manager approve/reject inline
+- **Attendance Calendar View** (NEW 2026-06-21) — month grid per staff with colored day cells (P=green/A=red/H=yellow/L=blue), click-to-cycle marking for admin/manager, summary counts + Days Present total
 - **Reimbursement 3-stage approval** — staff submits → L1 (snapshot of staff.reports_to, only that user can approve) → Accountant → Pay. On Pay, auto-creates an approved `expense` transaction so the dashboard P&L stays in sync. Step-wise badge UI visible to all roles.
 - **Payroll** — admin/accountant runs monthly payroll; per-staff gross computed as `per_day_rate × days_present` (falls back to prorated monthly_salary). Pay action auto-creates the offsetting expense transaction.
 - Bilingual UI (English / Hindi) toggle in header, persists in localStorage
