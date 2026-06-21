@@ -43,6 +43,12 @@ Need a web application where company-wise, partner-wise, center-wise, project-wi
 - **Extended Roles** (NEW 2026-06-21) — added `hr`, `senior_manager`, `center_staff` to `ROLE_LITERAL`. Scope helper `_txn_scope_for_user` updated: hr/senior_manager see global data (like manager/accountant), center_staff scoped like center_manager. Available in Register + Users dropdowns.
 - **Reporting-hierarchy lock** (NEW 2026-06-21) — Staff `reports_to_id` can be set/changed ONLY by admin. Manager-created staff have `reports_to_id` stripped to null on create; manager updates preserve existing value. Frontend hides the "Reports To" Select for non-admin in Add Staff dialog.
 - **Approval Log** (NEW 2026-06-21) — `/approvals` admin-only page + sidebar item. `GET /api/approval-log` returns unified audit feed (transactions approved/rejected, reimbursements l1/accountant/paid/rejected stages, leaves approved/rejected, payroll paid) with Date/Time · Type · Action · Summary · Amount · By · Remarks. Filters: type, action, date range. KPI cards (Total/Approved/Rejected/Total Amount). Print-ready.
+- **Leave audit fields** (NEW 2026-06-21) — `decide_leave` now persists `decided_by` + `decided_at`. Approval Log surfaces approver name for leaves (was `—` before).
+- **Extended role write-permissions** (NEW 2026-06-21):
+  - `hr` → POST/PUT `/api/staff`, POST `/payroll/run`, PATCH `/payroll/{id}/pay`, PATCH `/leaves/{id}`
+  - `senior_manager` → POST `/transactions/{id}/approve|reject`, POST `/transactions/bulk-approve`, POST/PUT `/batches`, PATCH `/batch-payments/{id}/receive`
+  - `center_staff` → POST `/attendance`
+- **Programs / Batches / Milestones module** (NEW 2026-06-21) — new `/programs` page + sidebar entry. Project tabs (JSDMS, BOCWW, PRI, …) populated from `/entities/project`. Per project: center filter + batch dropdown + 3 milestone cards (1st/2nd/3rd). Each milestone shows Amount · Expected Date · Status (Not configured / Pending / Received) · received_date. "Mark Received" auto-creates an approved `income` transaction with center_id+project_id mirrored from the batch. Backend collections: `batches`, `batch_payments`. Endpoints: GET/POST/PUT/DELETE `/api/batches`, GET/POST/PUT/DELETE `/api/batch-payments`, PATCH `/api/batch-payments/{id}/receive`. Cascade delete: removing a batch wipes its milestone payments. Duplicate `(batch_id, milestone)` blocked with 400; double-receive blocked with 400. Project/center FK existence validated on batch creation.
 
 ## Backlog (P1)
 - Excel (.xlsx) export — currently CSV only

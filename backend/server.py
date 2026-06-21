@@ -1657,6 +1657,11 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
 
 @api.post("/batches", response_model=BatchOut)
 async def create_batch(body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager"))):
+    # Validate referenced project / center actually exist
+    if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "project_id does not exist")
+    if body.center_id and not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "center_id does not exist")
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
