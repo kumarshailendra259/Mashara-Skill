@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration-3 backend testing complete. Added /app/backend/tests/test_finance_approval.py (20 tests) covering role downgrade on register, /me scope fields, admin PATCH /auth/users, POST status workflow per role (admin auto-approved; manager/center_manager/partner/accountant pending; viewer 403), approve/reject endpoints, scoping on GET (center_manager by assigned_center_ids, partner by assigned_partner_id, accountant=all, viewer=own), status=pending filter, edit semantics, and dashboard include_pending toggle. Result: 19/20 iter-3 PASS + 21/21 iter-1 + 8/8 iter-2 regression PASS (48/49 overall). ONE REAL BUG: PUT /api/transactions/{id} by non-admin creator on an approved entry returns 403 instead of accepting the edit and resetting status to pending.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/transactions/{id}",
+        "issue": "Non-admin creator cannot edit own *approved* entry — server returns 403 instead of accepting the update and resetting status='pending'. Spec says: 'editing approved entry by non-admin sets status back to pending'. The guard at server.py:560 requires existing.status=='pending' for non-admin, making the reset branch at lines 564-567 unreachable. Fix: drop the 'status==pending' requirement from the guard for the owner; keep the auto-reset to pending on save.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {"endpoint": "POST /api/transactions/{id}/reject", "issue": "Empty/missing reason is silently coerced to ''. Consider requiring a non-empty reason (422) to preserve audit trail."},
+      {"endpoint": "PATCH /api/auth/users/{id}", "issue": "No validation that assigned_center_ids actually reference existing centers and assigned_partner_id references an existing partner. Stale IDs would silently scope a user to nothing."},
+      {"endpoint": "POST /api/transactions/{id}/approve", "issue": "Idempotency: re-approving an already-approved txn just updates approved_by/approved_at. Consider returning 409 or no-op semantics to avoid audit churn."},
+      {"endpoint": "GET /api/transactions", "issue": "Scope filter for 'viewer' relies on created_by == user.id; a viewer who somehow has created_by data (legacy) could see unintended rows. Combine with explicit role check."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_finance_approval.py",
+    "/app/backend/tests/test_finance_features.py",
+    "/app/backend/tests/test_finance_api.py",
+    "/app/test_reports/pytest/pytest_iter3.xml",
+    "/app/test_reports/pytest/pytest_iter3_full.xml"
+  ],
+  "action_items": [
+    "Fix PUT /api/transactions/{id}: allow non-admin creator to edit own approved entry; auto-reset status to pending (clear approved_by/approved_at). Currently returns 403, breaking the spec'd workflow.",
+    "Optionally enforce non-empty 'reason' on /transactions/{id}/reject.",
+    "Validate that PATCH /auth/users assigned_center_ids / assigned_partner_id reference real entities."
+  ],
+  "critical_code_review_comments": [
+    "server.py:560 — permission guard for PUT /transactions/{id} blocks non-admin owners on approved rows, making the 'reset-to-pending on edit' branch (lines 564-567) dead code. Spec violation.",
+    "Approve/Reject endpoints don't restrict by current status: rejected → approved is allowed without explicit transition validation. Consider a small state-machine guard.",
+    "TxnStatus enum strings 'pending'/'approved'/'rejected' are stored as-is in Mongo; no index on (status, created_by, center_id, partner_id) — GET /transactions will scan as the table grows.",
+    "POST /transactions returns status='approved' for admin but uses approved_at = datetime.utcnow().isoformat() in some paths and timezone-aware in others — be consistent (use timezone-aware UTC everywhere).",
+    "Self-register downgrade is correct, but PATCH /auth/users has no protection against an admin demoting themselves to viewer (could lock out the last admin). Consider 'cannot demote the last admin' check."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_finance_approval.py (new, 20 tests)",
+    "/app/test_reports/pytest/pytest_iter3.xml",
+    "/app/test_reports/pytest/pytest_iter3_full.xml"
+  ],
+  "success_rate": {"backend": "98% (48/49 — 19/20 iter-3 + 8/8 iter-2 + 21/21 iter-1)", "frontend": "N/A (not requested)"},
+  "test_credentials": "admin@finance.app / Admin@123 (verified). Per-run TEST_<role>_<uuid>@x.com users created via /api/auth/register then PATCHed to target role.",
+  "seed_data_creation": "Each run creates 1 admin login, ~5 TEST_ users (cm, partner, manager, accountant, viewer), 6 entities (company, 2 partners, 2 centers, project), and ~10 transactions across Apr-May 2026. Status filter and dashboard tests are tolerant of leftover data; no cleanup.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Three pytest files: test_finance_api.py (iter-1, 21), test_finance_features.py (iter-2, 8), test_finance_approval.py (iter-3, 20). All read REACT_APP_BACKEND_URL from /app/frontend/.env. To re-run iter-3 only: `python -m pytest backend/tests/test_finance_approval.py -v`. After main agent fixes the PUT-on-approved 403 bug, re-run test_non_admin_edit_approved_resets_to_pending — it should turn green and return status='pending'.",
+  "rca of the issue": "Bug: PUT /api/transactions/{id} permission guard (server.py line 560) requires `existing.status == 'pending'` for non-admin owners. So when a center_manager who created a txn that admin later approved tries to PUT an edit, the guard rejects with 403. The follow-on branch (lines 564-567) that's supposed to reset status to pending is therefore unreachable for the very case it was written for. Fix: remove the `existing.status == 'pending'` clause from the owner-allow check; rely solely on (is_owner and role in editable_roles); keep the auto-reset block intact. Reproduction: (1) login as center_manager (assigned to centerX), POST /api/transactions for centerX → status=pending; (2) admin POST /transactions/{id}/approve → status=approved; (3) center_manager PUT /transactions/{id} with new amount → expected 200 + status=pending, actual 403 Forbidden."
+}

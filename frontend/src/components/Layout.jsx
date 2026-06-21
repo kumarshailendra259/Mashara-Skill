@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +20,7 @@ const navItems = [
   { to: "/projects", key: "projects", icon: Briefcase },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight },
   { to: "/reports", key: "reports", icon: FileBarChart2 },
+  { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
 ];
 
 export default function Layout({ children }) {
@@ -40,7 +41,7 @@ export default function Layout({ children }) {
           <div className="font-heading text-xl font-black tracking-tight mt-1">{t("app_name")}</div>
         </div>
         <nav className="flex-1 py-3" data-testid="sidebar-nav">
-          {navItems.map((it) => {
+          {navItems.filter((it) => !it.adminOnly || user?.role === "admin").map((it) => {
             const Icon = it.icon;
             return (
               <NavLink

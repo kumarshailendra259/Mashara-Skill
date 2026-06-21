@@ -105,18 +105,30 @@ def require_role(*roles: str):
 
 
 # ---------- Models ----------
+ROLE_LITERAL = Literal["admin", "manager", "center_manager", "partner", "accountant", "viewer"]
+
+
 class UserOut(BaseModel):
     id: str
     email: EmailStr
     name: str
     role: str
+    assigned_center_ids: List[str] = Field(default_factory=list)
+    assigned_partner_id: Optional[str] = None
 
 
 class RegisterIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=6)
     name: str
-    role: Literal["admin", "manager", "viewer"] = "manager"
+    role: ROLE_LITERAL = "viewer"
+
+
+class UserUpdateIn(BaseModel):
+    role: Optional[ROLE_LITERAL] = None
+    assigned_center_ids: Optional[List[str]] = None
+    assigned_partner_id: Optional[str] = None
+    name: Optional[str] = None
 
 
 class LoginIn(BaseModel):
@@ -169,10 +181,45 @@ class TransactionIn(BaseModel):
     attachments: List[AttachmentRef] = Field(default_factory=list)
 
 
+TxnStatus = Literal["pending", "approved", "rejected"]
+
+
 class TransactionOut(TransactionIn):
     id: str
     created_by: str
     created_at: str
+    status: TxnStatus = "pending"
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
+    rejected_reason: Optional[str] = None
+
+
+class RejectIn(BaseModel):
+    reason: Optional[str] = ""
+
+
+def _txn_scope_for_user(user: dict) -> dict:
+    """Return Mongo query filter restricting transactions to user's scope.
+
+    - admin / manager / accountant: all transactions
+    - center_manager: only transactions where center_id is in their assigned_center_ids
+    - partner: only transactions where partner_id == their assigned_partner_id
+    - viewer: only their own created transactions
+    """
+    role = user.get("role")
+    if role in ("admin", "manager", "accountant"):
+        return {}
+    if role == "center_manager":
+        return {"center_id": {"$in": user.get("assigned_center_ids") or []}}
+    if role == "partner":
+        pid = user.get("assigned_partner_id")
+        return {"partner_id": pid} if pid else {"_never_": True}
+    # viewer / any other → own data only
+    return {"created_by": user["id"]}
+
+
+def _can_auto_approve(user: dict) -> bool:
+    return user.get("role") == "admin"
 
 
 # ---------- Startup ----------
@@ -193,11 +240,23 @@ async def on_startup():
             "password_hash": hash_password(admin_pwd),
             "name": "Admin",
             "role": "admin",
+            "assigned_center_ids": [],
+            "assigned_partner_id": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
         log.info("Seeded admin user")
     elif not verify_password(admin_pwd, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pwd)}})
+
+    # Backfill new fields on existing docs (idempotent migration)
+    await db.users.update_many(
+        {"assigned_center_ids": {"$exists": False}},
+        {"$set": {"assigned_center_ids": [], "assigned_partner_id": None}},
+    )
+    await db.transactions.update_many(
+        {"status": {"$exists": False}},
+        {"$set": {"status": "approved", "approved_by": None, "approved_at": None, "rejected_reason": None, "items": [], "attachments": []}},
+    )
 
 
 @app.on_event("shutdown")
@@ -323,7 +382,9 @@ async def register(body: RegisterIn, response: Response):
         "email": email,
         "password_hash": hash_password(body.password),
         "name": body.name,
-        "role": body.role,
+        "role": body.role if body.role != "admin" else "viewer",  # self-register cannot become admin
+        "assigned_center_ids": [],
+        "assigned_partner_id": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(user)
@@ -358,6 +419,19 @@ async def me(user=Depends(get_current_user)):
 async def list_users(_=Depends(require_role("admin"))):
     docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
     return [UserOut(**d) for d in docs]
+
+
+@api.patch("/auth/users/{uid}", response_model=UserOut)
+async def update_user(uid: str, body: UserUpdateIn, _=Depends(require_role("admin"))):
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not update:
+        raise HTTPException(400, "Nothing to update")
+    res = await db.users.find_one_and_update(
+        {"id": uid}, {"$set": update}, return_document=True, projection={"_id": 0, "password_hash": 0}
+    )
+    if not res:
+        raise HTTPException(404, "User not found")
+    return UserOut(**res)
 
 
 # ---------- Entity (company/partner/center/project) ----------
@@ -422,6 +496,7 @@ async def delete_entity(etype: EntityType, eid: str, _=Depends(require_role("adm
 async def list_transactions(
     user=Depends(get_current_user),
     type: Optional[TxnType] = None,
+    status: Optional[TxnStatus] = None,
     company_id: Optional[str] = None,
     partner_id: Optional[str] = None,
     center_id: Optional[str] = None,
@@ -430,8 +505,11 @@ async def list_transactions(
     end: Optional[str] = None,
 ):
     q: dict = {}
+    q.update(_txn_scope_for_user(user))
     if type:
         q["type"] = type
+    if status:
+        q["status"] = status
     if company_id:
         q["company_id"] = company_id
     if partner_id:
@@ -452,20 +530,67 @@ async def list_transactions(
 
 
 @api.post("/transactions", response_model=TransactionOut)
-async def create_transaction(body: TransactionIn, user=Depends(require_role("admin", "manager"))):
+async def create_transaction(body: TransactionIn, user=Depends(require_role("admin", "manager", "center_manager", "partner", "accountant"))):
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    if _can_auto_approve(user):
+        doc["status"] = "approved"
+        doc["approved_by"] = user["id"]
+        doc["approved_at"] = doc["created_at"]
+    else:
+        doc["status"] = "pending"
+        doc["approved_by"] = None
+        doc["approved_at"] = None
+    doc["rejected_reason"] = None
     await db.transactions.insert_one(doc)
     return TransactionOut(**doc)
 
 
 @api.put("/transactions/{tid}", response_model=TransactionOut)
-async def update_transaction(tid: str, body: TransactionIn, _=Depends(require_role("admin", "manager"))):
+async def update_transaction(tid: str, body: TransactionIn, user=Depends(get_current_user)):
+    existing = await db.transactions.find_one({"id": tid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Not found")
+    role = user.get("role")
+    is_admin = role == "admin"
+    is_owner = existing.get("created_by") == user["id"]
+    # Only admin can always edit. Owner can edit only their own pending entries.
+    if not (is_admin or (is_owner and existing.get("status", "pending") == "pending" and role in ("manager", "center_manager", "partner", "accountant"))):
+        raise HTTPException(403, "Forbidden")
+    update = body.model_dump()
+    # Editing an approved entry sets it back to pending (unless admin)
+    if not is_admin and existing.get("status") == "approved":
+        update["status"] = "pending"
+        update["approved_by"] = None
+        update["approved_at"] = None
+    res = await db.transactions.find_one_and_update(
+        {"id": tid}, {"$set": update}, return_document=True
+    )
+    res.pop("_id", None)
+    return TransactionOut(**res)
+
+
+@api.post("/transactions/{tid}/approve", response_model=TransactionOut)
+async def approve_transaction(tid: str, user=Depends(require_role("admin"))):
+    now = datetime.now(timezone.utc).isoformat()
     res = await db.transactions.find_one_and_update(
         {"id": tid},
-        {"$set": body.model_dump()},
+        {"$set": {"status": "approved", "approved_by": user["id"], "approved_at": now, "rejected_reason": None}},
+        return_document=True,
+    )
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return TransactionOut(**res)
+
+
+@api.post("/transactions/{tid}/reject", response_model=TransactionOut)
+async def reject_transaction(tid: str, body: RejectIn, user=Depends(require_role("admin"))):
+    res = await db.transactions.find_one_and_update(
+        {"id": tid},
+        {"$set": {"status": "rejected", "approved_by": user["id"], "approved_at": None, "rejected_reason": body.reason or ""}},
         return_document=True,
     )
     if not res:
@@ -531,8 +656,14 @@ async def import_transactions(file: UploadFile = File(...), user=Depends(require
                 "partner_id": await resolve("partner", row.get("partner", "")),
                 "center_id": await resolve("center", row.get("center", "")),
                 "project_id": await resolve("project", row.get("project", "")),
+                "items": [],
+                "attachments": [],
                 "created_by": user["id"],
                 "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "approved" if _can_auto_approve(user) else "pending",
+                "approved_by": user["id"] if _can_auto_approve(user) else None,
+                "approved_at": datetime.now(timezone.utc).isoformat() if _can_auto_approve(user) else None,
+                "rejected_reason": None,
             }
             await db.transactions.insert_one(doc)
             inserted += 1
@@ -545,15 +676,20 @@ async def import_transactions(file: UploadFile = File(...), user=Depends(require
 # ---------- Dashboard ----------
 @api.get("/dashboard/summary")
 async def dashboard_summary(
-    _=Depends(get_current_user),
+    user=Depends(get_current_user),
     company_id: Optional[str] = None,
     partner_id: Optional[str] = None,
     center_id: Optional[str] = None,
     project_id: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    include_pending: bool = False,
 ):
     match: dict = {}
+    match.update(_txn_scope_for_user(user))
+    # Only approved entries count toward financial summary by default
+    if not include_pending:
+        match["status"] = "approved"
     for k, v in [("company_id", company_id), ("partner_id", partner_id),
                  ("center_id", center_id), ("project_id", project_id)]:
         if v:

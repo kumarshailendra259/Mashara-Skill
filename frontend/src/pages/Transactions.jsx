@@ -24,7 +24,7 @@ export default function Transactions() {
   const canDelete = user?.role === "admin";
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [items, setItems] = useState([]);
-  const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
+  const [filters, setFilters] = useState({ type: "", status: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -162,6 +162,18 @@ export default function Transactions() {
       {/* Filters */}
       <div className="swiss-card p-4 grid grid-cols-2 md:grid-cols-7 gap-3">
         <div>
+          <Label className="overline">{t("status")}</Label>
+          <Select value={filters.status || "__all"} onValueChange={(v) => setF("status", v === "__all" ? "" : v)}>
+            <SelectTrigger className="rounded-none" data-testid="filter-status"><SelectValue placeholder={t("all")} /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all">{t("all")}</SelectItem>
+              <SelectItem value="pending">{t("pending")}</SelectItem>
+              <SelectItem value="approved">{t("approved")}</SelectItem>
+              <SelectItem value="rejected">{t("rejected")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
           <Label className="overline">{t("type")}</Label>
           <Select value={filters.type || "__all"} onValueChange={(v) => setF("type", v === "__all" ? "" : v)}>
             <SelectTrigger className="rounded-none" data-testid="filter-type"><SelectValue placeholder={t("all")} /></SelectTrigger>
@@ -206,12 +218,13 @@ export default function Transactions() {
               <th className="text-left p-3">{t("center")}</th>
               <th className="text-left p-3">{t("project")}</th>
               <th className="text-left p-3">{t("description")}</th>
-              {canEdit && <th className="p-3 text-right w-28">{t("actions")}</th>}
+              <th className="text-left p-3">{t("status")}</th>
+              {canEdit && <th className="p-3 text-right w-40">{t("actions")}</th>}
             </tr>
           </thead>
           <tbody>
             {items.length === 0 ? (
-              <tr><td colSpan={9} className="text-center py-8 overline">{t("no_data")}</td></tr>
+              <tr><td colSpan={10} className="text-center py-8 overline">{t("no_data")}</td></tr>
             ) : items.map((it) => (
               <tr key={it.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                 <td className="p-3 num">{it.date}</td>
@@ -242,9 +255,22 @@ export default function Transactions() {
                     <span className="truncate">{it.description}</span>
                   </div>
                 </td>
+                <td className="p-3">
+                  <span className={`inline-block px-2 py-0.5 text-xs border ${
+                    it.status === "approved" ? "border-[var(--success)] text-[var(--success)]" :
+                    it.status === "rejected" ? "border-[var(--danger)] text-[var(--danger)]" :
+                    "border-[var(--warning)] text-[#9a7a00]"
+                  }`} title={it.rejected_reason || ""}>{t(it.status || "pending")}</span>
+                </td>
                 {canEdit && (
                   <td className="p-3 text-right">
                     <div className="inline-flex gap-1">
+                      {isAdmin && it.status !== "approved" && (
+                        <Button size="sm" variant="ghost" onClick={() => approveTxn(it.id)} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`approve-${it.id}`}>{t("approve")}</Button>
+                      )}
+                      {isAdmin && it.status !== "rejected" && (
+                        <Button size="sm" variant="ghost" onClick={() => rejectTxn(it.id)} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`reject-${it.id}`}>{t("reject")}</Button>
+                      )}
                       <Button size="icon" variant="ghost" onClick={() => openEdit(it)} className="rounded-none h-8 w-8"><Pencil size={14} /></Button>
                       {canDelete && <Button size="icon" variant="ghost" onClick={() => remove(it)} className="rounded-none h-8 w-8 hover:text-[var(--danger)]"><Trash2 size={14} /></Button>}
                     </div>
@@ -379,6 +405,21 @@ export default function Transactions() {
                         <Button type="button" size="icon" variant="ghost" onClick={() => removeAttachment(a.id)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
                       </div>
                     </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">{t("cancel")}</Button>
+            <Button onClick={save} className="brand-btn rounded-none" data-testid="txn-save">{t("save")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+                 </li>
                   ))}
                 </ul>
               )}
