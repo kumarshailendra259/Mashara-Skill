@@ -16,15 +16,17 @@ Need a web application where company-wise, partner-wise, center-wise, project-wi
 
 ## Implemented (2026-06-21)
 - JWT auth (login, register, logout, /me) with secure httpOnly cookies + admin seed (`admin@finance.app / Admin@123`)
-- Role-based access (admin / manager / viewer)
+- **6 roles** — admin, manager, center_manager, partner, accountant, viewer
+- **Approval workflow** for transactions: non-admin entries start as `pending`, admin approves/rejects; admin-created entries auto-approved; editing an approved entry by non-admin resets to `pending`
+- **Role-based data scoping** — center_manager sees only assigned centers, partner sees only assigned partner profile, accountant/manager/admin see all, viewer sees only own entries
+- **Admin User Management** UI — assign role + centers + partner profile
+- Self-register cannot escalate to admin (downgraded to viewer)
 - Entity CRUD for company / partner / center / project
-- Transaction CRUD (type: investment | income | expense) with filters by entity + date range
-- **Line items per transaction** (name, quantity, rate, amount) with auto-compute and item-wise aggregation across all txns
-- **Document attachments per transaction** (bills, receipts, invoices up to 10MB) via Emergent Object Storage
-- CSV import for transactions (auto-creates referenced entities by name)
-- CSV export from transactions list + per-dimension reports
-- Dashboard with KPI cards, monthly trend line chart, distribution pie chart, breakdown tabs (company / partner / center / project / **item**)
-- Reports page with per-dimension P&L tables + CSV export (now includes items)
+- Line items per transaction (name, quantity, rate, amount) with item-wise aggregation
+- Document attachments per transaction (≤10MB) via Emergent Object Storage
+- CSV import + CSV export from transactions and per-dimension reports
+- Dashboard with KPI cards, monthly trend, distribution pie, breakdown tabs (company / partner / center / project / item) — counts approved entries only by default
+- Reports page with per-dimension P&L tables + CSV export
 - Bilingual UI (English / Hindi) toggle in header, persists in localStorage
 - Swiss-style high-contrast light theme with International Klein Blue accents
 
