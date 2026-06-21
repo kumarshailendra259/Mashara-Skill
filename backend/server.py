@@ -573,6 +573,22 @@ async def update_transaction(tid: str, body: TransactionIn, user=Depends(get_cur
     return TransactionOut(**res)
 
 
+class BulkIds(BaseModel):
+    ids: List[str]
+
+
+@api.post("/transactions/bulk-approve")
+async def bulk_approve(body: BulkIds, user=Depends(require_role("admin"))):
+    if not body.ids:
+        return {"approved": 0}
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.transactions.update_many(
+        {"id": {"$in": body.ids}, "status": {"$ne": "approved"}},
+        {"$set": {"status": "approved", "approved_by": user["id"], "approved_at": now, "rejected_reason": None}},
+    )
+    return {"approved": r.modified_count}
+
+
 @api.post("/transactions/{tid}/approve", response_model=TransactionOut)
 async def approve_transaction(tid: str, user=Depends(require_role("admin"))):
     now = datetime.now(timezone.utc).isoformat()
