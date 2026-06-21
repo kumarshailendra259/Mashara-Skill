@@ -180,6 +180,8 @@ class TransactionIn(BaseModel):
     project_id: Optional[str] = None
     items: List[TransactionItem] = Field(default_factory=list)
     attachments: List[AttachmentRef] = Field(default_factory=list)
+    source: Optional[str] = None        # e.g. "milestone" when auto-created from Programs
+    milestone: Optional[str] = None     # "1st" | "2nd" | "3rd" when source == "milestone"
 
 
 TxnStatus = Literal["pending", "approved", "rejected"]
@@ -827,6 +829,82 @@ async def _items_breakdown(match: dict) -> list:
         o["profit"] = o["income"] - o["expense"]
         o["total"] = o["investment"] + o["income"] + o["expense"]
     return sorted(out, key=lambda x: x["total"], reverse=True)
+
+
+@api.get("/dashboard/milestone-income")
+async def milestone_income_summary(
+    user=Depends(get_current_user),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    project_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+):
+    """Aggregate milestone-source income across approved transactions.
+
+    Returns:
+      - total: float
+      - by_milestone: { "1st": float, "2nd": float, "3rd": float }
+      - by_partner: [{ partner_id, partner_name, amount }]
+      - by_project: [{ project_id, project_name, amount }]
+      - rows: full list of milestone transactions (for drill-down / print)
+    """
+    q: dict = {"source": "milestone", "status": "approved"}
+    if start or end:
+        rng: dict = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end
+        q["date"] = rng
+    if project_id:
+        q["project_id"] = project_id
+    if center_id:
+        q["center_id"] = center_id
+    # Apply scope
+    q.update(_txn_scope_for_user(user))
+
+    docs = await db.transactions.find(q, {"_id": 0}).to_list(20000)
+
+    pmap = await db.partners.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+    pname_by_id = {p["id"]: p["name"] for p in pmap}
+    projmap = await db.projects.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+    proj_by_id = {p["id"]: p["name"] for p in projmap}
+
+    total = 0.0
+    by_milestone: dict = {"1st": 0.0, "2nd": 0.0, "3rd": 0.0}
+    partner_agg: dict = {}
+    project_agg: dict = {}
+    for d in docs:
+        amt = float(d.get("amount") or 0)
+        total += amt
+        ms = d.get("milestone") or "—"
+        if ms in by_milestone:
+            by_milestone[ms] += amt
+        pid = d.get("partner_id")
+        key = pid or "__unassigned"
+        partner_agg[key] = partner_agg.get(key, 0.0) + amt
+        prj = d.get("project_id") or "__none"
+        project_agg[prj] = project_agg.get(prj, 0.0) + amt
+
+    by_partner = [
+        {"partner_id": k if k != "__unassigned" else None,
+         "partner_name": pname_by_id.get(k, "Unassigned") if k != "__unassigned" else "Unassigned",
+         "amount": round(v, 2)}
+        for k, v in sorted(partner_agg.items(), key=lambda x: -x[1])
+    ]
+    by_project = [
+        {"project_id": k if k != "__none" else None,
+         "project_name": proj_by_id.get(k, "—") if k != "__none" else "—",
+         "amount": round(v, 2)}
+        for k, v in sorted(project_agg.items(), key=lambda x: -x[1])
+    ]
+    return {
+        "total": round(total, 2),
+        "by_milestone": {k: round(v, 2) for k, v in by_milestone.items()},
+        "by_partner": by_partner,
+        "by_project": by_project,
+        "count": len(docs),
+    }
 
 
 @api.get("/dashboard/settlement")
@@ -1610,6 +1688,7 @@ class BatchIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     project_id: str
     center_id: Optional[str] = None
+    partner_ids: List[str] = Field(default_factory=list)
     name: str = Field(min_length=1)
     start_date: Optional[str] = ""
     end_date: Optional[str] = ""
@@ -1662,6 +1741,11 @@ async def create_batch(body: BatchIn, _=Depends(require_role("admin", "manager",
         raise HTTPException(400, "project_id does not exist")
     if body.center_id and not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "center_id does not exist")
+    # Validate all partner_ids
+    if body.partner_ids:
+        cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
+        if cnt != len(set(body.partner_ids)):
+            raise HTTPException(400, "one or more partner_ids do not exist")
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -1729,7 +1813,13 @@ async def update_batch_payment(pid: str, body: BatchPaymentIn, _=Depends(require
 
 @api.patch("/batch-payments/{pid}/receive", response_model=BatchPaymentOut)
 async def receive_batch_payment(pid: str, user=Depends(require_role("admin", "accountant", "senior_manager"))):
-    """Mark a milestone payment as received and auto-create an approved income transaction."""
+    """Mark a milestone payment as received and auto-create approved income transaction(s).
+
+    If the parent batch has `partner_ids`, the amount is split equally and one approved
+    income transaction is created per partner (each carrying source='milestone' and
+    milestone='1st|2nd|3rd' for downstream aggregations). Otherwise a single transaction
+    is created with no partner_id.
+    """
     rec = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
@@ -1742,25 +1832,43 @@ async def receive_batch_payment(pid: str, user=Depends(require_role("admin", "ac
         project_name = (proj or {}).get("name", "")
     now = datetime.now(timezone.utc).isoformat()
     today = now[:10]
-    txn = {
-        "id": str(uuid.uuid4()),
-        "type": "income",
-        "amount": rec["amount"],
-        "date": today,
-        "description": f"{project_name} — {batch.get('name','') if batch else ''} — {rec['milestone']} milestone",
-        "company_id": None,
-        "partner_id": None,
-        "center_id": (batch or {}).get("center_id"),
-        "project_id": (batch or {}).get("project_id"),
-        "items": [], "attachments": [],
-        "created_by": user["id"], "created_at": now,
-        "status": "approved", "approved_by": user["id"], "approved_at": now,
-        "rejected_reason": None,
-    }
-    await db.transactions.insert_one(txn)
+    partner_ids = list((batch or {}).get("partner_ids") or [])
+    splits = partner_ids if partner_ids else [None]
+    share = round(rec["amount"] / len(splits), 2)
+    # Adjust last split so the sum exactly equals total (handle rounding tail)
+    last_share = round(rec["amount"] - share * (len(splits) - 1), 2)
+    description_base = f"{project_name} — {batch.get('name','') if batch else ''} — {rec['milestone']} milestone"
+    created_txn_ids: list[str] = []
+    for idx, pid_split in enumerate(splits):
+        amt = last_share if idx == len(splits) - 1 else share
+        if amt <= 0:
+            continue
+        txn = {
+            "id": str(uuid.uuid4()),
+            "type": "income",
+            "amount": amt,
+            "date": today,
+            "description": description_base + (f" (partner split {idx+1}/{len(splits)})" if pid_split else ""),
+            "company_id": None,
+            "partner_id": pid_split,
+            "center_id": (batch or {}).get("center_id"),
+            "project_id": (batch or {}).get("project_id"),
+            "items": [], "attachments": [],
+            "source": "milestone",
+            "milestone": rec["milestone"],
+            "created_by": user["id"], "created_at": now,
+            "status": "approved", "approved_by": user["id"], "approved_at": now,
+            "rejected_reason": None,
+        }
+        await db.transactions.insert_one(txn)
+        created_txn_ids.append(txn["id"])
     res = await db.batch_payments.find_one_and_update(
         {"id": pid},
-        {"$set": {"status": "received", "received_date": today, "received_by": user["id"], "txn_id": txn["id"]}},
+        {"$set": {
+            "status": "received", "received_date": today, "received_by": user["id"],
+            "txn_id": created_txn_ids[0] if created_txn_ids else None,
+            "txn_ids": created_txn_ids,
+        }},
         return_document=True,
     )
     res.pop("_id", None)

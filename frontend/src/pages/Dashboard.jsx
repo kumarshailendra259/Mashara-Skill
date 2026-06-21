@@ -30,6 +30,7 @@ export default function Dashboard() {
     company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "",
   });
   const [data, setData] = useState(null);
+  const [milestoneSummary, setMilestoneSummary] = useState(null);
 
   useEffect(() => {
     Promise.all(ENTITY_TYPES.map((tt) => api.get(`/entities/${tt}`))).then((res) => {
@@ -47,6 +48,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     api.get("/dashboard/summary", { params: query }).then((r) => setData(r.data)).catch(() => setData(null));
+    api.get("/dashboard/milestone-income", { params: query }).then((r) => setMilestoneSummary(r.data)).catch(() => setMilestoneSummary(null));
   }, [query]);
 
   useEffect(() => {
@@ -258,6 +260,77 @@ export default function Dashboard() {
           })}
         </Tabs>
       </div>
+
+      {/* Milestone Income Section */}
+      {milestoneSummary && milestoneSummary.count > 0 && (
+        <div className="space-y-3" data-testid="milestone-income-section">
+          <h2 className="font-heading font-black tracking-tight text-2xl">Milestone Income</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="swiss-card p-3"><div className="overline">Total Milestone Income</div><div className="num font-bold text-2xl value-positive">{inr(milestoneSummary.total)}</div></div>
+            <div className="swiss-card p-3"><div className="overline">1st Milestone</div><div className="num font-bold text-xl">{inr(milestoneSummary.by_milestone["1st"])}</div></div>
+            <div className="swiss-card p-3"><div className="overline">2nd Milestone</div><div className="num font-bold text-xl">{inr(milestoneSummary.by_milestone["2nd"])}</div></div>
+            <div className="swiss-card p-3"><div className="overline">3rd Milestone</div><div className="num font-bold text-xl">{inr(milestoneSummary.by_milestone["3rd"])}</div></div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {/* Partner-wise split */}
+            <div className="swiss-card p-4" data-testid="milestone-by-partner">
+              <div className="overline mb-2">Partner-wise Split</div>
+              {milestoneSummary.by_partner.length === 0 ? (
+                <div className="overline text-center py-6">No partner allocations</div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b border-[var(--border)] overline">
+                    <th className="text-left py-2">Partner</th>
+                    <th className="text-right py-2">Amount</th>
+                    <th className="text-right py-2">Share</th>
+                  </tr></thead>
+                  <tbody>
+                    {milestoneSummary.by_partner.map((r) => {
+                      const pct = milestoneSummary.total > 0 ? (r.amount / milestoneSummary.total * 100).toFixed(1) : "0.0";
+                      return (
+                        <tr key={r.partner_id || "unassigned"} className="border-b border-[var(--border)]">
+                          <td className="py-2 font-medium">{r.partner_name}</td>
+                          <td className="py-2 num value-positive">{inr(r.amount)}</td>
+                          <td className="py-2 num text-[var(--muted)]">{pct}%</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Project-wise */}
+            <div className="swiss-card p-4" data-testid="milestone-by-project">
+              <div className="overline mb-2">Project-wise</div>
+              {milestoneSummary.by_project.length === 0 ? (
+                <div className="overline text-center py-6">No project allocations</div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b border-[var(--border)] overline">
+                    <th className="text-left py-2">Project</th>
+                    <th className="text-right py-2">Amount</th>
+                    <th className="text-right py-2">Share</th>
+                  </tr></thead>
+                  <tbody>
+                    {milestoneSummary.by_project.map((r) => {
+                      const pct = milestoneSummary.total > 0 ? (r.amount / milestoneSummary.total * 100).toFixed(1) : "0.0";
+                      return (
+                        <tr key={r.project_id || "none"} className="border-b border-[var(--border)]">
+                          <td className="py-2 font-medium">{r.project_name}</td>
+                          <td className="py-2 num value-positive">{inr(r.amount)}</td>
+                          <td className="py-2 num text-[var(--muted)]">{pct}%</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

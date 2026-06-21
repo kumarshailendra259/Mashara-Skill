@@ -89,6 +89,7 @@ export default function Programs() {
 
   const [projects, setProjects] = useState([]);
   const [centers, setCenters] = useState([]);
+  const [partners, setPartners] = useState([]);
   const [activeProjectId, setActiveProjectId] = useState("");
   const [selectedCenterId, setSelectedCenterId] = useState("__all");
 
@@ -99,7 +100,7 @@ export default function Programs() {
   // Batch dialog
   const [batchOpen, setBatchOpen] = useState(false);
   const [editingBatch, setEditingBatch] = useState(null);
-  const emptyBatch = { project_id: "", center_id: "", name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "" };
+  const emptyBatch = { project_id: "", center_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "" };
   const [bForm, setBForm] = useState(emptyBatch);
 
   // Payment dialog
@@ -109,10 +110,11 @@ export default function Programs() {
   const [pForm, setPForm] = useState(emptyPay);
 
   useEffect(() => {
-    Promise.all([api.get("/entities/project"), api.get("/entities/center")])
-      .then(([p, c]) => {
+    Promise.all([api.get("/entities/project"), api.get("/entities/center"), api.get("/entities/partner")])
+      .then(([p, c, pa]) => {
         setProjects(p.data);
         setCenters(c.data);
+        setPartners(pa.data);
         if (!activeProjectId && p.data.length) setActiveProjectId(p.data[0].id);
       })
       .catch(() => {});
@@ -154,6 +156,7 @@ export default function Programs() {
     setEditingBatch(b);
     setBForm({
       project_id: b.project_id, center_id: b.center_id || "",
+      partner_ids: b.partner_ids || [],
       name: b.name, start_date: b.start_date || "", end_date: b.end_date || "",
       total_beneficiaries: b.total_beneficiaries || 0, description: b.description || "",
     });
@@ -163,7 +166,7 @@ export default function Programs() {
     if (!bForm.name.trim()) { toast.error("Batch name required"); return; }
     if (!bForm.project_id) { toast.error("Project required"); return; }
     try {
-      const payload = { ...bForm, total_beneficiaries: +bForm.total_beneficiaries || 0, center_id: bForm.center_id || null };
+      const payload = { ...bForm, total_beneficiaries: +bForm.total_beneficiaries || 0, center_id: bForm.center_id || null, partner_ids: bForm.partner_ids || [] };
       if (editingBatch) await api.put(`/batches/${editingBatch.id}`, payload);
       else {
         const r = await api.post("/batches", payload);
@@ -321,6 +324,36 @@ export default function Programs() {
                     <div className="swiss-card p-3"><div className="overline">Total Received</div><div className="num font-bold text-xl value-positive">{inr(totalReceived)}</div></div>
                   </div>
 
+                  {/* Partners on this batch */}
+                  {(activeBatch.partner_ids || []).length > 0 && (
+                    <div className="swiss-card p-4" data-testid="partner-split-section">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="overline">Partners on this batch · income splits equally on Receive</div>
+                        <span className="overline">{activeBatch.partner_ids.length} partner{activeBatch.partner_ids.length === 1 ? "" : "s"}</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                        {activeBatch.partner_ids.map((pid) => {
+                          const name = partners.find((p) => p.id === pid)?.name || pid;
+                          const split = activeBatch.partner_ids.length > 0 ? totalConfigured / activeBatch.partner_ids.length : 0;
+                          const splitReceived = activeBatch.partner_ids.length > 0 ? totalReceived / activeBatch.partner_ids.length : 0;
+                          return (
+                            <div key={pid} className="border border-[var(--border)] p-2 text-sm" data-testid={`partner-split-${pid}`}>
+                              <div className="font-medium truncate">{name}</div>
+                              <div className="overline text-xs mt-1">Configured share</div>
+                              <div className="num font-bold">{inr(split)}</div>
+                              {splitReceived > 0 && (
+                                <>
+                                  <div className="overline text-xs mt-1">Received</div>
+                                  <div className="num font-bold value-positive">{inr(splitReceived)}</div>
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Milestone cards */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3" data-testid="milestones-grid">
                     {MILESTONES.map((m) => (
@@ -410,6 +443,31 @@ export default function Programs() {
             <div className="col-span-2">
               <Label>Total Beneficiaries</Label>
               <Input type="number" value={bForm.total_beneficiaries} onChange={(e) => setBForm({ ...bForm, total_beneficiaries: e.target.value })} className="rounded-none num" />
+            </div>
+            <div className="col-span-2">
+              <Label>Partners <span className="overline text-[10px]">(milestone income will be split equally among selected partners)</span></Label>
+              <div className="border border-[var(--border)] p-2 max-h-40 overflow-y-auto space-y-1" data-testid="partner-multiselect">
+                {partners.length === 0 ? (
+                  <div className="overline text-xs py-2 text-center">No partners — create some under <a href="/partners" className="text-[var(--brand)] hover:underline">Partners</a></div>
+                ) : partners.map((p) => {
+                  const checked = (bForm.partner_ids || []).includes(p.id);
+                  return (
+                    <label key={p.id} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-50 px-1 py-0.5">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        data-testid={`partner-check-${p.id}`}
+                        onChange={() => setBForm((s) => {
+                          const ids = new Set(s.partner_ids || []);
+                          if (ids.has(p.id)) ids.delete(p.id); else ids.add(p.id);
+                          return { ...s, partner_ids: Array.from(ids) };
+                        })}
+                      />
+                      <span>{p.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
             <div className="col-span-2">
               <Label>Description</Label>
