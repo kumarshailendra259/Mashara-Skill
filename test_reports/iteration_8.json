@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration-8 frontend-only smoke for new HRMS Attendance + Leaves UI tabs. Logged in as admin, ensured staff existed (already 7), and ran end-to-end Playwright through Attendance (date picker, Mark all Present, Save Attendance, reload persistence, Recent table) and Leaves (Apply Leave dialog, approve, reject), plus regression on Reimbursements/Staff/Payroll tabs. All 11 critical flows passed; no UI/integration bugs found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Apply Leave dialog (and likely other Dialogs)", "issues": ["Radix DialogContent missing `Description` or `aria-describedby` — console warning: 'Missing Description or aria-describedby={undefined} for DialogContent'. Add a <DialogDescription> for a11y."]},
+      {"screen": "Dashboard charts", "issues": ["Recharts width/height(-1) warnings — chart container has no resolved size at first render. Cosmetic/console-only."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_8.json"
+  ],
+  "action_items": [
+    "(Optional) Add <DialogDescription> inside each <DialogContent> to silence Radix a11y warning.",
+    "(Optional) Give Recharts container a min-height so initial render does not log width/height(-1)."
+  ],
+  "critical_code_review_comments": [
+    "HRMS.jsx saveAttendance fires N parallel POSTs (one per row). Works fine for 7 staff but will be O(N) requests for larger orgs — consider a bulk endpoint POST /api/attendance/bulk if staff count grows.",
+    "Attendance reload effect runs twice per attDate change (one for the day, one for the 30-day recent window) — both are unconditional GETs. Acceptable; could be debounced or combined later.",
+    "Leaves PATCH uses query-string decision (`/leaves/{id}?decision=approved`) — works, but a JSON body { decision } would be more REST-idiomatic. Backend already accepts both per prior iteration tests.",
+    "canMarkAttendance includes manager/center_manager — leave approve/reject buttons therefore also show for managers (intentional per spec). Admin-only restriction not enforced on client; backend should be the source of truth (verified in prior iterations).",
+    "Re-applying for the same staff/date range silently creates duplicate leave rows — no duplicate guard on UI or backend. Low priority but worth a note."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (frontend-only run)", "frontend": "100% (11/11 critical flows)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md). Login succeeded; httpOnly cookie set; subsequent API calls (GET /api/staff, /api/attendance, /api/leaves; POST /api/attendance ×7, POST /api/leaves ×2; PATCH /api/leaves/{id} approve+reject) all returned 200.",
+  "seed_data_creation": "No new staff needed (7 staff already present from prior iterations: TEST_MgrStaff_*/TEST_EmpStaff_*). Attendance: 7 rows saved for today via Mark-all-Present. Leaves: 2 leave requests created (1 approved, 1 rejected).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Attendance + Leaves UI is fully working end-to-end against the backend. Tab data-testids: tab-attendance, tab-leaves. Key element testids verified: att-date, att-mark-all-present, att-save, att-status-{staffId}, btn-new-leave, leave-staff, leave-from, leave-to, leave-save, leave-approve-{id}, leave-reject-{id}. The Recent table heading uses CSS uppercase ('overline' class) — when asserting, match case-insensitively. The only console warnings are (a) Radix Dialog missing aria-describedby and (b) Recharts width(-1)/height(-1) at first render — both are non-blocking. Backend regression from iteration-7 still applies (78/78).",
+  "rca of the issue": "No issues found in this iteration."
+}
