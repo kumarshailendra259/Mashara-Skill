@@ -790,6 +790,103 @@ async def _items_breakdown(match: dict) -> list:
     return sorted(out, key=lambda x: x["total"], reverse=True)
 
 
+@api.get("/dashboard/settlement")
+async def settlement_view(
+    user=Depends(get_current_user),
+    center_id: Optional[str] = None,
+    partner_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    """Co-partner settlement view for a center.
+
+    - partner role: scoped to centers where the logged-in partner has activity (own_partner_id derived from assigned_partner_id).
+    - admin/manager/accountant: can pass any center_id (or partner_id) to inspect.
+
+    Returns list of centers; for each center, list of partners with their investment/income/expense
+    plus fair-share (equal split) adjustment: how much each partner should pay to / receive from
+    the group to balance NET CONTRIBUTION (= investment + expense - income).
+    """
+    role = user.get("role")
+    own_partner_id = user.get("assigned_partner_id") if role == "partner" else partner_id
+
+    # Build base match — only approved entries count
+    base: dict = {"status": "approved"}
+    if start or end:
+        rng: dict = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end
+        base["date"] = rng
+
+    # Find which centers to include
+    center_ids: list[str] = []
+    if center_id:
+        center_ids = [center_id]
+    elif own_partner_id:
+        center_ids = await db.transactions.distinct(
+            "center_id",
+            {**base, "partner_id": own_partner_id, "center_id": {"$ne": None}},
+        )
+    else:
+        # admin without filter: all centers that have any partner transaction
+        center_ids = await db.transactions.distinct(
+            "center_id",
+            {**base, "partner_id": {"$ne": None}, "center_id": {"$ne": None}},
+        )
+
+    # Fetch entity name lookups
+    center_docs = await db.centers.find({"id": {"$in": center_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
+    center_name = {c["id"]: c["name"] for c in center_docs}
+
+    out_centers = []
+    for cid in center_ids:
+        # Aggregate per partner inside this center
+        pipe = [
+            {"$match": {**base, "center_id": cid, "partner_id": {"$ne": None}}},
+            {"$group": {"_id": {"pid": "$partner_id", "type": "$type"}, "total": {"$sum": "$amount"}}},
+        ]
+        rows = await db.transactions.aggregate(pipe).to_list(5000)
+        if not rows:
+            continue
+        partner_ids = list({r["_id"]["pid"] for r in rows})
+        p_docs = await db.partners.find({"id": {"$in": partner_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
+        p_name = {p["id"]: p["name"] for p in p_docs}
+
+        agg: dict = {}
+        for r in rows:
+            pid = r["_id"]["pid"]
+            agg.setdefault(pid, {"id": pid, "name": p_name.get(pid, "Unknown"),
+                                 "investment": 0, "income": 0, "expense": 0})
+            agg[pid][r["_id"]["type"]] += r["total"]
+
+        partners = list(agg.values())
+        # Net contribution per partner = investment + expense - income (money they put into the venture)
+        for p in partners:
+            p["net_contribution"] = p["investment"] + p["expense"] - p["income"]
+            p["profit_share"] = p["income"] - p["expense"]  # individual P&L
+        total_contrib = sum(p["net_contribution"] for p in partners)
+        n = len(partners) or 1
+        fair_share = total_contrib / n
+        for p in partners:
+            # adjustment > 0 ⇒ this partner needs to PAY this amount to balance
+            # adjustment < 0 ⇒ this partner should RECEIVE this amount
+            p["fair_share"] = round(fair_share, 2)
+            p["adjustment"] = round(fair_share - p["net_contribution"], 2)
+
+        out_centers.append({
+            "center_id": cid,
+            "center_name": center_name.get(cid, "Unknown"),
+            "total_contribution": round(total_contrib, 2),
+            "fair_share_each": round(fair_share, 2),
+            "partner_count": n,
+            "partners": sorted(partners, key=lambda x: x["adjustment"]),
+        })
+
+    return {"centers": sorted(out_centers, key=lambda x: x["center_name"])}
+
+
 @api.get("/")
 async def root():
     return {"service": "finance-tracker", "ok": True}

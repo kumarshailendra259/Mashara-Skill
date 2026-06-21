@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration-6 settlement endpoint testing. Added /app/backend/tests/test_finance_settlement.py with 7 tests covering auth, partner scoping, admin filter (?center_id), admin global view, math (net_contribution, fair_share_each, adjustment sum≈0), approved-only filter (pending excluded), and date range filter. All 7 new + 49 existing tests pass (56/56).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_finance_settlement.py",
+    "/app/test_reports/pytest/iteration_6_settlement.xml",
+    "/app/test_reports/pytest/iteration_6_all.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "settlement_view in server.py (~95 lines) is clean and well-commented. Approved-only base match is correctly merged into every query.",
+    "Per-center aggregation issues a separate aggregate() call per center_id. For tenants with many centers this could be N+1; consider one $group keyed by {center_id, partner_id, type}. Not a blocker — performance optimisation only.",
+    "fair_share uses `n = len(partners) or 1` (safe-guard against div-by-zero), but center is skipped earlier when rows are empty, so the `or 1` branch is unreachable — fine, just defensive.",
+    "Rounding is done at output only; intermediate sums use raw floats. For currency amounts this is acceptable here but a future Decimal migration would be cleaner.",
+    "Endpoint does not restrict 'manager'/'accountant'/'center_manager' explicitly — they fall through to the admin branch (own_partner_id=None) and see all partner-bearing centers. PRD only specifies partner & admin; if center_manager scoping is intended in future, add a role-based branch."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_finance_settlement.py (new)",
+    "/app/test_reports/iteration_6.json (new)"
+  ],
+  "success_rate": {"backend": "100% (56/56)", "frontend": "N/A (backend-only review)"},
+  "test_credentials": "admin@finance.app / Admin@123 (read from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Test fixtures create isolated TEST_-prefixed centers/partners and approved txns (P1: inv 50K + exp 10K → net 60K; P2: inv 30K + inc 15K → net 15K). One pending txn injected via a center_manager to verify approved-only filtering. Second isolated center created for admin no-filter assertion.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Settlement endpoint at GET /api/dashboard/settlement is fully covered. Re-run `pytest /app/backend/tests/ -v` for full regression (56 tests, ~12s). The test suite is idempotent — fixtures use uuid-suffixed names. No frontend testing was requested or performed.",
+  "rca of the issue": "N/A — no bugs found. All shape, math, scoping, and filter assertions pass exactly as specified in the review request (P1 adj -22500, P2 adj +22500, sum=0)."
+}

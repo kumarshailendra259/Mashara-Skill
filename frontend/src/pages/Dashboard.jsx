@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { useLang } from "@/context/LangContext";
+import { useAuth } from "@/context/AuthContext";
 import { inr } from "@/lib/i18n";
 import KpiCard from "@/components/KpiCard";
 import {
@@ -20,7 +21,10 @@ const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
 
 export default function Dashboard() {
   const { t } = useLang();
+  const { user } = useAuth();
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
+  const [settlement, setSettlement] = useState(null);
+  const showSettlement = ["partner", "admin", "manager", "accountant"].includes(user?.role);
   const [filters, setFilters] = useState({
     company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "",
   });
@@ -43,6 +47,15 @@ export default function Dashboard() {
   useEffect(() => {
     api.get("/dashboard/summary", { params: query }).then((r) => setData(r.data)).catch(() => setData(null));
   }, [query]);
+
+  useEffect(() => {
+    if (!showSettlement) return;
+    const p = {};
+    if (query.start) p.start = query.start;
+    if (query.end) p.end = query.end;
+    if (query.center_id) p.center_id = query.center_id;
+    api.get("/dashboard/settlement", { params: p }).then((r) => setSettlement(r.data)).catch(() => setSettlement(null));
+  }, [query, showSettlement]);
 
   const totals = data?.totals || { investment: 0, income: 0, expense: 0, profit: 0 };
 
@@ -131,6 +144,67 @@ export default function Dashboard() {
           ) : <EmptyChart text={t("no_data")} />}
         </div>
       </div>
+
+      {/* Partner Settlement */}
+      {showSettlement && settlement?.centers?.length > 0 && (
+        <div className="swiss-card p-5" data-testid="settlement-section">
+          <div className="flex items-center justify-between mb-1">
+            <div className="font-heading font-bold tracking-tight text-lg">{t("settlement")}</div>
+            <div className="overline">Equal-split fair share</div>
+          </div>
+          <p className="text-sm text-[var(--muted)] mb-4">Net contribution = investment + expense − income (money each partner put into the venture). Adjustment shows who should pay or receive to balance.</p>
+          <div className="space-y-6">
+            {settlement.centers.map((c) => (
+              <div key={c.center_id} className="border border-[var(--border)]" data-testid={`settlement-center-${c.center_id}`}>
+                <div className="px-4 py-2 bg-gray-50 border-b border-[var(--border)] flex justify-between items-center">
+                  <div>
+                    <span className="overline mr-2">Center</span>
+                    <span className="font-heading font-bold">{c.center_name}</span>
+                  </div>
+                  <div className="text-sm">
+                    <span className="overline mr-2">Fair share / partner</span>
+                    <span className="num font-semibold">{inr(c.fair_share_each)}</span>
+                  </div>
+                </div>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--border)] overline">
+                      <th className="text-left p-3">{t("partner")}</th>
+                      <th className="text-right p-3">{t("investment")}</th>
+                      <th className="text-right p-3">{t("expense")}</th>
+                      <th className="text-right p-3">{t("income")}</th>
+                      <th className="text-right p-3">{t("net_contribution")}</th>
+                      <th className="text-right p-3">{t("adjustment")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {c.partners.map((p) => {
+                      const adj = p.adjustment;
+                      const label = Math.abs(adj) < 0.5 ? t("settled") : adj > 0 ? t("to_pay") : t("to_receive");
+                      const color = Math.abs(adj) < 0.5 ? "text-[var(--muted)]" : adj > 0 ? "value-negative" : "value-positive";
+                      return (
+                        <tr key={p.id} className="border-b border-[var(--border)] last:border-0">
+                          <td className="p-3 font-medium">{p.name}</td>
+                          <td className="p-3 num">{inr(p.investment)}</td>
+                          <td className="p-3 num value-negative">{inr(p.expense)}</td>
+                          <td className="p-3 num value-positive">{inr(p.income)}</td>
+                          <td className="p-3 num font-medium">{inr(p.net_contribution)}</td>
+                          <td className={`p-3 num font-bold ${color}`}>
+                            <div className="flex justify-end items-center gap-2">
+                              <span className="overline text-[10px]">{label}</span>
+                              <span>{inr(Math.abs(adj))}</span>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Breakdown */}
       <div className="swiss-card p-5" data-testid="breakdown-section">
