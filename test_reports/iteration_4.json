@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration-4 regression run after the claimed fix to PUT /api/transactions/{id}. Result: 48/49 PASS, the SAME single bug from iteration-3 persists. The guard at server.py:560 was NOT actually relaxed — the clause `existing.get(\"status\", \"pending\") == \"pending\"` is still present, so a non-admin creator editing their own *approved* entry still gets 403 instead of 200 + status auto-reset to 'pending'. All other 48 tests (iter-1: 21, iter-2: 8, iter-3: 19) continue to pass.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "PUT /api/transactions/{id}",
+        "issue": "REGRESSION/UNFIXED: Non-admin creator editing own *approved* entry still returns 403. server.py:560 guard still includes `existing.get('status','pending') == 'pending'`, so the reset-to-pending branch at lines 564-567 remains unreachable. The fix described in the review request (relax guard so owner can edit regardless of status; auto-reset to pending on save) was NOT applied to the source. Verified by reading server.py lines 552-572 after the supposed fix.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {"endpoint": "POST /api/transactions/{id}/reject", "issue": "Empty/missing reason is silently coerced to '' (no audit-trail enforcement)."},
+      {"endpoint": "PATCH /api/auth/users/{id}", "issue": "No validation that assigned_center_ids / assigned_partner_id reference real entities; stale IDs silently scope user to nothing."},
+      {"endpoint": "POST /api/transactions/{id}/approve", "issue": "Re-approving already-approved txn just updates approved_by/approved_at; consider 409 / no-op."},
+      {"endpoint": "POST /api/transactions/{id}/reject", "issue": "No status state-machine: rejected → approved transition is allowed without guard."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_finance_api.py",
+    "/app/backend/tests/test_finance_features.py",
+    "/app/backend/tests/test_finance_approval.py",
+    "/app/test_reports/pytest/pytest_iter4_full.xml"
+  ],
+  "action_items": [
+    "ACTUALLY apply the fix to /app/backend/server.py update_transaction(): change line 560 from `if not (is_admin or (is_owner and existing.get('status','pending') == 'pending' and role in ('manager','center_manager','partner','accountant'))):` to `if not (is_admin or (is_owner and role in ('manager','center_manager','partner','accountant'))):` — drop the `status == 'pending'` clause. Keep the auto-reset block at 564-567 intact. After that change the failing test `test_non_admin_edit_approved_resets_to_pending` will pass.",
+    "Verify via: `python -m pytest backend/tests/test_finance_approval.py::TestEditSemantics -v` — must return 2 passed."
+  ],
+  "critical_code_review_comments": [
+    "server.py:560 still has the buggy `status == 'pending'` clause. The follow-on branch on lines 564-567 (reset to pending on owner edit of approved entry) is dead code under the current guard. This contradicts both the spec and the iteration-4 review request which said the guard was relaxed.",
+    "Approve/Reject endpoints lack a status state-machine (rejected → approved is silently allowed).",
+    "datetime usage is inconsistent across endpoints (mix of `datetime.utcnow().isoformat()` and timezone-aware UTC); unify to `datetime.now(timezone.utc).isoformat()` everywhere.",
+    "PATCH /auth/users has no 'cannot demote the last admin' protection; an admin could lock themselves out."
+  ],
+  "updated_files": [
+    "/app/test_reports/iteration_4.json (new)",
+    "/app/test_reports/pytest/pytest_iter4_full.xml (new)"
+  ],
+  "success_rate": {"backend": "98% (48/49 — same single failure as iter-3)", "frontend": "N/A (not requested)"},
+  "test_credentials": "admin@finance.app / Admin@123 (verified).",
+  "seed_data_creation": "Per-run TEST_ users + entities + ~10 transactions; no cleanup, tolerant filters.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "After main agent ACTUALLY edits server.py line 560 (drop the `status=='pending'` clause), re-run: `python -m pytest backend/tests/test_finance_approval.py backend/tests/test_finance_api.py backend/tests/test_finance_features.py -v`. Expect 49/49 pass. The single failing test is TestEditSemantics::test_non_admin_edit_approved_resets_to_pending (expects 200 + status='pending' + approved_by=None + approved_at=None after a center_manager PUT on their own admin-approved txn).",
+  "rca of the issue": "Main agent's iteration-4 fix description says the guard was relaxed, but the source at /app/backend/server.py:560 was not actually modified — the `existing.get('status','pending') == 'pending'` clause is still present, so the same 403 path is taken for non-admin owner editing an approved entry. The unreachable branch at 564-567 (which would reset status to pending) confirms the intent was correct; only the guard line needs to be edited. Reproduction is unchanged from iter-3: (1) center_manager POSTs txn → pending; (2) admin approves → approved; (3) center_manager PUT → expected 200 + status='pending', actual 403."
+}
