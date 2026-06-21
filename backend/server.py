@@ -6,6 +6,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 import os
 import io
+import re
 import csv
 import uuid
 import logging
@@ -203,15 +204,15 @@ class RejectIn(BaseModel):
 def _txn_scope_for_user(user: dict) -> dict:
     """Return Mongo query filter restricting transactions to user's scope.
 
-    - admin / manager / accountant: all transactions
-    - center_manager: only transactions where center_id is in their assigned_center_ids
+    - admin / manager / senior_manager / accountant / hr: all transactions
+    - center_manager / center_staff: only transactions where center_id is in their assigned_center_ids
     - partner: only transactions where partner_id == their assigned_partner_id
     - viewer: only their own created transactions
     """
     role = user.get("role")
-    if role in ("admin", "manager", "accountant"):
+    if role in ("admin", "manager", "senior_manager", "accountant", "hr"):
         return {}
-    if role == "center_manager":
+    if role in ("center_manager", "center_staff"):
         return {"center_id": {"$in": user.get("assigned_center_ids") or []}}
     if role == "partner":
         pid = user.get("assigned_partner_id")
@@ -1474,7 +1475,7 @@ async def item_suggestions(q: Optional[str] = None, limit: int = 50, _=Depends(g
         {"$group": {"_id": {"$toLower": "$items.name"}, "name": {"$first": "$items.name"}, "count": {"$sum": 1}}},
     ]
     if q and q.strip():
-        rx = {"$regex": q.strip(), "$options": "i"}
+        rx = {"$regex": re.escape(q.strip()), "$options": "i"}
         pipeline.append({"$match": {"name": rx}})
     pipeline += [
         {"$sort": {"count": -1, "name": 1}},
