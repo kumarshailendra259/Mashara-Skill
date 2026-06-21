@@ -58,6 +58,10 @@ export const dictionary = {
     confirm_delete: "Are you sure you want to delete this?",
     distribution: "Distribution",
     language: "Language",
+    items: "Items",
+    by_item: "By Item",
+    quantity: "Quantity",
+    attachments: "Attachments",
   },
   hi: {
     app_name: "फाइनेंस ट्रैकर",
@@ -118,6 +122,10 @@ export const dictionary = {
     confirm_delete: "क्या आप वाक़ई इसे हटाना चाहते हैं?",
     distribution: "वितरण",
     language: "भाषा",
+    items: "आइटम",
+    by_item: "आइटम अनुसार",
+    quantity: "मात्रा",
+    attachments: "संलग्नक",
   },
 };
 

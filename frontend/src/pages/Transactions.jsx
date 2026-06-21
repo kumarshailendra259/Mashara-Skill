@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Download, Upload } from "lucide-react";
+import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List } from "lucide-react";
 
 const TXN_TYPES = ["investment", "income", "expense"];
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
@@ -28,9 +28,11 @@ export default function Transactions() {
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
-  const emptyForm = { type: "expense", amount: "", date: new Date().toISOString().slice(0, 10), description: "", company_id: "", partner_id: "", center_id: "", project_id: "" };
+  const emptyForm = { type: "expense", amount: "", date: new Date().toISOString().slice(0, 10), description: "", company_id: "", partner_id: "", center_id: "", project_id: "", items: [], attachments: [] };
   const [form, setForm] = useState(emptyForm);
   const fileRef = useRef(null);
+  const attachRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
 
   const loadEntities = () =>
     Promise.all(ENTITY_TYPES.map((tt) => api.get(`/entities/${tt}`))).then((r) => {
@@ -53,13 +55,48 @@ export default function Transactions() {
       type: it.type, amount: it.amount, date: it.date, description: it.description || "",
       company_id: it.company_id || "", partner_id: it.partner_id || "",
       center_id: it.center_id || "", project_id: it.project_id || "",
+      items: it.items || [], attachments: it.attachments || [],
     });
     setOpen(true);
   };
 
+  const addItem = () => setForm((f) => ({ ...f, items: [...f.items, { name: "", quantity: 1, rate: 0, amount: 0 }] }));
+  const updateItem = (idx, key, val) => setForm((f) => {
+    const items = f.items.map((it, i) => {
+      if (i !== idx) return it;
+      const next = { ...it, [key]: val };
+      if (key === "quantity" || key === "rate") {
+        const q = parseFloat(next.quantity || 0);
+        const r = parseFloat(next.rate || 0);
+        next.amount = +(q * r).toFixed(2);
+      }
+      return next;
+    });
+    return { ...f, items };
+  });
+  const removeItem = (idx) => setForm((f) => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
+
+  const uploadAttachment = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    setUploading(true);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setForm((s) => ({ ...s, attachments: [...s.attachments, data] }));
+      toast.success("Attached");
+    } catch (err) { toast.error(formatError(err)); }
+    finally { setUploading(false); e.target.value = ""; }
+  };
+
+  const removeAttachment = (id) => setForm((s) => ({ ...s, attachments: s.attachments.filter((a) => a.id !== id) }));
+
+  const itemsTotal = form.items.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
+
   const save = async () => {
     try {
-      const payload = { ...form, amount: parseFloat(form.amount) };
+      const computedAmount = form.items.length ? itemsTotal : parseFloat(form.amount);
+      if (!(computedAmount > 0)) { toast.error("Amount must be > 0"); return; }
+      const payload = { ...form, amount: computedAmount };
       ENTITY_TYPES.forEach((et) => { if (!payload[`${et}_id`]) payload[`${et}_id`] = null; });
       if (editing) await api.put(`/transactions/${editing.id}`, payload);
       else await api.post("/transactions", payload);
@@ -190,7 +227,21 @@ export default function Transactions() {
                 <td className="p-3">{nameOf("partner", it.partner_id)}</td>
                 <td className="p-3">{nameOf("center", it.center_id)}</td>
                 <td className="p-3">{nameOf("project", it.project_id)}</td>
-                <td className="p-3 text-[var(--muted)] max-w-xs truncate">{it.description}</td>
+                <td className="p-3 text-[var(--muted)] max-w-xs truncate">
+                  <div className="flex items-center gap-2">
+                    {(it.items?.length || 0) > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs text-[var(--brand)] border border-[var(--brand)] px-1.5 py-0.5" title={`${it.items.length} items`}>
+                        <List size={11} /> {it.items.length}
+                      </span>
+                    )}
+                    {(it.attachments?.length || 0) > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs text-[var(--muted)] border border-[var(--border)] px-1.5 py-0.5" title={`${it.attachments.length} attachments`}>
+                        <Paperclip size={11} /> {it.attachments.length}
+                      </span>
+                    )}
+                    <span className="truncate">{it.description}</span>
+                  </div>
+                </td>
                 {canEdit && (
                   <td className="p-3 text-right">
                     <div className="inline-flex gap-1">
@@ -207,7 +258,7 @@ export default function Transactions() {
 
       {/* Dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="rounded-none max-w-lg">
+        <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="font-heading tracking-tight">{editing ? t("edit") : t("new_transaction")}</DialogTitle>
           </DialogHeader>
@@ -222,8 +273,14 @@ export default function Transactions() {
               </Select>
             </div>
             <div>
-              <Label>{t("amount")}</Label>
-              <Input type="number" step="0.01" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} className="rounded-none" data-testid="txn-amount" />
+              <Label>{t("amount")} {form.items.length > 0 && <span className="text-xs text-[var(--muted)]">(auto from items)</span>}</Label>
+              <Input
+                type="number" step="0.01"
+                value={form.items.length ? itemsTotal : form.amount}
+                onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                disabled={form.items.length > 0}
+                className="rounded-none" data-testid="txn-amount"
+              />
             </div>
             <div className="col-span-2">
               <Label>{t("date")}</Label>
@@ -244,6 +301,87 @@ export default function Transactions() {
             <div className="col-span-2">
               <Label>{t("description")}</Label>
               <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="rounded-none" rows={2} />
+            </div>
+
+            {/* Items */}
+            <div className="col-span-2 border-t border-[var(--border)] pt-4 mt-2">
+              <div className="flex items-center justify-between mb-2">
+                <Label className="overline">{t("items") || "Items"}</Label>
+                <Button type="button" size="sm" variant="outline" className="rounded-none gap-2" onClick={addItem} data-testid="btn-add-item">
+                  <Plus size={14} /> {t("add") || "Add"}
+                </Button>
+              </div>
+              {form.items.length === 0 ? (
+                <div className="overline text-center py-3 border border-dashed border-[var(--border)]">No items — optional. Add line items for granular tracking.</div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="overline border-b border-[var(--border)]">
+                      <th className="text-left py-2">Item</th>
+                      <th className="text-right">Qty</th>
+                      <th className="text-right">Rate</th>
+                      <th className="text-right">Amount</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {form.items.map((it, idx) => (
+                      <tr key={idx} className="border-b border-[var(--border)]">
+                        <td className="py-1.5 pr-2">
+                          <Input value={it.name} onChange={(e) => updateItem(idx, "name", e.target.value)} placeholder="Item name" className="rounded-none h-8" data-testid={`item-name-${idx}`} />
+                        </td>
+                        <td className="py-1.5 pr-2 w-20">
+                          <Input type="number" step="0.01" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="rounded-none h-8 num" />
+                        </td>
+                        <td className="py-1.5 pr-2 w-28">
+                          <Input type="number" step="0.01" value={it.rate} onChange={(e) => updateItem(idx, "rate", e.target.value)} className="rounded-none h-8 num" />
+                        </td>
+                        <td className="py-1.5 pr-2 w-28">
+                          <Input type="number" step="0.01" value={it.amount} onChange={(e) => updateItem(idx, "amount", parseFloat(e.target.value) || 0)} className="rounded-none h-8 num font-medium" />
+                        </td>
+                        <td className="w-10">
+                          <Button type="button" size="icon" variant="ghost" onClick={() => removeItem(idx)} className="h-8 w-8 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td colSpan={3} className="text-right overline pt-2">Items Total</td>
+                      <td className="num font-bold pt-2">{inr(itemsTotal)}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Attachments */}
+            <div className="col-span-2 border-t border-[var(--border)] pt-4 mt-2">
+              <div className="flex items-center justify-between mb-2">
+                <Label className="overline">Attachments</Label>
+                <div>
+                  <input ref={attachRef} type="file" hidden onChange={uploadAttachment} data-testid="attach-input" />
+                  <Button type="button" size="sm" variant="outline" className="rounded-none gap-2" disabled={uploading} onClick={() => attachRef.current?.click()} data-testid="btn-attach">
+                    <Upload size={14} /> {uploading ? "Uploading…" : "Attach file"}
+                  </Button>
+                </div>
+              </div>
+              {form.attachments.length === 0 ? (
+                <div className="overline text-center py-3 border border-dashed border-[var(--border)]">No attachments — upload bills, receipts, invoices (max 10MB).</div>
+              ) : (
+                <ul className="space-y-1">
+                  {form.attachments.map((a) => (
+                    <li key={a.id} className="flex items-center justify-between border border-[var(--border)] px-3 py-2 text-sm">
+                      <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate">
+                        {a.filename}
+                      </a>
+                      <div className="flex items-center gap-3 ml-3">
+                        <span className="overline">{(a.size / 1024).toFixed(0)} KB</span>
+                        <Button type="button" size="icon" variant="ghost" onClick={() => removeAttachment(a.id)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
           <DialogFooter>

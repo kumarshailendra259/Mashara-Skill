@@ -6,7 +6,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Download } from "lucide-react";
 
-const DIMS = ["company", "partner", "center", "project"];
+const DIMS = ["company", "partner", "center", "project", "item"];
 
 export default function Reports() {
   const { t } = useLang();

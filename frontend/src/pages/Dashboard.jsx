@@ -16,6 +16,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
+const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
 
 export default function Dashboard() {
   const { t } = useLang();
@@ -136,15 +137,16 @@ export default function Dashboard() {
         <div className="font-heading font-bold tracking-tight mb-4">{t("breakdown")}</div>
         <Tabs defaultValue="company">
           <TabsList className="rounded-none bg-transparent border-b border-[var(--border)] p-0 h-auto">
-            {ENTITY_TYPES.map((tt) => (
+            {BREAKDOWN_TYPES.map((tt) => (
               <TabsTrigger key={tt} value={tt} data-testid={`tab-${tt}`}
                 className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
                 {t(tt)}
               </TabsTrigger>
             ))}
           </TabsList>
-          {ENTITY_TYPES.map((tt) => {
+          {BREAKDOWN_TYPES.map((tt) => {
             const rows = (data?.[`by_${tt}`] || []).slice(0, 10);
+            const isItem = tt === "item";
             return (
               <TabsContent key={tt} value={tt} className="mt-4">
                 {rows.length ? (
@@ -153,6 +155,7 @@ export default function Dashboard() {
                       <thead>
                         <tr className="border-b border-[var(--border)] overline">
                           <th className="text-left py-2">{t(tt)}</th>
+                          {isItem && <th className="text-right">{t("quantity")}</th>}
                           <th className="text-right">{t("investment")}</th>
                           <th className="text-right">{t("income")}</th>
                           <th className="text-right">{t("expense")}</th>
@@ -160,9 +163,10 @@ export default function Dashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {rows.map((r) => (
-                          <tr key={r.id} className="border-b border-[var(--border)] hover:bg-gray-50">
+                        {rows.map((r, i) => (
+                          <tr key={r.id || r.name || i} className="border-b border-[var(--border)] hover:bg-gray-50">
                             <td className="py-2 font-medium">{r.name}</td>
+                            {isItem && <td className="num">{(r.quantity || 0).toLocaleString()}</td>}
                             <td className="num">{inr(r.investment)}</td>
                             <td className="num value-positive">{inr(r.income)}</td>
                             <td className="num value-negative">{inr(r.expense)}</td>

@@ -11,10 +11,11 @@ import uuid
 import logging
 import bcrypt
 import jwt
+import requests
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Literal
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -138,6 +139,22 @@ EntityType = Literal["company", "partner", "center", "project"]
 TxnType = Literal["investment", "income", "expense"]
 
 
+class TransactionItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    quantity: float = Field(default=1, ge=0)
+    rate: float = Field(default=0, ge=0)
+    amount: float = Field(ge=0)
+
+
+class AttachmentRef(BaseModel):
+    id: str
+    path: str
+    filename: str
+    content_type: str
+    size: int
+
+
 class TransactionIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     type: TxnType
@@ -148,6 +165,8 @@ class TransactionIn(BaseModel):
     partner_id: Optional[str] = None
     center_id: Optional[str] = None
     project_id: Optional[str] = None
+    items: List[TransactionItem] = Field(default_factory=list)
+    attachments: List[AttachmentRef] = Field(default_factory=list)
 
 
 class TransactionOut(TransactionIn):
@@ -184,6 +203,113 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     client.close()
+
+
+# ---------- Object Storage ----------
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+APP_STORAGE_PREFIX = os.environ.get("APP_STORAGE_PREFIX", "finance-tracker")
+_storage_key: Optional[str] = None
+
+
+def _init_storage() -> str:
+    global _storage_key
+    if _storage_key:
+        return _storage_key
+    emergent_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not emergent_key:
+        raise HTTPException(500, "Object storage not configured (EMERGENT_LLM_KEY missing)")
+    r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": emergent_key}, timeout=30)
+    r.raise_for_status()
+    _storage_key = r.json()["storage_key"]
+    return _storage_key
+
+
+def _put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = _init_storage()
+    r = requests.put(
+        f"{STORAGE_URL}/objects/{path}",
+        headers={"X-Storage-Key": key, "Content-Type": content_type},
+        data=data, timeout=120,
+    )
+    if r.status_code == 403:
+        # refresh key once
+        globals()["_storage_key"] = None
+        key = _init_storage()
+        r = requests.put(
+            f"{STORAGE_URL}/objects/{path}",
+            headers={"X-Storage-Key": key, "Content-Type": content_type},
+            data=data, timeout=120,
+        )
+    r.raise_for_status()
+    return r.json()
+
+
+def _get_object(path: str) -> tuple[bytes, str]:
+    key = _init_storage()
+    r = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    if r.status_code == 403:
+        globals()["_storage_key"] = None
+        key = _init_storage()
+        r = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
+
+
+@api.post("/files/upload")
+async def upload_file(file: UploadFile = File(...), user=Depends(require_role("admin", "manager"))):
+    if not file.filename:
+        raise HTTPException(400, "Missing filename")
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
+    if len(ext) > 10:
+        ext = "bin"
+    file_id = str(uuid.uuid4())
+    path = f"{APP_STORAGE_PREFIX}/uploads/{user['id']}/{file_id}.{ext}"
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 10MB)")
+    content_type = file.content_type or "application/octet-stream"
+    try:
+        result = _put_object(path, data, content_type)
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage upload failed: {e}")
+    ref = {
+        "id": file_id,
+        "path": result.get("path", path),
+        "filename": file.filename,
+        "content_type": content_type,
+        "size": result.get("size", len(data)),
+        "uploaded_by": user["id"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_deleted": False,
+    }
+    await db.files.insert_one(ref)
+    return {k: ref[k] for k in ("id", "path", "filename", "content_type", "size")}
+
+
+@api.get("/files/view")
+async def view_file(
+    path: str = Query(...),
+    auth: Optional[str] = Query(None),
+    request: Request = None,
+):
+    # Allow either cookie OR ?auth=<jwt> for direct img/iframe display
+    token = request.cookies.get("access_token") if request else None
+    if not token and auth:
+        token = auth
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+    try:
+        jwt.decode(token, jwt_secret(), algorithms=[JWT_ALG])
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid token")
+    rec = await db.files.find_one({"path": path, "is_deleted": False})
+    if not rec:
+        raise HTTPException(404, "File not found")
+    try:
+        data, ct = _get_object(path)
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage fetch failed: {e}")
+    return Response(content=data, media_type=rec.get("content_type", ct))
 
 
 # ---------- Auth Routes ----------
@@ -498,7 +624,33 @@ async def dashboard_summary(
         "by_partner": await breakdown("partner_id", "partners"),
         "by_center": await breakdown("center_id", "centers"),
         "by_project": await breakdown("project_id", "projects"),
+        "by_item": await _items_breakdown(match),
     }
+
+
+async def _items_breakdown(match: dict) -> list:
+    """Aggregate transaction.items[] grouped by item name across the matched txns."""
+    pipe = [
+        {"$match": match},
+        {"$unwind": "$items"},
+        {"$group": {
+            "_id": {"name": "$items.name", "type": "$type"},
+            "amount": {"$sum": "$items.amount"},
+            "qty": {"$sum": "$items.quantity"},
+        }},
+    ]
+    rows = await db.transactions.aggregate(pipe).to_list(5000)
+    agg_map: dict = {}
+    for r in rows:
+        n = (r["_id"]["name"] or "Unnamed").strip() or "Unnamed"
+        agg_map.setdefault(n, {"name": n, "investment": 0, "income": 0, "expense": 0, "quantity": 0})
+        agg_map[n][r["_id"]["type"]] += r["amount"]
+        agg_map[n]["quantity"] += r["qty"]
+    out = list(agg_map.values())
+    for o in out:
+        o["profit"] = o["income"] - o["expense"]
+        o["total"] = o["investment"] + o["income"] + o["expense"]
+    return sorted(out, key=lambda x: x["total"], reverse=True)
 
 
 @api.get("/")

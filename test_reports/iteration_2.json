@@ -1,0 +1,48 @@
+{
+  "summary": "Backend-only testing of iteration-2 features: object-storage-backed file upload/view + transaction items[] + dashboard by_item aggregation. Wrote new pytest file /app/backend/tests/test_finance_features.py (8 tests). All 29 tests (21 regression + 8 new) PASS against the HTTPS ingress.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/files/upload", "issue": "Returns 200 (not 201) on successful create — minor REST convention mismatch."},
+      {"endpoint": "/api/files/view", "issue": "Accepts a JWT via query string (?auth=...) to support direct <img>/<iframe> embedding. JWT in URL can leak via browser history / referer / server logs. Consider short-lived signed URLs or a server-issued one-time view token instead."},
+      {"endpoint": "/api/files/upload", "issue": "No filetype/MIME allow-list. Anything up to 10MB can be uploaded (e.g. executables, html). Recommend whitelist (pdf/png/jpg/jpeg/txt) and content-type sniff."},
+      {"endpoint": "/api/files/view", "issue": "No ownership/RBAC check — any authenticated user (including viewers) can fetch any uploaded file path. Consider scoping by uploader or by linked transaction visibility."},
+      {"endpoint": "TransactionIn", "issue": "items[] and attachments[] are part of the same body — there is no dedicated /api/transactions/{id}/attachments endpoint. PUT requires full TransactionIn replacement to add/remove attachments, which is heavy."},
+      {"endpoint": "_init_storage()", "issue": "Uses a blocking `requests` call inside an async FastAPI route — blocks the event loop on cold start. Acceptable for low traffic; recommend httpx.AsyncClient for higher concurrency."},
+      {"endpoint": "/api/files/upload", "issue": "File metadata is stored in db.files but there is no index/uniqueness on `path`. Concurrent uploads could collide if UUID gen is identical (vanishingly small probability, but no constraint)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_finance_features.py",
+    "/app/backend/tests/test_finance_api.py",
+    "/app/test_reports/pytest/pytest_iter2.xml",
+    "/app/test_reports/pytest/pytest_full.xml"
+  ],
+  "action_items": [
+    "Consider RBAC/ownership check on /api/files/view — currently any authenticated user (incl. viewers) can read any file path.",
+    "Avoid passing JWT via ?auth= query param (leaks to logs/history); use short-lived signed URLs or one-time view tokens.",
+    "Add MIME/extension allow-list on /api/files/upload (currently any file <=10MB is accepted).",
+    "Convert blocking `requests` calls in storage helpers to async (httpx.AsyncClient) to avoid blocking FastAPI event loop."
+  ],
+  "critical_code_review_comments": [
+    "/api/files/view is missing authorization — any logged-in user can read any uploaded file by path (no link to transaction visibility or uploader).",
+    "JWT-in-query (?auth=...) is a security smell: tokens land in server access logs, browser history, and Referer headers. Use a server-minted short-lived view token bound to a single object path.",
+    "_put_object/_get_object use sync `requests` inside async endpoints; blocks event loop. Use httpx.AsyncClient or run in a threadpool.",
+    "No allow-list on upload content_type or extension; an admin/manager could upload arbitrary content (e.g. .html) and serve it back via /files/view.",
+    "TransactionItem.amount is independent of quantity*rate — the backend doesn't validate consistency. Acceptable if intentional (discount etc.) but worth a comment.",
+    "_items_breakdown groups by case-sensitive item name (e.g. 'Widget' vs 'widget' are separate). Consider normalizing case before grouping for better UX."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_finance_features.py (new)",
+    "/app/test_reports/pytest/pytest_iter2.xml",
+    "/app/test_reports/pytest/pytest_full.xml"
+  ],
+  "success_rate": {"backend": "100% (29/29 — 8 new + 21 regression)", "frontend": "N/A (not requested)"},
+  "test_credentials": "admin@finance.app / Admin@123 (verified).",
+  "seed_data_creation": "Each pytest run creates ~3 transactions in March 2026 with a unique 'Widget_<uuid>' item name plus a few TEST_-prefixed entities. Item name is randomized per-run to keep dashboard aggregation deterministic across repeated runs. No cleanup performed (matches iteration 1 convention).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Two pytest files under /app/backend/tests/: test_finance_api.py (iteration-1 regression, 21 tests) and test_finance_features.py (iteration-2 features, 8 tests). Both auto-read REACT_APP_BACKEND_URL from /app/frontend/.env. Override with FINANCE_TEST_BASE_URL. Item aggregation test uses a per-run unique item name to avoid contamination from previous runs. EMERGENT_LLM_KEY in backend/.env is configured and Emergent Object Storage upload/fetch works end-to-end.",
+  "rca of the issue": "Initial full-suite run failed test_by_item_aggregation (got 700 expected 350) because the items_txn_ids fixture created a hard-coded 'Widget' item, and a previous test run had already left 'Widget' rows in the DB — so the aggregation correctly summed all of them. Fixed by introducing a per-session unique item_tag fixture (Widget_<uuid8>) so each run aggregates only its own data. Backend behavior is correct; the test was non-isolated. After fix, 29/29 PASS."
+}
