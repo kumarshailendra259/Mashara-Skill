@@ -1309,6 +1309,24 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant")
     return res
 
 
+# ---------- My Tasks ----------
+@api.get("/tasks/my")
+async def my_tasks(user=Depends(get_current_user)):
+    role = user.get("role")
+    counts = {"txn_pending": 0, "reimb_l1": 0, "reimb_accountant": 0, "reimb_pay": 0, "payroll_pay": 0}
+    if role == "admin":
+        counts["txn_pending"] = await db.transactions.count_documents({"status": "pending"})
+    my_staff = await _staff_for_user(user["id"])
+    if my_staff:
+        counts["reimb_l1"] = await db.reimbursements.count_documents({"l1_approver_id": my_staff["id"], "status": "submitted"})
+    if role in ("admin", "accountant"):
+        counts["reimb_accountant"] = await db.reimbursements.count_documents({"status": "l1_approved"})
+        counts["reimb_pay"] = await db.reimbursements.count_documents({"status": "accountant_approved"})
+        counts["payroll_pay"] = await db.payroll.count_documents({"status": {"$ne": "paid"}})
+    counts["total"] = sum(v for k, v in counts.items() if k != "total")
+    return counts
+
+
 # ============================================================
 
 

@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
+import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck,
@@ -28,6 +29,21 @@ export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const { lang, switchLang, t } = useLang();
   const nav = useNavigate();
+  const [tasks, setTasks] = useState({ txn_pending: 0, reimb_l1: 0, reimb_accountant: 0, reimb_pay: 0, payroll_pay: 0, total: 0 });
+
+  useEffect(() => {
+    if (!user) return;
+    const load = () => api.get("/tasks/my").then((r) => setTasks(r.data)).catch(() => {});
+    load();
+    const id = setInterval(load, 30000);
+    return () => clearInterval(id);
+  }, [user]);
+
+  const badgeFor = (key) => {
+    if (key === "transactions") return tasks.txn_pending;
+    if (key === "HRMS") return tasks.reimb_l1 + tasks.reimb_accountant + tasks.reimb_pay + tasks.payroll_pay;
+    return 0;
+  };
 
   const handleLogout = async () => {
     await logout();
@@ -44,6 +60,7 @@ export default function Layout({ children }) {
         <nav className="flex-1 py-3" data-testid="sidebar-nav">
           {navItems.filter((it) => !it.adminOnly || user?.role === "admin").map((it) => {
             const Icon = it.icon;
+            const badge = badgeFor(it.key);
             return (
               <NavLink
                 key={it.to}
@@ -59,7 +76,12 @@ export default function Layout({ children }) {
                 }
               >
                 <Icon size={16} strokeWidth={1.6} />
-                <span>{t(it.key)}</span>
+                <span className="flex-1">{t(it.key)}</span>
+                {badge > 0 && (
+                  <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`badge-${it.key}`}>
+                    {badge}
+                  </span>
+                )}
               </NavLink>
             );
           })}
