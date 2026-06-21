@@ -1,0 +1,40 @@
+{
+  "summary": "Backend-only testing of Finance Tracker API. Wrote pytest suite (21 tests) covering auth (login/me/register/logout/cookie), RBAC (viewer/manager/admin), entities CRUD (company/partner/center/project), transactions CRUD with filters, CSV import (success + bad rows), dashboard summary (totals/monthly/breakdowns/profit), and negative cases (invalid login 401, missing cookie 401, bad txn type 422, admin-only delete). All 21 tests PASS against the public HTTPS ingress.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "Auth cookie", "issue": "Cookies are set with secure=True; samesite=none. They cannot be sent over plain http://localhost:8001 (browsers and python-requests both refuse). Tests must hit the HTTPS ingress. Acceptable for production but note: any direct http internal probing won't carry auth."},
+      {"endpoint": "/api/auth/register", "issue": "Allows clients to self-register with role='admin' (RegisterIn accepts admin literal). Should restrict role assignment to existing admins."},
+      {"endpoint": "FastAPI startup", "issue": "Uses deprecated @app.on_event('startup'/'shutdown'). Consider migrating to lifespan handlers."},
+      {"endpoint": "/api/transactions PUT", "issue": "TransactionIn is fully replaced (no PATCH). created_by/created_at preserved only because not part of body, but full overwrite of every field is required by clients."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_finance_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Consider restricting role='admin' on /api/auth/register (currently any anonymous caller can self-register as admin).",
+    "Migrate @app.on_event to FastAPI lifespan handlers (deprecation warning).",
+    "If you want internal HTTP tests to work with cookies, gate cookie 'secure' flag on an env var (e.g., COOKIE_SECURE=true in prod, false locally)."
+  ],
+  "critical_code_review_comments": [
+    "RegisterIn.role accepts 'admin' literal with no authorization guard — privilege escalation risk; only admins should be able to create admins.",
+    "Cookie config secure=True/samesite='none' is fine for cross-site HTTPS but makes any http testing unusable; recommend env-driven flag.",
+    "Dashboard breakdown groups null entity ids under literal string '—' but name 'Unassigned' — minor inconsistency but acceptable.",
+    "TransactionIn.model_config extra='ignore' is good for CSV-like payloads. Date is a string (YYYY-MM-DD); no validation that it parses — bad dates would silently sort wrong.",
+    "Use of deprecated on_event startup/shutdown; should switch to lifespan."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_finance_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "N/A (not requested)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md). Verified working.",
+  "seed_data_creation": "Tests create TEST_-prefixed entities and transactions; not cleaned up (per request — also useful as smoke data for frontend testing).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Pytest file at /app/backend/tests/test_finance_api.py auto-reads REACT_APP_BACKEND_URL from /app/frontend/.env. Override with FINANCE_TEST_BASE_URL env var. Cookies are secure=true so tests MUST run against https ingress, not http://localhost:8001. Admin seed runs on startup; updates password if changed. All endpoints, RBAC, CSV import, and dashboard summary verified end-to-end.",
+  "rca of the issue": "Initial test run against http://localhost:8001 failed all cookie-authenticated calls because Set-Cookie has Secure flag — python-requests dropped the cookie on the second request. Resolved by pointing BASE_URL to the HTTPS ingress (REACT_APP_BACKEND_URL). This is a configuration nuance, not a backend bug."
+}

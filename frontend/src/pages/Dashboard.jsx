@@ -1,0 +1,187 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { api } from "@/lib/api";
+import { useLang } from "@/context/LangContext";
+import { inr } from "@/lib/i18n";
+import KpiCard from "@/components/KpiCard";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import {
+  ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
+  Legend, PieChart, Pie, Cell, LineChart, Line,
+} from "recharts";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+
+const ENTITY_TYPES = ["company", "partner", "center", "project"];
+
+export default function Dashboard() {
+  const { t } = useLang();
+  const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
+  const [filters, setFilters] = useState({
+    company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "",
+  });
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    Promise.all(ENTITY_TYPES.map((tt) => api.get(`/entities/${tt}`))).then((res) => {
+      const e = {};
+      ENTITY_TYPES.forEach((tt, i) => { e[tt] = res[i].data; });
+      setEntities(e);
+    }).catch(() => {});
+  }, []);
+
+  const query = useMemo(() => {
+    const p = {};
+    Object.entries(filters).forEach(([k, v]) => { if (v) p[k] = v; });
+    return p;
+  }, [filters]);
+
+  useEffect(() => {
+    api.get("/dashboard/summary", { params: query }).then((r) => setData(r.data)).catch(() => setData(null));
+  }, [query]);
+
+  const totals = data?.totals || { investment: 0, income: 0, expense: 0, profit: 0 };
+
+  const pieData = [
+    { name: t("investment"), value: totals.investment, color: "#002FA7" },
+    { name: t("income"), value: totals.income, color: "#00A859" },
+    { name: t("expense"), value: totals.expense, color: "#FF2A2A" },
+  ].filter((d) => d.value > 0);
+
+  const setF = (k, v) => setFilters((s) => ({ ...s, [k]: v }));
+
+  return (
+    <div className="space-y-6" data-testid="dashboard-page">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="overline">{t("dashboard")}</div>
+          <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("dashboard")}</h1>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="swiss-card p-4 grid grid-cols-2 md:grid-cols-6 gap-3" data-testid="dashboard-filters">
+        {ENTITY_TYPES.map((etype) => (
+          <div key={etype} className="space-y-1">
+            <Label className="overline">{t(etype)}</Label>
+            <Select value={filters[`${etype}_id`] || "__all"} onValueChange={(v) => setF(`${etype}_id`, v === "__all" ? "" : v)}>
+              <SelectTrigger className="rounded-none" data-testid={`filter-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all">{t("all")}</SelectItem>
+                {entities[etype].map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        ))}
+        <div className="space-y-1">
+          <Label className="overline">From</Label>
+          <Input type="date" value={filters.start} onChange={(e) => setF("start", e.target.value)} className="rounded-none" data-testid="filter-start" />
+        </div>
+        <div className="space-y-1">
+          <Label className="overline">To</Label>
+          <Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-none" data-testid="filter-end" />
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <KpiCard label={t("total_investment")} value={totals.investment} testId="kpi-investment" />
+        <KpiCard label={t("total_income")} value={totals.income} accent="positive" testId="kpi-income" />
+        <KpiCard label={t("total_expense")} value={totals.expense} accent="negative" testId="kpi-expense" />
+        <KpiCard label={t("net_profit")} value={totals.profit} accent={totals.profit >= 0 ? "positive" : "negative"} testId="kpi-profit" />
+      </div>
+
+      {/* Charts row */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="swiss-card p-5 lg:col-span-2 h-80" data-testid="chart-monthly">
+          <div className="flex items-center justify-between mb-3">
+            <div className="font-heading font-bold tracking-tight">{t("monthly_trend")}</div>
+          </div>
+          {data?.monthly?.length ? (
+            <ResponsiveContainer width="100%" height="90%">
+              <LineChart data={data.monthly}>
+                <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
+                <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
+                <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Line type="monotone" dataKey="investment" stroke="#002FA7" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="income" stroke="#00A859" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="expense" stroke="#FF2A2A" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart text={t("no_data")} />}
+        </div>
+        <div className="swiss-card p-5 h-80" data-testid="chart-distribution">
+          <div className="font-heading font-bold tracking-tight mb-3">{t("distribution")}</div>
+          {pieData.length ? (
+            <ResponsiveContainer width="100%" height="90%">
+              <PieChart>
+                <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={90} stroke="#fff">
+                  {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                </Pie>
+                <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : <EmptyChart text={t("no_data")} />}
+        </div>
+      </div>
+
+      {/* Breakdown */}
+      <div className="swiss-card p-5" data-testid="breakdown-section">
+        <div className="font-heading font-bold tracking-tight mb-4">{t("breakdown")}</div>
+        <Tabs defaultValue="company">
+          <TabsList className="rounded-none bg-transparent border-b border-[var(--border)] p-0 h-auto">
+            {ENTITY_TYPES.map((tt) => (
+              <TabsTrigger key={tt} value={tt} data-testid={`tab-${tt}`}
+                className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
+                {t(tt)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {ENTITY_TYPES.map((tt) => {
+            const rows = (data?.[`by_${tt}`] || []).slice(0, 10);
+            return (
+              <TabsContent key={tt} value={tt} className="mt-4">
+                {rows.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-[var(--border)] overline">
+                          <th className="text-left py-2">{t(tt)}</th>
+                          <th className="text-right">{t("investment")}</th>
+                          <th className="text-right">{t("income")}</th>
+                          <th className="text-right">{t("expense")}</th>
+                          <th className="text-right">{t("profit")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((r) => (
+                          <tr key={r.id} className="border-b border-[var(--border)] hover:bg-gray-50">
+                            <td className="py-2 font-medium">{r.name}</td>
+                            <td className="num">{inr(r.investment)}</td>
+                            <td className="num value-positive">{inr(r.income)}</td>
+                            <td className="num value-negative">{inr(r.expense)}</td>
+                            <td className={`num font-semibold ${r.profit >= 0 ? "value-positive" : "value-negative"}`}>{inr(r.profit)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : <div className="overline text-center py-6">{t("no_data")}</div>}
+              </TabsContent>
+            );
+          })}
+        </Tabs>
+      </div>
+    </div>
+  );
+}
+
+function EmptyChart({ text }) {
+  return <div className="h-full flex items-center justify-center overline">{text}</div>;
+}
