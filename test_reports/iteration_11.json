@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration-11 — Both backend and frontend tested for (a) leave audit fields decided_by/decided_at + approval-log surfaces approver name; (b) extended role permissions for hr (staff/payroll/leave), senior_manager (txn approve/reject/bulk + batch create + batch-payment receive), center_staff (attendance); (c) new Programs module: GET/POST/PUT/DELETE /api/batches, GET/POST/PUT/DELETE /api/batch-payments, PATCH /api/batch-payments/{id}/receive (auto-creates approved income txn with center_id+project_id), cascade delete of payments when batch is deleted, duplicate (batch_id,milestone) returns 400, double-receive returns 400. Added /app/backend/tests/test_iter11_programs.py with 27 tests covering all of the above + viewer 403s + unauth 401s. 27/27 new + 114/114 prior = 141/141 PASS in ~32s. Live UI verified on /programs: 15 project tabs render (incl. JSDMS, BOCWW, PRI), center & batch dropdowns work, 3 MilestoneCards switch correctly between Not configured / Pending / Received states on PRI's Batch 2026-A (1st=Received ₹50,000 on 2026-06-21, 2nd=Pending ₹75,000 with Mark Received button, 3rd=Not configured with Configure btn), Total Configured=₹1,25,000 and Total Received=₹50,000 compute correctly, detail table at bottom reflects all 3 milestone rows, sidebar 'Programs' link visible between Projects and Transactions.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard charts", "issues": ["Pre-existing: Recharts width(-1)/height(-1) console warnings on initial render — same as iter-10, not blocking."]},
+      {"screen": "Programs page header", "issues": ["Minor: 15 project tabs (incl. several TEST_* from prior iters) wrap to two rows on 1920px — acceptable but if PM wants tidy tabs, agent could add overflow-x-auto scroll or a 'Manage Projects' dropdown when count >8."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter11_programs.py",
+    "/app/test_reports/pytest/iteration_11_new.xml",
+    "/app/test_reports/pytest/iteration_11_all.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py receive_batch_payment: write order is txn-insert THEN payment-update. If the update fails (shouldn't, but in theory) a ghost approved income transaction is left behind. Consider a transactional wrapper or fail-soft cleanup. Low priority since both ops are tiny single-doc ops on the same Mongo replica.",
+    "server.py create_batch (and update/delete): no validation that project_id (and center_id when supplied) actually exist in db.projects/db.centers. A typo'd id will silently create an orphan batch. Add an existence check, similar to how transactions might validate company/partner ids.",
+    "server.py /api/batches DELETE is admin-only but /api/batch-payments DELETE is also admin-only — spec says 'Cascade: DELETE /api/batches/{id} (admin only)'. That matches. However senior_manager can create batches but cannot delete them. Confirm with PM whether SM should be allowed to delete batches/payments they created.",
+    "server.py BatchIn.center_id is Optional, but receive_batch_payment copies (batch or {}).get('center_id') into the txn — when center_id is None the resulting income transaction has center_id=None which then becomes invisible to center_manager/center_staff scoping. PM should clarify whether 'central' batches (no center) should still be visible to center users or stay admin-scope only.",
+    "Programs.jsx: tabs render all projects from /entities/project including TEST_* leftovers from prior test iterations — UX clutter on prod-like envs. Consider filtering by an 'active' flag or adding a search/multi-row scroll.",
+    "Programs.jsx milestones-grid: Mark Received button is shown for hr role too per UI permission check? Verify — backend correctly returns 403 (we tested), but ideally the button should be hidden via canReceive prop for non-admin/accountant/senior_manager to avoid wasted click → toast error.",
+    "server.py approval-log leaves block: tested working — `by` shows admin name correctly when decided_by is set. Old leaves decided before this iteration will still have by='—' since decided_by/decided_at were not back-filled. Non-blocking, but a one-time migration script could clean that up."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter11_programs.py (new, 27 tests)",
+    "/app/test_reports/iteration_11.json (new)"
+  ],
+  "success_rate": {"backend": "100% (141/141)", "frontend": "100% (all 8 Programs UI checks passed)"},
+  "test_credentials": "admin@finance.app / Admin@123. Tests create TEST_-prefixed users (TEST_hr_*, TEST_sm_*, TEST_cs_*, TEST_view11_*, TEST_mgrsm_*) registered as viewer then promoted via admin PATCH /api/auth/users/{id}, then re-login to refresh JWT role claims.",
+  "seed_data_creation": "Per test run: 5 TEST users (hr/senior_manager/center_staff/viewer/manager-for-pending-txns), 5+ TEST staff (for leave, payroll, attendance, reports_to chain tests), 1 TEST project + 1 TEST center, 2 TEST batches (one for full lifecycle, one for cascade-delete), 3 milestone payments + 1 cascade payment, multiple TEST pending transactions for SM approve/reject/bulk. All tagged with random TAG suffix so re-runs do not collide.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v` for full regression (141 tests, ~32s on this env). Key new data-testids verified on public URL /programs: project-tabs (1 container), tab-project-{projectId} (15 buttons), filter-center, filter-batch, btn-new-batch, btn-edit-batch, btn-delete-batch, milestones-grid, milestone-1st/2nd/3rd, btn-add-1st/2nd/3rd, btn-receive-1st/2nd/3rd, payments-table, no-batch-msg (shown only when project has zero batches). Note: GET /api/transactions/{id} endpoint does NOT exist — use GET /api/transactions and filter by id. Leave audit: approval-log row uses key 'ref_id' (not 'id') for the leave document id; date field is 'at' driven by decided_at. Senior_manager can CREATE batches but NOT delete them (admin only) — confirmed and tested. Hr is forbidden from /receive endpoint (only admin/accountant/senior_manager). Center_staff is forbidden from most endpoints except attendance.",
+  "rca of the issue": "No bugs. Two initial test-side mismatches (now fixed in test file): (1) approval-log uses key 'ref_id' not 'id'; (2) transactions GET-by-id endpoint does not exist (only list endpoint). Both updated in test_iter11_programs.py."
+}

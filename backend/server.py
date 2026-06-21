@@ -230,9 +230,11 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
+    await db.batches.create_index([("project_id", 1), ("center_id", 1)])
+    await db.batch_payments.create_index([("batch_id", 1), ("milestone", 1)])
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -582,7 +584,7 @@ class BulkIds(BaseModel):
 
 
 @api.post("/transactions/bulk-approve")
-async def bulk_approve(body: BulkIds, user=Depends(require_role("admin"))):
+async def bulk_approve(body: BulkIds, user=Depends(require_role("admin", "senior_manager"))):
     if not body.ids:
         return {"approved": 0}
     now = datetime.now(timezone.utc).isoformat()
@@ -604,7 +606,7 @@ async def bulk_approve(body: BulkIds, user=Depends(require_role("admin"))):
 
 
 @api.post("/transactions/{tid}/approve", response_model=TransactionOut)
-async def approve_transaction(tid: str, user=Depends(require_role("admin"))):
+async def approve_transaction(tid: str, user=Depends(require_role("admin", "senior_manager"))):
     now = datetime.now(timezone.utc).isoformat()
     res = await db.transactions.find_one_and_update(
         {"id": tid},
@@ -621,7 +623,7 @@ async def approve_transaction(tid: str, user=Depends(require_role("admin"))):
 
 
 @api.post("/transactions/{tid}/reject", response_model=TransactionOut)
-async def reject_transaction(tid: str, body: RejectIn, user=Depends(require_role("admin"))):
+async def reject_transaction(tid: str, body: RejectIn, user=Depends(require_role("admin", "senior_manager"))):
     res = await db.transactions.find_one_and_update(
         {"id": tid},
         {"$set": {"status": "rejected", "approved_by": user["id"], "approved_at": None, "rejected_reason": body.reason or ""}},
@@ -990,7 +992,7 @@ async def list_staff(_=Depends(get_current_user)):
 
 
 @api.post("/staff", response_model=StaffOut)
-async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manager"))):
+async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manager", "hr"))):
     doc = body.model_dump()
     # Only admin can assign the reports_to chain (approval hierarchy)
     if user.get("role") != "admin":
@@ -1002,7 +1004,7 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
 
 
 @api.put("/staff/{sid}", response_model=StaffOut)
-async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin", "manager"))):
+async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin", "manager", "hr"))):
     update = body.model_dump()
     if user.get("role") != "admin":
         # Preserve existing reports_to_id; only admin may change it
@@ -1027,7 +1029,7 @@ async def delete_staff(sid: str, _=Depends(require_role("admin"))):
 
 # -------- Attendance --------
 @api.post("/attendance")
-async def mark_attendance(body: AttendanceIn, _=Depends(require_role("admin", "manager", "center_manager"))):
+async def mark_attendance(body: AttendanceIn, _=Depends(require_role("admin", "manager", "center_manager", "hr", "center_staff"))):
     # upsert by (staff_id, date)
     doc = body.model_dump()
     new_id = str(uuid.uuid4())
@@ -1090,8 +1092,13 @@ async def list_leaves(
 
 @api.patch("/leaves/{lid}")
 async def decide_leave(lid: str, decision: str = Query(..., pattern="^(approved|rejected)$"),
-                       _=Depends(require_role("admin", "manager", "center_manager"))):
-    res = await db.leaves.find_one_and_update({"id": lid}, {"$set": {"status": decision}}, return_document=True)
+                       user=Depends(require_role("admin", "manager", "center_manager", "hr", "senior_manager"))):
+    now = datetime.now(timezone.utc).isoformat()
+    res = await db.leaves.find_one_and_update(
+        {"id": lid},
+        {"$set": {"status": decision, "decided_by": user["id"], "decided_at": now}},
+        return_document=True,
+    )
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
@@ -1278,7 +1285,7 @@ async def reimb_reject(rid: str, body: RejectIn, user=Depends(get_current_user))
 async def payroll_run(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020, le=2100),
-    _=Depends(require_role("admin", "accountant")),
+    _=Depends(require_role("admin", "accountant", "hr")),
 ):
     """Generate payroll rows for all staff for the given month based on attendance × per_day_rate.
 
@@ -1344,7 +1351,7 @@ async def list_payroll(month: Optional[int] = None, year: Optional[int] = None, 
 
 
 @api.patch("/payroll/{pid}/pay")
-async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant"))):
+async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant", "hr"))):
     rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
@@ -1562,10 +1569,10 @@ async def approval_log(
 
     # Leaves (approved/rejected)
     if not type_filter or type_filter == "leave":
-        async for d in db.leaves.find({"status": {"$in": ["approved", "rejected"]}}, {"_id": 0}).sort("created_at", -1).limit(2000):
+        async for d in db.leaves.find({"status": {"$in": ["approved", "rejected"]}}, {"_id": 0}).sort("decided_at", -1).limit(2000):
             staff = await db.staff.find_one({"id": d.get("staff_id")}, {"_id": 0, "name": 1})
             sname = (staff or {}).get("name", "")
-            at = d.get("created_at")
+            at = d.get("decided_at") or d.get("created_at")
             if (start or end) and not _in_range(at):
                 continue
             act = d.get("status")
@@ -1573,7 +1580,7 @@ async def approval_log(
                 continue
             rows.append({
                 "type": "leave", "action": act, "ref_id": d.get("id"),
-                "at": at, "by": "—", "amount": None,
+                "at": at, "by": uname.get(d.get("decided_by")) or "—", "amount": None,
                 "summary": f"Leave — {sname} ({d.get('start_date')} → {d.get('end_date')})",
                 "remarks": d.get("reason", "") or "",
             })
@@ -1596,6 +1603,171 @@ async def approval_log(
 
     rows.sort(key=lambda r: r.get("at") or "", reverse=True)
     return rows[: max(1, min(limit, 2000))]
+
+
+# ---------- Programs (Batches + Milestone Payments) ----------
+class BatchIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    project_id: str
+    center_id: Optional[str] = None
+    name: str = Field(min_length=1)
+    start_date: Optional[str] = ""
+    end_date: Optional[str] = ""
+    total_beneficiaries: int = 0
+    description: Optional[str] = ""
+
+
+class BatchOut(BatchIn):
+    id: str
+    created_at: str
+
+
+MilestoneType = Literal["1st", "2nd", "3rd"]
+
+
+class BatchPaymentIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    batch_id: str
+    milestone: MilestoneType
+    amount: float = Field(gt=0)
+    expected_date: Optional[str] = ""
+    description: Optional[str] = ""
+
+
+class BatchPaymentOut(BatchPaymentIn):
+    id: str
+    status: Literal["pending", "received"] = "pending"
+    received_date: Optional[str] = None
+    received_by: Optional[str] = None
+    txn_id: Optional[str] = None
+    created_at: str
+
+
+@api.get("/batches", response_model=List[BatchOut])
+async def list_batches(project_id: Optional[str] = None, center_id: Optional[str] = None,
+                       _=Depends(get_current_user)):
+    q: dict = {}
+    if project_id:
+        q["project_id"] = project_id
+    if center_id:
+        q["center_id"] = center_id
+    docs = await db.batches.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return [BatchOut(**d) for d in docs]
+
+
+@api.post("/batches", response_model=BatchOut)
+async def create_batch(body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager"))):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.batches.insert_one(doc)
+    return BatchOut(**doc)
+
+
+@api.put("/batches/{bid}", response_model=BatchOut)
+async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager"))):
+    res = await db.batches.find_one_and_update({"id": bid}, {"$set": body.model_dump()}, return_document=True)
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return BatchOut(**res)
+
+
+@api.delete("/batches/{bid}")
+async def delete_batch(bid: str, _=Depends(require_role("admin"))):
+    # Cascade delete payments under this batch
+    await db.batch_payments.delete_many({"batch_id": bid})
+    r = await db.batches.delete_one({"id": bid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.get("/batch-payments", response_model=List[BatchPaymentOut])
+async def list_batch_payments(batch_id: Optional[str] = None, _=Depends(get_current_user)):
+    q: dict = {}
+    if batch_id:
+        q["batch_id"] = batch_id
+    docs = await db.batch_payments.find(q, {"_id": 0}).sort([("batch_id", 1), ("milestone", 1)]).to_list(5000)
+    return [BatchPaymentOut(**d) for d in docs]
+
+
+@api.post("/batch-payments", response_model=BatchPaymentOut)
+async def create_batch_payment(body: BatchPaymentIn, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
+    # Enforce one-row-per (batch_id, milestone)
+    existing = await db.batch_payments.find_one({"batch_id": body.batch_id, "milestone": body.milestone})
+    if existing:
+        raise HTTPException(400, f"{body.milestone} milestone already exists for this batch")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["status"] = "pending"
+    doc["received_date"] = None
+    doc["received_by"] = None
+    doc["txn_id"] = None
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.batch_payments.insert_one(doc)
+    return BatchPaymentOut(**doc)
+
+
+@api.put("/batch-payments/{pid}", response_model=BatchPaymentOut)
+async def update_batch_payment(pid: str, body: BatchPaymentIn, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
+    res = await db.batch_payments.find_one_and_update(
+        {"id": pid},
+        {"$set": {"amount": body.amount, "expected_date": body.expected_date, "description": body.description}},
+        return_document=True,
+    )
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return BatchPaymentOut(**res)
+
+
+@api.patch("/batch-payments/{pid}/receive", response_model=BatchPaymentOut)
+async def receive_batch_payment(pid: str, user=Depends(require_role("admin", "accountant", "senior_manager"))):
+    """Mark a milestone payment as received and auto-create an approved income transaction."""
+    rec = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec["status"] == "received":
+        raise HTTPException(400, "Already received")
+    batch = await db.batches.find_one({"id": rec["batch_id"]}, {"_id": 0})
+    project_name = ""
+    if batch:
+        proj = await db.projects.find_one({"id": batch.get("project_id")}, {"_id": 0, "name": 1})
+        project_name = (proj or {}).get("name", "")
+    now = datetime.now(timezone.utc).isoformat()
+    today = now[:10]
+    txn = {
+        "id": str(uuid.uuid4()),
+        "type": "income",
+        "amount": rec["amount"],
+        "date": today,
+        "description": f"{project_name} — {batch.get('name','') if batch else ''} — {rec['milestone']} milestone",
+        "company_id": None,
+        "partner_id": None,
+        "center_id": (batch or {}).get("center_id"),
+        "project_id": (batch or {}).get("project_id"),
+        "items": [], "attachments": [],
+        "created_by": user["id"], "created_at": now,
+        "status": "approved", "approved_by": user["id"], "approved_at": now,
+        "rejected_reason": None,
+    }
+    await db.transactions.insert_one(txn)
+    res = await db.batch_payments.find_one_and_update(
+        {"id": pid},
+        {"$set": {"status": "received", "received_date": today, "received_by": user["id"], "txn_id": txn["id"]}},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return BatchPaymentOut(**res)
+
+
+@api.delete("/batch-payments/{pid}")
+async def delete_batch_payment(pid: str, _=Depends(require_role("admin"))):
+    r = await db.batch_payments.delete_one({"id": pid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
 
 
 # ---------- Notifications ----------
