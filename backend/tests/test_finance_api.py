@@ -27,8 +27,8 @@ BASE_URL = (
     or _read_frontend_backend_url()
     or "http://localhost:8001"
 ).rstrip("/")
-ADMIN_EMAIL = "admin@finance.app"
-ADMIN_PASSWORD = "Admin@123"
+ADMIN_EMAIL = os.environ.get("FINANCE_TEST_ADMIN_EMAIL", "admin@finance.app")
+ADMIN_PASSWORD = os.environ.get("FINANCE_TEST_ADMIN_PASSWORD", "Admin@123")
 
 
 def _session():

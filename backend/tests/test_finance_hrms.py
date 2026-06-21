@@ -27,8 +27,8 @@ def _read_url():
 
 
 BASE_URL = (os.environ.get("FINANCE_TEST_BASE_URL") or _read_url()).rstrip("/")
-ADMIN_EMAIL = "admin@finance.app"
-ADMIN_PASSWORD = "Admin@123"
+ADMIN_EMAIL = os.environ.get("FINANCE_TEST_ADMIN_EMAIL", "admin@finance.app")
+ADMIN_PASSWORD = os.environ.get("FINANCE_TEST_ADMIN_PASSWORD", "Admin@123")
 TAG = uuid.uuid4().hex[:6]
 
 

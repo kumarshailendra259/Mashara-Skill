@@ -135,7 +135,7 @@ export default function Dashboard() {
             <ResponsiveContainer width="100%" height="90%">
               <PieChart>
                 <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={90} stroke="#fff">
-                  {pieData.map((entry, i) => <Cell key={i} fill={entry.color} />)}
+                  {pieData.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
                 </Pie>
                 <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />

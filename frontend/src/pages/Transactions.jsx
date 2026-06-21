@@ -57,7 +57,7 @@ export default function Transactions() {
   };
 
   useEffect(() => { loadEntities(); }, []);
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [params]);
+  useEffect(() => { load(); }, [params]);
 
   const openNew = () => { setEditing(null); setForm(emptyForm); setOpen(true); };
   const openEdit = (it) => {
@@ -362,8 +362,10 @@ export default function Transactions() {
                     </tr>
                   </thead>
                   <tbody>
-                    {form.items.map((it, idx) => (
-                      <tr key={idx} className="border-b border-[var(--border)]">
+                    {form.items.map((it, idx) => {
+                      const itemKey = it._k || (it._k = `it-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
+                      return (
+                      <tr key={itemKey} className="border-b border-[var(--border)]">
                         <td className="py-1.5 pr-2">
                           <Input value={it.name} onChange={(e) => updateItem(idx, "name", e.target.value)} placeholder="Item name" className="rounded-none h-8" data-testid={`item-name-${idx}`} />
                         </td>
@@ -380,7 +382,8 @@ export default function Transactions() {
                           <Button type="button" size="icon" variant="ghost" onClick={() => removeItem(idx)} className="h-8 w-8 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
                         </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                     <tr>
                       <td colSpan={3} className="text-right overline pt-2">Items Total</td>
                       <td className="num font-bold pt-2">{inr(itemsTotal)}</td>

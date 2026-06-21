@@ -21,7 +21,7 @@ export default function Entities({ etype }) {
   const [form, setForm] = useState({ name: "", description: "" });
 
   const load = () => api.get(`/entities/${etype}`).then((r) => setItems(r.data));
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [etype]);
+  useEffect(() => { load(); }, [etype]);
 
   const openNew = () => { setEditing(null); setForm({ name: "", description: "" }); setOpen(true); };
   const openEdit = (it) => { setEditing(it); setForm({ name: it.name, description: it.description || "" }); setOpen(true); };

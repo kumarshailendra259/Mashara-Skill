@@ -185,6 +185,8 @@ TxnStatus = Literal["pending", "approved", "rejected"]
 
 
 class TransactionOut(TransactionIn):
+    # Override: output tolerates amount >= 0 (historical/edge-case data; input still enforces > 0)
+    amount: float = Field(ge=0)
     id: str
     created_by: str
     created_at: str
@@ -1300,6 +1302,15 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant")
     if rec["status"] == "paid":
         raise HTTPException(400, "Already paid")
     now = datetime.now(timezone.utc).isoformat()
+    if (rec.get("net") or 0) <= 0:
+        # Nothing to pay (0 days_present etc.). Mark paid without creating a zero-amount transaction.
+        res = await db.payroll.find_one_and_update(
+            {"id": pid},
+            {"$set": {"status": "paid", "paid_at": now, "txn_id": None}},
+            return_document=True,
+        )
+        res.pop("_id", None)
+        return res
     staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
     txn = {
         "id": str(uuid.uuid4()),
