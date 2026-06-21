@@ -19,10 +19,12 @@ Need a web application where company-wise, partner-wise, center-wise, project-wi
 - Role-based access (admin / manager / viewer)
 - Entity CRUD for company / partner / center / project
 - Transaction CRUD (type: investment | income | expense) with filters by entity + date range
+- **Line items per transaction** (name, quantity, rate, amount) with auto-compute and item-wise aggregation across all txns
+- **Document attachments per transaction** (bills, receipts, invoices up to 10MB) via Emergent Object Storage
 - CSV import for transactions (auto-creates referenced entities by name)
 - CSV export from transactions list + per-dimension reports
-- Dashboard with KPI cards, monthly trend line chart, distribution pie chart, breakdown tabs (company/partner/center/project)
-- Reports page with per-dimension P&L tables + CSV export
+- Dashboard with KPI cards, monthly trend line chart, distribution pie chart, breakdown tabs (company / partner / center / project / **item**)
+- Reports page with per-dimension P&L tables + CSV export (now includes items)
 - Bilingual UI (English / Hindi) toggle in header, persists in localStorage
 - Swiss-style high-contrast light theme with International Klein Blue accents
 
