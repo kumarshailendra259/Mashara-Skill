@@ -1755,6 +1755,15 @@ async def create_batch(body: BatchIn, _=Depends(require_role("admin", "manager",
 
 @api.put("/batches/{bid}", response_model=BatchOut)
 async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager"))):
+    # Re-validate same FKs as create (project/center/partners)
+    if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "project_id does not exist")
+    if body.center_id and not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "center_id does not exist")
+    if body.partner_ids:
+        cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
+        if cnt != len(set(body.partner_ids)):
+            raise HTTPException(400, "one or more partner_ids do not exist")
     res = await db.batches.find_one_and_update({"id": bid}, {"$set": body.model_dump()}, return_document=True)
     if not res:
         raise HTTPException(404, "Not found")
