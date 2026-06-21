@@ -1,0 +1,124 @@
+{
+  "theme_and_archetype": {
+    "domain": "Finance, Business Tracking Dashboard",
+    "theme": "Light Theme",
+    "archetype": "Archetype 4: Swiss & High-Contrast",
+    "vibe": "Authority, clarity, function-first, rigid, objective, data-dense."
+  },
+  "typography": {
+    "strategy": "Swiss Brutalist (Tech/Enterprise). Clean, minimal typography prioritizing data readability.",
+    "font_families": {
+      "headings": "Chivo",
+      "body": "IBM Plex Sans",
+      "monospace": "JetBrains Mono"
+    },
+    "font_weights": {
+      "headings": "700, 900",
+      "body": "400, 500"
+    },
+    "sizing": {
+      "h1": "text-3xl sm:text-4xl",
+      "h2": "text-2xl sm:text-3xl",
+      "h3": "text-xl sm:text-2xl",
+      "body": "text-sm",
+      "small": "text-xs"
+    },
+    "rules": [
+      "Headings must use tight letter spacing: tracking-tight.",
+      "Overlines/Labels must be Uppercase, text-xs, and wide spacing: tracking-[0.2em].",
+      "Avoid Inter for headings."
+    ],
+    "installation": "yarn add @fontsource/chivo @fontsource/ibm-plex-sans @fontsource/jetbrains-mono"
+  },
+  "color_palette": {
+    "base": {
+      "background": "#F8F9FA",
+      "surface": "#FFFFFF",
+      "border": "#E5E7EB",
+      "text_primary": "#0A0A0A",
+      "text_secondary": "#4B5563"
+    },
+    "brand_accents": {
+      "primary": "#002FA7",
+      "primary_hover": "#002585",
+      "accent": "#0A0A0A"
+    },
+    "status": {
+      "success": "#00A859",
+      "danger": "#FF2A2A",
+      "warning": "#FFD700",
+      "info": "#007AFF"
+    },
+    "rules": [
+      "95% of the UI should be monochrome. Color exists only to guide action.",
+      "No full-screen gradients. Pure function over decoration.",
+      "Use International Klein Blue (#002FA7) strictly for primary actions.",
+      "Use Green/Red strictly for Profit/Loss indicators."
+    ]
+  },
+  "spacing_and_layout": {
+    "strategy": "The 'Control Room' Grid (Mode B).",
+    "grid_system": {
+      "base": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4",
+      "gap": "gap-4 md:gap-6"
+    },
+    "widget_ratios": [
+      "Summary/KPI Card: col-span-1",
+      "Primary Data/Chart: col-span-2 row-span-2 or col-span-3",
+      "Feed/List/Table: col-span-full or col-span-4"
+    ],
+    "rules": [
+      "Every pixel must be utilized. Use h-full on children.",
+      "Generous internal padding in containers (p-6).",
+      "Strict alignment: numbers in tables should be right-aligned."
+    ]
+  },
+  "component_strategy": {
+    "surfaces": "Grid Borders ('Technical' Look). Use border-collapse style layouts where possible.",
+    "cards": "Flat solid background, sharp corners (rounded-none or max rounded-sm / 2-4px), 1px solid border (border-gray-200), NO shadows.",
+    "buttons": "Rectangular, sharp edges. Primary uses background #002FA7, text #FFFFFF. Hover state must explicitly set text color.",
+    "inputs": "Shadcn UI customized: sharp borders, distinct focus state (ring-2 ring-primary).",
+    "charts": "Recharts. Use monochrome for general data, strict Green/Red for Income/Expense.",
+    "tables": "Dense, high-contrast borders. Alternating subtle row colors if data is extremely dense."
+  },
+  "motion_and_interaction": {
+    "hover_states": "Crisp and fast. Slight border color darkening or background tint.",
+    "transitions": "transition-colors duration-150 ease-in-out.",
+    "focus": "Focus states must have HIGHER contrast, eg: focus:ring-2 focus:ring-[#002FA7] focus:ring-offset-2."
+  },
+  "icons_and_assets": {
+    "icon_library": "@phosphor-icons/react",
+    "icon_style": "Duotone or Regular depending on emphasis. Dense layouts prefer crisp line icons.",
+    "installation": "yarn add @phosphor-icons/react",
+    "images": [
+      {
+        "category": "logo",
+        "url": "https://images.pexels.com/photos/5477692/pexels-photo-5477692.jpeg",
+        "description": "Minimalist ampersand logo for brand placeholder."
+      },
+      {
+        "category": "user_avatar",
+        "url": "https://images.pexels.com/photos/36733305/pexels-photo-36733305.jpeg",
+        "description": "Professional business person avatar."
+      }
+    ],
+    "rules": [
+      "NEVER use placeholder URLs. Use provided image URLs."
+    ]
+  },
+  "testing": {
+    "rules": [
+      "All interactive and key informational elements MUST include data-testid attribute.",
+      "Use kebab-case, role-based format. Example: data-testid='login-submit-button', data-testid='kpi-total-profit'."
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Implement bilingual toggle (English/Hindi) in the header using i18n or state context.",
+    "Dashboard needs KPIs for Investment, Profit, Loss, Expenses, Income.",
+    "Use Recharts for line, bar, pie charts. Ensure tooltips are functional and styled with high contrast.",
+    "Role-based access (Admin, Manager, Viewer) should reflect in UI (disable/hide actions for Viewers).",
+    "Implement CSV/Excel export/import capabilities as requested.",
+    "Use .js files. Do not use TypeScript.",
+    "Ensure data tables are dense, scalable, and responsive (horizontal scroll on mobile)."
+  ]
+}
