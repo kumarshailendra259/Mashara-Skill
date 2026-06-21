@@ -20,6 +20,7 @@ const navItems = [
   { to: "/projects", key: "projects", icon: Briefcase },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight },
   { to: "/reports", key: "reports", icon: FileBarChart2 },
+  { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
 ];
 

@@ -227,7 +227,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll"):
         await db[col].create_index("id", unique=True)
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
@@ -890,6 +890,426 @@ async def settlement_view(
 @api.get("/")
 async def root():
     return {"service": "finance-tracker", "ok": True}
+
+
+# ====================== HRMS + Payroll ======================
+
+class StaffIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    designation: str
+    reports_to_id: Optional[str] = None
+    monthly_salary: float = Field(ge=0, default=0)
+    per_day_rate: float = Field(ge=0, default=0)
+    joining_date: str = ""
+    user_id: Optional[str] = None  # link to a User if they log in
+    center_id: Optional[str] = None
+
+
+class StaffOut(StaffIn):
+    id: str
+    created_at: str
+
+
+class AttendanceIn(BaseModel):
+    staff_id: str
+    date: str  # YYYY-MM-DD
+    status: Literal["present", "absent", "half", "leave"] = "present"
+
+
+class LeaveIn(BaseModel):
+    staff_id: str
+    start_date: str
+    end_date: str
+    reason: Optional[str] = ""
+
+
+class ReimbursementIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    staff_id: str
+    amount: float = Field(gt=0)
+    date: str
+    category: Optional[str] = ""
+    description: Optional[str] = ""
+    attachments: List[AttachmentRef] = Field(default_factory=list)
+
+
+ReimbStatus = Literal["submitted", "l1_approved", "accountant_approved", "paid", "rejected"]
+
+
+def _resolve_staff_for_user(user: dict) -> Optional[dict]:
+    return None  # populated in async helper
+
+
+async def _staff_for_user(user_id: str) -> Optional[dict]:
+    return await db.staff.find_one({"user_id": user_id}, {"_id": 0})
+
+
+# -------- Staff CRUD --------
+@api.get("/staff", response_model=List[StaffOut])
+async def list_staff(_=Depends(get_current_user)):
+    docs = await db.staff.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    return [StaffOut(**d) for d in docs]
+
+
+@api.post("/staff", response_model=StaffOut)
+async def create_staff(body: StaffIn, _=Depends(require_role("admin", "manager"))):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.staff.insert_one(doc)
+    return StaffOut(**doc)
+
+
+@api.put("/staff/{sid}", response_model=StaffOut)
+async def update_staff(sid: str, body: StaffIn, _=Depends(require_role("admin", "manager"))):
+    res = await db.staff.find_one_and_update(
+        {"id": sid}, {"$set": body.model_dump()}, return_document=True
+    )
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return StaffOut(**res)
+
+
+@api.delete("/staff/{sid}")
+async def delete_staff(sid: str, _=Depends(require_role("admin"))):
+    r = await db.staff.delete_one({"id": sid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# -------- Attendance --------
+@api.post("/attendance")
+async def mark_attendance(body: AttendanceIn, _=Depends(require_role("admin", "manager", "center_manager"))):
+    # upsert by (staff_id, date)
+    doc = body.model_dump()
+    new_id = str(uuid.uuid4())
+    await db.attendance.update_one(
+        {"staff_id": doc["staff_id"], "date": doc["date"]},
+        {"$set": doc, "$setOnInsert": {"id": new_id}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api.get("/attendance")
+async def list_attendance(
+    staff_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    _=Depends(get_current_user),
+):
+    q: dict = {}
+    if staff_id:
+        q["staff_id"] = staff_id
+    if start or end:
+        rng: dict = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end
+        q["date"] = rng
+    docs = await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
+    return docs
+
+
+# -------- Leaves --------
+@api.post("/leaves")
+async def apply_leave(body: LeaveIn, user=Depends(get_current_user)):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["status"] = "pending"
+    doc["created_by"] = user["id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.leaves.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/leaves")
+async def list_leaves(
+    staff_id: Optional[str] = None,
+    status: Optional[str] = None,
+    _=Depends(get_current_user),
+):
+    q: dict = {}
+    if staff_id:
+        q["staff_id"] = staff_id
+    if status:
+        q["status"] = status
+    docs = await db.leaves.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+
+@api.patch("/leaves/{lid}")
+async def decide_leave(lid: str, decision: str = Query(..., pattern="^(approved|rejected)$"),
+                       _=Depends(require_role("admin", "manager", "center_manager"))):
+    res = await db.leaves.find_one_and_update({"id": lid}, {"$set": {"status": decision}}, return_document=True)
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return res
+
+
+# -------- Reimbursements (3-stage approval) --------
+@api.post("/reimbursements")
+async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_user)):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["status"] = "submitted"
+    doc["created_by"] = user["id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # snapshot approver chain
+    staff = await db.staff.find_one({"id": body.staff_id}, {"_id": 0})
+    doc["l1_approver_id"] = staff.get("reports_to_id") if staff else None
+    doc["l1_approved_at"] = None
+    doc["l1_approved_by"] = None
+    doc["accountant_approved_at"] = None
+    doc["accountant_approved_by"] = None
+    doc["paid_at"] = None
+    doc["paid_by"] = None
+    doc["txn_id"] = None
+    doc["rejected_reason"] = None
+    doc["rejected_at"] = None
+    await db.reimbursements.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/reimbursements")
+async def list_reimbursements(
+    staff_id: Optional[str] = None,
+    status: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    q: dict = {}
+    role = user.get("role")
+    if staff_id:
+        q["staff_id"] = staff_id
+    if status:
+        q["status"] = status
+    # If staff (logged-in user maps to a staff record), default-scope to own + ones they need to approve
+    if role not in ("admin", "accountant", "manager"):
+        my_staff = await _staff_for_user(user["id"])
+        my_sid = my_staff["id"] if my_staff else None
+        clauses: list = [{"created_by": user["id"]}]
+        if my_sid:
+            clauses.append({"staff_id": my_sid})
+            clauses.append({"l1_approver_id": my_sid})
+        q["$or"] = clauses
+    docs = await db.reimbursements.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    return docs
+
+
+async def _check_l1_approver(rid: str, user: dict) -> dict:
+    rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if user.get("role") == "admin":
+        return rec
+    # must be the snapshot l1 approver via their linked staff record
+    my_staff = await _staff_for_user(user["id"])
+    if not my_staff or rec.get("l1_approver_id") != my_staff["id"]:
+        raise HTTPException(403, "Only the assigned higher-post approver can act on this request")
+    return rec
+
+
+@api.patch("/reimbursements/{rid}/l1-approve")
+async def reimb_l1_approve(rid: str, user=Depends(get_current_user)):
+    rec = await _check_l1_approver(rid, user)
+    if rec["status"] != "submitted":
+        raise HTTPException(400, f"Cannot L1-approve from status={rec['status']}")
+    res = await db.reimbursements.find_one_and_update(
+        {"id": rid},
+        {"$set": {"status": "l1_approved",
+                  "l1_approved_at": datetime.now(timezone.utc).isoformat(),
+                  "l1_approved_by": user["id"]}},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return res
+
+
+@api.patch("/reimbursements/{rid}/accountant-approve")
+async def reimb_accountant_approve(rid: str, user=Depends(require_role("admin", "accountant"))):
+    rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec["status"] != "l1_approved":
+        raise HTTPException(400, f"Cannot accountant-approve from status={rec['status']}")
+    res = await db.reimbursements.find_one_and_update(
+        {"id": rid},
+        {"$set": {"status": "accountant_approved",
+                  "accountant_approved_at": datetime.now(timezone.utc).isoformat(),
+                  "accountant_approved_by": user["id"]}},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return res
+
+
+@api.patch("/reimbursements/{rid}/pay")
+async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant"))):
+    rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec["status"] != "accountant_approved":
+        raise HTTPException(400, "Reimbursement must be accountant-approved before payment")
+    now = datetime.now(timezone.utc).isoformat()
+    staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
+    # Auto-create an expense transaction (approved) for ledger sync
+    txn = {
+        "id": str(uuid.uuid4()),
+        "type": "expense",
+        "amount": rec["amount"],
+        "date": rec["date"],
+        "description": f"Reimbursement: {staff.get('name','') if staff else ''} — {rec.get('description','')}".strip(),
+        "company_id": None, "partner_id": None,
+        "center_id": (staff or {}).get("center_id"),
+        "project_id": None,
+        "items": [], "attachments": rec.get("attachments") or [],
+        "created_by": user["id"], "created_at": now,
+        "status": "approved", "approved_by": user["id"], "approved_at": now,
+        "rejected_reason": None,
+    }
+    await db.transactions.insert_one(txn)
+    res = await db.reimbursements.find_one_and_update(
+        {"id": rid},
+        {"$set": {"status": "paid", "paid_at": now, "paid_by": user["id"], "txn_id": txn["id"]}},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return res
+
+
+@api.patch("/reimbursements/{rid}/reject")
+async def reimb_reject(rid: str, body: RejectIn, user=Depends(get_current_user)):
+    rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    role = user.get("role")
+    is_admin_or_acct = role in ("admin", "accountant")
+    if not is_admin_or_acct:
+        # only the L1 approver can reject before they've approved
+        my_staff = await _staff_for_user(user["id"])
+        if not my_staff or rec.get("l1_approver_id") != my_staff["id"]:
+            raise HTTPException(403, "Not allowed")
+    res = await db.reimbursements.find_one_and_update(
+        {"id": rid},
+        {"$set": {"status": "rejected", "rejected_reason": body.reason or "",
+                  "rejected_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return res
+
+
+# -------- Payroll --------
+@api.post("/payroll/run")
+async def payroll_run(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    _=Depends(require_role("admin", "accountant")),
+):
+    """Generate payroll rows for all staff for the given month based on attendance × per_day_rate.
+
+    days_present is counted as: present=1, half=0.5, absent/leave=0.
+    net_pay = base_salary OR (days_worked × per_day_rate) — we use per_day_rate × days when > 0
+    else fall back to monthly_salary prorated by (days_present / working_days_in_month).
+    """
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year:04d}-{month:02d}-{last_day:02d}"
+
+    staff_docs = await db.staff.find({}, {"_id": 0}).to_list(2000)
+    created: list = []
+    for s in staff_docs:
+        rows = await db.attendance.find({"staff_id": s["id"], "date": {"$gte": start, "$lte": end}}, {"_id": 0}).to_list(1000)
+        days_present = 0.0
+        for r in rows:
+            if r["status"] == "present":
+                days_present += 1
+            elif r["status"] == "half":
+                days_present += 0.5
+        if s.get("per_day_rate", 0) and days_present > 0:
+            gross = s["per_day_rate"] * days_present
+        else:
+            gross = (s.get("monthly_salary", 0) or 0) * (days_present / last_day) if days_present else 0
+
+        existing = await db.payroll.find_one({"staff_id": s["id"], "month": month, "year": year})
+        if existing:
+            continue
+        doc = {
+            "id": str(uuid.uuid4()),
+            "staff_id": s["id"],
+            "staff_name": s.get("name"),
+            "month": month, "year": year,
+            "days_present": days_present,
+            "working_days": last_day,
+            "base_salary": s.get("monthly_salary", 0),
+            "per_day_rate": s.get("per_day_rate", 0),
+            "gross": round(gross, 2),
+            "deductions": 0.0,
+            "net": round(gross, 2),
+            "status": "draft",
+            "txn_id": None,
+            "paid_at": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await db.payroll.insert_one(doc)
+        doc.pop("_id", None)
+        created.append(doc)
+    return {"created": len(created), "rows": created}
+
+
+@api.get("/payroll")
+async def list_payroll(month: Optional[int] = None, year: Optional[int] = None, _=Depends(get_current_user)):
+    q: dict = {}
+    if month:
+        q["month"] = month
+    if year:
+        q["year"] = year
+    docs = await db.payroll.find(q, {"_id": 0}).sort([("year", -1), ("month", -1)]).to_list(5000)
+    return docs
+
+
+@api.patch("/payroll/{pid}/pay")
+async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant"))):
+    rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec["status"] == "paid":
+        raise HTTPException(400, "Already paid")
+    now = datetime.now(timezone.utc).isoformat()
+    staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
+    txn = {
+        "id": str(uuid.uuid4()),
+        "type": "expense",
+        "amount": rec["net"],
+        "date": f"{rec['year']:04d}-{rec['month']:02d}-{rec['working_days']:02d}",
+        "description": f"Salary: {staff.get('name','') if staff else ''} {rec['month']}/{rec['year']}",
+        "company_id": None, "partner_id": None,
+        "center_id": (staff or {}).get("center_id"),
+        "project_id": None,
+        "items": [], "attachments": [],
+        "created_by": user["id"], "created_at": now,
+        "status": "approved", "approved_by": user["id"], "approved_at": now,
+        "rejected_reason": None,
+    }
+    await db.transactions.insert_one(txn)
+    res = await db.payroll.find_one_and_update(
+        {"id": pid},
+        {"$set": {"status": "paid", "paid_at": now, "txn_id": txn["id"]}},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return res
+
+
+# ============================================================
 
 
 # ---------- Register router + CORS ----------
