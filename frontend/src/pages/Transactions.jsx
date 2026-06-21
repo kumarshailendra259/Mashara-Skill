@@ -20,8 +20,9 @@ const ENTITY_TYPES = ["company", "partner", "center", "project"];
 export default function Transactions() {
   const { t } = useLang();
   const { user } = useAuth();
-  const canEdit = ["admin", "manager"].includes(user?.role);
+  const canEdit = ["admin", "manager", "center_manager", "partner", "accountant"].includes(user?.role);
   const canDelete = user?.role === "admin";
+  const isAdmin = user?.role === "admin";
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [items, setItems] = useState([]);
   const [filters, setFilters] = useState({ type: "", status: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
@@ -44,6 +45,16 @@ export default function Transactions() {
   }, [filters]);
 
   const load = () => api.get("/transactions", { params }).then((r) => setItems(r.data));
+
+  const approveTxn = async (id) => {
+    try { await api.post(`/transactions/${id}/approve`); load(); toast.success("Approved"); }
+    catch (e) { toast.error(formatError(e)); }
+  };
+  const rejectTxn = async (id) => {
+    const reason = window.prompt("Reason (optional):") || "";
+    try { await api.post(`/transactions/${id}/reject`, { reason }); load(); toast.success("Rejected"); }
+    catch (e) { toast.error(formatError(e)); }
+  };
 
   useEffect(() => { loadEntities(); }, []);
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [params]);
@@ -405,21 +416,6 @@ export default function Transactions() {
                         <Button type="button" size="icon" variant="ghost" onClick={() => removeAttachment(a.id)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
                       </div>
                     </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">{t("cancel")}</Button>
-            <Button onClick={save} className="brand-btn rounded-none" data-testid="txn-save">{t("save")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-                 </li>
                   ))}
                 </ul>
               )}
