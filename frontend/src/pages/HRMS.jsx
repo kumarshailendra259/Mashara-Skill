@@ -164,10 +164,16 @@ export default function HRMS() {
                           </>
                         )}
                         {r.status === "l1_approved" && (isAdmin || isAccountant) && (
-                          <Button size="sm" variant="ghost" onClick={() => act(r.id, "accountant-approve")} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`acct-${r.id}`}>Acct ✓</Button>
+                          <>
+                            <Button size="sm" variant="ghost" onClick={() => act(r.id, "accountant-approve")} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`acct-${r.id}`}>Acct ✓</Button>
+                            <Button size="sm" variant="ghost" onClick={() => act(r.id, "reject")} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`reject-l1-${r.id}`}><X size={14} /></Button>
+                          </>
                         )}
                         {r.status === "accountant_approved" && (isAdmin || isAccountant) && (
-                          <Button size="sm" variant="ghost" onClick={() => act(r.id, "pay")} className="rounded-none h-8 px-2 text-[var(--brand)] font-medium" data-testid={`pay-${r.id}`}><Check size={14} /> Pay</Button>
+                          <>
+                            <Button size="sm" variant="ghost" onClick={() => act(r.id, "pay")} className="rounded-none h-8 px-2 text-[var(--brand)] font-medium" data-testid={`pay-${r.id}`}><Check size={14} /> Pay</Button>
+                            <Button size="sm" variant="ghost" onClick={() => act(r.id, "reject")} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`reject-acct-${r.id}`}><X size={14} /></Button>
+                          </>
                         )}
                       </div>
                     </td>
