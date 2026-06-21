@@ -28,6 +28,9 @@ Need a web application where company-wise, partner-wise, center-wise, project-wi
 - Dashboard with KPI cards, monthly trend, distribution pie, breakdown tabs (company / partner / center / project / item) — counts approved entries only by default
 - Reports page with per-dimension P&L tables + CSV export
 - **Partner Settlement view** (`/api/dashboard/settlement`) — when a partner logs in they see all co-partners at their shared center(s), with each partner's investment/expense/income, net contribution, fair-share, and adjustment (who pays whom) computed on equal-split basis. Admin can inspect any center via `?center_id=`.
+- **HRMS module** — Staff master (designation, reports_to, monthly_salary, per_day_rate, linked user_id), Attendance (present/absent/half/leave, upsert by staff+date), Leave requests (apply / approve / reject)
+- **Reimbursement 3-stage approval** — staff submits → L1 (snapshot of staff.reports_to, only that user can approve) → Accountant → Pay. On Pay, auto-creates an approved `expense` transaction so the dashboard P&L stays in sync. Step-wise badge UI visible to all roles.
+- **Payroll** — admin/accountant runs monthly payroll; per-staff gross computed as `per_day_rate × days_present` (falls back to prorated monthly_salary). Pay action auto-creates the offsetting expense transaction.
 - Bilingual UI (English / Hindi) toggle in header, persists in localStorage
 - Swiss-style high-contrast light theme with International Klein Blue accents
 
