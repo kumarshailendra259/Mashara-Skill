@@ -29,6 +29,10 @@ export default function Register() {
   return (
     <div className="min-h-screen flex items-center justify-center p-6 bg-[var(--bg)]" data-testid="register-page">
       <form onSubmit={submit} className="swiss-card p-8 w-full max-w-md space-y-5" data-testid="register-form">
+        <div className="border-l-2 border-[var(--brand)] pl-3" data-testid="company-welcome">
+          <div className="overline text-[var(--brand)]">Welcome to</div>
+          <div className="font-heading font-bold text-base tracking-tight leading-tight mt-0.5">Mashara Skills and Creative Learning Pvt Ltd</div>
+        </div>
         <div>
           <div className="overline">{t("register")}</div>
           <h2 className="font-heading font-black text-3xl tracking-tight mt-1">{t("create_account")}</h2>

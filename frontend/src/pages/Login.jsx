@@ -43,6 +43,10 @@ export default function Login() {
 
       <div className="flex items-center justify-center p-8 bg-white">
         <form onSubmit={submit} className="w-full max-w-sm space-y-6" data-testid="login-form">
+          <div className="border-l-2 border-[var(--brand)] pl-3" data-testid="company-welcome">
+            <div className="overline text-[var(--brand)]">Welcome to</div>
+            <div className="font-heading font-bold text-lg tracking-tight leading-tight mt-0.5">Mashara Skills and Creative Learning Pvt Ltd</div>
+          </div>
           <div>
             <div className="overline">{t("login")}</div>
             <h2 className="font-heading font-black text-3xl mt-1 tracking-tight">{t("welcome")}</h2>

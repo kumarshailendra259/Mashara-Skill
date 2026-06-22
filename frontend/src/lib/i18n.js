@@ -1,6 +1,6 @@
 export const dictionary = {
   en: {
-    app_name: "Finance Tracker",
+    app_name: "Mashara Finance",
     login: "Login",
     register: "Register",
     logout: "Logout",
@@ -86,7 +86,7 @@ export const dictionary = {
     awaiting_approval: "Awaiting admin approval",
   },
   hi: {
-    app_name: "फाइनेंस ट्रैकर",
+    app_name: "मशारा फाइनेंस",
     login: "लॉगिन",
     register: "रजिस्टर",
     logout: "लॉगआउट",

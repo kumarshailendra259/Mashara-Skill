@@ -81,6 +81,9 @@ export default function Layout({ children }) {
         <div className="px-5 py-5 border-b border-[var(--border)]">
           <div className="text-xs overline">Console</div>
           <div className="font-heading text-xl font-black tracking-tight mt-1">{t("app_name")}</div>
+          <div className="mt-2 pt-2 border-t border-[var(--border)] text-[10px] leading-tight text-[var(--muted)]" data-testid="company-banner">
+            Welcome to<br/><span className="font-medium text-[var(--ink)]">Mashara Skills and Creative Learning Pvt Ltd</span>
+          </div>
         </div>
         <nav className="flex-1 py-3" data-testid="sidebar-nav">
           {navItems.filter((it) => !it.adminOnly || user?.role === "admin").map((it) => {
