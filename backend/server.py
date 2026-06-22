@@ -1506,9 +1506,14 @@ async def list_stock(
     # so duplicate flag stays stable across views).
     docs = await db.transactions.find(q, {"_id": 0}).sort([("date", 1), ("created_at", 1)]).to_list(20000)
 
-    # First-occurrence lookup: scan entire transactions collection (just the items + dates).
+    # First-occurrence lookup: scan transactions in chronological order (bounded to 50000
+    # to keep memory + time predictable on large datasets — the goal is just to find the
+    # earliest occurrence per item name, so a sorted scan within this bound is sufficient
+    # for any realistic finance-tracker volume).
     seen_first = {}
-    cursor = db.transactions.find({}, {"_id": 0, "id": 1, "date": 1, "created_at": 1, "items": 1}).sort([("date", 1), ("created_at", 1)])
+    cursor = db.transactions.find(
+        {}, {"_id": 0, "id": 1, "date": 1, "created_at": 1, "items": 1}
+    ).sort([("date", 1), ("created_at", 1)]).limit(50000)
     async for d in cursor:
         for it in (d.get("items") or []):
             n = (it.get("name") or "").strip().lower()
@@ -1620,11 +1625,14 @@ async def approval_log(
                 "remarks": d.get("rejected_reason") or "",
             })
 
+    # Pre-load staff names once for both reimbursement and leave blocks (avoids N+1)
+    sdocs = await db.staff.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    sname_by_id = {s["id"]: s.get("name", "") for s in sdocs}
+
     # Reimbursements: emit a row for each completed stage
     if not type_filter or type_filter == "reimbursement":
         async for d in db.reimbursements.find({}, {"_id": 0}).sort("created_at", -1).limit(2000):
-            staff = await db.staff.find_one({"id": d.get("staff_id")}, {"_id": 0, "name": 1})
-            sname = (staff or {}).get("name", "")
+            sname = sname_by_id.get(d.get("staff_id"), "")
             base = {"type": "reimbursement", "ref_id": d.get("id"), "amount": d.get("amount"),
                     "summary": f"Reimbursement — {sname}".strip(" —")}
             stages = [
@@ -1648,8 +1656,7 @@ async def approval_log(
     # Leaves (approved/rejected)
     if not type_filter or type_filter == "leave":
         async for d in db.leaves.find({"status": {"$in": ["approved", "rejected"]}}, {"_id": 0}).sort("decided_at", -1).limit(2000):
-            staff = await db.staff.find_one({"id": d.get("staff_id")}, {"_id": 0, "name": 1})
-            sname = (staff or {}).get("name", "")
+            sname = sname_by_id.get(d.get("staff_id"), "")
             at = d.get("decided_at") or d.get("created_at")
             if (start or end) and not _in_range(at):
                 continue
