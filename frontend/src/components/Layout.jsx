@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
@@ -50,12 +50,19 @@ export default function Layout({ children }) {
     try {
       await api.patch("/notifications/mark-all-read");
       setNotifs((n) => ({ items: n.items.map((it) => ({ ...it, read: true })), unread: 0 }));
-    } catch { /* best effort */ }
+    } catch (e) {
+      // Best-effort: keep current UI state if the call fails (e.g. transient network).
+      console.warn("notifications mark-all-read failed:", e?.message || e);
+    }
   };
 
   const onNotifClick = async (n) => {
     if (!n.read) {
-      try { await api.patch(`/notifications/${n.id}/read`); } catch { /* best effort */ }
+      try {
+        await api.patch(`/notifications/${n.id}/read`);
+      } catch (e) {
+        console.warn("notification mark-read failed:", e?.message || e);
+      }
       setNotifs((s) => ({
         items: s.items.map((it) => it.id === n.id ? { ...it, read: true } : it),
         unread: Math.max(0, s.unread - 1),
@@ -75,6 +82,12 @@ export default function Layout({ children }) {
     nav("/login");
   };
 
+  // Memoise the role-filtered nav list so the sidebar doesn't rebuild it on every render.
+  const visibleNavItems = useMemo(
+    () => navItems.filter((it) => !it.adminOnly || user?.role === "admin"),
+    [user?.role],
+  );
+
   return (
     <div className="min-h-screen flex" data-testid="app-layout">
       <aside className="w-60 shrink-0 border-r border-[var(--border)] bg-white hidden md:flex md:flex-col">
@@ -86,7 +99,7 @@ export default function Layout({ children }) {
           </div>
         </div>
         <nav className="flex-1 py-3" data-testid="sidebar-nav">
-          {navItems.filter((it) => !it.adminOnly || user?.role === "admin").map((it) => {
+          {visibleNavItems.map((it) => {
             const Icon = it.icon;
             const badge = badgeFor(it.key);
             return (
