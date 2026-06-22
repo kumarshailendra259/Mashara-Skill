@@ -145,10 +145,22 @@ export default function Transactions() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  const [deleting, setDeleting] = useState(new Set());
   const remove = async (it) => {
+    if (deleting.has(it.id)) return; // prevent double-click race
     if (!window.confirm(t("confirm_delete"))) return;
-    try { await api.delete(`/transactions/${it.id}`); load(); toast.success("Deleted"); }
-    catch (e) { toast.error(formatError(e)); }
+    setDeleting((s) => new Set(s).add(it.id));
+    // Optimistic: drop the row from local state immediately so it can't be re-clicked
+    setItems((cur) => cur.filter((x) => x.id !== it.id));
+    try {
+      await api.delete(`/transactions/${it.id}`);
+      toast.success("Deleted");
+    } catch (e) {
+      toast.error(formatError(e));
+      load(); // restore list on failure
+    } finally {
+      setDeleting((s) => { const n = new Set(s); n.delete(it.id); return n; });
+    }
   };
 
   const nameOf = (etype, id) => entities[etype].find((e) => e.id === id)?.name || "—";
@@ -336,7 +348,7 @@ export default function Transactions() {
                         <Button size="sm" variant="ghost" onClick={() => rejectTxn(it.id)} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`reject-${it.id}`}>{t("reject")}</Button>
                       )}
                       <Button size="icon" variant="ghost" onClick={() => openEdit(it)} className="rounded-none h-8 w-8"><Pencil size={14} /></Button>
-                      {canDelete && <Button size="icon" variant="ghost" onClick={() => remove(it)} className="rounded-none h-8 w-8 hover:text-[var(--danger)]"><Trash2 size={14} /></Button>}
+                      {canDelete && <Button size="icon" variant="ghost" disabled={deleting.has(it.id)} onClick={() => remove(it)} className="rounded-none h-8 w-8 hover:text-[var(--danger)] disabled:opacity-40"><Trash2 size={14} /></Button>}
                     </div>
                   </td>
                 )}

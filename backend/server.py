@@ -644,9 +644,9 @@ async def reject_transaction(tid: str, body: RejectIn, user=Depends(require_role
 @api.delete("/transactions/{tid}")
 async def delete_transaction(tid: str, _=Depends(require_role("admin"))):
     r = await db.transactions.delete_one({"id": tid})
-    if r.deleted_count == 0:
-        raise HTTPException(404, "Not found")
-    return {"ok": True}
+    # Idempotent: don't 404 on a row that's already gone — this avoids noisy errors
+    # when the UI double-clicks or shows a stale list.
+    return {"ok": True, "already_deleted": r.deleted_count == 0}
 
 
 @api.post("/transactions/import")
