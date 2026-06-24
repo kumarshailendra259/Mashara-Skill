@@ -11,11 +11,8 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.get("/auth/me");
       setUser(data);
-    } catch (e) {
-      // Treat any non-OK /auth/me (401/403/network) as "not logged in".
-      if (e?.response?.status && ![401, 403].includes(e.response.status)) {
-        console.warn("auth/me failed:", e?.message || e);
-      }
+    } catch {
+      // Any failure (401/403/network) is treated as "not logged in".
       setUser(false);
     } finally {
       setLoading(false);
@@ -49,10 +46,9 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     try {
       await api.post("/auth/logout");
-    } catch (e) {
+    } catch {
       // Logout is best-effort: even if the server call fails (network, expired token),
       // we still drop the local user so the UI returns to the login screen.
-      console.warn("logout best-effort failed:", e?.message || e);
     }
     setUser(false);
   }, []);

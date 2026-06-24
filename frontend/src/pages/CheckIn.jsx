@@ -37,8 +37,8 @@ export default function CheckIn() {
     try {
       const { data } = await api.get("/attendance/today");
       setTodayInfo(data);
-    } catch (e) {
-      console.warn("loadToday failed:", e?.message || e);
+    } catch {
+      // best-effort: ignore failures (user may not yet have a staff row)
     }
   };
 

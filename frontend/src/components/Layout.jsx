@@ -50,9 +50,8 @@ export default function Layout({ children }) {
     try {
       await api.patch("/notifications/mark-all-read");
       setNotifs((n) => ({ items: n.items.map((it) => ({ ...it, read: true })), unread: 0 }));
-    } catch (e) {
+    } catch {
       // Best-effort: keep current UI state if the call fails (e.g. transient network).
-      console.warn("notifications mark-all-read failed:", e?.message || e);
     }
   };
 
@@ -60,8 +59,8 @@ export default function Layout({ children }) {
     if (!n.read) {
       try {
         await api.patch(`/notifications/${n.id}/read`);
-      } catch (e) {
-        console.warn("notification mark-read failed:", e?.message || e);
+      } catch {
+        // best-effort
       }
       setNotifs((s) => ({
         items: s.items.map((it) => it.id === n.id ? { ...it, read: true } : it),
