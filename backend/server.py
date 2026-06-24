@@ -323,7 +323,7 @@ def _get_object(path: str) -> tuple[bytes, str]:
 
 
 @api.post("/files/upload")
-async def upload_file(file: UploadFile = File(...), user=Depends(require_role("admin", "manager"))):
+async def upload_file(file: UploadFile = File(...), user=Depends(get_current_user)):
     if not file.filename:
         raise HTTPException(400, "Missing filename")
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
@@ -1152,19 +1152,19 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
         raise HTTPException(400, "Your user is not linked to any staff record. Ask admin to set it up.")
     today = (body.date or datetime.now(timezone.utc).date().isoformat())[:10]
     now_iso = datetime.now(timezone.utc).isoformat()
+    # Build doc with only explicitly-provided fields so a re-submit doesn't wipe
+    # location/selfie set by a prior call on the same day.
+    body_dict = body.model_dump(exclude_none=True)
     doc = {
         "staff_id": staff["id"],
         "date": today,
-        "status": body.status,
-        "latitude": body.latitude,
-        "longitude": body.longitude,
-        "accuracy": body.accuracy,
-        "selfie_path": body.selfie_path,
-        "selfie_filename": body.selfie_filename,
         "marked_via": "self",
         "marked_at": now_iso,
         "marked_by": user["id"],
     }
+    for k in ("status", "latitude", "longitude", "accuracy", "selfie_path", "selfie_filename"):
+        if k in body_dict:
+            doc[k] = body_dict[k]
     new_id = str(uuid.uuid4())
     await db.attendance.update_one(
         {"staff_id": staff["id"], "date": today},
