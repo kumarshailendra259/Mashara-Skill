@@ -13,7 +13,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 
 const STEPS = ["submitted", "l1_approved", "accountant_approved", "paid"];
@@ -50,7 +50,18 @@ export default function HRMS() {
   const [leaves, setLeaves] = useState([]);
 
   const [openS, setOpenS] = useState(false);
-  const [staffForm, setStaffForm] = useState({ name: "", designation: "", reports_to_id: "", monthly_salary: 0, per_day_rate: 0, joining_date: "", user_id: "", email: "", mobile: "", create_login: false });
+  const emptyStaffForm = {
+    name: "", designation: "", reports_to_id: "",
+    monthly_salary: 0, per_day_rate: 0, joining_date: "",
+    user_id: "", email: "", mobile: "",
+    date_of_birth: "", gender: "", address: "",
+    pan: "", aadhaar_last4: "",
+    emergency_contact_name: "", emergency_contact_mobile: "",
+    bank_account_no: "", bank_name: "", ifsc: "", account_holder_name: "",
+    create_login: false,
+  };
+  const [staffForm, setStaffForm] = useState(emptyStaffForm);
+  const [editingStaffId, setEditingStaffId] = useState(null);
 
   const [openR, setOpenR] = useState(false);
   const [rForm, setRForm] = useState({ staff_id: "", amount: "", date: new Date().toISOString().slice(0,10), category: "", description: "", attachments: [] });
@@ -179,21 +190,87 @@ export default function HRMS() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  const canManageStaff = isAdmin || user?.role === "manager" || user?.role === "hr";
+  const canDeleteStaff = isAdmin || user?.role === "hr";
+
+  const openEditStaff = (s) => {
+    setEditingStaffId(s.id);
+    setStaffForm({
+      name: s.name || "",
+      designation: s.designation || "",
+      reports_to_id: s.reports_to_id || "",
+      monthly_salary: s.monthly_salary || 0,
+      per_day_rate: s.per_day_rate || 0,
+      joining_date: s.joining_date || "",
+      user_id: s.user_id || "",
+      email: s.email || "",
+      mobile: s.mobile || "",
+      date_of_birth: s.date_of_birth || "",
+      gender: s.gender || "",
+      address: s.address || "",
+      pan: s.pan || "",
+      aadhaar_last4: s.aadhaar_last4 || "",
+      emergency_contact_name: s.emergency_contact_name || "",
+      emergency_contact_mobile: s.emergency_contact_mobile || "",
+      bank_account_no: s.bank_account_no || "",
+      bank_name: s.bank_name || "",
+      ifsc: s.ifsc || "",
+      account_holder_name: s.account_holder_name || "",
+      create_login: false,
+    });
+    setOpenS(true);
+  };
+
+  const openAddStaff = () => {
+    setEditingStaffId(null);
+    setStaffForm(emptyStaffForm);
+    setOpenS(true);
+  };
+
+  const deleteStaff = async (s) => {
+    if (!window.confirm(`Delete staff "${s.name}"? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/staff/${s.id}`);
+      toast.success("Deleted");
+      loadAll();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   const saveStaff = async () => {
     try {
       const payload = {
         ...staffForm,
-        monthly_salary: +staffForm.monthly_salary,
-        per_day_rate: +staffForm.per_day_rate,
+        monthly_salary: +staffForm.monthly_salary || 0,
+        per_day_rate: +staffForm.per_day_rate || 0,
         reports_to_id: staffForm.reports_to_id || null,
         user_id: staffForm.user_id || null,
         email: staffForm.email?.trim() || null,
         mobile: staffForm.mobile?.trim() || null,
+        date_of_birth: staffForm.date_of_birth || null,
+        gender: staffForm.gender || null,
+        address: staffForm.address?.trim() || null,
+        pan: staffForm.pan?.trim().toUpperCase() || null,
+        aadhaar_last4: staffForm.aadhaar_last4?.trim() || null,
+        emergency_contact_name: staffForm.emergency_contact_name?.trim() || null,
+        emergency_contact_mobile: staffForm.emergency_contact_mobile?.trim() || null,
+        bank_account_no: staffForm.bank_account_no?.trim() || null,
+        bank_name: staffForm.bank_name?.trim() || null,
+        ifsc: staffForm.ifsc?.trim().toUpperCase() || null,
+        account_holder_name: staffForm.account_holder_name?.trim() || null,
         create_login: !!staffForm.create_login,
       };
+      if (editingStaffId) {
+        await api.put(`/staff/${editingStaffId}`, payload);
+        setOpenS(false);
+        setEditingStaffId(null);
+        setStaffForm(emptyStaffForm);
+        loadAll();
+        toast.success("Updated");
+        return;
+      }
       const { data } = await api.post("/staff", payload);
       setOpenS(false);
-      setStaffForm({ name: "", designation: "", reports_to_id: "", monthly_salary: 0, per_day_rate: 0, joining_date: "", user_id: "", email: "", mobile: "", create_login: false });
+      setStaffForm(emptyStaffForm);
       loadAll();
       const es = data?.email_status;
       if (payload.create_login) {
@@ -378,30 +455,80 @@ export default function HRMS() {
 
         {/* Staff */}
         <TabsContent value="staff" className="mt-4 space-y-4">
-          {(isAdmin || user?.role === "manager") && (
+          {canManageStaff && (
             <div className="flex justify-end">
-              <Dialog open={openS} onOpenChange={setOpenS}>
-                <DialogTrigger asChild><Button className="brand-btn rounded-none gap-2" data-testid="btn-new-staff"><Plus size={16} /> Add Staff</Button></DialogTrigger>
-                <DialogContent className="rounded-none">
-                  <DialogHeader><DialogTitle className="font-heading">Add Staff</DialogTitle></DialogHeader>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="col-span-2"><Label>Name</Label><Input value={staffForm.name} onChange={(e) => setStaffForm({ ...staffForm, name: e.target.value })} className="rounded-none" /></div>
-                    <div><Label>Designation</Label><Input value={staffForm.designation} onChange={(e) => setStaffForm({ ...staffForm, designation: e.target.value })} className="rounded-none" /></div>
-                    {isAdmin && (
-                      <div><Label>Reports To <span className="overline text-[10px]">(admin only)</span></Label>
-                        <Select value={staffForm.reports_to_id || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, reports_to_id: v === "__none" ? "" : v })}>
+              <Dialog open={openS} onOpenChange={(o) => { setOpenS(o); if (!o) { setEditingStaffId(null); setStaffForm(emptyStaffForm); } }}>
+                <DialogTrigger asChild><Button onClick={openAddStaff} className="brand-btn rounded-none gap-2" data-testid="btn-new-staff"><Plus size={16} /> Add Staff</Button></DialogTrigger>
+                <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto">
+                  <DialogHeader><DialogTitle className="font-heading">{editingStaffId ? "Edit Staff" : "Add Staff"}</DialogTitle></DialogHeader>
+
+                  {/* SECTION 1 — Basic */}
+                  <div className="space-y-2">
+                    <div className="overline text-[var(--brand)]">Basic Info</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="col-span-2"><Label>Name <span className="text-[var(--danger)]">*</span></Label><Input value={staffForm.name} onChange={(e) => setStaffForm({ ...staffForm, name: e.target.value })} className="rounded-none" data-testid="staff-name" /></div>
+                      <div><Label>Designation</Label><Input value={staffForm.designation} onChange={(e) => setStaffForm({ ...staffForm, designation: e.target.value })} className="rounded-none" /></div>
+                      {isAdmin && (
+                        <div><Label>Reports To <span className="overline text-[10px]">(admin only)</span></Label>
+                          <Select value={staffForm.reports_to_id || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, reports_to_id: v === "__none" ? "" : v })}>
+                            <SelectTrigger className="rounded-none"><SelectValue placeholder="—" /></SelectTrigger>
+                            <SelectContent><SelectItem value="__none">—</SelectItem>{staff.filter((s) => s.id !== editingStaffId).map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
+                          </Select>
+                        </div>
+                      )}
+                      <div><Label>Monthly Salary</Label><Input type="number" value={staffForm.monthly_salary} onChange={(e) => setStaffForm({ ...staffForm, monthly_salary: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Per-Day Rate</Label><Input type="number" value={staffForm.per_day_rate} onChange={(e) => setStaffForm({ ...staffForm, per_day_rate: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Joining Date</Label><Input type="date" value={staffForm.joining_date} onChange={(e) => setStaffForm({ ...staffForm, joining_date: e.target.value })} className="rounded-none" /></div>
+                    </div>
+                  </div>
+
+                  {/* SECTION 2 — Contact */}
+                  <div className="space-y-2 pt-4 border-t border-[var(--border)]">
+                    <div className="overline text-[var(--brand)]">Contact</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div><Label>Email</Label><Input type="email" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} placeholder="staff@example.com" className="rounded-none" data-testid="staff-email" /></div>
+                      <div><Label>Mobile</Label><Input value={staffForm.mobile} onChange={(e) => setStaffForm({ ...staffForm, mobile: e.target.value })} placeholder="+91 ..." className="rounded-none" data-testid="staff-mobile" /></div>
+                    </div>
+                  </div>
+
+                  {/* SECTION 3 — Personal */}
+                  <div className="space-y-2 pt-4 border-t border-[var(--border)]">
+                    <div className="overline text-[var(--brand)]">Personal Info</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div><Label>Date of Birth</Label><Input type="date" value={staffForm.date_of_birth} onChange={(e) => setStaffForm({ ...staffForm, date_of_birth: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Gender</Label>
+                        <Select value={staffForm.gender || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, gender: v === "__none" ? "" : v })}>
                           <SelectTrigger className="rounded-none"><SelectValue placeholder="—" /></SelectTrigger>
-                          <SelectContent><SelectItem value="__none">—</SelectItem>{staff.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}</SelectContent>
+                          <SelectContent>
+                            <SelectItem value="__none">—</SelectItem>
+                            <SelectItem value="male">Male</SelectItem>
+                            <SelectItem value="female">Female</SelectItem>
+                            <SelectItem value="other">Other</SelectItem>
+                          </SelectContent>
                         </Select>
                       </div>
-                    )}
-                    <div><Label>Monthly Salary</Label><Input type="number" value={staffForm.monthly_salary} onChange={(e) => setStaffForm({ ...staffForm, monthly_salary: e.target.value })} className="rounded-none" /></div>
-                    <div><Label>Per-Day Rate</Label><Input type="number" value={staffForm.per_day_rate} onChange={(e) => setStaffForm({ ...staffForm, per_day_rate: e.target.value })} className="rounded-none" /></div>
-                    <div><Label>Joining Date</Label><Input type="date" value={staffForm.joining_date} onChange={(e) => setStaffForm({ ...staffForm, joining_date: e.target.value })} className="rounded-none" /></div>
-                    <div><Label>Linked User ID (optional)</Label><Input value={staffForm.user_id} onChange={(e) => setStaffForm({ ...staffForm, user_id: e.target.value })} placeholder="User UUID for login mapping" className="rounded-none" /></div>
+                      <div className="col-span-2"><Label>Address</Label><Textarea value={staffForm.address} onChange={(e) => setStaffForm({ ...staffForm, address: e.target.value })} placeholder="Street, City, State, PIN" className="rounded-none" rows={2} /></div>
+                      <div><Label>PAN</Label><Input value={staffForm.pan} onChange={(e) => setStaffForm({ ...staffForm, pan: e.target.value.toUpperCase() })} placeholder="ABCDE1234F" maxLength={10} className="rounded-none uppercase" /></div>
+                      <div><Label>Aadhaar (last 4 digits)</Label><Input value={staffForm.aadhaar_last4} onChange={(e) => setStaffForm({ ...staffForm, aadhaar_last4: e.target.value.replace(/\D/g, "").slice(0, 4) })} placeholder="1234" maxLength={4} className="rounded-none" /></div>
+                      <div><Label>Emergency Contact Name</Label><Input value={staffForm.emergency_contact_name} onChange={(e) => setStaffForm({ ...staffForm, emergency_contact_name: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Emergency Contact Mobile</Label><Input value={staffForm.emergency_contact_mobile} onChange={(e) => setStaffForm({ ...staffForm, emergency_contact_mobile: e.target.value })} placeholder="+91 ..." className="rounded-none" /></div>
+                    </div>
+                  </div>
 
-                    {/* Auto-provision login + email credentials */}
-                    <div className="col-span-2 border-t border-[var(--border)] pt-3 mt-1">
+                  {/* SECTION 4 — Bank Details */}
+                  <div className="space-y-2 pt-4 border-t border-[var(--border)]">
+                    <div className="overline text-[var(--brand)]">Bank Details <span className="overline text-[10px] text-[var(--muted)]">(for payroll)</span></div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div><Label>Account Holder Name</Label><Input value={staffForm.account_holder_name} onChange={(e) => setStaffForm({ ...staffForm, account_holder_name: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Bank Name</Label><Input value={staffForm.bank_name} onChange={(e) => setStaffForm({ ...staffForm, bank_name: e.target.value })} placeholder="e.g. SBI" className="rounded-none" /></div>
+                      <div><Label>Account Number</Label><Input value={staffForm.bank_account_no} onChange={(e) => setStaffForm({ ...staffForm, bank_account_no: e.target.value.replace(/\s/g, "") })} className="rounded-none" data-testid="staff-bank-account" /></div>
+                      <div><Label>IFSC</Label><Input value={staffForm.ifsc} onChange={(e) => setStaffForm({ ...staffForm, ifsc: e.target.value.toUpperCase() })} placeholder="SBIN0001234" maxLength={11} className="rounded-none uppercase" /></div>
+                    </div>
+                  </div>
+
+                  {/* SECTION 5 — Login provisioning (only on Add, not Edit) */}
+                  {!editingStaffId && (
+                    <div className="pt-4 border-t border-[var(--border)]">
                       <label className="flex items-start gap-2 cursor-pointer" data-testid="create-login-toggle">
                         <input
                           type="checkbox"
@@ -411,40 +538,47 @@ export default function HRMS() {
                         />
                         <span className="text-sm">
                           <span className="font-medium">Create login &amp; email credentials</span>
-                          <span className="block text-xs text-[var(--muted)] mt-0.5">A random password will be generated and emailed to the staff with their check-in link.</span>
+                          <span className="block text-xs text-[var(--muted)] mt-0.5">A random password will be generated and emailed to the staff with their check-in link. Email above is used as login.</span>
                         </span>
                       </label>
                     </div>
-                    {staffForm.create_login && (
-                      <>
-                        <div>
-                          <Label>Email <span className="text-[var(--danger)]">*</span></Label>
-                          <Input type="email" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} placeholder="staff@example.com" className="rounded-none" data-testid="staff-email" required />
-                        </div>
-                        <div>
-                          <Label>Mobile (info only)</Label>
-                          <Input value={staffForm.mobile} onChange={(e) => setStaffForm({ ...staffForm, mobile: e.target.value })} placeholder="+91 ..." className="rounded-none" data-testid="staff-mobile" />
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  <DialogFooter><Button variant="outline" onClick={() => setOpenS(false)} className="rounded-none">Cancel</Button><Button onClick={saveStaff} className="brand-btn rounded-none" data-testid="staff-save">Save</Button></DialogFooter>
+                  )}
+
+                  <DialogFooter><Button variant="outline" onClick={() => setOpenS(false)} className="rounded-none">Cancel</Button><Button onClick={saveStaff} className="brand-btn rounded-none" data-testid="staff-save">{editingStaffId ? "Update" : "Save"}</Button></DialogFooter>
                 </DialogContent>
               </Dialog>
             </div>
           )}
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
             <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
-              <th className="text-left p-3">Name</th><th className="text-left p-3">Designation</th><th className="text-left p-3">Reports To</th>
-              <th className="text-right p-3">Salary</th><th className="text-right p-3">Per-Day</th>
+              <th className="text-left p-3">Name</th>
+              <th className="text-left p-3">Designation</th>
+              <th className="text-left p-3">Email</th>
+              <th className="text-left p-3">Mobile</th>
+              <th className="text-left p-3">Bank</th>
+              <th className="text-right p-3">Salary</th>
+              <th className="text-right p-3">Per-Day</th>
+              {canManageStaff && <th className="text-right p-3 no-print">Actions</th>}
             </tr></thead><tbody>
-              {staff.length === 0 ? <tr><td colSpan={5} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
+              {staff.length === 0 ? <tr><td colSpan={canManageStaff ? 8 : 7} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
                 <tr key={s.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                   <td className="p-3 font-medium">{s.name}</td>
                   <td className="p-3">{s.designation}</td>
-                  <td className="p-3 text-[var(--muted)]">{sName(s.reports_to_id)}</td>
+                  <td className="p-3 text-[var(--muted)] text-xs">{s.email || "—"}</td>
+                  <td className="p-3 text-[var(--muted)] text-xs">{s.mobile || "—"}</td>
+                  <td className="p-3 text-[var(--muted)] text-xs">{s.bank_name ? `${s.bank_name}${s.bank_account_no ? " · ****" + s.bank_account_no.slice(-4) : ""}` : "—"}</td>
                   <td className="p-3 num">{inr(s.monthly_salary)}</td>
                   <td className="p-3 num">{inr(s.per_day_rate)}</td>
+                  {canManageStaff && (
+                    <td className="p-3 text-right no-print">
+                      <div className="flex justify-end gap-1">
+                        <Button size="sm" variant="outline" onClick={() => openEditStaff(s)} className="rounded-none h-8 px-2" data-testid={`staff-edit-${s.id}`} title="Edit"><Pencil size={14} /></Button>
+                        {canDeleteStaff && (
+                          <Button size="sm" variant="outline" onClick={() => deleteStaff(s)} className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" data-testid={`staff-delete-${s.id}`} title="Delete"><Trash2 size={14} /></Button>
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody></table></div>

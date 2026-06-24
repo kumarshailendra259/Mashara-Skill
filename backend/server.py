@@ -1023,11 +1023,25 @@ class StaffIn(BaseModel):
     joining_date: str = ""
     user_id: Optional[str] = None  # link to a User if they log in
     center_id: Optional[str] = None
-    # ----- Optional fields used only on create_staff to auto-provision a login -----
-    email: Optional[str] = None         # if create_login=True, used as the new user's email
-    mobile: Optional[str] = None        # informational only (SMS not enabled)
-    create_login: bool = False          # admin/HR can tick this in the dialog
-    send_credentials_email: bool = True # if create_login and email present, email it
+    # ---- Contact (persisted on staff record so admin/HR always see them) ----
+    email: Optional[str] = None
+    mobile: Optional[str] = None
+    # ---- Personal info ----
+    date_of_birth: Optional[str] = None  # YYYY-MM-DD
+    gender: Optional[str] = None  # "male" | "female" | "other"
+    address: Optional[str] = None
+    pan: Optional[str] = None
+    aadhaar_last4: Optional[str] = None  # store last 4 digits only for privacy
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_mobile: Optional[str] = None
+    # ---- Bank details (for payroll) ----
+    bank_account_no: Optional[str] = None
+    bank_name: Optional[str] = None
+    ifsc: Optional[str] = None
+    account_holder_name: Optional[str] = None
+    # ---- Login auto-provisioning toggles (used only on create_staff) ----
+    create_login: bool = False
+    send_credentials_email: bool = True
 
 
 class StaffOut(StaffIn):
@@ -1104,8 +1118,11 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
     # --- Optional auto-provisioning a user login + credentials email ---
     create_login = bool(doc.pop("create_login", False))
     send_creds = bool(doc.pop("send_credentials_email", True))
-    login_email = (doc.pop("email", None) or "").strip().lower()
-    mobile = (doc.pop("mobile", None) or "").strip()
+    # Normalise contact fields (KEEP them on staff doc; do not pop)
+    login_email = (doc.get("email") or "").strip().lower() or None
+    mobile = (doc.get("mobile") or "").strip() or None
+    doc["email"] = login_email
+    doc["mobile"] = mobile
     email_result = None
     if create_login:
         if not login_email:
@@ -1153,6 +1170,9 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
 @api.put("/staff/{sid}", response_model=StaffOut)
 async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin", "manager", "hr"))):
     update = body.model_dump()
+    # Strip transient login-only fields — never persist them as columns
+    update.pop("create_login", None)
+    update.pop("send_credentials_email", None)
     if user.get("role") != "admin":
         # Preserve existing reports_to_id; only admin may change it
         existing = await db.staff.find_one({"id": sid}, {"_id": 0, "reports_to_id": 1})
@@ -1163,6 +1183,9 @@ async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
+    # Best-effort: keep linked user's mobile in sync
+    if update.get("mobile") and res.get("user_id"):
+        await db.users.update_one({"id": res["user_id"]}, {"$set": {"mobile": update["mobile"]}})
     return StaffOut(**res)
 
 
