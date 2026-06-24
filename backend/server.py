@@ -1029,9 +1029,28 @@ class StaffOut(StaffIn):
 
 
 class AttendanceIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
     staff_id: str
     date: str  # YYYY-MM-DD
     status: Literal["present", "absent", "half", "leave"] = "present"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy: Optional[float] = None  # in meters
+    selfie_path: Optional[str] = None  # storage path returned by /files/upload
+    selfie_filename: Optional[str] = None
+    marked_via: Optional[str] = "admin"  # "self" (from mobile check-in) or "admin"
+    marked_at: Optional[str] = None      # ISO timestamp when staff/admin actually pressed Save
+
+
+class SelfCheckInIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: Optional[str] = None  # defaults to today (server-side)
+    status: Literal["present", "absent", "half", "leave"] = "present"
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy: Optional[float] = None
+    selfie_path: Optional[str] = None
+    selfie_filename: Optional[str] = None
 
 
 class LeaveIn(BaseModel):
@@ -1107,9 +1126,13 @@ async def delete_staff(sid: str, _=Depends(require_role("admin"))):
 
 # -------- Attendance --------
 @api.post("/attendance")
-async def mark_attendance(body: AttendanceIn, _=Depends(require_role("admin", "manager", "center_manager", "hr", "center_staff"))):
+async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin", "manager", "center_manager", "hr", "center_staff"))):
     # upsert by (staff_id, date)
-    doc = body.model_dump()
+    doc = body.model_dump(exclude_none=True)
+    if not doc.get("marked_at"):
+        doc["marked_at"] = datetime.now(timezone.utc).isoformat()
+    doc["marked_via"] = doc.get("marked_via") or "admin"
+    doc["marked_by"] = user["id"]
     new_id = str(uuid.uuid4())
     await db.attendance.update_one(
         {"staff_id": doc["staff_id"], "date": doc["date"]},
@@ -1117,6 +1140,49 @@ async def mark_attendance(body: AttendanceIn, _=Depends(require_role("admin", "m
         upsert=True,
     )
     return {"ok": True}
+
+
+@api.post("/attendance/self")
+async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
+    """Mobile self-check-in: looks up the staff record linked to the current user,
+    then upserts today's attendance with location + selfie metadata.
+    """
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not staff:
+        raise HTTPException(400, "Your user is not linked to any staff record. Ask admin to set it up.")
+    today = (body.date or datetime.now(timezone.utc).date().isoformat())[:10]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "staff_id": staff["id"],
+        "date": today,
+        "status": body.status,
+        "latitude": body.latitude,
+        "longitude": body.longitude,
+        "accuracy": body.accuracy,
+        "selfie_path": body.selfie_path,
+        "selfie_filename": body.selfie_filename,
+        "marked_via": "self",
+        "marked_at": now_iso,
+        "marked_by": user["id"],
+    }
+    new_id = str(uuid.uuid4())
+    await db.attendance.update_one(
+        {"staff_id": staff["id"], "date": today},
+        {"$set": doc, "$setOnInsert": {"id": new_id}},
+        upsert=True,
+    )
+    return {"ok": True, "staff_id": staff["id"], "staff_name": staff.get("name"), "date": today, "marked_at": now_iso}
+
+
+@api.get("/attendance/today")
+async def my_today_attendance(user=Depends(get_current_user)):
+    """Return today's attendance row for the current logged-in user (if any)."""
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not staff:
+        return {"staff": None, "attendance": None}
+    today = datetime.now(timezone.utc).date().isoformat()
+    row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
+    return {"staff": staff, "attendance": row}
 
 
 @api.get("/attendance")

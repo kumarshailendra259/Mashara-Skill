@@ -456,13 +456,31 @@ export default function HRMS() {
                 <th className="text-left p-3">Date</th>
                 <th className="text-left p-3">Staff</th>
                 <th className="text-left p-3">Status</th>
+                <th className="text-left p-3">Source</th>
+                <th className="text-left p-3">Location</th>
+                <th className="text-left p-3">Selfie</th>
               </tr></thead>
               <tbody>
-                {attRecent.length === 0 ? <tr><td colSpan={3} className="text-center py-8 overline">No records</td></tr> : attRecent.map((a) => (
+                {attRecent.length === 0 ? <tr><td colSpan={6} className="text-center py-8 overline">No records</td></tr> : attRecent.map((a) => (
                   <tr key={a.id || `${a.staff_id}-${a.date}`} className="border-b border-[var(--border)] hover:bg-gray-50">
                     <td className="p-3 num">{a.date}</td>
                     <td className="p-3">{sName(a.staff_id)}</td>
                     <td className="p-3"><span className="overline">{a.status}</span></td>
+                    <td className="p-3 overline text-xs">{a.marked_via || "—"}</td>
+                    <td className="p-3">
+                      {a.latitude != null && a.longitude != null ? (
+                        <a href={`https://www.google.com/maps?q=${a.latitude},${a.longitude}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[var(--brand)] hover:underline text-xs">
+                          📍 {a.latitude.toFixed(4)}, {a.longitude.toFixed(4)}
+                        </a>
+                      ) : <span className="text-[var(--muted)] text-xs">—</span>}
+                    </td>
+                    <td className="p-3">
+                      {a.selfie_path ? (
+                        <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.selfie_path)}`} target="_blank" rel="noreferrer">
+                          <img src={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.selfie_path)}`} alt="selfie" className="w-10 h-10 object-cover border border-[var(--border)]" />
+                        </a>
+                      ) : <span className="text-[var(--muted)] text-xs">—</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>

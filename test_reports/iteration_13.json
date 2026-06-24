@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration-13 — Backend + frontend tested for mobile attendance PWA: (a) AttendanceIn extended fields (lat/lng/accuracy/selfie_path/selfie_filename/marked_via/marked_at) accepted on POST /api/attendance + auto-set marked_at/marked_by/default marked_via='admin' when missing, (b) POST /api/attendance/self for any logged-in user — looks up staff via user_id, upserts today's attendance with marked_via='self', returns {ok,staff_id,staff_name,date,marked_at}, 400 for unlinked user, (c) GET /api/attendance/today returns {staff,attendance} (null staff when unmapped), (d) PWA manifest at /manifest.json (start_url=/check-in, display=standalone, theme_color=#0a3bc5, 192/512 SVG icons) + index.html links manifest + apple-mobile-web-app-* meta tags, (e) /check-in mobile page (NOT behind ProtectedRoute, shows login form when logged-out, shows already-marked panel when today's attendance exists, shows step 1/2/3 UI when not yet marked), (f) HRMS Attendance tab now has Source/Location/Selfie columns. Wrote /app/backend/tests/test_iter13_mobile_attendance.py with 11 tests; ALL PASS. Full regression: 163/163 pass (152 prior + 11 new — no regression).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/attendance/self", "issue": "Uses body.model_dump() (no exclude_none) — re-posting a minimal payload like {\"status\":\"present\"} sets latitude/longitude/accuracy/selfie_path/selfie_filename back to null in Mongo, erasing prior values on the same (staff_id, date). Switch to exclude_none=True or use $unset semantics."},
+      {"endpoint": "GET /api/attendance/today / POST /api/attendance/self", "issue": "Both use db.staff.find_one({user_id}) — when multiple staff rows share the same user_id (e.g., TEST data), Mongo non-deterministically returns different rows on each call, so /attendance/today may show a different staff than the one self-checkin just upserted. Add a unique index on staff.user_id OR document that a user maps to exactly one staff."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Mobile self check-in selfie upload", "issue": "CheckIn.jsx posts the selfie to /api/files/upload — but the backend enforces require_role('admin','manager') on that endpoint. ANY non-admin/manager staff (center_staff, hr, center_manager, plain user) trying to self-check-in via /check-in will get 403 at the selfie step and cannot complete attendance. /attendance/self itself is open to all logged-in users, so the selfie-upload gate is the bottleneck. Recommend either (a) widening role on /files/upload, or (b) adding a dedicated open endpoint /api/files/upload-selfie that any authenticated user can call (size + content_type validated).", "affected_selectors": ["btn-take-selfie", "selfie-input"]},
+      {"flow": "already-marked panel image rendering", "issue": "Both CheckIn.jsx and HRMS.jsx render the selfie via <img src='${REACT_APP_BACKEND_URL}/api/files/view?path=...'> which relies on cross-origin cookie auth. /files/view DOES accept ?auth=<jwt> as a fallback but the UI never appends it. On browsers/contexts that block 3P cookies on <img>, selfie thumbnails will silently 401. Consider passing the JWT via ?auth= when rendering thumbnails (or proxying through a same-origin endpoint)."}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter13_mobile_attendance.py",
+    "/app/test_reports/pytest/iteration_13_new.xml",
+    "/app/test_reports/pytest/iteration_13_all.xml"
+  ],
+  "action_items": [
+    "HIGH: Fix selfie upload role guard — non-admin/manager staff cannot self-check-in today because /api/files/upload requires admin/manager. Either widen the role list to include hr/center_manager/center_staff for selfie uploads, or add a new endpoint /api/files/upload-selfie open to any authenticated user.",
+    "MED: Use exclude_none=True in self_check_in body.model_dump() so re-submits with minimal payload don't wipe lat/lng/selfie fields previously stored.",
+    "LOW: Add a unique index on staff.user_id (or enforce 1:1) — multiple TEST staff rows sharing one user_id cause /attendance/today vs /attendance/self to disagree on which staff is 'yours'.",
+    "LOW: Append ?auth=<jwt> to selfie <img src> in CheckIn.jsx and HRMS.jsx (or proxy via same-origin) to avoid 3P-cookie failures on selfie thumbnails."
+  ],
+  "critical_code_review_comments": [
+    "BUG (HIGH): The mobile check-in flow is broken for any staff whose role is not admin/manager. CheckIn.jsx → onSelfieChange calls api.post('/files/upload', ...). server.py:326 declares upload_file with Depends(require_role('admin','manager')). center_staff / hr / center_manager / plain users get 403. The /attendance/self endpoint itself is open to any authenticated user, so the bottleneck is purely the selfie upload role check. This needs to be fixed before rollout.",
+    "self_check_in upserts with body.model_dump() (NO exclude_none) — every minimal call overwrites lat/lng/accuracy/selfie_path/selfie_filename with null. mark_attendance correctly uses exclude_none=True. Make them consistent.",
+    "mark_attendance and self_check_in both look up staff via find_one({user_id}) with no deterministic ordering. If a single user has multiple staff records (possible via admin creating duplicates), the 'today' lookup may return a different row than the upsert — verified during testing where my fixture had to switch from /staff listing to /attendance/today to stay consistent with the backend.",
+    "/files/view accepts ?auth=<jwt> but CheckIn.jsx and HRMS.jsx never use it for <img src>. They rely on cookies being sent with <img> requests cross-origin — that works on this preview domain (same emergentagent.com root) but is fragile.",
+    "CheckIn.jsx submit() validates !coords / !selfie client-side but POST /attendance/self has no server-side requirement for either — a malicious client could post status without location/selfie. Probably acceptable for v1 but should be noted.",
+    "manifest.json uses data: URIs for both icons. Some PWA install heuristics on Android reject data: icons and require a real PNG file. Consider serving real 192x192 + 512x512 PNGs from /public for higher install-promotion reliability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter13_mobile_attendance.py (new, 11 tests)",
+    "/app/test_reports/iteration_13.json (new)",
+    "/app/test_reports/pytest/iteration_13_new.xml (new)",
+    "/app/test_reports/pytest/iteration_13_all.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (163/163, 11 new + 152 regression)", "frontend": "100% (login form + already-marked panel + step UI + manifest + HRMS columns all verified)"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Per-run: 1 fresh unmapped user (test_unmapped_{TAG}@finance.app) for the 400 'not linked' branch. Admin staff auto-resolved via /attendance/today. 2 future-dated (2099-01-15/16) admin attendance rows for extended-field tests. All tagged with random TAG suffix.",
+  "retest_needed": true,
+  "main_agent_can_self_test": false,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/ -v` → 163/163 in ~37s. NEW data-testids on /check-in: checkin-login, checkin-email, checkin-password, checkin-login-btn, checkin-not-staff, checkin-page, checkin-logout, already-marked, btn-capture-location, btn-take-selfie, selfie-input, status-present/half/leave, btn-checkin-submit. /check-in is intentionally OUTSIDE ProtectedRoute. After backend tests run, admin's today attendance exists with marked_via=self but lat=null/selfie=null (because last test's minimal payload overwrote them — symptom of the exclude_none bug). HIGH-priority bug: /files/upload is admin/manager-only, blocking any non-admin/manager from completing self-checkin. After main agent fixes role guard, re-test the full flow with a fresh center_staff user (register → admin POST /staff with user_id+role=center_staff → login as that user on /check-in → capture geo + selfie → submit). Use page.context.grant_permissions(['geolocation']) and page.context.set_geolocation({...}) in Playwright to test the geolocation branch; use page.set_input_files on [data-testid='selfie-input'] to drive the camera capture (the capture='user' attr is just a hint).",
+  "rca of the issue": "Mobile check-in bug RCA: server.py:326 has @api.post('/files/upload') with Depends(require_role('admin','manager')). CheckIn.jsx:87 unconditionally posts the selfie to that endpoint. Therefore role hierarchy: admin/manager succeed (verified end-to-end), center_staff/hr/center_manager/regular user fail with 403 on the selfie step and cannot complete /attendance/self. Repro: register a fresh user, admin POST /staff with that user_id and role=center_staff, login as that user, GET /attendance/today returns staff (verified working), POST /api/files/upload → 403. Mitigation options: (1) widen require_role to include all staff-class roles; (2) add a new endpoint /api/files/upload-selfie open to get_current_user with stricter content_type/size validation; (3) keep selfie as base64 in the attendance doc itself (simpler but bloats Mongo)."
+}
