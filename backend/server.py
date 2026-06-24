@@ -21,6 +21,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from motor.motor_asyncio import AsyncIOMotorClient
 
+logger = logging.getLogger(__name__)
+
 
 # ---------- DB ----------
 mongo_url = os.environ["MONGO_URL"]
@@ -1129,7 +1131,10 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
             await db.users.insert_one(user_doc)
             doc["user_id"] = user_doc["id"]
             if send_creds:
-                check_in_url = (os.environ.get("PUBLIC_APP_URL") or "https://finance.masharaskills.com").rstrip("/") + "/check-in"
+                public_url = os.environ.get("PUBLIC_APP_URL", "").rstrip("/")
+                if not public_url:
+                    logger.warning("PUBLIC_APP_URL not set — staff credential email check-in link will be empty")
+                check_in_url = (public_url + "/check-in") if public_url else "/check-in"
                 email_result = await send_credentials_email(
                     to_email=login_email, name=user_doc["name"], password=new_password, check_in_url=check_in_url,
                 )
