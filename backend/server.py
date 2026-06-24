@@ -247,7 +247,7 @@ class ApprovalActionIn(BaseModel):
     request_type: ApprovalType
     request_id: str
     action: Literal["approve", "reject"]
-    remarks: Optional[str] = ""
+    remarks: str = Field(min_length=3, description="Mandatory note explaining the decision (min 3 chars)")
 
 
 def _txn_scope_for_user(user: dict) -> dict:
@@ -1610,11 +1610,12 @@ async def list_leaves(
 
 @api.patch("/leaves/{lid}")
 async def decide_leave(lid: str, decision: str = Query(..., pattern="^(approved|rejected)$"),
+                       remarks: str = Query(..., min_length=3, description="Mandatory note (min 3 chars)"),
                        user=Depends(require_role("admin", "manager", "center_manager", "hr", "senior_manager"))):
     now = datetime.now(timezone.utc).isoformat()
     res = await db.leaves.find_one_and_update(
         {"id": lid},
-        {"$set": {"status": decision, "decided_by": user["id"], "decided_at": now}},
+        {"$set": {"status": decision, "decided_by": user["id"], "decided_at": now, "decision_remarks": remarks}},
         return_document=True,
     )
     if not res:
@@ -1994,6 +1995,99 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "created_at": rec.get("created_at"),
                 })
     return out
+
+
+@api.get("/approvals/{request_type}/{request_id}/timeline")
+async def approval_timeline(request_type: str, request_id: str, _=Depends(get_current_user)):
+    """Return a human-readable timeline of this request's approval chain.
+
+    Each step shows:
+      - level + label
+      - resolved approver name(s) (looked up from staff / users)
+      - state: "done" / "current" / "pending"
+      - action taken (approve/reject/auto-skip) + by_user_name + at + remarks (from chain_history)
+    """
+    if request_type not in ("reimbursement", "leave", "transaction"):
+        raise HTTPException(400, "Invalid request_type")
+    coll_name = {"reimbursement": "reimbursements", "leave": "leaves", "transaction": "transactions"}[request_type]
+    rec = await db[coll_name].find_one({"id": request_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Request not found")
+    snap = rec.get("chain_snapshot") or []
+    history = rec.get("chain_history") or []
+    cur_level = rec.get("current_level") or 0
+    overall_status = rec.get("status")
+
+    # Pre-load users for name lookup
+    user_ids: set = set()
+    for h in history:
+        if h.get("by_user_id"):
+            user_ids.add(h["by_user_id"])
+    if user_ids:
+        users = await db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(500)
+        user_map = {u["id"]: u for u in users}
+    else:
+        user_map = {}
+
+    timeline: List[dict] = []
+    for step in sorted(snap, key=lambda s: s.get("level", 0)):
+        lvl = step.get("level")
+        # State derivation
+        if overall_status in ("rejected",) and any(h.get("level") == lvl and h.get("action") == "reject" for h in history):
+            state = "rejected"
+        elif cur_level == 0 or (cur_level == -1 and any(h.get("level") == lvl and h.get("action") in ("approve", "auto-skip") for h in history)):
+            state = "done" if any(h.get("level") == lvl and h.get("action") in ("approve", "auto-skip") for h in history) else "skipped"
+        elif lvl < cur_level:
+            state = "done"
+        elif lvl == cur_level:
+            state = "current"
+        else:
+            state = "pending"
+
+        # Resolve approver name(s)
+        approver_ids = await _resolve_step_user_ids(step, rec)
+        approver_names = []
+        if approver_ids:
+            ulist = await db.users.find({"id": {"$in": approver_ids}}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(50)
+            approver_names = [u.get("name") or u.get("email") or u["id"][:8] for u in ulist]
+        elif step.get("kind") == "role":
+            approver_names = [f"(no user with role: {step.get('value')})"]
+
+        # History entry for this level (if any)
+        h_for_level = [h for h in history if h.get("level") == lvl]
+        action_log = []
+        for h in h_for_level:
+            by = h.get("by_user_name") or (user_map.get(h.get("by_user_id"), {}).get("name") if h.get("by_user_id") else "system")
+            action_log.append({
+                "action": h.get("action"),
+                "by": by,
+                "at": h.get("at"),
+                "remarks": h.get("remarks") or "",
+            })
+
+        timeline.append({
+            "level": lvl,
+            "label": step.get("label") or f"Level {lvl}",
+            "kind": step.get("kind"),
+            "value": step.get("value"),
+            "optional": step.get("optional", False),
+            "approver_names": approver_names,
+            "state": state,
+            "history": action_log,
+        })
+
+    return {
+        "request_type": request_type,
+        "request_id": request_id,
+        "status": overall_status,
+        "current_level": cur_level,
+        "total_levels": len(snap),
+        "created_by_id": rec.get("created_by"),
+        "created_at": rec.get("created_at"),
+        "amount": rec.get("amount"),
+        "description": rec.get("description") or rec.get("reason"),
+        "timeline": timeline,
+    }
 
 
 # -------- Reimbursements (3-stage approval) --------

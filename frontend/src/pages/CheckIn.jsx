@@ -520,6 +520,7 @@ function LeaveTab({ staffId }) {
   const [list, setList] = useState([]);
   const [form, setForm] = useState({ start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), reason: "" });
   const [submitting, setSubmitting] = useState(false);
+  const [trackId, setTrackId] = useState(null);
 
   const load = async () => {
     try { const { data } = await api.get("/leaves/my"); setList(data || []); } catch {/* best-effort */}
@@ -567,9 +568,14 @@ function LeaveTab({ staffId }) {
             {list.map((l) => (
               <li key={l.id} className="py-3 text-sm">
                 <div className="flex justify-between items-start">
-                  <div>
+                  <div className="flex-1">
                     <div className="font-medium">{new Date(l.start_date).toLocaleDateString(undefined, { day: "2-digit", month: "short" })} → {new Date(l.end_date).toLocaleDateString(undefined, { day: "2-digit", month: "short" })}</div>
                     {l.reason && <div className="text-xs text-[var(--muted)] mt-0.5">{l.reason}</div>}
+                    {l.current_level > 0 && l.chain_snapshot?.length && (
+                      <button onClick={() => setTrackId(l.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-leave-${l.id}`}>
+                        Track approval · Level {l.current_level} of {l.chain_snapshot.length} →
+                      </button>
+                    )}
                   </div>
                   <span className={`text-xs uppercase font-bold px-2 py-1 ${
                     l.status === "approved" ? "bg-green-100 text-green-700" :
@@ -582,6 +588,8 @@ function LeaveTab({ staffId }) {
           </ul>
         )}
       </div>
+
+      <ApprovalTimelineModal type="leave" requestId={trackId} onClose={() => setTrackId(null)} />
     </div>
   );
 }
@@ -594,6 +602,7 @@ function ReimburseTab({ staffId }) {
   const [form, setForm] = useState({ amount: "", date: new Date().toISOString().slice(0, 10), category: "", description: "", attachments: [] });
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [trackId, setTrackId] = useState(null);
   const fileRef = useRef(null);
 
   const load = async () => {
@@ -670,7 +679,9 @@ function ReimburseTab({ staffId }) {
                     <div className="text-xs text-[var(--muted)] mt-0.5">{new Date(r.date).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" })}</div>
                     {r.description && <div className="text-xs mt-1">{r.description}</div>}
                     {r.current_level > 0 && r.chain_snapshot?.length && (
-                      <div className="text-[10px] text-[var(--brand)] mt-1 font-medium">At Level {r.current_level} of {r.chain_snapshot.length}</div>
+                      <button onClick={() => setTrackId(r.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-claim-${r.id}`}>
+                        Track approval · Level {r.current_level} of {r.chain_snapshot.length} →
+                      </button>
                     )}
                   </div>
                   <span className={`text-xs uppercase font-bold px-2 py-1 ${
@@ -684,6 +695,8 @@ function ReimburseTab({ staffId }) {
           </ul>
         )}
       </div>
+
+      <ApprovalTimelineModal type="reimbursement" requestId={trackId} onClose={() => setTrackId(null)} />
     </div>
   );
 }
@@ -857,5 +870,71 @@ function SalaryTab() {
         )}
       </div>
     </div>
+  );
+}
+
+/* ============================================================
+   APPROVAL TIMELINE MODAL — reusable
+   ============================================================ */
+function ApprovalTimelineModal({ type, requestId, onClose }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!requestId) { setData(null); return; }
+    (async () => {
+      setLoading(true);
+      try { const r = await api.get(`/approvals/${type}/${requestId}/timeline`); setData(r.data); }
+      catch (e) { toast.error(formatError(e)); onClose(); }
+      finally { setLoading(false); }
+    })();
+  }, [type, requestId, onClose]);
+  if (!requestId) return null;
+  return (
+    <Dialog open={!!requestId} onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent className="rounded-none max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogHeader><DialogTitle className="font-heading">Approval Workflow</DialogTitle></DialogHeader>
+        {loading || !data ? (
+          <div className="overline text-center py-8 text-[var(--muted)]">Loading…</div>
+        ) : (
+          <div className="space-y-3">
+            <div className="text-xs text-[var(--muted)]">
+              Status: <span className="font-bold uppercase">{data.status}</span> · Level {data.current_level} of {data.total_levels}
+              {data.amount ? <> · {inr(data.amount)}</> : null}
+            </div>
+            <ol className="space-y-3">
+              {data.timeline.map((s) => {
+                const icon = s.state === "done" ? "✓" : s.state === "rejected" ? "✗" : s.state === "current" ? "→" : s.state === "skipped" ? "⟳" : "·";
+                const bg = s.state === "done" ? "bg-green-100 text-green-700" :
+                          s.state === "rejected" ? "bg-red-100 text-red-700" :
+                          s.state === "current" ? "bg-[var(--brand)] text-white" :
+                          s.state === "skipped" ? "bg-gray-200 text-gray-600" :
+                          "bg-gray-100 text-gray-500";
+                return (
+                  <li key={s.level} className="flex items-start gap-3">
+                    <div className={`w-8 h-8 flex items-center justify-center font-bold shrink-0 ${bg}`}>{icon}</div>
+                    <div className="flex-1 text-sm">
+                      <div className="font-medium">L{s.level} — {s.label}</div>
+                      <div className="text-[10px] text-[var(--muted)]">
+                        {s.state === "current" && "Pending with: "}
+                        {s.state === "pending" && "Will go to: "}
+                        {s.state === "done" && "Approved by: "}
+                        {s.state === "rejected" && "Rejected by: "}
+                        {s.history.length > 0 ? (s.history.map((h) => h.by).join(", ")) : (s.approver_names.slice(0, 3).join(", ") + (s.approver_names.length > 3 ? ` +${s.approver_names.length - 3}` : ""))}
+                      </div>
+                      {s.history.map((h, i) => (
+                        <div key={i} className="text-[11px] mt-1 bg-gray-50 border border-[var(--border)] p-1.5">
+                          <span className="capitalize font-medium">{h.action}</span> · {new Date(h.at).toLocaleString()}
+                          {h.remarks && <div className="text-[var(--muted)] mt-0.5 italic">&ldquo;{h.remarks}&rdquo;</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
