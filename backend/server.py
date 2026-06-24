@@ -2084,17 +2084,100 @@ async def reimb_reject(rid: str, body: RejectIn, user=Depends(get_current_user))
 
 
 # -------- Payroll --------
+class PayrollLineItem(BaseModel):
+    label: str
+    amount: float
+
+
+class PayrollEditIn(BaseModel):
+    """Admin/HR can override any component; net auto-recalculated server-side."""
+    model_config = ConfigDict(extra="ignore")
+    days_present: Optional[float] = None
+    basic: Optional[float] = None
+    hra: Optional[float] = None
+    da: Optional[float] = None
+    conveyance: Optional[float] = None
+    bonus: Optional[float] = None
+    incentive: Optional[float] = None
+    pf_deduction: Optional[float] = None
+    esi_deduction: Optional[float] = None
+    late_deduction: Optional[float] = None  # manual override of computed late
+    other_deductions: Optional[List[PayrollLineItem]] = None
+    remarks: Optional[str] = None
+
+
+def _recalc_payroll(doc: dict) -> dict:
+    """Compute gross / total_deductions / net from component fields. Mutates and returns doc."""
+    earnings = sum([
+        doc.get("basic", 0) or 0, doc.get("hra", 0) or 0, doc.get("da", 0) or 0,
+        doc.get("conveyance", 0) or 0, doc.get("bonus", 0) or 0, doc.get("incentive", 0) or 0,
+    ])
+    other_sum = sum((li.get("amount", 0) or 0) for li in (doc.get("other_deductions") or []))
+    deductions = sum([
+        doc.get("pf_deduction", 0) or 0, doc.get("esi_deduction", 0) or 0,
+        doc.get("late_deduction", 0) or 0, other_sum,
+    ])
+    doc["gross"] = round(earnings, 2)
+    doc["deductions"] = round(deductions, 2)
+    doc["net"] = round(earnings - deductions, 2)
+    return doc
+
+
+def _compute_late_buckets(rows: List[dict], shift: Optional[dict]) -> dict:
+    """Walk attendance rows; for each present day compute late_minutes vs shift start+grace.
+    Returns {minor: N, half_day: N, full_day: N, total_late_minutes: M} per user-defined rules:
+      - <2h late  → minor (every 3 minor = 1 full day deduct)
+      - 2h ≤ x < 6h → half_day count
+      - ≥6h → full_day count
+    If no shift configured for the staff, returns all zeros (no penalty).
+    """
+    out = {"minor": 0, "half_day": 0, "full_day": 0, "total_late_minutes": 0}
+    if not shift or not shift.get("start_time"):
+        return out
+    try:
+        sh_h, sh_m = (int(x) for x in shift["start_time"].split(":"))
+    except (ValueError, AttributeError):
+        return out
+    shift_start_min = sh_h * 60 + sh_m
+    grace = int(shift.get("grace_minutes") or 0)
+    for r in rows:
+        if r.get("status") != "present":
+            continue
+        check_in = r.get("check_in_at") or r.get("marked_at")
+        if not check_in:
+            continue
+        try:
+            dt = datetime.fromisoformat(check_in.replace("Z", "+00:00"))
+            ci_min = dt.hour * 60 + dt.minute
+        except (ValueError, AttributeError):
+            continue
+        late = ci_min - shift_start_min - grace
+        if late <= 0:
+            continue
+        out["total_late_minutes"] += late
+        if late >= 360:           # ≥ 6 hours
+            out["full_day"] += 1
+        elif late >= 120:         # 2 – 6 hours
+            out["half_day"] += 1
+        else:                     # < 2 hours
+            out["minor"] += 1
+    return out
+
+
 @api.post("/payroll/run")
 async def payroll_run(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020, le=2100),
     _=Depends(require_role("admin", "accountant", "hr")),
 ):
-    """Generate payroll rows for all staff for the given month based on attendance × per_day_rate.
+    """Generate payroll rows for all staff for the given month.
 
-    days_present is counted as: present=1, half=0.5, absent/leave=0.
-    net_pay = base_salary OR (days_worked × per_day_rate) — we use per_day_rate × days when > 0
-    else fall back to monthly_salary prorated by (days_present / working_days_in_month).
+    Late penalty (per user-defined formula):
+      - <2h late  → minor: every 3 minor counts = 1 day deducted
+      - 2h-6h     → half-day (0.5 day deducted)
+      - ≥6h       → full-day (1 day deducted)
+      Final late_days = (minor // 3) + 0.5*half_day + 1.0*full_day
+      late_deduction = late_days × per_day_rate (or pro-rated monthly_salary/working_days)
     """
     import calendar
     last_day = calendar.monthrange(year, month)[1]
@@ -2107,14 +2190,26 @@ async def payroll_run(
         rows = await db.attendance.find({"staff_id": s["id"], "date": {"$gte": start, "$lte": end}}, {"_id": 0}).to_list(1000)
         days_present = 0.0
         for r in rows:
-            if r["status"] == "present":
+            st = r.get("status")
+            if st == "present":
                 days_present += 1
-            elif r["status"] == "half":
+            elif st == "half":
                 days_present += 0.5
+        # Late penalty
+        shift = None
+        if s.get("shift_id"):
+            shift = await db.shifts.find_one({"id": s["shift_id"]}, {"_id": 0})
+        buckets = _compute_late_buckets(rows, shift)
+        late_days = (buckets["minor"] // 3) + 0.5 * buckets["half_day"] + 1.0 * buckets["full_day"]
+        per_day = s.get("per_day_rate", 0) or ((s.get("monthly_salary", 0) or 0) / last_day if last_day else 0)
+        late_deduction = round(late_days * per_day, 2)
+        # Base (basic only; HRA/DA/etc. start at 0 and HR can configure later)
         if s.get("per_day_rate", 0) and days_present > 0:
-            gross = s["per_day_rate"] * days_present
+            basic = s["per_day_rate"] * days_present
+        elif s.get("monthly_salary", 0) and days_present > 0:
+            basic = (s["monthly_salary"] or 0) * (days_present / last_day)
         else:
-            gross = (s.get("monthly_salary", 0) or 0) * (days_present / last_day) if days_present else 0
+            basic = 0
 
         existing = await db.payroll.find_one({"staff_id": s["id"], "month": month, "year": year})
         if existing:
@@ -2128,18 +2223,55 @@ async def payroll_run(
             "working_days": last_day,
             "base_salary": s.get("monthly_salary", 0),
             "per_day_rate": s.get("per_day_rate", 0),
-            "gross": round(gross, 2),
-            "deductions": 0.0,
-            "net": round(gross, 2),
+            # Earnings breakdown
+            "basic": round(basic, 2),
+            "hra": 0.0, "da": 0.0, "conveyance": 0.0,
+            "bonus": 0.0, "incentive": 0.0,
+            # Deductions
+            "pf_deduction": 0.0, "esi_deduction": 0.0,
+            "late_deduction": late_deduction,
+            "other_deductions": [],
+            # Late buckets snapshot
+            "late_buckets": buckets,
+            "late_days": late_days,
+            # Computed
+            "gross": 0.0, "deductions": 0.0, "net": 0.0,
+            # Lifecycle
             "status": "draft",
-            "txn_id": None,
-            "paid_at": None,
+            "txn_id": None, "paid_at": None,
+            "remarks": None,
+            "edited_by": None, "edited_at": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        _recalc_payroll(doc)
         await db.payroll.insert_one(doc)
         doc.pop("_id", None)
         created.append(doc)
     return {"created": len(created), "rows": created}
+
+
+@api.patch("/payroll/{pid}")
+async def edit_payroll(pid: str, body: PayrollEditIn, user=Depends(require_role("admin", "hr"))):
+    """Admin/HR can override any payroll component. Net auto-recalculated."""
+    rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") == "paid":
+        raise HTTPException(400, "Cannot edit a paid payslip. Reverse the payment first.")
+    update = body.model_dump(exclude_none=True)
+    if "other_deductions" in update:
+        update["other_deductions"] = [li if isinstance(li, dict) else li.model_dump() for li in update["other_deductions"]]
+    merged = {**rec, **update}
+    _recalc_payroll(merged)
+    merged["edited_by"] = user["id"]
+    merged["edited_at"] = datetime.now(timezone.utc).isoformat()
+    await db.payroll.update_one({"id": pid}, {"$set": {k: merged[k] for k in (
+        "days_present", "basic", "hra", "da", "conveyance", "bonus", "incentive",
+        "pf_deduction", "esi_deduction", "late_deduction", "other_deductions",
+        "gross", "deductions", "net", "remarks", "edited_by", "edited_at",
+    ) if k in merged}})
+    res = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    return res
 
 
 @api.get("/payroll")

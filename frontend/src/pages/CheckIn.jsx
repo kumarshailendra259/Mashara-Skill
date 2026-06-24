@@ -730,14 +730,38 @@ function SalaryTab() {
         ) : (
           <ul className="mt-2 divide-y divide-[var(--border)]">
             {rows.map((r) => (
-              <li key={r.id} className="py-3 text-sm flex justify-between items-start">
-                <div>
-                  <div className="font-medium">{new Date(r.year, r.month - 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
-                  <div className="text-xs text-[var(--muted)] mt-0.5">{r.days_present || 0} days · {inr(r.gross || 0)} gross</div>
-                </div>
-                <div className="text-right">
-                  <div className="font-heading font-bold">{inr(r.net || 0)}</div>
-                  <span className={`text-xs uppercase font-bold px-2 py-0.5 ${r.status === "paid" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+              <li key={r.id} className="py-3 text-sm">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <div className="font-medium">{new Date(r.year, r.month - 1).toLocaleDateString(undefined, { month: "long", year: "numeric" })}</div>
+                    <div className="text-xs text-[var(--muted)] mt-0.5">{r.days_present || 0} days{r.late_days ? ` · ${r.late_days} late day(s)` : ""}</div>
+                    {(r.basic || r.hra || r.bonus) && (
+                      <div className="text-[10px] text-[var(--muted)] mt-1 leading-tight">
+                        Earn: {[
+                          r.basic ? `Basic ${inr(r.basic)}` : null,
+                          r.hra ? `HRA ${inr(r.hra)}` : null,
+                          r.da ? `DA ${inr(r.da)}` : null,
+                          r.conveyance ? `Conv ${inr(r.conveyance)}` : null,
+                          r.bonus ? `Bonus ${inr(r.bonus)}` : null,
+                          r.incentive ? `Inct ${inr(r.incentive)}` : null,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                    {(r.pf_deduction || r.esi_deduction || r.late_deduction || (r.other_deductions || []).length > 0) && (
+                      <div className="text-[10px] text-[var(--danger)] mt-0.5 leading-tight">
+                        Deduct: {[
+                          r.pf_deduction ? `PF ${inr(r.pf_deduction)}` : null,
+                          r.esi_deduction ? `ESI ${inr(r.esi_deduction)}` : null,
+                          r.late_deduction ? `Late ${inr(r.late_deduction)}` : null,
+                          ...((r.other_deductions || []).map((li) => `${li.label} ${inr(li.amount)}`)),
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <div className="font-heading font-bold">{inr(r.net || 0)}</div>
+                    <span className={`text-xs uppercase font-bold px-2 py-0.5 ${r.status === "paid" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                  </div>
                 </div>
               </li>
             ))}

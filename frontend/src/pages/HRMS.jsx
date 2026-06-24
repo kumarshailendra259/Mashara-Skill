@@ -74,6 +74,59 @@ export default function HRMS() {
   const [pMonth, setPMonth] = useState(new Date().getMonth() + 1);
   const [pYear, setPYear] = useState(new Date().getFullYear());
 
+  // Payroll edit dialog state
+  const [payrollOpen, setPayrollOpen] = useState(false);
+  const [editingPayroll, setEditingPayroll] = useState(null);
+  const emptyPayrollForm = {
+    days_present: 0, basic: 0, hra: 0, da: 0, conveyance: 0, bonus: 0, incentive: 0,
+    pf_deduction: 0, esi_deduction: 0, late_deduction: 0, other_deductions: [], remarks: "",
+  };
+  const [payrollForm, setPayrollForm] = useState(emptyPayrollForm);
+
+  const openEditPayroll = (p) => {
+    setEditingPayroll(p);
+    setPayrollForm({
+      days_present: p.days_present || 0,
+      basic: p.basic || 0,
+      hra: p.hra || 0,
+      da: p.da || 0,
+      conveyance: p.conveyance || 0,
+      bonus: p.bonus || 0,
+      incentive: p.incentive || 0,
+      pf_deduction: p.pf_deduction || 0,
+      esi_deduction: p.esi_deduction || 0,
+      late_deduction: p.late_deduction || 0,
+      other_deductions: (p.other_deductions || []).map((li) => ({ ...li })),
+      remarks: p.remarks || "",
+    });
+    setPayrollOpen(true);
+  };
+
+  const savePayroll = async () => {
+    if (!editingPayroll) return;
+    try {
+      const payload = {
+        days_present: +payrollForm.days_present || 0,
+        basic: +payrollForm.basic || 0,
+        hra: +payrollForm.hra || 0,
+        da: +payrollForm.da || 0,
+        conveyance: +payrollForm.conveyance || 0,
+        bonus: +payrollForm.bonus || 0,
+        incentive: +payrollForm.incentive || 0,
+        pf_deduction: +payrollForm.pf_deduction || 0,
+        esi_deduction: +payrollForm.esi_deduction || 0,
+        late_deduction: +payrollForm.late_deduction || 0,
+        other_deductions: (payrollForm.other_deductions || []).map((li) => ({ label: li.label || "", amount: +li.amount || 0 })),
+        remarks: payrollForm.remarks || null,
+      };
+      await api.patch(`/payroll/${editingPayroll.id}`, payload);
+      setPayrollOpen(false);
+      setEditingPayroll(null);
+      loadAll();
+      toast.success("Payslip updated");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   // Attendance state
   const [attDate, setAttDate] = useState(new Date().toISOString().slice(0,10));
   const [attMap, setAttMap] = useState({}); // staff_id -> status
@@ -872,26 +925,125 @@ export default function HRMS() {
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
             <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
               <th className="text-left p-3">Period</th><th className="text-left p-3">Staff</th>
-              <th className="text-right p-3">Days</th><th className="text-right p-3">Gross</th>
+              <th className="text-right p-3">Days</th><th className="text-right p-3">Late Days</th>
+              <th className="text-right p-3">Gross</th><th className="text-right p-3">Deduct</th>
               <th className="text-right p-3">Net</th><th className="text-left p-3">Status</th>
-              <th className="text-right p-3 w-28">Action</th>
+              <th className="text-right p-3 w-32 no-print">Action</th>
             </tr></thead><tbody>
-              {payroll.length === 0 ? <tr><td colSpan={7} className="text-center py-8 overline">No payroll yet</td></tr> : payroll.map((p) => (
+              {payroll.length === 0 ? <tr><td colSpan={9} className="text-center py-8 overline">No payroll yet</td></tr> : payroll.map((p) => (
                 <tr key={p.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                   <td className="p-3 num">{p.month}/{p.year}</td>
                   <td className="p-3">{p.staff_name || sName(p.staff_id)}</td>
                   <td className="p-3 num">{p.days_present} / {p.working_days}</td>
+                  <td className="p-3 num text-xs">
+                    {p.late_days ? (
+                      <span title={`<2h: ${p.late_buckets?.minor || 0} · 2-6h: ${p.late_buckets?.half_day || 0} · ≥6h: ${p.late_buckets?.full_day || 0}`}>{p.late_days}</span>
+                    ) : "—"}
+                  </td>
                   <td className="p-3 num">{inr(p.gross)}</td>
+                  <td className="p-3 num text-[var(--danger)]">{p.deductions ? inr(p.deductions) : "—"}</td>
                   <td className="p-3 num font-medium">{inr(p.net)}</td>
                   <td className="p-3"><span className={`inline-block px-2 py-0.5 text-xs border ${p.status === "paid" ? "border-[var(--success)] text-[var(--success)]" : "border-[var(--warning)] text-[#9a7a00]"}`}>{p.status}</span></td>
-                  <td className="p-3 text-right">
-                    {p.status !== "paid" && (isAdmin || isAccountant) && (
-                      <Button size="sm" variant="ghost" onClick={() => payPayroll(p.id)} className="rounded-none h-8 px-2 text-[var(--brand)] font-medium" data-testid={`pay-payroll-${p.id}`}>Pay</Button>
-                    )}
+                  <td className="p-3 text-right no-print">
+                    <div className="flex gap-1 justify-end">
+                      {p.status !== "paid" && canManageStaff && (
+                        <Button size="sm" variant="outline" onClick={() => openEditPayroll(p)} className="rounded-none h-8 px-2" data-testid={`edit-payroll-${p.id}`} title="Edit"><Pencil size={14} /></Button>
+                      )}
+                      {p.status !== "paid" && (isAdmin || isAccountant) && (
+                        <Button size="sm" onClick={() => payPayroll(p.id)} className="brand-btn rounded-none h-8 px-3" data-testid={`pay-payroll-${p.id}`}>Pay</Button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody></table></div>
+
+          {/* Edit Payslip Dialog */}
+          <Dialog open={payrollOpen} onOpenChange={(o) => { setPayrollOpen(o); if (!o) setEditingPayroll(null); }}>
+            <DialogContent className="rounded-none max-w-2xl max-h-[90vh] overflow-y-auto">
+              <DialogHeader><DialogTitle className="font-heading">Edit Payslip — {editingPayroll?.staff_name} · {editingPayroll?.month}/{editingPayroll?.year}</DialogTitle></DialogHeader>
+              {editingPayroll && (
+                <div className="space-y-4">
+                  {/* Earnings */}
+                  <div>
+                    <div className="overline text-[var(--brand)] mb-2">Earnings</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div><Label>Days Present</Label><Input type="number" step="0.5" value={payrollForm.days_present} onChange={(e) => setPayrollForm({ ...payrollForm, days_present: e.target.value })} className="rounded-none" data-testid="pf-days" /></div>
+                      <div><Label>Basic</Label><Input type="number" value={payrollForm.basic} onChange={(e) => setPayrollForm({ ...payrollForm, basic: e.target.value })} className="rounded-none" data-testid="pf-basic" /></div>
+                      <div><Label>HRA</Label><Input type="number" value={payrollForm.hra} onChange={(e) => setPayrollForm({ ...payrollForm, hra: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>DA</Label><Input type="number" value={payrollForm.da} onChange={(e) => setPayrollForm({ ...payrollForm, da: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Conveyance</Label><Input type="number" value={payrollForm.conveyance} onChange={(e) => setPayrollForm({ ...payrollForm, conveyance: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Bonus</Label><Input type="number" value={payrollForm.bonus} onChange={(e) => setPayrollForm({ ...payrollForm, bonus: e.target.value })} className="rounded-none" /></div>
+                      <div className="col-span-2"><Label>Incentive</Label><Input type="number" value={payrollForm.incentive} onChange={(e) => setPayrollForm({ ...payrollForm, incentive: e.target.value })} className="rounded-none" /></div>
+                    </div>
+                  </div>
+
+                  {/* Deductions */}
+                  <div>
+                    <div className="overline text-[var(--brand)] mb-2">Deductions</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div><Label>PF</Label><Input type="number" value={payrollForm.pf_deduction} onChange={(e) => setPayrollForm({ ...payrollForm, pf_deduction: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>ESI</Label><Input type="number" value={payrollForm.esi_deduction} onChange={(e) => setPayrollForm({ ...payrollForm, esi_deduction: e.target.value })} className="rounded-none" /></div>
+                      <div className="col-span-2"><Label>Late Penalty <span className="text-[10px] text-[var(--muted)]">(auto-computed; you can override)</span></Label><Input type="number" value={payrollForm.late_deduction} onChange={(e) => setPayrollForm({ ...payrollForm, late_deduction: e.target.value })} className="rounded-none" data-testid="pf-late" /></div>
+                      {editingPayroll.late_buckets && (
+                        <div className="col-span-2 text-[10px] text-[var(--muted)] -mt-1">
+                          Late buckets: &lt;2h × {editingPayroll.late_buckets.minor || 0} · 2-6h × {editingPayroll.late_buckets.half_day || 0} · ≥6h × {editingPayroll.late_buckets.full_day || 0} = {editingPayroll.late_days || 0} day(s) deducted
+                        </div>
+                      )}
+                    </div>
+                    {/* Other deductions line items */}
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between">
+                        <Label className="overline">Other Deductions</Label>
+                        <Button size="sm" variant="outline" onClick={() => setPayrollForm({ ...payrollForm, other_deductions: [...(payrollForm.other_deductions || []), { label: "", amount: 0 }] })} className="rounded-none h-7 px-2 gap-1 text-xs"><Plus size={12} /> Add</Button>
+                      </div>
+                      <div className="space-y-2 mt-2">
+                        {(payrollForm.other_deductions || []).map((li, i) => (
+                          <div key={i} className="flex gap-2 items-center">
+                            <Input value={li.label} onChange={(e) => {
+                              const arr = [...payrollForm.other_deductions];
+                              arr[i] = { ...arr[i], label: e.target.value };
+                              setPayrollForm({ ...payrollForm, other_deductions: arr });
+                            }} placeholder="e.g. Loan recovery" className="rounded-none flex-1" />
+                            <Input type="number" value={li.amount} onChange={(e) => {
+                              const arr = [...payrollForm.other_deductions];
+                              arr[i] = { ...arr[i], amount: e.target.value };
+                              setPayrollForm({ ...payrollForm, other_deductions: arr });
+                            }} className="rounded-none w-32" />
+                            <Button size="sm" variant="outline" onClick={() => {
+                              const arr = (payrollForm.other_deductions || []).filter((_, j) => j !== i);
+                              setPayrollForm({ ...payrollForm, other_deductions: arr });
+                            }} className="rounded-none h-9 px-2 text-[var(--danger)] hover:bg-red-50"><Trash2 size={14} /></Button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Live recalculation preview */}
+                  {(() => {
+                    const n = (v) => parseFloat(v) || 0;
+                    const earn = ["basic", "hra", "da", "conveyance", "bonus", "incentive"].reduce((a, k) => a + n(payrollForm[k]), 0);
+                    const otherSum = (payrollForm.other_deductions || []).reduce((a, li) => a + n(li.amount), 0);
+                    const ded = n(payrollForm.pf_deduction) + n(payrollForm.esi_deduction) + n(payrollForm.late_deduction) + otherSum;
+                    return (
+                      <div className="bg-gray-50 border border-[var(--border)] p-3 grid grid-cols-3 gap-2 text-sm">
+                        <div><div className="overline text-[10px]">Gross</div><div className="font-heading font-bold text-lg">{inr(earn)}</div></div>
+                        <div><div className="overline text-[10px]">Deductions</div><div className="font-heading font-bold text-lg text-[var(--danger)]">{inr(ded)}</div></div>
+                        <div><div className="overline text-[10px]">Net</div><div className="font-heading font-black text-xl text-[var(--success)]" data-testid="pf-net-preview">{inr(earn - ded)}</div></div>
+                      </div>
+                    );
+                  })()}
+
+                  <div><Label>Remarks (optional)</Label><Input value={payrollForm.remarks || ""} onChange={(e) => setPayrollForm({ ...payrollForm, remarks: e.target.value })} placeholder="e.g. Bonus for project completion" className="rounded-none" /></div>
+                </div>
+              )}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setPayrollOpen(false)} className="rounded-none">Cancel</Button>
+                <Button onClick={savePayroll} className="brand-btn rounded-none" data-testid="pf-save">Save</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
       </Tabs>
     </div>
