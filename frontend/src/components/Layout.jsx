@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +25,7 @@ const navItems = [
   { to: "/reports", key: "reports", icon: FileBarChart2 },
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
+  { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
 ];
 
@@ -83,7 +84,11 @@ export default function Layout({ children }) {
 
   // Memoise the role-filtered nav list so the sidebar doesn't rebuild it on every render.
   const visibleNavItems = useMemo(
-    () => navItems.filter((it) => !it.adminOnly || user?.role === "admin"),
+    () => navItems.filter((it) => {
+      if (it.adminOnly && user?.role !== "admin") return false;
+      if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
+      return true;
+    }),
     [user?.role],
   );
 

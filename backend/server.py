@@ -205,6 +205,51 @@ class RejectIn(BaseModel):
     reason: Optional[str] = ""
 
 
+# ============================================================================
+# Approval Chains — configurable multi-level approval workflows
+# ============================================================================
+ApprovalType = Literal["reimbursement", "leave", "transaction"]
+ApproverKind = Literal["role", "staff", "user", "reports_to"]
+
+
+class ApprovalStep(BaseModel):
+    """One level in an approval chain.
+
+    kind / value semantics:
+      - role          → value = role name (e.g. "manager"); any user with that role may approve
+      - staff         → value = staff.id (their linked user_id approves)
+      - user          → value = user.id (specific person)
+      - reports_to    → value = depth-int as string ("1"=direct manager, "2"=grand-manager)
+                        resolved dynamically from the submitter's staff.reports_to chain
+    """
+    level: int = Field(ge=1)
+    kind: ApproverKind
+    value: str
+    label: Optional[str] = None
+    optional: bool = False  # if approver can't be resolved, skip this level
+
+
+class ApprovalChainIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    type: ApprovalType
+    steps: List[ApprovalStep] = Field(default_factory=list)
+    active: bool = True
+
+
+class ApprovalChainOut(ApprovalChainIn):
+    id: str
+    created_at: str
+    created_by: Optional[str] = None
+
+
+class ApprovalActionIn(BaseModel):
+    request_type: ApprovalType
+    request_id: str
+    action: Literal["approve", "reject"]
+    remarks: Optional[str] = ""
+
+
 def _txn_scope_for_user(user: dict) -> dict:
     """Return Mongo query filter restricting transactions to user's scope.
 
@@ -234,11 +279,12 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
     await db.batch_payments.create_index([("batch_id", 1), ("milestone", 1)])
+    await db.approval_chains.create_index([("type", 1), ("active", 1)])
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -267,6 +313,9 @@ async def on_startup():
         {"status": {"$exists": False}},
         {"$set": {"status": "approved", "approved_by": None, "approved_at": None, "rejected_reason": None, "items": [], "attachments": []}},
     )
+
+    # Seed default approval chains (idempotent)
+    await _seed_default_chains()
 
 
 @app.on_event("shutdown")
@@ -426,7 +475,7 @@ async def me(user=Depends(get_current_user)):
 
 
 @api.get("/auth/users", response_model=List[UserOut])
-async def list_users(_=Depends(require_role("admin"))):
+async def list_users(_=Depends(require_role("admin", "hr"))):
     docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
     return [UserOut(**d) for d in docs]
 
@@ -549,12 +598,26 @@ async def create_transaction(body: TransactionIn, user=Depends(require_role("adm
         doc["status"] = "approved"
         doc["approved_by"] = user["id"]
         doc["approved_at"] = doc["created_at"]
+        # Admin-created transactions skip the chain (auto-approved)
+        doc["chain_id"] = None
+        doc["current_level"] = 0
+        doc["chain_snapshot"] = []
+        doc["chain_history"] = []
     else:
         doc["status"] = "pending"
         doc["approved_by"] = None
         doc["approved_at"] = None
+        await _attach_chain_to_request("transaction", doc)
     doc["rejected_reason"] = None
     await db.transactions.insert_one(doc)
+    # Notify first-level approver if chain present
+    if doc.get("current_level") and doc.get("chain_snapshot"):
+        first = next((s for s in doc["chain_snapshot"] if s.get("level") == 1), None)
+        if first:
+            for uid in await _resolve_step_user_ids(first, doc):
+                if uid and uid != user["id"]:
+                    await _notify(uid, f"New transaction awaiting your approval (₹{doc.get('amount', 0):,.0f})",
+                                  ntype="txn_pending", ref_id=doc["id"], link="/transactions")
     return TransactionOut(**doc)
 
 
@@ -1287,8 +1350,17 @@ async def apply_leave(body: LeaveIn, user=Depends(get_current_user)):
     doc["status"] = "pending"
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await _attach_chain_to_request("leave", doc)
     await db.leaves.insert_one(doc)
     doc.pop("_id", None)
+    # Notify L1 approver
+    if doc.get("chain_snapshot"):
+        first = next((s for s in doc["chain_snapshot"] if s.get("level") == 1), None)
+        if first:
+            for uid in await _resolve_step_user_ids(first, doc):
+                if uid and uid != user["id"]:
+                    await _notify(uid, "New leave request awaiting your approval",
+                                  ntype="leave_pending", ref_id=doc["id"], link="/hrms")
     return doc
 
 
@@ -1322,6 +1394,379 @@ async def decide_leave(lid: str, decision: str = Query(..., pattern="^(approved|
     return res
 
 
+# ============================================================================
+# Approval Chain Engine — generic configurable multi-level workflows
+# ============================================================================
+#
+# Chains live in `approval_chains` collection. Each request (reimbursement /
+# leave / transaction) that uses a chain stores:
+#   - chain_id          : reference
+#   - current_level     : 1..N while pending, 0 once final-approved, -1 if rejected
+#   - chain_history     : list of {level, action, by_user_id, by_user_name, at, remarks}
+#   - chain_snapshot    : snapshot of steps at submit-time so later config edits don't break in-flight items
+#
+# Endpoints exposed:
+#   GET    /api/approval-chains
+#   POST   /api/approval-chains          (admin, hr)
+#   PUT    /api/approval-chains/{id}     (admin, hr)
+#   DELETE /api/approval-chains/{id}     (admin, hr)
+#   POST   /api/approvals/act            (any user; checked against current step's resolved approvers)
+# ============================================================================
+
+
+DEFAULT_CHAINS: List[dict] = [
+    {
+        "name": "Reimbursement — Default (4 levels)",
+        "type": "reimbursement",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "reports_to", "value": "1", "label": "Direct Manager", "optional": False},
+            {"level": 2, "kind": "role",       "value": "hr", "label": "HR", "optional": True},
+            {"level": 3, "kind": "role",       "value": "accountant", "label": "Accountant", "optional": False},
+            {"level": 4, "kind": "role",       "value": "admin", "label": "Account Officer (Pay)", "optional": False},
+        ],
+    },
+    {
+        "name": "Leave — Default (2 levels)",
+        "type": "leave",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "reports_to", "value": "1", "label": "Direct Manager", "optional": False},
+            {"level": 2, "kind": "role",       "value": "hr", "label": "HR", "optional": False},
+        ],
+    },
+    {
+        "name": "Transaction — Default (1 level)",
+        "type": "transaction",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "admin", "label": "Admin", "optional": False},
+        ],
+    },
+]
+
+
+async def _seed_default_chains():
+    """Idempotent: ensure at least one active default chain exists per request type."""
+    for default in DEFAULT_CHAINS:
+        existing = await db.approval_chains.find_one({"type": default["type"], "active": True}, {"_id": 0})
+        if existing:
+            continue
+        doc = {
+            **default,
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": None,
+        }
+        await db.approval_chains.insert_one(doc)
+
+
+async def _find_active_chain(req_type: str) -> Optional[dict]:
+    return await db.approval_chains.find_one({"type": req_type, "active": True}, {"_id": 0})
+
+
+async def _resolve_reports_to_user_ids(submitter_user_id: str, depth: int) -> List[str]:
+    """Walk the reports_to chain `depth` steps up from the submitter's staff record.
+    Returns the linked user_id of the resolved staff (list with 0 or 1 entry)."""
+    staff = await db.staff.find_one({"user_id": submitter_user_id}, {"_id": 0})
+    if not staff:
+        return []
+    current = staff
+    for _ in range(depth):
+        boss_id = current.get("reports_to_id")
+        if not boss_id:
+            return []
+        current = await db.staff.find_one({"id": boss_id}, {"_id": 0})
+        if not current:
+            return []
+    target_user_id = current.get("user_id")
+    return [target_user_id] if target_user_id else []
+
+
+async def _resolve_step_user_ids(step: dict, request_doc: dict) -> List[str]:
+    """Return list of user_ids who are eligible to act on this step for this request."""
+    kind = step.get("kind")
+    value = step.get("value", "")
+    if kind == "role":
+        users = await db.users.find({"role": value}, {"_id": 0, "id": 1}).to_list(2000)
+        return [u["id"] for u in users]
+    if kind == "user":
+        return [value] if value else []
+    if kind == "staff":
+        s = await db.staff.find_one({"id": value}, {"_id": 0, "user_id": 1})
+        return [s["user_id"]] if s and s.get("user_id") else []
+    if kind == "reports_to":
+        try:
+            depth = max(1, int(value or "1"))
+        except (ValueError, TypeError):
+            depth = 1
+        submitter_id = request_doc.get("created_by")
+        if not submitter_id:
+            return []
+        return await _resolve_reports_to_user_ids(submitter_id, depth)
+    return []
+
+
+async def _attach_chain_to_request(req_type: str, request_doc: dict) -> dict:
+    """Look up active chain, snapshot it onto the request_doc, set current_level=1.
+    Mutates and returns the same doc. If no chain is configured, leaves doc unchanged."""
+    chain = await _find_active_chain(req_type)
+    if not chain or not chain.get("steps"):
+        request_doc["chain_id"] = None
+        request_doc["current_level"] = None
+        request_doc["chain_snapshot"] = []
+        request_doc["chain_history"] = []
+        return request_doc
+    steps = sorted(chain["steps"], key=lambda s: s.get("level", 0))
+    request_doc["chain_id"] = chain["id"]
+    request_doc["current_level"] = 1
+    request_doc["chain_snapshot"] = steps
+    request_doc["chain_history"] = []
+    return request_doc
+
+
+async def _current_step(request_doc: dict) -> Optional[dict]:
+    snap = request_doc.get("chain_snapshot") or []
+    cur = request_doc.get("current_level")
+    if not snap or not cur or cur < 1:
+        return None
+    for s in snap:
+        if s.get("level") == cur:
+            return s
+    return None
+
+
+async def _user_can_act_on_request(user: dict, request_doc: dict) -> bool:
+    # Admin bypass: admin can always act on any pending step
+    if user.get("role") == "admin":
+        return True
+    step = await _current_step(request_doc)
+    if not step:
+        return False
+    eligible = await _resolve_step_user_ids(step, request_doc)
+    return user["id"] in eligible
+
+
+def _history_entry(level: int, action: str, user: dict, remarks: str = "") -> dict:
+    return {
+        "level": level,
+        "action": action,
+        "by_user_id": user["id"],
+        "by_user_name": user.get("name") or user.get("email"),
+        "at": datetime.now(timezone.utc).isoformat(),
+        "remarks": remarks or "",
+    }
+
+
+# -------- Approval Chain CRUD --------
+@api.get("/approval-chains", response_model=List[ApprovalChainOut])
+async def list_approval_chains(_=Depends(get_current_user)):
+    docs = await db.approval_chains.find({}, {"_id": 0}).sort([("type", 1), ("created_at", 1)]).to_list(200)
+    return docs
+
+
+@api.post("/approval-chains", response_model=ApprovalChainOut)
+async def create_approval_chain(body: ApprovalChainIn, user=Depends(require_role("admin", "hr"))):
+    doc = body.model_dump()
+    if not doc["steps"]:
+        raise HTTPException(400, "At least one approval step is required")
+    # Normalise step levels: re-index 1..N to avoid duplicates/gaps
+    sorted_steps = sorted(doc["steps"], key=lambda s: s.get("level", 0))
+    for i, s in enumerate(sorted_steps, 1):
+        s["level"] = i
+    doc["steps"] = sorted_steps
+    # If activated, deactivate other chains of the same type to keep one active per type
+    if doc.get("active"):
+        await db.approval_chains.update_many({"type": doc["type"], "active": True}, {"$set": {"active": False}})
+    doc["id"] = str(uuid.uuid4())
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["created_by"] = user["id"]
+    await db.approval_chains.insert_one(doc)
+    return doc
+
+
+@api.put("/approval-chains/{cid}", response_model=ApprovalChainOut)
+async def update_approval_chain(cid: str, body: ApprovalChainIn, _=Depends(require_role("admin", "hr"))):
+    update = body.model_dump()
+    if not update["steps"]:
+        raise HTTPException(400, "At least one approval step is required")
+    sorted_steps = sorted(update["steps"], key=lambda s: s.get("level", 0))
+    for i, s in enumerate(sorted_steps, 1):
+        s["level"] = i
+    update["steps"] = sorted_steps
+    if update.get("active"):
+        await db.approval_chains.update_many({"type": update["type"], "active": True, "id": {"$ne": cid}}, {"$set": {"active": False}})
+    res = await db.approval_chains.find_one_and_update(
+        {"id": cid}, {"$set": update}, return_document=True,
+    )
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return res
+
+
+@api.delete("/approval-chains/{cid}")
+async def delete_approval_chain(cid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.approval_chains.delete_one({"id": cid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# -------- Generic act-on-approval endpoint --------
+@api.post("/approvals/act")
+async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
+    """Advance an in-flight reimbursement / leave / transaction along its configured chain.
+
+    On final-approve of a reimbursement, automatically creates the offsetting expense transaction
+    (preserving the existing payroll/reimbursement-ledger sync behaviour).
+    """
+    coll_name = {"reimbursement": "reimbursements", "leave": "leaves", "transaction": "transactions"}[body.request_type]
+    coll = db[coll_name]
+    rec = await coll.find_one({"id": body.request_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Request not found")
+    # Already finalised?
+    if rec.get("current_level") in (0, -1) or rec.get("status") in ("paid", "approved", "rejected"):
+        raise HTTPException(400, f"Already finalised (status={rec.get('status')})")
+    if not await _user_can_act_on_request(user, rec):
+        raise HTTPException(403, "You are not the configured approver for the current step")
+
+    snap = rec.get("chain_snapshot") or []
+    cur_level = rec.get("current_level") or 1
+    history = list(rec.get("chain_history") or [])
+    update: dict = {}
+
+    if body.action == "reject":
+        history.append(_history_entry(cur_level, "reject", user, body.remarks or ""))
+        update = {
+            "current_level": -1,
+            "chain_history": history,
+            "status": "rejected",
+            "rejected_reason": body.remarks or "",
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await coll.update_one({"id": body.request_id}, {"$set": update})
+        # Notify creator
+        if rec.get("created_by") and rec["created_by"] != user["id"]:
+            await _notify(rec["created_by"],
+                          f"Your {body.request_type} was rejected" + (f": {body.remarks}" if body.remarks else ""),
+                          ntype=f"{body.request_type}_rejected", ref_id=body.request_id,
+                          link=("/hrms" if body.request_type != "transaction" else "/transactions"))
+        return {"ok": True, "status": "rejected"}
+
+    # Approve flow
+    history.append(_history_entry(cur_level, "approve", user, body.remarks or ""))
+    # Determine next level (skipping optional steps with no resolvable approver)
+    next_level = cur_level + 1
+    while True:
+        nxt = next((s for s in snap if s.get("level") == next_level), None)
+        if nxt is None:
+            break  # past the end
+        eligible = await _resolve_step_user_ids(nxt, rec)
+        if eligible or not nxt.get("optional"):
+            break
+        # Optional step with no resolvable approver → auto-skip
+        history.append({"level": next_level, "action": "auto-skip", "by_user_id": None,
+                        "by_user_name": "system", "at": datetime.now(timezone.utc).isoformat(),
+                        "remarks": "No approver resolved; optional step skipped"})
+        next_level += 1
+
+    is_last = (next((s for s in snap if s.get("level") == next_level), None)) is None
+
+    if is_last:
+        # Final approval — finalise per type
+        if body.request_type == "reimbursement":
+            now = datetime.now(timezone.utc).isoformat()
+            staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
+            txn = {
+                "id": str(uuid.uuid4()),
+                "type": "expense",
+                "amount": rec["amount"],
+                "date": rec["date"],
+                "description": f"Reimbursement: {(staff or {}).get('name','')} — {rec.get('description','')}".strip(),
+                "company_id": None, "partner_id": None,
+                "center_id": (staff or {}).get("center_id"),
+                "project_id": None,
+                "items": [], "attachments": rec.get("attachments") or [],
+                "created_by": user["id"], "created_at": now,
+                "status": "approved", "approved_by": user["id"], "approved_at": now,
+                "rejected_reason": None,
+            }
+            await db.transactions.insert_one(txn)
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "paid",
+                "paid_at": now,
+                "paid_by": user["id"],
+                "txn_id": txn["id"],
+            }
+        elif body.request_type == "leave":
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "decided_by": user["id"],
+                "decided_at": datetime.now(timezone.utc).isoformat(),
+            }
+        else:  # transaction
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "approved_by": user["id"],
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+                "rejected_reason": None,
+            }
+        await coll.update_one({"id": body.request_id}, {"$set": update})
+        if rec.get("created_by") and rec["created_by"] != user["id"]:
+            verb = "paid" if body.request_type == "reimbursement" else "approved"
+            await _notify(rec["created_by"], f"Your {body.request_type} was {verb}",
+                          ntype=f"{body.request_type}_{verb}", ref_id=body.request_id,
+                          link=("/hrms" if body.request_type != "transaction" else "/transactions"))
+        return {"ok": True, "status": update["status"]}
+
+    # Otherwise advance to next level
+    update = {"current_level": next_level, "chain_history": history}
+    await coll.update_one({"id": body.request_id}, {"$set": update})
+    # Notify next approvers
+    nxt = next((s for s in snap if s.get("level") == next_level), None)
+    if nxt:
+        next_uids = await _resolve_step_user_ids(nxt, rec)
+        for uid in next_uids:
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"{body.request_type.title()} awaiting your approval (Level {next_level}: {nxt.get('label','')})",
+                              ntype=f"{body.request_type}_pending", ref_id=body.request_id,
+                              link=("/hrms" if body.request_type != "transaction" else "/transactions"))
+    return {"ok": True, "status": "in_progress", "current_level": next_level}
+
+
+@api.get("/approvals/pending")
+async def list_pending_approvals(user=Depends(get_current_user)):
+    """Return all requests across types where the current user is the resolved approver for the current step."""
+    out: List[dict] = []
+    for req_type, coll_name in [("reimbursement", "reimbursements"), ("leave", "leaves"), ("transaction", "transactions")]:
+        rows = await db[coll_name].find({"current_level": {"$gt": 0}}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+        for rec in rows:
+            if await _user_can_act_on_request(user, rec):
+                step = await _current_step(rec)
+                out.append({
+                    "request_type": req_type,
+                    "request_id": rec["id"],
+                    "current_level": rec.get("current_level"),
+                    "step_label": (step or {}).get("label"),
+                    "summary": {
+                        "amount": rec.get("amount"),
+                        "date": rec.get("date") or rec.get("start_date"),
+                        "description": rec.get("description") or rec.get("reason"),
+                    },
+                    "created_at": rec.get("created_at"),
+                })
+    return out
+
+
 # -------- Reimbursements (3-stage approval) --------
 @api.post("/reimbursements")
 async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_user)):
@@ -1330,7 +1775,7 @@ async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_u
     doc["status"] = "submitted"
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
-    # snapshot approver chain
+    # snapshot approver chain (legacy fields kept for back-compat with old endpoints)
     staff = await db.staff.find_one({"id": body.staff_id}, {"_id": 0})
     doc["l1_approver_id"] = staff.get("reports_to_id") if staff else None
     doc["l1_approved_at"] = None
@@ -1342,13 +1787,25 @@ async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_u
     doc["txn_id"] = None
     doc["rejected_reason"] = None
     doc["rejected_at"] = None
+    # Attach configurable approval chain
+    await _attach_chain_to_request("reimbursement", doc)
     await db.reimbursements.insert_one(doc)
     doc.pop("_id", None)
-    # Notify L1 approver (via their linked user_id)
-    l1_uid = await _user_id_for_staff(doc.get("l1_approver_id"))
-    if l1_uid and l1_uid != user["id"]:
-        await _notify(l1_uid, f"New reimbursement awaiting your approval (₹{doc.get('amount', 0):,.0f})",
-                      ntype="reimb_l1_pending", ref_id=doc["id"], link="/hrms")
+    # Notify the first-level approver via the chain (fallback to legacy L1 if no chain)
+    notified_uids: set = set()
+    if doc.get("chain_snapshot"):
+        first_step = next((s for s in doc["chain_snapshot"] if s.get("level") == 1), None)
+        if first_step:
+            for uid in await _resolve_step_user_ids(first_step, doc):
+                if uid and uid != user["id"]:
+                    notified_uids.add(uid)
+    if not notified_uids:
+        legacy_uid = await _user_id_for_staff(doc.get("l1_approver_id"))
+        if legacy_uid and legacy_uid != user["id"]:
+            notified_uids.add(legacy_uid)
+    for uid in notified_uids:
+        await _notify(uid, f"New reimbursement awaiting your approval (₹{doc.get('amount', 0):,.0f})",
+                      ntype="reimb_pending", ref_id=doc["id"], link="/hrms")
     return doc
 
 
