@@ -279,12 +279,14 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains", "holidays", "geofences"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
     await db.batch_payments.create_index([("batch_id", 1), ("milestone", 1)])
     await db.approval_chains.create_index([("type", 1), ("active", 1)])
+    await db.holidays.create_index("date")
+    await db.geofences.create_index([("center_id", 1), ("active", 1)])
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -1137,6 +1139,33 @@ class SelfCheckInIn(BaseModel):
     selfie_filename: Optional[str] = None
 
 
+class CheckOutIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    accuracy: Optional[float] = None
+    selfie_path: Optional[str] = None
+    selfie_filename: Optional[str] = None
+
+
+class HolidayIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: str  # YYYY-MM-DD
+    name: str
+    type: Optional[str] = "public"  # "public" | "festival" | "weekly_off" | "other"
+    is_recurring: bool = False  # if true, applies to that month-day every year
+
+
+class GeofenceIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    center_id: Optional[str] = None  # if None → global fence (any center can use)
+    name: str
+    latitude: float
+    longitude: float
+    radius_m: float = Field(gt=0, default=200)  # default 200 metres
+    active: bool = True
+
+
 class LeaveIn(BaseModel):
     staff_id: str
     start_date: str
@@ -1282,21 +1311,51 @@ async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin",
 async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
     """Mobile self-check-in: looks up the staff record linked to the current user,
     then upserts today's attendance with location + selfie metadata.
+    Enforces geofence if any active fence is configured for the staff's center.
     """
-    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "center_id": 1})
     if not staff:
         raise HTTPException(400, "Your user is not linked to any staff record. Ask admin to set it up.")
+    # Enforce geofence if configured for the staff's center (or global fences exist)
+    body_dict = body.model_dump(exclude_none=True)
+    lat = body_dict.get("latitude")
+    lng = body_dict.get("longitude")
+    if lat is not None and lng is not None:
+        fence_q: dict = {"active": True}
+        if staff.get("center_id"):
+            fence_q["$or"] = [{"center_id": staff["center_id"]}, {"center_id": None}]
+        fences = await db.geofences.find(fence_q, {"_id": 0}).to_list(50)
+        if fences:
+            from math import radians, sin, cos, sqrt, atan2
+            def _haversine_m(a_lat, a_lng, b_lat, b_lng):
+                R = 6_371_000.0
+                p1, p2 = radians(a_lat), radians(b_lat)
+                dphi = radians(b_lat - a_lat)
+                dlam = radians(b_lng - a_lng)
+                a = sin(dphi / 2) ** 2 + cos(p1) * cos(p2) * sin(dlam / 2) ** 2
+                return 2 * R * atan2(sqrt(a), sqrt(1 - a))
+            inside = False
+            nearest_name = None
+            nearest_dist = None
+            for f in fences:
+                d = _haversine_m(lat, lng, f["latitude"], f["longitude"])
+                if nearest_dist is None or d < nearest_dist:
+                    nearest_dist = d
+                    nearest_name = f.get("name")
+                if d <= float(f.get("radius_m", 200)):
+                    inside = True
+                    break
+            if not inside:
+                raise HTTPException(400, f"Outside geofence. Nearest: {nearest_name or 'site'} (~{(nearest_dist or 0)/1000:.2f} km away). Move closer to mark attendance.")
     today = (body.date or datetime.now(timezone.utc).date().isoformat())[:10]
     now_iso = datetime.now(timezone.utc).isoformat()
-    # Build doc with only explicitly-provided fields so a re-submit doesn't wipe
-    # location/selfie set by a prior call on the same day.
-    body_dict = body.model_dump(exclude_none=True)
     doc = {
         "staff_id": staff["id"],
         "date": today,
         "marked_via": "self",
         "marked_at": now_iso,
         "marked_by": user["id"],
+        "check_in_at": now_iso,
     }
     for k in ("status", "latitude", "longitude", "accuracy", "selfie_path", "selfie_filename"):
         if k in body_dict:
@@ -1308,6 +1367,55 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
         upsert=True,
     )
     return {"ok": True, "staff_id": staff["id"], "staff_name": staff.get("name"), "date": today, "marked_at": now_iso}
+
+
+@api.post("/attendance/checkout")
+async def self_check_out(body: CheckOutIn, user=Depends(get_current_user)):
+    """Mobile check-out: staff clocks out for the day. Records location + optional selfie.
+    Today's attendance row must already exist (i.e. staff checked in first)."""
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+    if not staff:
+        raise HTTPException(400, "Your user is not linked to any staff record.")
+    today = datetime.now(timezone.utc).date().isoformat()
+    row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
+    if not row:
+        raise HTTPException(400, "Please check in first before checking out.")
+    if row.get("check_out_at"):
+        raise HTTPException(400, "You have already checked out today.")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    update = {"check_out_at": now_iso}
+    body_dict = body.model_dump(exclude_none=True)
+    for k, target in (("latitude", "check_out_latitude"), ("longitude", "check_out_longitude"),
+                      ("accuracy", "check_out_accuracy"), ("selfie_path", "check_out_selfie_path"),
+                      ("selfie_filename", "check_out_selfie_filename")):
+        if k in body_dict:
+            update[target] = body_dict[k]
+    await db.attendance.update_one(
+        {"staff_id": staff["id"], "date": today},
+        {"$set": update},
+    )
+    return {"ok": True, "check_out_at": now_iso}
+
+
+@api.get("/attendance/my")
+async def my_attendance(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    """Current logged-in staff's own attendance history."""
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+    if not staff:
+        return []
+    q: dict = {"staff_id": staff["id"]}
+    if start or end:
+        q["date"] = {}
+        if start:
+            q["date"]["$gte"] = start
+        if end:
+            q["date"]["$lte"] = end
+    docs = await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(500)
+    return docs
 
 
 @api.get("/attendance/today")
@@ -2022,6 +2130,125 @@ async def list_payroll(month: Optional[int] = None, year: Optional[int] = None, 
         q["year"] = year
     docs = await db.payroll.find(q, {"_id": 0}).sort([("year", -1), ("month", -1)]).to_list(5000)
     return docs
+
+
+@api.get("/payroll/my")
+async def my_payroll(year: Optional[int] = None, user=Depends(get_current_user)):
+    """Current logged-in staff's own payroll/salary history."""
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "designation": 1, "monthly_salary": 1, "per_day_rate": 1, "bank_name": 1, "bank_account_no": 1, "ifsc": 1})
+    if not staff:
+        return {"staff": None, "payroll": []}
+    q: dict = {"staff_id": staff["id"]}
+    if year:
+        q["year"] = year
+    docs = await db.payroll.find(q, {"_id": 0}).sort([("year", -1), ("month", -1)]).to_list(120)
+    # Mask bank_account_no for safety
+    if staff.get("bank_account_no"):
+        staff["bank_account_no_masked"] = "****" + staff["bank_account_no"][-4:]
+        staff.pop("bank_account_no", None)
+    return {"staff": staff, "payroll": docs}
+
+
+# -------- Holidays --------
+@api.get("/holidays")
+async def list_holidays(year: Optional[int] = None, _=Depends(get_current_user)):
+    docs = await db.holidays.find({}, {"_id": 0}).sort("date", 1).to_list(500)
+    if year:
+        docs = [d for d in docs if d.get("is_recurring") or (d.get("date", "")[:4] == str(year))]
+    return docs
+
+
+@api.post("/holidays")
+async def create_holiday(body: HolidayIn, user=Depends(require_role("admin", "hr"))):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_by"] = user["id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.holidays.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.delete("/holidays/{hid}")
+async def delete_holiday(hid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.holidays.delete_one({"id": hid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# -------- Geofences --------
+@api.get("/geofences")
+async def list_geofences(center_id: Optional[str] = None, _=Depends(get_current_user)):
+    q: dict = {"active": True}
+    if center_id:
+        q["$or"] = [{"center_id": center_id}, {"center_id": None}]
+    docs = await db.geofences.find(q, {"_id": 0}).sort("name", 1).to_list(200)
+    return docs
+
+
+@api.post("/geofences")
+async def create_geofence(body: GeofenceIn, user=Depends(require_role("admin", "hr"))):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_by"] = user["id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.geofences.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.delete("/geofences/{gid}")
+async def delete_geofence(gid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.geofences.delete_one({"id": gid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+# -------- Personal endpoints for mobile staff app --------
+@api.get("/leaves/my")
+async def my_leaves(user=Depends(get_current_user)):
+    docs = await db.leaves.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.get("/reimbursements/my")
+async def my_reimbursements(user=Depends(get_current_user)):
+    docs = await db.reimbursements.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.get("/me/summary")
+async def my_summary(user=Depends(get_current_user)):
+    """Combined dashboard data for the mobile staff app home tab."""
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not staff:
+        return {"staff": None, "today": None, "month_stats": {}, "pending_counts": {}}
+    today = datetime.now(timezone.utc).date().isoformat()
+    today_row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
+    # This month stats
+    yyyy_mm = today[:7]
+    month_rows = await db.attendance.find({"staff_id": staff["id"], "date": {"$regex": f"^{yyyy_mm}"}}, {"_id": 0}).to_list(40)
+    month_stats = {
+        "present": sum(1 for r in month_rows if r.get("status") == "present"),
+        "absent": sum(1 for r in month_rows if r.get("status") == "absent"),
+        "half": sum(1 for r in month_rows if r.get("status") == "half"),
+        "leave": sum(1 for r in month_rows if r.get("status") == "leave"),
+        "total_days": len(month_rows),
+    }
+    # Pending counts
+    pending_leaves = await db.leaves.count_documents({"created_by": user["id"], "status": "pending"})
+    pending_reimb = await db.reimbursements.count_documents({"created_by": user["id"], "status": {"$nin": ["paid", "rejected"]}})
+    # Next holiday
+    upcoming = await db.holidays.find({"date": {"$gte": today}}, {"_id": 0}).sort("date", 1).to_list(3)
+    return {
+        "staff": {k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name")},
+        "today": today_row,
+        "month_stats": month_stats,
+        "pending_counts": {"leaves": pending_leaves, "reimbursements": pending_reimb},
+        "upcoming_holidays": upcoming,
+    }
 
 
 @api.patch("/payroll/{pid}/pay")
