@@ -279,7 +279,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains", "holidays", "geofences"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains", "holidays", "geofences", "shifts", "regularisations"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -287,6 +287,7 @@ async def on_startup():
     await db.approval_chains.create_index([("type", 1), ("active", 1)])
     await db.holidays.create_index("date")
     await db.geofences.create_index([("center_id", 1), ("active", 1)])
+    await db.regularisations.create_index([("created_by", 1), ("status", 1)])
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -1088,6 +1089,7 @@ class StaffIn(BaseModel):
     joining_date: str = ""
     user_id: Optional[str] = None  # link to a User if they log in
     center_id: Optional[str] = None
+    shift_id: Optional[str] = None  # link to Shift master for late/penalty rules
     # ---- Contact (persisted on staff record so admin/HR always see them) ----
     email: Optional[str] = None
     mobile: Optional[str] = None
@@ -1164,6 +1166,25 @@ class GeofenceIn(BaseModel):
     longitude: float
     radius_m: float = Field(gt=0, default=200)  # default 200 metres
     active: bool = True
+
+
+class ShiftIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str  # e.g. "Day Shift", "Night Shift"
+    start_time: str  # "HH:MM" 24h
+    end_time: str  # "HH:MM"
+    grace_minutes: int = Field(ge=0, default=10)
+    late_penalty_per_hour: float = Field(ge=0, default=0)  # ₹ deducted per hour late beyond grace
+    half_day_after_minutes: int = Field(ge=0, default=120)  # late > N min → half day
+    min_hours_for_present: float = Field(ge=0, default=4)  # punched-duration min for present status
+    active: bool = True
+
+
+class RegularisationIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    date: str  # YYYY-MM-DD — day to regularise
+    status: Literal["present", "half", "leave"] = "present"
+    reason: str  # mandatory explanation
 
 
 class LeaveIn(BaseModel):
@@ -2206,6 +2227,129 @@ async def delete_geofence(gid: str, _=Depends(require_role("admin", "hr"))):
     return {"ok": True}
 
 
+# -------- Shifts --------
+@api.get("/shifts")
+async def list_shifts(_=Depends(get_current_user)):
+    docs = await db.shifts.find({}, {"_id": 0}).sort("name", 1).to_list(100)
+    return docs
+
+
+@api.post("/shifts")
+async def create_shift(body: ShiftIn, user=Depends(require_role("admin", "hr"))):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_by"] = user["id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.shifts.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.put("/shifts/{sid}")
+async def update_shift(sid: str, body: ShiftIn, _=Depends(require_role("admin", "hr"))):
+    res = await db.shifts.find_one_and_update({"id": sid}, {"$set": body.model_dump()}, return_document=True)
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return res
+
+
+@api.delete("/shifts/{sid}")
+async def delete_shift(sid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.shifts.delete_one({"id": sid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    # Detach from staff to avoid dangling references
+    await db.staff.update_many({"shift_id": sid}, {"$set": {"shift_id": None}})
+    return {"ok": True}
+
+
+# -------- Regularisation requests (missed-attendance fix) --------
+@api.post("/regularisations")
+async def submit_regularisation(body: RegularisationIn, user=Depends(get_current_user)):
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not staff:
+        raise HTTPException(400, "Your user is not linked to any staff record.")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["staff_id"] = staff["id"]
+    doc["staff_name"] = staff.get("name")
+    doc["created_by"] = user["id"]
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["status"] = "pending"  # pending | approved | rejected
+    doc["decided_by"] = None
+    doc["decided_at"] = None
+    doc["decision_remarks"] = None
+    await db.regularisations.insert_one(doc)
+    doc.pop("_id", None)
+    # Notify admin + HR
+    admins = await db.users.find({"role": {"$in": ["admin", "hr"]}}, {"_id": 0, "id": 1}).to_list(50)
+    for a in admins:
+        if a["id"] != user["id"]:
+            await _notify(a["id"], f"New attendance regularisation request from {staff.get('name')} for {doc['date']}",
+                          ntype="regularisation_pending", ref_id=doc["id"], link="/hr-settings")
+    return doc
+
+
+@api.get("/regularisations")
+async def list_regularisations(status: Optional[str] = None, user=Depends(get_current_user)):
+    q: dict = {}
+    if status:
+        q["status"] = status
+    # Staff see only their own; admin/HR see all
+    if user.get("role") not in ("admin", "hr", "manager"):
+        q["created_by"] = user["id"]
+    docs = await db.regularisations.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+
+@api.get("/regularisations/my")
+async def my_regularisations(user=Depends(get_current_user)):
+    docs = await db.regularisations.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return docs
+
+
+@api.patch("/regularisations/{rid}")
+async def decide_regularisation(rid: str, decision: str = Query(..., pattern="^(approved|rejected)$"),
+                                remarks: Optional[str] = Query(None),
+                                user=Depends(require_role("admin", "hr", "manager"))):
+    rec = await db.regularisations.find_one({"id": rid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") != "pending":
+        raise HTTPException(400, f"Already {rec.get('status')}")
+    now = datetime.now(timezone.utc).isoformat()
+    update = {
+        "status": decision,
+        "decided_by": user["id"],
+        "decided_at": now,
+        "decision_remarks": remarks or "",
+    }
+    # On approve, upsert into attendance
+    if decision == "approved":
+        new_id = str(uuid.uuid4())
+        await db.attendance.update_one(
+            {"staff_id": rec["staff_id"], "date": rec["date"]},
+            {"$set": {
+                "staff_id": rec["staff_id"], "date": rec["date"],
+                "status": rec.get("status") or "present",
+                "marked_via": "regularised",
+                "marked_at": now,
+                "marked_by": user["id"],
+                "check_in_at": now,
+                "regularised": True,
+                "regularisation_id": rid,
+            }, "$setOnInsert": {"id": new_id}},
+            upsert=True,
+        )
+    res = await db.regularisations.find_one_and_update({"id": rid}, {"$set": update}, return_document=True)
+    res.pop("_id", None)
+    if rec.get("created_by") and rec["created_by"] != user["id"]:
+        await _notify(rec["created_by"], f"Your regularisation request for {rec['date']} was {decision}",
+                      ntype=f"regularisation_{decision}", ref_id=rid, link="/check-in")
+    return res
+
+
 # -------- Personal endpoints for mobile staff app --------
 @api.get("/leaves/my")
 async def my_leaves(user=Depends(get_current_user)):
@@ -2227,26 +2371,43 @@ async def my_summary(user=Depends(get_current_user)):
         return {"staff": None, "today": None, "month_stats": {}, "pending_counts": {}}
     today = datetime.now(timezone.utc).date().isoformat()
     today_row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
-    # This month stats
+    # This month stats — "complete present" = has both check_in_at + check_out_at
     yyyy_mm = today[:7]
     month_rows = await db.attendance.find({"staff_id": staff["id"], "date": {"$regex": f"^{yyyy_mm}"}}, {"_id": 0}).to_list(40)
-    month_stats = {
-        "present": sum(1 for r in month_rows if r.get("status") == "present"),
-        "absent": sum(1 for r in month_rows if r.get("status") == "absent"),
-        "half": sum(1 for r in month_rows if r.get("status") == "half"),
-        "leave": sum(1 for r in month_rows if r.get("status") == "leave"),
-        "total_days": len(month_rows),
-    }
+
+    def _effective_status(r):
+        s = r.get("status")
+        if s in ("absent", "leave", "half"):
+            return s
+        if s == "present" and r.get("check_in_at") and r.get("check_out_at"):
+            return "present"
+        if s == "present" and r.get("check_in_at") and not r.get("check_out_at"):
+            return "incomplete"
+        return s or "absent"
+
+    counts = {"present": 0, "absent": 0, "half": 0, "leave": 0, "incomplete": 0}
+    for r in month_rows:
+        eff = _effective_status(r)
+        counts[eff] = counts.get(eff, 0) + 1
+    month_stats = {**counts, "total_days": len(month_rows)}
+    # Decorate today's row with effective status
+    if today_row:
+        today_row["effective_status"] = _effective_status(today_row)
     # Pending counts
     pending_leaves = await db.leaves.count_documents({"created_by": user["id"], "status": "pending"})
     pending_reimb = await db.reimbursements.count_documents({"created_by": user["id"], "status": {"$nin": ["paid", "rejected"]}})
-    # Next holiday
+    pending_reg = await db.regularisations.count_documents({"created_by": user["id"], "status": "pending"})
     upcoming = await db.holidays.find({"date": {"$gte": today}}, {"_id": 0}).sort("date", 1).to_list(3)
+    # Shift info if assigned
+    shift = None
+    if staff.get("shift_id"):
+        shift = await db.shifts.find_one({"id": staff["shift_id"]}, {"_id": 0})
     return {
-        "staff": {k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name")},
+        "staff": {k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name", "shift_id")},
+        "shift": shift,
         "today": today_row,
         "month_stats": month_stats,
-        "pending_counts": {"leaves": pending_leaves, "reimbursements": pending_reimb},
+        "pending_counts": {"leaves": pending_leaves, "reimbursements": pending_reimb, "regularisations": pending_reg},
         "upcoming_holidays": upcoming,
     }
 

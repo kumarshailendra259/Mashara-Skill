@@ -9,8 +9,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import {
   Camera, MapPin, CheckCircle2, LogOut, RefreshCw, Home, CalendarDays, Plane,
-  Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar,
+  Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle,
 } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 
 const STATUS_OPTIONS = [
   { v: "present", label: "Present" },
@@ -277,25 +281,29 @@ function AttendanceTab() {
   const [todayInfo, setTodayInfo] = useState(null);
   const [history, setHistory] = useState([]);
   const [holidays, setHolidays] = useState([]);
+  const [myReg, setMyReg] = useState([]);
   const [coords, setCoords] = useState(null);
   const [locErr, setLocErr] = useState("");
   const [selfie, setSelfie] = useState(null);
   const [status, setStatus] = useState("present");
   const [submitting, setSubmitting] = useState(false);
   const [uploadingSelfie, setUploadingSelfie] = useState(false);
+  const [regOpen, setRegOpen] = useState(false);
+  const [regForm, setRegForm] = useState({ date: "", status: "present", reason: "" });
   const selfieRef = useRef(null);
-  const fileBase = process.env.REACT_APP_BACKEND_URL;
 
   const load = async () => {
     try {
-      const [t, h, hol] = await Promise.all([
+      const [t, h, hol, reg] = await Promise.all([
         api.get("/attendance/today"),
         api.get("/attendance/my"),
         api.get("/holidays"),
+        api.get("/regularisations/my").catch(() => ({ data: [] })),
       ]);
       setTodayInfo(t.data);
       setHistory(h.data || []);
       setHolidays(hol.data || []);
+      setMyReg(reg.data || []);
     } catch {/* best-effort */}
   };
 
@@ -429,7 +437,50 @@ function AttendanceTab() {
 
       {/* History list */}
       <div className="swiss-card p-4">
-        <div className="overline">Recent Attendance</div>
+        <div className="flex items-center justify-between">
+          <div className="overline">Recent Attendance</div>
+          <Dialog open={regOpen} onOpenChange={setRegOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" variant="outline" className="rounded-none h-8 px-2 gap-1 text-xs" data-testid="reg-open"><AlertCircle size={12} /> Regularise</Button>
+            </DialogTrigger>
+            <DialogContent className="rounded-none max-w-sm">
+              <DialogHeader><DialogTitle className="font-heading">Regularise Attendance</DialogTitle></DialogHeader>
+              <p className="text-xs text-[var(--muted)]">If you forgot to check in on a past day, submit a request — HR will review and mark it.</p>
+              <div className="space-y-3">
+                <div><Label className="overline">Date Missed</Label><Input type="date" value={regForm.date} max={new Date().toISOString().slice(0,10)} onChange={(e) => setRegForm({ ...regForm, date: e.target.value })} className="rounded-none h-11" data-testid="reg-date" /></div>
+                <div><Label className="overline">Status Requested</Label>
+                  <Select value={regForm.status} onValueChange={(v) => setRegForm({ ...regForm, status: v })}>
+                    <SelectTrigger className="rounded-none h-11"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="present">Present</SelectItem>
+                      <SelectItem value="half">Half Day</SelectItem>
+                      <SelectItem value="leave">Leave</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div><Label className="overline">Reason</Label><Textarea value={regForm.reason} onChange={(e) => setRegForm({ ...regForm, reason: e.target.value })} placeholder="Why was attendance missed?" className="rounded-none" rows={3} data-testid="reg-reason" /></div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setRegOpen(false)} className="rounded-none">Cancel</Button>
+                <Button onClick={async () => {
+                  if (!regForm.date || !regForm.reason.trim()) { toast.error("Date and reason required"); return; }
+                  try {
+                    await api.post("/regularisations", regForm);
+                    setRegOpen(false);
+                    setRegForm({ date: "", status: "present", reason: "" });
+                    load();
+                    toast.success("Submitted — pending HR review");
+                  } catch (e) { toast.error(formatError(e)); }
+                }} className="brand-btn rounded-none" data-testid="reg-submit">Submit</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+        {myReg.filter((r) => r.status === "pending").length > 0 && (
+          <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 mt-2">
+            {myReg.filter((r) => r.status === "pending").length} regularisation request(s) pending HR review
+          </div>
+        )}
         {history.length === 0 ? (
           <div className="text-sm text-[var(--muted)] mt-2">No history yet.</div>
         ) : (

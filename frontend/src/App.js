@@ -15,6 +15,7 @@ import HRMS from "@/pages/HRMS";
 import Stock from "@/pages/Stock";
 import ApprovalLog from "@/pages/ApprovalLog";
 import ApprovalWorkflows from "@/pages/ApprovalWorkflows";
+import HrSettings from "@/pages/HrSettings";
 import Programs from "@/pages/Programs";
 import CheckIn from "@/pages/CheckIn";
 import { Toaster } from "@/components/ui/sonner";
@@ -44,6 +45,7 @@ function App() {
             <Route path="/stock" element={<ProtectedRoute><Shell><Stock /></Shell></ProtectedRoute>} />
             <Route path="/approvals" element={<ProtectedRoute><Shell><ApprovalLog /></Shell></ProtectedRoute>} />
             <Route path="/approval-workflows" element={<ProtectedRoute><Shell><ApprovalWorkflows /></Shell></ProtectedRoute>} />
+            <Route path="/hr-settings" element={<ProtectedRoute><Shell><HrSettings /></Shell></ProtectedRoute>} />
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />

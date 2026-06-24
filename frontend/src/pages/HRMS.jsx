@@ -48,12 +48,15 @@ export default function HRMS() {
   const [reimbs, setReimbs] = useState([]);
   const [payroll, setPayroll] = useState([]);
   const [leaves, setLeaves] = useState([]);
+  const [centers, setCenters] = useState([]);
+  const [shifts, setShifts] = useState([]);
 
   const [openS, setOpenS] = useState(false);
   const emptyStaffForm = {
     name: "", designation: "", reports_to_id: "",
     monthly_salary: 0, per_day_rate: 0, joining_date: "",
     user_id: "", email: "", mobile: "",
+    center_id: "", shift_id: "",
     date_of_birth: "", gender: "", address: "",
     pan: "", aadhaar_last4: "",
     emergency_contact_name: "", emergency_contact_mobile: "",
@@ -90,7 +93,8 @@ export default function HRMS() {
 
   const loadAll = () => Promise.all([
     api.get("/staff"), api.get("/reimbursements"), api.get("/payroll"), api.get("/leaves"),
-  ]).then(([s, r, p, lv]) => { setStaff(s.data); setReimbs(r.data); setPayroll(p.data); setLeaves(lv.data); });
+    api.get("/entities/center"), api.get("/shifts").catch(() => ({ data: [] })),
+  ]).then(([s, r, p, lv, c, sh]) => { setStaff(s.data); setReimbs(r.data); setPayroll(p.data); setLeaves(lv.data); setCenters(c.data); setShifts(sh.data); });
 
   useEffect(() => { loadAll(); }, []);
 
@@ -205,6 +209,8 @@ export default function HRMS() {
       user_id: s.user_id || "",
       email: s.email || "",
       mobile: s.mobile || "",
+      center_id: s.center_id || "",
+      shift_id: s.shift_id || "",
       date_of_birth: s.date_of_birth || "",
       gender: s.gender || "",
       address: s.address || "",
@@ -244,6 +250,8 @@ export default function HRMS() {
         per_day_rate: +staffForm.per_day_rate || 0,
         reports_to_id: staffForm.reports_to_id || null,
         user_id: staffForm.user_id || null,
+        center_id: staffForm.center_id || null,
+        shift_id: staffForm.shift_id || null,
         email: staffForm.email?.trim() || null,
         mobile: staffForm.mobile?.trim() || null,
         date_of_birth: staffForm.date_of_birth || null,
@@ -479,6 +487,26 @@ export default function HRMS() {
                       <div><Label>Monthly Salary</Label><Input type="number" value={staffForm.monthly_salary} onChange={(e) => setStaffForm({ ...staffForm, monthly_salary: e.target.value })} className="rounded-none" /></div>
                       <div><Label>Per-Day Rate</Label><Input type="number" value={staffForm.per_day_rate} onChange={(e) => setStaffForm({ ...staffForm, per_day_rate: e.target.value })} className="rounded-none" /></div>
                       <div><Label>Joining Date</Label><Input type="date" value={staffForm.joining_date} onChange={(e) => setStaffForm({ ...staffForm, joining_date: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Center / Location</Label>
+                        <Select value={staffForm.center_id || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, center_id: v === "__none" ? "" : v })}>
+                          <SelectTrigger className="rounded-none" data-testid="staff-center"><SelectValue placeholder="—" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none">— None —</SelectItem>
+                            {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                        <div className="text-[10px] text-[var(--muted)] mt-1">Drives geofence enforcement on mobile check-in</div>
+                      </div>
+                      <div><Label>Shift</Label>
+                        <Select value={staffForm.shift_id || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, shift_id: v === "__none" ? "" : v })}>
+                          <SelectTrigger className="rounded-none" data-testid="staff-shift"><SelectValue placeholder="—" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none">— None —</SelectItem>
+                            {shifts.map((s) => <SelectItem key={s.id} value={s.id}>{s.name} ({s.start_time}–{s.end_time})</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                        <div className="text-[10px] text-[var(--muted)] mt-1">Defines late penalty &amp; half-day rules</div>
+                      </div>
                     </div>
                   </div>
 

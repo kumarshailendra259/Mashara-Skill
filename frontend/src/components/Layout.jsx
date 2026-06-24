@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +26,7 @@ const navItems = [
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
   { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
+  { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
 ];
 
