@@ -598,14 +598,32 @@ export default function HRMS() {
 
                   {/* SECTION 4 — Bank Details */}
                   <div className="space-y-2 pt-4 border-t border-[var(--border)]">
-                    <div className="overline text-[var(--brand)]">Bank Details <span className="overline text-[10px] text-[var(--muted)]">(for payroll)</span></div>
+                    <div className="flex items-center justify-between">
+                      <div className="overline text-[var(--brand)]">Bank Details <span className="overline text-[10px] text-[var(--muted)]">(for payroll)</span></div>
+                      {editingStaffId && (() => {
+                        const target = staff.find((x) => x.id === editingStaffId) || {};
+                        if (target.bank_verified) {
+                          return <span className="inline-flex items-center gap-1 text-[10px] text-[var(--success)] font-bold uppercase">✓ Verified</span>;
+                        }
+                        return (
+                          <Button size="sm" variant="outline" onClick={async () => {
+                            try { await api.post(`/staff/${editingStaffId}/verify-bank`); toast.success("Bank verified"); loadAll(); }
+                            catch (e) { toast.error(formatError(e)); }
+                          }} className="rounded-none h-7 px-2 gap-1 text-xs" data-testid="verify-bank-btn">Verify Bank</Button>
+                        );
+                      })()}
+                    </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div><Label>Account Holder Name</Label><Input value={staffForm.account_holder_name} onChange={(e) => setStaffForm({ ...staffForm, account_holder_name: e.target.value })} className="rounded-none" /></div>
                       <div><Label>Bank Name</Label><Input value={staffForm.bank_name} onChange={(e) => setStaffForm({ ...staffForm, bank_name: e.target.value })} placeholder="e.g. SBI" className="rounded-none" /></div>
                       <div><Label>Account Number</Label><Input value={staffForm.bank_account_no} onChange={(e) => setStaffForm({ ...staffForm, bank_account_no: e.target.value.replace(/\s/g, "") })} className="rounded-none" data-testid="staff-bank-account" /></div>
                       <div><Label>IFSC</Label><Input value={staffForm.ifsc} onChange={(e) => setStaffForm({ ...staffForm, ifsc: e.target.value.toUpperCase() })} placeholder="SBIN0001234" maxLength={11} className="rounded-none uppercase" /></div>
                     </div>
+                    <div className="text-[10px] text-[var(--muted)]">Note: editing any bank field auto-clears verification — re-verify after change.</div>
                   </div>
+
+                  {/* SECTION 4.5 — Staff Documents (only when editing) */}
+                  {editingStaffId && <StaffDocsView staffId={editingStaffId} />}
 
                   {/* SECTION 5 — Login provisioning (only on Add, not Edit) */}
                   {!editingStaffId && (
@@ -647,7 +665,14 @@ export default function HRMS() {
                   <td className="p-3">{s.designation}</td>
                   <td className="p-3 text-[var(--muted)] text-xs">{s.email || "—"}</td>
                   <td className="p-3 text-[var(--muted)] text-xs">{s.mobile || "—"}</td>
-                  <td className="p-3 text-[var(--muted)] text-xs">{s.bank_name ? `${s.bank_name}${s.bank_account_no ? " · ****" + s.bank_account_no.slice(-4) : ""}` : "—"}</td>
+                  <td className="p-3 text-[var(--muted)] text-xs">
+                    {s.bank_name ? `${s.bank_name}${s.bank_account_no ? " · ****" + s.bank_account_no.slice(-4) : ""}` : "—"}
+                    {s.bank_account_no && (
+                      <span className={`ml-1 text-[9px] font-bold uppercase ${s.bank_verified ? "text-[var(--success)]" : "text-amber-700"}`}>
+                        {s.bank_verified ? "✓ verified" : "unverified"}
+                      </span>
+                    )}
+                  </td>
                   <td className="p-3 num">{inr(s.monthly_salary)}</td>
                   <td className="p-3 num">{inr(s.per_day_rate)}</td>
                   {canManageStaff && (
@@ -1046,6 +1071,41 @@ export default function HRMS() {
           </Dialog>
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function StaffDocsView({ staffId }) {
+  const [docs, setDocs] = useState([]);
+  const load = async () => {
+    try { const r = await api.get(`/staff/${staffId}/documents`); setDocs(r.data || []); }
+    catch { /* best-effort */ }
+  };
+  useEffect(() => { load(); }, [staffId]);
+  const remove = async (id) => {
+    if (!window.confirm("Delete this document?")) return;
+    try { await api.delete(`/staff-documents/${id}`); load(); toast.success("Deleted"); }
+    catch (e) { toast.error(formatError(e)); }
+  };
+  return (
+    <div className="space-y-2 pt-4 border-t border-[var(--border)]">
+      <div className="overline text-[var(--brand)]">Documents <span className="overline text-[10px] text-[var(--muted)]">({docs.length} uploaded by staff)</span></div>
+      {docs.length === 0 ? (
+        <div className="text-xs text-[var(--muted)] py-2">No documents uploaded by staff yet. They can upload from the mobile app → Salary tab.</div>
+      ) : (
+        <div className="border border-[var(--border)] divide-y divide-[var(--border)] max-h-48 overflow-y-auto">
+          {docs.map((d) => (
+            <div key={d.id} className="p-2 text-sm flex items-center justify-between gap-2">
+              <div className="flex-1 min-w-0">
+                <div className="font-medium truncate">{d.title}</div>
+                <div className="text-[10px] text-[var(--muted)] capitalize">{d.doc_type} · {new Date(d.uploaded_at).toLocaleDateString()}</div>
+              </div>
+              <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(d.file_path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] text-xs hover:underline">View</a>
+              <button onClick={() => remove(d.id)} className="text-[var(--danger)] hover:bg-red-50 p-1" title="Delete"><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

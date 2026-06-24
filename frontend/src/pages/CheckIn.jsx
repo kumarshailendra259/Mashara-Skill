@@ -9,7 +9,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import {
   Camera, MapPin, CheckCircle2, LogOut, RefreshCw, Home, CalendarDays, Plane,
-  Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle,
+  Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle, Trash2,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import {
@@ -689,16 +689,43 @@ function ReimburseTab({ staffId }) {
 }
 
 /* ============================================================
-   SALARY TAB — Profile + Payroll history
+   SALARY TAB — Profile + Bank Verification + Documents + Payroll history
    ============================================================ */
 function SalaryTab() {
   const [data, setData] = useState(null);
+  const [docs, setDocs] = useState([]);
+  const [docForm, setDocForm] = useState({ doc_type: "aadhaar", title: "", notes: "" });
+  const [uploading, setUploading] = useState(false);
+  const docRef = useRef(null);
 
-  useEffect(() => {
-    (async () => {
-      try { const r = await api.get("/payroll/my"); setData(r.data); } catch {/* best-effort */}
-    })();
-  }, []);
+  const load = async () => {
+    try {
+      const [r, d] = await Promise.all([api.get("/payroll/my"), api.get("/staff-documents/my").catch(() => ({ data: [] }))]);
+      setData(r.data);
+      setDocs(d.data || []);
+    } catch {/* best-effort */}
+  };
+  useEffect(() => { load(); }, []);
+
+  const uploadDoc = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (!docForm.title.trim()) { toast.error("Enter a title first (e.g., Aadhaar Front)"); if (docRef.current) docRef.current.value = ""; return; }
+    setUploading(true);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const up = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      await api.post("/staff-documents", { doc_type: docForm.doc_type, title: docForm.title.trim(), notes: docForm.notes || null, file_path: up.data.path, file_name: up.data.filename });
+      setDocForm({ doc_type: "aadhaar", title: "", notes: "" });
+      toast.success("Document uploaded");
+      load();
+    } catch (err) { toast.error(formatError(err)); }
+    finally { setUploading(false); if (docRef.current) docRef.current.value = ""; }
+  };
+
+  const removeDoc = async (id) => {
+    if (!window.confirm("Delete this document?")) return;
+    try { await api.delete(`/staff-documents/${id}`); load(); toast.success("Deleted"); } catch (e) { toast.error(formatError(e)); }
+  };
 
   if (!data) return <div className="overline text-center py-8 text-[var(--muted)]">Loading…</div>;
   const s = data.staff || {};
@@ -715,12 +742,73 @@ function SalaryTab() {
           <div><div className="overline">Bank</div><div className="font-medium">{s.bank_name || "—"}</div></div>
           <div><div className="overline">A/C</div><div className="font-medium">{s.bank_account_no_masked || "—"}</div></div>
         </div>
+        {/* Bank verification status */}
+        <div className="mt-3 pt-3 border-t border-[var(--border)]">
+          {!s.bank_account_no_masked ? (
+            <div className="text-xs text-[var(--muted)]">No bank details on file. Ask HR to add for payroll.</div>
+          ) : s.bank_verified ? (
+            <div className="flex items-center gap-2 text-xs text-[var(--success)]">
+              <CheckCircle2 size={14} /> Bank verified by HR{s.bank_verified_at ? ` · ${new Date(s.bank_verified_at).toLocaleDateString()}` : ""}
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1.5">
+              <AlertCircle size={14} /> Pending verification by HR
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="swiss-card p-4">
         <div className="overline">Year-to-Date Earned</div>
         <div className="font-heading font-bold text-2xl mt-1 text-[var(--success)]">{inr(ytd)}</div>
         <div className="text-xs text-[var(--muted)] mt-0.5">Across {rows.filter((r) => r.year === new Date().getFullYear()).length} payslip(s) in {new Date().getFullYear()}</div>
+      </div>
+
+      {/* Documents section */}
+      <div className="swiss-card p-4">
+        <div className="overline">My Documents</div>
+        <div className="grid grid-cols-2 gap-2 mt-3">
+          <div>
+            <Label className="overline text-[10px]">Type</Label>
+            <Select value={docForm.doc_type} onValueChange={(v) => setDocForm({ ...docForm, doc_type: v })}>
+              <SelectTrigger className="rounded-none h-10"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="aadhaar">Aadhaar</SelectItem>
+                <SelectItem value="pan">PAN Card</SelectItem>
+                <SelectItem value="education">Education Certificate</SelectItem>
+                <SelectItem value="experience">Experience Letter</SelectItem>
+                <SelectItem value="photo">Photograph</SelectItem>
+                <SelectItem value="bank_proof">Bank Proof (cheque/passbook)</SelectItem>
+                <SelectItem value="other">Other</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label className="overline text-[10px]">Title</Label>
+            <Input value={docForm.title} onChange={(e) => setDocForm({ ...docForm, title: e.target.value })} placeholder="e.g. Aadhaar Front" className="rounded-none h-10" data-testid="doc-title" />
+          </div>
+        </div>
+        <Button onClick={() => docRef.current?.click()} disabled={uploading} variant="outline" className="rounded-none w-full mt-2 gap-2" data-testid="doc-upload-btn">
+          <Camera size={14} /> {uploading ? "Uploading…" : "Take Photo / Pick File"}
+        </Button>
+        <input ref={docRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={uploadDoc} />
+
+        {docs.length === 0 ? (
+          <div className="text-sm text-[var(--muted)] mt-3 text-center">No documents uploaded yet.</div>
+        ) : (
+          <ul className="mt-3 divide-y divide-[var(--border)]">
+            {docs.map((d) => (
+              <li key={d.id} className="py-2 text-sm flex items-center justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium truncate">{d.title}</div>
+                  <div className="text-[10px] text-[var(--muted)] capitalize">{d.doc_type} · {new Date(d.uploaded_at).toLocaleDateString()}</div>
+                </div>
+                <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(d.file_path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] text-xs hover:underline">View</a>
+                <Button size="sm" variant="outline" onClick={() => removeDoc(d.id)} className="rounded-none h-8 w-8 p-0 text-[var(--danger)] hover:bg-red-50"><Trash2 size={14} /></Button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="swiss-card p-4">

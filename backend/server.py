@@ -279,7 +279,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains", "holidays", "geofences", "shifts", "regularisations"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -288,6 +288,7 @@ async def on_startup():
     await db.holidays.create_index("date")
     await db.geofences.create_index([("center_id", 1), ("active", 1)])
     await db.regularisations.create_index([("created_by", 1), ("status", 1)])
+    await db.staff_documents.create_index([("staff_id", 1), ("uploaded_at", -1)])
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -1106,6 +1107,9 @@ class StaffIn(BaseModel):
     bank_name: Optional[str] = None
     ifsc: Optional[str] = None
     account_holder_name: Optional[str] = None
+    bank_verified: bool = False
+    bank_verified_at: Optional[str] = None
+    bank_verified_by: Optional[str] = None
     # ---- Login auto-provisioning toggles (used only on create_staff) ----
     create_login: bool = False
     send_credentials_email: bool = True
@@ -1156,6 +1160,15 @@ class HolidayIn(BaseModel):
     name: str
     type: Optional[str] = "public"  # "public" | "festival" | "weekly_off" | "other"
     is_recurring: bool = False  # if true, applies to that month-day every year
+
+
+class StaffDocIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    doc_type: str  # "aadhaar" | "pan" | "education" | "experience" | "photo" | "other"
+    title: str
+    file_path: str
+    file_name: str
+    notes: Optional[str] = None
 
 
 class GeofenceIn(BaseModel):
@@ -1290,6 +1303,22 @@ async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin
         # Preserve existing reports_to_id; only admin may change it
         existing = await db.staff.find_one({"id": sid}, {"_id": 0, "reports_to_id": 1})
         update["reports_to_id"] = (existing or {}).get("reports_to_id")
+    # Auto-unverify bank if any bank field changed
+    prev = await db.staff.find_one({"id": sid}, {"_id": 0, "bank_account_no": 1, "ifsc": 1, "bank_name": 1, "account_holder_name": 1, "bank_verified": 1})
+    if prev and prev.get("bank_verified"):
+        bank_changed = any(
+            (prev.get(k) or "") != (update.get(k) or "")
+            for k in ("bank_account_no", "ifsc", "bank_name", "account_holder_name")
+        )
+        if bank_changed:
+            update["bank_verified"] = False
+            update["bank_verified_at"] = None
+            update["bank_verified_by"] = None
+    # Don't let the client itself flip bank_verified — only the dedicated endpoint may
+    if prev and not prev.get("bank_verified"):
+        update["bank_verified"] = False
+        update["bank_verified_at"] = None
+        update["bank_verified_by"] = None
     res = await db.staff.find_one_and_update(
         {"id": sid}, {"$set": update}, return_document=True
     )
@@ -1307,6 +1336,77 @@ async def delete_staff(sid: str, _=Depends(require_role("admin", "hr"))):
     r = await db.staff.delete_one({"id": sid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.post("/staff/{sid}/verify-bank")
+async def verify_staff_bank(sid: str, user=Depends(require_role("admin", "hr"))):
+    """HR/Admin marks a staff's bank details as verified after manual check."""
+    s = await db.staff.find_one({"id": sid}, {"_id": 0, "bank_account_no": 1, "ifsc": 1})
+    if not s:
+        raise HTTPException(404, "Staff not found")
+    if not s.get("bank_account_no") or not s.get("ifsc"):
+        raise HTTPException(400, "Bank account number and IFSC required before verification")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.staff.update_one({"id": sid}, {"$set": {
+        "bank_verified": True, "bank_verified_at": now, "bank_verified_by": user["id"],
+    }})
+    return {"ok": True, "verified_at": now}
+
+
+@api.post("/staff/{sid}/unverify-bank")
+async def unverify_staff_bank(sid: str, _=Depends(require_role("admin", "hr"))):
+    await db.staff.update_one({"id": sid}, {"$set": {
+        "bank_verified": False, "bank_verified_at": None, "bank_verified_by": None,
+    }})
+    return {"ok": True}
+
+
+# -------- Staff Documents --------
+@api.post("/staff-documents")
+async def upload_staff_document(body: StaffDocIn, user=Depends(get_current_user)):
+    """Staff uploads a document (Aadhaar, PAN, certificates etc) for their own profile.
+    Admin/HR can also upload on behalf via /staff-documents/admin endpoint below."""
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not staff:
+        raise HTTPException(400, "Your user is not linked to any staff record.")
+    doc = body.model_dump()
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "staff_id": staff["id"],
+        "staff_name": staff.get("name"),
+        "uploaded_by": user["id"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    })
+    await db.staff_documents.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/staff-documents/my")
+async def list_my_staff_documents(user=Depends(get_current_user)):
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+    if not staff:
+        return []
+    return await db.staff_documents.find({"staff_id": staff["id"]}, {"_id": 0}).sort("uploaded_at", -1).to_list(200)
+
+
+@api.get("/staff/{sid}/documents")
+async def list_staff_documents(sid: str, _=Depends(require_role("admin", "hr", "manager"))):
+    return await db.staff_documents.find({"staff_id": sid}, {"_id": 0}).sort("uploaded_at", -1).to_list(200)
+
+
+@api.delete("/staff-documents/{did}")
+async def delete_staff_document(did: str, user=Depends(get_current_user)):
+    """Staff can delete their own doc; admin/HR can delete any."""
+    doc = await db.staff_documents.find_one({"id": did}, {"_id": 0, "staff_id": 1, "uploaded_by": 1})
+    if not doc:
+        raise HTTPException(404, "Not found")
+    if user.get("role") not in ("admin", "hr"):
+        # Only owner can delete
+        if doc.get("uploaded_by") != user["id"]:
+            raise HTTPException(403, "Not allowed")
+    await db.staff_documents.delete_one({"id": did})
     return {"ok": True}
 
 
@@ -2288,7 +2388,7 @@ async def list_payroll(month: Optional[int] = None, year: Optional[int] = None, 
 @api.get("/payroll/my")
 async def my_payroll(year: Optional[int] = None, user=Depends(get_current_user)):
     """Current logged-in staff's own payroll/salary history."""
-    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "designation": 1, "monthly_salary": 1, "per_day_rate": 1, "bank_name": 1, "bank_account_no": 1, "ifsc": 1})
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "designation": 1, "monthly_salary": 1, "per_day_rate": 1, "bank_name": 1, "bank_account_no": 1, "ifsc": 1, "bank_verified": 1, "bank_verified_at": 1})
     if not staff:
         return {"staff": None, "payroll": []}
     q: dict = {"staff_id": staff["id"]}
