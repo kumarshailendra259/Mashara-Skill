@@ -50,7 +50,7 @@ export default function HRMS() {
   const [leaves, setLeaves] = useState([]);
 
   const [openS, setOpenS] = useState(false);
-  const [staffForm, setStaffForm] = useState({ name: "", designation: "", reports_to_id: "", monthly_salary: 0, per_day_rate: 0, joining_date: "", user_id: "" });
+  const [staffForm, setStaffForm] = useState({ name: "", designation: "", reports_to_id: "", monthly_salary: 0, per_day_rate: 0, joining_date: "", user_id: "", email: "", mobile: "", create_login: false });
 
   const [openR, setOpenR] = useState(false);
   const [rForm, setRForm] = useState({ staff_id: "", amount: "", date: new Date().toISOString().slice(0,10), category: "", description: "", attachments: [] });
@@ -180,8 +180,30 @@ export default function HRMS() {
   };
 
   const saveStaff = async () => {
-    try { await api.post("/staff", { ...staffForm, monthly_salary: +staffForm.monthly_salary, per_day_rate: +staffForm.per_day_rate, reports_to_id: staffForm.reports_to_id || null, user_id: staffForm.user_id || null }); setOpenS(false); loadAll(); toast.success("Saved"); }
-    catch (e) { toast.error(formatError(e)); }
+    try {
+      const payload = {
+        ...staffForm,
+        monthly_salary: +staffForm.monthly_salary,
+        per_day_rate: +staffForm.per_day_rate,
+        reports_to_id: staffForm.reports_to_id || null,
+        user_id: staffForm.user_id || null,
+        email: staffForm.email?.trim() || null,
+        mobile: staffForm.mobile?.trim() || null,
+        create_login: !!staffForm.create_login,
+      };
+      const { data } = await api.post("/staff", payload);
+      setOpenS(false);
+      setStaffForm({ name: "", designation: "", reports_to_id: "", monthly_salary: 0, per_day_rate: 0, joining_date: "", user_id: "", email: "", mobile: "", create_login: false });
+      loadAll();
+      const es = data?.email_status;
+      if (payload.create_login) {
+        if (es?.sent) toast.success("Staff saved · credentials emailed");
+        else if (es?.reason === "resend_not_configured") toast.success("Staff saved · login created (email skipped — RESEND_API_KEY not set)");
+        else toast.success("Staff saved · login created" + (es?.reason ? ` (email: ${es.reason})` : ""));
+      } else {
+        toast.success("Saved");
+      }
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   const submitReimb = async () => {
@@ -377,6 +399,34 @@ export default function HRMS() {
                     <div><Label>Per-Day Rate</Label><Input type="number" value={staffForm.per_day_rate} onChange={(e) => setStaffForm({ ...staffForm, per_day_rate: e.target.value })} className="rounded-none" /></div>
                     <div><Label>Joining Date</Label><Input type="date" value={staffForm.joining_date} onChange={(e) => setStaffForm({ ...staffForm, joining_date: e.target.value })} className="rounded-none" /></div>
                     <div><Label>Linked User ID (optional)</Label><Input value={staffForm.user_id} onChange={(e) => setStaffForm({ ...staffForm, user_id: e.target.value })} placeholder="User UUID for login mapping" className="rounded-none" /></div>
+
+                    {/* Auto-provision login + email credentials */}
+                    <div className="col-span-2 border-t border-[var(--border)] pt-3 mt-1">
+                      <label className="flex items-start gap-2 cursor-pointer" data-testid="create-login-toggle">
+                        <input
+                          type="checkbox"
+                          checked={!!staffForm.create_login}
+                          onChange={(e) => setStaffForm({ ...staffForm, create_login: e.target.checked })}
+                          className="mt-1"
+                        />
+                        <span className="text-sm">
+                          <span className="font-medium">Create login &amp; email credentials</span>
+                          <span className="block text-xs text-[var(--muted)] mt-0.5">A random password will be generated and emailed to the staff with their check-in link.</span>
+                        </span>
+                      </label>
+                    </div>
+                    {staffForm.create_login && (
+                      <>
+                        <div>
+                          <Label>Email <span className="text-[var(--danger)]">*</span></Label>
+                          <Input type="email" value={staffForm.email} onChange={(e) => setStaffForm({ ...staffForm, email: e.target.value })} placeholder="staff@example.com" className="rounded-none" data-testid="staff-email" required />
+                        </div>
+                        <div>
+                          <Label>Mobile (info only)</Label>
+                          <Input value={staffForm.mobile} onChange={(e) => setStaffForm({ ...staffForm, mobile: e.target.value })} placeholder="+91 ..." className="rounded-none" data-testid="staff-mobile" />
+                        </div>
+                      </>
+                    )}
                   </div>
                   <DialogFooter><Button variant="outline" onClick={() => setOpenS(false)} className="rounded-none">Cancel</Button><Button onClick={saveStaff} className="brand-btn rounded-none" data-testid="staff-save">Save</Button></DialogFooter>
                 </DialogContent>

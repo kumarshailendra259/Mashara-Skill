@@ -1021,6 +1021,11 @@ class StaffIn(BaseModel):
     joining_date: str = ""
     user_id: Optional[str] = None  # link to a User if they log in
     center_id: Optional[str] = None
+    # ----- Optional fields used only on create_staff to auto-provision a login -----
+    email: Optional[str] = None         # if create_login=True, used as the new user's email
+    mobile: Optional[str] = None        # informational only (SMS not enabled)
+    create_login: bool = False          # admin/HR can tick this in the dialog
+    send_credentials_email: bool = True # if create_login and email present, email it
 
 
 class StaffOut(StaffIn):
@@ -1088,16 +1093,56 @@ async def list_staff(_=Depends(get_current_user)):
     return [StaffOut(**d) for d in docs]
 
 
-@api.post("/staff", response_model=StaffOut)
+@api.post("/staff")
 async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manager", "hr"))):
     doc = body.model_dump()
     # Only admin can assign the reports_to chain (approval hierarchy)
     if user.get("role") != "admin":
         doc["reports_to_id"] = None
+    # --- Optional auto-provisioning a user login + credentials email ---
+    create_login = bool(doc.pop("create_login", False))
+    send_creds = bool(doc.pop("send_credentials_email", True))
+    login_email = (doc.pop("email", None) or "").strip().lower()
+    mobile = (doc.pop("mobile", None) or "").strip()
+    email_result = None
+    if create_login:
+        if not login_email:
+            raise HTTPException(400, "email is required when create_login=true")
+        # Idempotent: if a user with this email already exists, link to that user.
+        existing_user = await db.users.find_one({"email": login_email}, {"_id": 0})
+        if existing_user:
+            doc["user_id"] = existing_user["id"]
+        else:
+            from email_utils import generate_password, send_credentials_email
+            new_password = generate_password(12)
+            user_doc = {
+                "id": str(uuid.uuid4()),
+                "name": doc.get("name") or login_email,
+                "email": login_email,
+                "password_hash": hash_password(new_password),
+                "role": "center_staff",  # default lowest write-capable role for new staff
+                "mobile": mobile or None,
+                "assigned_center_ids": [doc["center_id"]] if doc.get("center_id") else [],
+                "assigned_partner_id": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.users.insert_one(user_doc)
+            doc["user_id"] = user_doc["id"]
+            if send_creds:
+                check_in_url = (os.environ.get("PUBLIC_APP_URL") or "https://finance.masharaskills.com").rstrip("/") + "/check-in"
+                email_result = await send_credentials_email(
+                    to_email=login_email, name=user_doc["name"], password=new_password, check_in_url=check_in_url,
+                )
+    if mobile and doc.get("user_id"):
+        # Best-effort: store mobile on the linked user record too
+        await db.users.update_one({"id": doc["user_id"]}, {"$set": {"mobile": mobile}})
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     await db.staff.insert_one(doc)
-    return StaffOut(**doc)
+    out = StaffOut(**{k: v for k, v in doc.items() if k in StaffOut.model_fields}).model_dump()
+    if email_result is not None:
+        out["email_status"] = email_result
+    return out
 
 
 @api.put("/staff/{sid}", response_model=StaffOut)
