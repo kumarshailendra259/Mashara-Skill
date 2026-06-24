@@ -1117,7 +1117,7 @@ async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin
 
 
 @api.delete("/staff/{sid}")
-async def delete_staff(sid: str, _=Depends(require_role("admin"))):
+async def delete_staff(sid: str, _=Depends(require_role("admin", "hr"))):
     r = await db.staff.delete_one({"id": sid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
@@ -1308,7 +1308,7 @@ async def _check_l1_approver(rid: str, user: dict) -> dict:
     rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
-    if user.get("role") == "admin":
+    if user.get("role") in ("admin", "hr"):
         return rec
     # must be the snapshot l1 approver via their linked staff record
     my_staff = await _staff_for_user(user["id"])
@@ -1338,7 +1338,7 @@ async def reimb_l1_approve(rid: str, user=Depends(get_current_user)):
 
 
 @api.patch("/reimbursements/{rid}/accountant-approve")
-async def reimb_accountant_approve(rid: str, user=Depends(require_role("admin", "accountant"))):
+async def reimb_accountant_approve(rid: str, user=Depends(require_role("admin", "accountant", "hr"))):
     rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
@@ -1360,7 +1360,7 @@ async def reimb_accountant_approve(rid: str, user=Depends(require_role("admin", 
 
 
 @api.patch("/reimbursements/{rid}/pay")
-async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant"))):
+async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant", "hr"))):
     rec = await db.reimbursements.find_one({"id": rid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
