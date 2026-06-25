@@ -1,0 +1,40 @@
+{
+  "summary": "Iter-18 testing: Bulk delete/archive endpoints + 2nd milestone assessment fee + recovery-aware TDS. 23/24 new backend tests PASS (1 skip — staff create endpoint signature). Iter-17 regression PASS (15/15). Iter-16 has 1 EXPECTED failure (old test asserted TDS on gross; new spec correctly computes on gross−recovery). Frontend UI shows bulk-delete/archive buttons after row select on transactions, hrms/staff, users.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/staff (POST)", "issue": "Staff create endpoint signature didn't accept basic fields used in helper — staff bulk-archive linked-user test skipped. Endpoint behavior itself OK; only test helper limitation."},
+      {"endpoint": "/api/batch-payments/{pid}/receive (2nd milestone)", "issue": "Pre-existing iter-16 test `test_receive_creates_recovery_and_tds_txns` now fails because it asserted old behaviour (TDS on gross=2344.16). New iter-18 spec correctly computes TDS on (gross−recovery)=2073.68. The OLD test assertion is stale and should be updated."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter18_bulk_assessment_fee.py",
+    "/app/test_reports/pytest/iter18_results.xml",
+    "/app/test_reports/pytest/iter16_17_regression.xml"
+  ],
+  "action_items": [
+    "Update stale assertion in /app/backend/tests/test_iter16_milestone_recovery.py::test_receive_creates_recovery_and_tds_txns — change expected tds from 2344.16 → 2073.68 (and net accordingly) to reflect new recovery-aware TDS spec."
+  ],
+  "critical_code_review_comments": [
+    "/app/backend/server.py is 4226 lines — well over the 700-line guideline. Strongly recommend splitting into routers (auth, transactions, batches/payments, entities, hrms, programs).",
+    "receive_batch_payment (lines 3809–3969) has a subtle docstring/spec mismatch: docstring (lines 3819–3821) still says 'TDS = (gross − uniform_amount) × tds_percent', but actual code at line 3926 uses (gross − uniform − recovery). Update docstring.",
+    "Assessment fee description uses ternary inside f-string with mixed operator precedence (lines 3901-3903) — works but is hard to read; recommend extracting to a variable.",
+    "Bulk-delete endpoints do not verify foreign-key usage before hard-delete (e.g., deleting a partner referenced by transactions/batches). Could orphan FK refs. Consider soft-delete or rejection if referenced.",
+    "bulk_archive_users does not return 400 when ALL ids are missing/unknown — it returns archived=0 silently. Minor."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter18_bulk_assessment_fee.py (created)"
+  ],
+  "success_rate": {"backend": "96% (23/24 new + 25/26 regression = 48/50)", "frontend": "100% on critical bulk-action UI checks"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "TEST_-prefixed batches, transactions, entities, and users created via fixtures. Not cleaned up — historical pattern across iter-15/16/17 tests.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-18 = bulk delete/archive + 2nd-milestone assessment-fee + recovery-aware TDS. Canonical math test (gross 117208, recovery 13524, af 13000, tds 2%) → tds 2073.68, net 88610.32 — VERIFIED. /api/auth/users POST does NOT exist — use /api/auth/register to create test users, then PATCH /api/auth/users/{uid} to change role. Staff bulk-archive endpoint cascades to linked user_id (sets is_active=false + archived_at on both). User bulk-archive blocks self-archive: pure-self → 400, mixed → archives others + returns skipped_self count. Programs page Configure 2nd dialog requires deep navigation (project tab → batch with passed_candidates>0); data-testids pay-assess-per & pay-assess-total exist in /app/frontend/src/pages/Programs.jsx but not tested live.",
+  "rca of the issue": "Iter-16 test failure RCA: that test was written before spec change. Code now correctly subtracts recovery from TDS taxable per Iter-18 spec — assertion in the legacy test is stale and needs updating (not a code bug)."
+}

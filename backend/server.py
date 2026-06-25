@@ -3648,6 +3648,10 @@ class BatchPaymentIn(BaseModel):
     # Recovery (only relevant on 2nd milestone): the portion of already-disbursed 1st milestone
     # being claw-backed for candidates who failed the exam. Reduces credited income.
     recovery_amount: float = Field(default=0, ge=0)
+    # Assessment fee per passed candidate (only relevant on 2nd milestone, variable per batch
+    # so admin enters manually). Total assessment expense = this × passed_candidates.
+    assessment_fee_per_candidate: float = Field(default=0, ge=0)
+    assessment_fee_total: float = Field(default=0, ge=0)
 
 
 class BatchPaymentOut(BatchPaymentIn):
@@ -3661,7 +3665,8 @@ class BatchPaymentOut(BatchPaymentIn):
     tds_amount: float = 0
     tds_txn_id: Optional[str] = None
     recovery_txn_id: Optional[str] = None
-    net_amount: Optional[float] = None  # gross - tds - recovery
+    assessment_fee_txn_id: Optional[str] = None
+    net_amount: Optional[float] = None  # gross − tds − recovery − assessment_fee
     created_at: str
 
 
@@ -3882,13 +3887,43 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
         await db.transactions.insert_one(rec_txn)
         recovery_txn_id = rec_txn["id"]
 
-    # TDS deduction: separate expense transaction (uniform amount excluded from taxable base)
+    # Assessment fee (2nd milestone): per-passed-candidate fee, manually entered
+    assessment_fee_total = float(rec.get("assessment_fee_total") or 0)
+    assessment_fee_per = float(rec.get("assessment_fee_per_candidate") or 0)
+    assessment_fee_txn_id = None
+    if assessment_fee_total > 0:
+        passed_n = int((batch or {}).get("passed_candidates") or 0)
+        af_txn = {
+            "id": str(uuid.uuid4()),
+            "type": "expense",
+            "amount": assessment_fee_total,
+            "date": today,
+            "description": f"Assessment fee on {description_base} "
+                           f"(₹{assessment_fee_per:,.2f} × {passed_n} passed)" if assessment_fee_per > 0
+                           else f"Assessment fee on {description_base}",
+            "company_id": None,
+            "partner_id": None,
+            "center_id": (batch or {}).get("center_id"),
+            "project_id": (batch or {}).get("project_id"),
+            "items": [], "attachments": [],
+            "source": "assessment_fee",
+            "milestone": rec["milestone"],
+            "created_by": user["id"], "created_at": now,
+            "status": "approved", "approved_by": user["id"], "approved_at": now,
+            "rejected_reason": None,
+        }
+        await db.transactions.insert_one(af_txn)
+        assessment_fee_txn_id = af_txn["id"]
+
+    # TDS deduction: calculated on (gross − uniform − recovery) per spec.
+    # Uniform (1st milestone only) and recovery (2nd milestone) are both excluded from
+    # the taxable base. Assessment fee is a separate post-TDS expense.
     tds_percent = float(body.tds_percent or 0)
     uniform_amount = float(rec.get("uniform_amount") or 0)
     tds_amount = 0.0
     tds_txn_id = None
     if tds_percent > 0:
-        taxable = max(0.0, gross - uniform_amount)
+        taxable = max(0.0, gross - uniform_amount - recovery_amount)
         tds_amount = round(taxable * tds_percent / 100.0, 2)
         if tds_amount > 0:
             tds_txn = {
@@ -3911,7 +3946,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             await db.transactions.insert_one(tds_txn)
             tds_txn_id = tds_txn["id"]
 
-    net_amount = round(gross - tds_amount - recovery_amount, 2)
+    net_amount = round(gross - tds_amount - recovery_amount - assessment_fee_total, 2)
     res = await db.batch_payments.find_one_and_update(
         {"id": pid},
         {"$set": {
@@ -3923,6 +3958,9 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "tds_txn_id": tds_txn_id,
             "recovery_amount": recovery_amount,
             "recovery_txn_id": recovery_txn_id,
+            "assessment_fee_total": assessment_fee_total,
+            "assessment_fee_per_candidate": assessment_fee_per,
+            "assessment_fee_txn_id": assessment_fee_txn_id,
             "net_amount": net_amount,
         }},
         return_document=True,

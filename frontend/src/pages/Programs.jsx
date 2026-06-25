@@ -116,14 +116,17 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
             {received && payment.recovery_amount > 0 && (
               <div className="flex justify-between text-[var(--danger)]"><span className="overline">Recovery</span><span className="num">−{inr2(payment.recovery_amount)}</span></div>
             )}
+            {received && payment.assessment_fee_total > 0 && (
+              <div className="flex justify-between text-[var(--danger)]"><span className="overline">Assessment fee</span><span className="num">−{inr2(payment.assessment_fee_total)}</span></div>
+            )}
             {received && payment.tds_percent > 0 && (
               <>
                 <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({payment.tds_percent}%)</span><span className="num">−{inr2(payment.tds_amount)}</span></div>
                 <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - payment.tds_amount))}</span></div>
               </>
             )}
-            {received && payment.tds_percent === 0 && payment.recovery_amount > 0 && (
-              <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - payment.recovery_amount))}</span></div>
+            {received && payment.tds_percent === 0 && (payment.recovery_amount > 0 || payment.assessment_fee_total > 0) && (
+              <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - (payment.recovery_amount || 0) - (payment.assessment_fee_total || 0)))}</span></div>
             )}
             {payment.expected_date && (
               <div className="flex justify-between"><span className="overline">Expected</span><span className="num">{payment.expected_date}</span></div>
@@ -177,7 +180,7 @@ export default function Programs() {
   // Payment dialog
   const [payOpen, setPayOpen] = useState(false);
   const [editingPay, setEditingPay] = useState(null);
-  const emptyPay = { batch_id: "", milestone: "1st", amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0 };
+  const emptyPay = { batch_id: "", milestone: "1st", amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0, assessment_fee_per_candidate: 0, assessment_fee_total: 0 };
   const [pForm, setPForm] = useState(emptyPay);
   const [autoFilled, setAutoFilled] = useState(false); // hint flag
 
@@ -334,12 +337,13 @@ export default function Programs() {
         setAutoFilled(true); setPayOpen(true); return;
       }
       if (milestone === "2nd" && bd.second.gross > 0) {
-        // Set gross as amount; recovery captured separately and applied on Receive
+        // Set gross as amount; recovery + assessment fee captured separately and applied on Receive
         setPForm({
           batch_id: selectedBatchId, milestone, amount: bd.second.gross,
           expected_date: "",
           description: `Auto · 40% × ₹${bd.roleTotal.toLocaleString("en-IN")} × ${bd.passed}/${bd.totalCandidates} passed. Recovery for ${bd.failed} failed = ₹${bd.second.recovery.toLocaleString("en-IN")}`,
           uniform_amount: 0, recovery_amount: bd.second.recovery,
+          assessment_fee_per_candidate: 0, assessment_fee_total: 0,
         });
         setAutoFilled(true); setPayOpen(true); return;
       }
@@ -349,11 +353,12 @@ export default function Programs() {
           expected_date: "",
           description: `Auto · 30% × ₹${bd.roleTotal.toLocaleString("en-IN")} × ${bd.placed}/${bd.totalCandidates} placed`,
           uniform_amount: 0, recovery_amount: 0,
+          assessment_fee_per_candidate: 0, assessment_fee_total: 0,
         });
         setAutoFilled(true); setPayOpen(true); return;
       }
     }
-    setPForm({ batch_id: selectedBatchId, milestone, amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0 });
+    setPForm({ batch_id: selectedBatchId, milestone, amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0, assessment_fee_per_candidate: 0, assessment_fee_total: 0 });
     setAutoFilled(false);
     setPayOpen(true);
   };
@@ -364,6 +369,8 @@ export default function Programs() {
       expected_date: p.expected_date || "", description: p.description || "",
       uniform_amount: p.uniform_amount || 0,
       recovery_amount: p.recovery_amount || 0,
+      assessment_fee_per_candidate: p.assessment_fee_per_candidate || 0,
+      assessment_fee_total: p.assessment_fee_total || 0,
     });
     setAutoFilled(false);
     setPayOpen(true);
@@ -376,6 +383,8 @@ export default function Programs() {
         amount: parseFloat(pForm.amount),
         uniform_amount: parseFloat(pForm.uniform_amount) || 0,
         recovery_amount: parseFloat(pForm.recovery_amount) || 0,
+        assessment_fee_per_candidate: parseFloat(pForm.assessment_fee_per_candidate) || 0,
+        assessment_fee_total: parseFloat(pForm.assessment_fee_total) || 0,
       };
       if (editingPay) await api.put(`/batch-payments/${editingPay.id}`, payload);
       else await api.post("/batch-payments", payload);
@@ -424,11 +433,13 @@ export default function Programs() {
     const gross = recvTarget.amount || 0;
     const uniform = recvTarget.uniform_amount || 0;
     const recovery = recvTarget.recovery_amount || 0;
+    const assessmentFee = recvTarget.assessment_fee_total || 0;
     const pct = parseFloat(recvTds) || 0;
-    const taxable = Math.max(0, gross - uniform);
+    // TDS base: (gross − uniform − recovery). Uniform applies only to 1st; recovery to 2nd.
+    const taxable = Math.max(0, gross - uniform - recovery);
     const tds = Math.round(taxable * pct) / 100;
-    const net = gross - tds - recovery;
-    return { gross, uniform, recovery, taxable, pct, tds, net };
+    const net = gross - tds - recovery - assessmentFee;
+    return { gross, uniform, recovery, assessmentFee, taxable, pct, tds, net };
   }, [recvTarget, recvTds]);
 
   return (
@@ -877,8 +888,41 @@ export default function Programs() {
               <div className="col-span-2">
                 <Label>Recovery Amount <span className="overline text-[10px]">claw-back of 1st milestone for failed candidates</span></Label>
                 <Input type="number" step="0.01" value={pForm.recovery_amount} onChange={(e) => setPForm({ ...pForm, recovery_amount: e.target.value })} className="rounded-none num" data-testid="pay-recovery" />
-                <p className="text-[10px] text-[var(--muted)] mt-1">Formula: 30% × role_total × (failed / total). Applied on Mark Received → separate expense txn (source=candidate_recovery).</p>
+                <p className="text-[10px] text-[var(--muted)] mt-1">Formula: 30% × role_total × (failed / total). Applied on Mark Received → separate expense txn (source=candidate_recovery). TDS will be calculated on (gross − recovery).</p>
               </div>
+            )}
+            {pForm.milestone === "2nd" && (
+              <>
+                <div>
+                  <Label>Assessment Fee per Candidate <span className="overline text-[10px]">manual / variable</span></Label>
+                  <Input
+                    type="number" step="0.01" min="0"
+                    value={pForm.assessment_fee_per_candidate}
+                    onChange={(e) => {
+                      const per = e.target.value;
+                      const passed = activeBatch?.passed_candidates || 0;
+                      setPForm({
+                        ...pForm,
+                        assessment_fee_per_candidate: per,
+                        assessment_fee_total: (parseFloat(per) || 0) * passed,
+                      });
+                    }}
+                    className="rounded-none num"
+                    data-testid="pay-assess-per"
+                  />
+                </div>
+                <div>
+                  <Label>Total Assessment Fee <span className="overline text-[10px]">{activeBatch?.passed_candidates || 0} passed × per</span></Label>
+                  <Input
+                    type="number" step="0.01" min="0"
+                    value={pForm.assessment_fee_total}
+                    onChange={(e) => setPForm({ ...pForm, assessment_fee_total: e.target.value })}
+                    className="rounded-none num"
+                    data-testid="pay-assess-total"
+                  />
+                  <p className="text-[10px] text-[var(--muted)] mt-1">Auto-calculated as per × passed_candidates. Manually editable. Recorded as expense (source=assessment_fee) on Receive.</p>
+                </div>
+              </>
             )}
             <div className="col-span-2">
               <Label>Expected Date</Label>
@@ -912,7 +956,10 @@ export default function Programs() {
                 {recvPreview.recovery > 0 && (
                   <div className="flex justify-between text-[var(--danger)]"><span className="overline">Recovery (failed candidates)</span><span className="num">−{inr2(recvPreview.recovery)}</span></div>
                 )}
-                <div className="flex justify-between"><span className="overline">Taxable base (gross − uniform)</span><span className="num">{inr(recvPreview.taxable)}</span></div>
+                <div className="flex justify-between"><span className="overline">Taxable base (gross − uniform − recovery)</span><span className="num">{inr(recvPreview.taxable)}</span></div>
+                {recvPreview.assessmentFee > 0 && (
+                  <div className="flex justify-between text-[var(--danger)]"><span className="overline">Assessment fee</span><span className="num">−{inr2(recvPreview.assessmentFee)}</span></div>
+                )}
               </div>
               <div>
                 <Label>TDS Deduction by Department</Label>
