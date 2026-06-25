@@ -3442,9 +3442,11 @@ class BatchIn(BaseModel):
     end_date: Optional[str] = ""
     total_beneficiaries: int = 0
     description: Optional[str] = ""
-    # New: job-role rows used to auto-compute 1st milestone amount.
-    # Each row: {category: "1"|"2"|"3", job_role: str, candidates: int, hours: float}
+    # Job-role rows drive the batch role-total: rows of {category 1/2/3, job_role, candidates, hours}
     job_roles: List[dict] = Field(default_factory=list)
+    # Outcome counters used for 2nd / 3rd milestone proportional splits + failed-candidate recovery
+    passed_candidates: int = Field(default=0, ge=0)
+    placed_candidates: int = Field(default=0, ge=0)
 
 
 class BatchOut(BatchIn):
@@ -3456,10 +3458,21 @@ class BatchOut(BatchIn):
 JOB_CATEGORY_RATES = {"1": 56.35, "2": 52.50, "3": 36.85}
 UNIFORM_PER_CANDIDATE = 1000.0  # one-time uniform allowance, applied ONLY on 1st milestone
 
+# Milestone shares of role_total (Σ candidates × rate × hours). Uniform is added on top of 1st only.
+MILESTONE_SHARES = {"1st": 0.30, "2nd": 0.40, "3rd": 0.30}
 
-def _compute_1st_milestone(job_roles: list) -> dict:
-    """Compute 1st milestone breakdown from job_roles list.
-    Returns: { rows: [...with row_total], role_total, uniform_total, total, total_candidates }
+
+def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0) -> dict:
+    """Return per-milestone breakdown.
+
+    Formula (per user spec):
+      role_total      = Σ(candidates × CATEGORY_RATE × hours)
+      uniform_total   = total_candidates × ₹1000     (1st milestone only)
+      1st_amount      = 30% × role_total + uniform_total
+      2nd_gross       = 40% × role_total × (passed / total)
+      2nd_recovery    = 30% × role_total × (failed / total)   # already-disbursed for failed
+      2nd_net         = 2nd_gross − 2nd_recovery
+      3rd_amount      = 30% × role_total × (placed / total)
     """
     rows_out = []
     role_total = 0.0
@@ -3473,20 +3486,80 @@ def _compute_1st_milestone(job_roles: list) -> dict:
         role_total += row_total
         total_candidates += candidates
         rows_out.append({
-            "category": cat,
-            "job_role": r.get("job_role", "") or "",
-            "candidates": candidates,
-            "hours": hours,
-            "rate": rate,
+            "category": cat, "job_role": r.get("job_role", "") or "",
+            "candidates": candidates, "hours": hours, "rate": rate,
             "row_total": row_total,
         })
+    role_total = round(role_total, 2)
     uniform_total = round(total_candidates * UNIFORM_PER_CANDIDATE, 2)
+    total_candidates = int(total_candidates or 0)
+    passed = max(0, min(int(passed or 0), total_candidates))
+    placed = max(0, min(int(placed or 0), total_candidates))
+    failed = max(0, total_candidates - passed)
+
+    # Helper for safe proportional share
+    def _prop(numer: int) -> float:
+        if total_candidates == 0:
+            return 0.0
+        return round(role_total * MILESTONE_SHARES["1st"] * 0, 2)  # placeholder, overridden below
+
+    # Compute explicit milestone amounts
+    first_amount = round(role_total * MILESTONE_SHARES["1st"] + uniform_total, 2)
+    second_gross = round(role_total * MILESTONE_SHARES["2nd"] * (passed / total_candidates), 2) if total_candidates else 0.0
+    second_recovery = round(role_total * MILESTONE_SHARES["1st"] * (failed / total_candidates), 2) if total_candidates else 0.0
+    second_net = round(second_gross - second_recovery, 2)
+    third_amount = round(role_total * MILESTONE_SHARES["3rd"] * (placed / total_candidates), 2) if total_candidates else 0.0
+
     return {
         "rows": rows_out,
-        "role_total": round(role_total, 2),
+        "role_total": role_total,
         "uniform_total": uniform_total,
-        "total": round(role_total + uniform_total, 2),
         "total_candidates": total_candidates,
+        "passed_candidates": passed,
+        "failed_candidates": failed,
+        "placed_candidates": placed,
+        "shares": MILESTONE_SHARES,
+        "rates": JOB_CATEGORY_RATES,
+        "uniform_per_candidate": UNIFORM_PER_CANDIDATE,
+        "by_milestone": {
+            "1st": {
+                "share_of_role": MILESTONE_SHARES["1st"],
+                "role_portion": round(role_total * MILESTONE_SHARES["1st"], 2),
+                "uniform": uniform_total,
+                "amount": first_amount,
+                "based_on": total_candidates,
+                "based_on_label": "total candidates",
+            },
+            "2nd": {
+                "share_of_role": MILESTONE_SHARES["2nd"],
+                "gross": second_gross,
+                "recovery": second_recovery,
+                "amount": second_net,
+                "based_on": passed,
+                "based_on_label": f"{passed}/{total_candidates} passed",
+                "failed_count": failed,
+            },
+            "3rd": {
+                "share_of_role": MILESTONE_SHARES["3rd"],
+                "amount": third_amount,
+                "based_on": placed,
+                "based_on_label": f"{placed}/{total_candidates} placed",
+            },
+        },
+    }
+
+
+# Backward-compat alias for the older endpoint name
+def _compute_1st_milestone(job_roles: list) -> dict:
+    """Legacy: returns the 1st-milestone-only breakdown (role + uniform). Retained for back-compat."""
+    bd = _compute_batch_milestones(job_roles, passed=0, placed=0)
+    first = bd["by_milestone"]["1st"]
+    return {
+        "rows": bd["rows"],
+        "role_total": bd["role_total"],
+        "uniform_total": bd["uniform_total"],
+        "total": first["amount"],
+        "total_candidates": bd["total_candidates"],
     }
 
 
@@ -3502,6 +3575,9 @@ class BatchPaymentIn(BaseModel):
     description: Optional[str] = ""
     # Uniform amount portion (only relevant on 1st milestone). Excluded from TDS.
     uniform_amount: float = Field(default=0, ge=0)
+    # Recovery (only relevant on 2nd milestone): the portion of already-disbursed 1st milestone
+    # being claw-backed for candidates who failed the exam. Reduces credited income.
+    recovery_amount: float = Field(default=0, ge=0)
 
 
 class BatchPaymentOut(BatchPaymentIn):
@@ -3512,7 +3588,7 @@ class BatchPaymentOut(BatchPaymentIn):
     txn_id: Optional[str] = None
     tds_percent: float = 0
     tds_amount: float = 0
-    net_amount: Optional[float] = None  # gross - tds
+    net_amount: Optional[float] = None  # gross - tds (after recovery already deducted from amount)
     created_at: str
 
 
@@ -3592,7 +3668,8 @@ async def list_batch_payments(batch_id: Optional[str] = None, _=Depends(get_curr
 
 @api.get("/batches/{bid}/compute-1st-milestone")
 async def compute_first_milestone(bid: str, _=Depends(get_current_user)):
-    """Returns the auto-computed 1st milestone breakdown for the batch's job_roles."""
+    """Returns the auto-computed 1st milestone breakdown for the batch's job_roles.
+    (Legacy endpoint — for full 3-milestone breakdown use /compute-milestones.)"""
     batch = await db.batches.find_one({"id": bid}, {"_id": 0})
     if not batch:
         raise HTTPException(404, "Batch not found")
@@ -3600,6 +3677,25 @@ async def compute_first_milestone(bid: str, _=Depends(get_current_user)):
     breakdown["rates"] = JOB_CATEGORY_RATES
     breakdown["uniform_per_candidate"] = UNIFORM_PER_CANDIDATE
     return breakdown
+
+
+@api.get("/batches/{bid}/compute-milestones")
+async def compute_milestones(bid: str, _=Depends(get_current_user)):
+    """Full 3-milestone breakdown including 2nd-milestone recovery for failed candidates.
+
+    Formula (per spec):
+      1st = 30% × role_total + uniform_total
+      2nd = (40% × role_total × passed/total) − (30% × role_total × failed/total)  ← recovery
+      3rd = 30% × role_total × placed/total
+    """
+    batch = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    return _compute_batch_milestones(
+        batch.get("job_roles") or [],
+        passed=int(batch.get("passed_candidates") or 0),
+        placed=int(batch.get("placed_candidates") or 0),
+    )
 
 
 @api.post("/batch-payments", response_model=BatchPaymentOut)
@@ -3639,10 +3735,12 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
 
     Behaviour:
     - Income transaction(s) created at the GROSS milestone amount (per partner split if applicable).
+    - If recovery_amount > 0 (only relevant on 2nd milestone): an additional EXPENSE transaction
+      (source='candidate_recovery') is created — represents the claw-back of 1st-milestone money
+      already paid for candidates who failed the exam. Reduces net P&L.
     - If tds_percent > 0: an additional EXPENSE transaction (source='tds_deduction') is created for
       the TDS amount = (gross − uniform_amount) × tds_percent / 100. Uniform portion is excluded
-      from TDS by statute (training-uniform allowance). TDS is recorded once per batch payment,
-      not per partner split.
+      from TDS by statute. TDS is recorded once per batch payment, not per partner split.
     """
     rec = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
     if not rec:
@@ -3687,6 +3785,30 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
         await db.transactions.insert_one(txn)
         created_txn_ids.append(txn["id"])
 
+    # Candidate-failure recovery (2nd milestone): separate expense to claw back 1st-milestone
+    recovery_amount = float(rec.get("recovery_amount") or 0)
+    recovery_txn_id = None
+    if recovery_amount > 0:
+        rec_txn = {
+            "id": str(uuid.uuid4()),
+            "type": "expense",
+            "amount": recovery_amount,
+            "date": today,
+            "description": f"Candidate-failure recovery (claw-back of 1st-milestone) on {description_base}",
+            "company_id": None,
+            "partner_id": None,
+            "center_id": (batch or {}).get("center_id"),
+            "project_id": (batch or {}).get("project_id"),
+            "items": [], "attachments": [],
+            "source": "candidate_recovery",
+            "milestone": rec["milestone"],
+            "created_by": user["id"], "created_at": now,
+            "status": "approved", "approved_by": user["id"], "approved_at": now,
+            "rejected_reason": None,
+        }
+        await db.transactions.insert_one(rec_txn)
+        recovery_txn_id = rec_txn["id"]
+
     # TDS deduction: separate expense transaction (uniform amount excluded from taxable base)
     tds_percent = float(body.tds_percent or 0)
     uniform_amount = float(rec.get("uniform_amount") or 0)
@@ -3716,7 +3838,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             await db.transactions.insert_one(tds_txn)
             tds_txn_id = tds_txn["id"]
 
-    net_amount = round(gross - tds_amount, 2)
+    net_amount = round(gross - tds_amount - recovery_amount, 2)
     res = await db.batch_payments.find_one_and_update(
         {"id": pid},
         {"$set": {
@@ -3726,6 +3848,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "tds_percent": tds_percent,
             "tds_amount": tds_amount,
             "tds_txn_id": tds_txn_id,
+            "recovery_amount": recovery_amount,
+            "recovery_txn_id": recovery_txn_id,
             "net_amount": net_amount,
         }},
         return_document=True,

@@ -1,0 +1,42 @@
+{
+  "summary": "Iter-16 (3-milestone breakdown + 2nd-milestone candidate recovery) full backend + frontend verification. All 11 new backend tests pass; canonical example math (3,38,100 / 1,31,430 / 1,17,208 / 13,524 / 1,03,684 / 67,620) is reproduced byte-for-byte both in API responses and on the live UI.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PATCH /api/batch-payments/{pid}/receive", "issue": "Server writes recovery_txn_id / tds_txn_id / txn_ids on the payment doc but BatchPaymentOut Pydantic model doesn't declare them, so they get stripped from the JSON response. Functionally OK, but the FE can't link directly to the recovery/tds expense rows. Suggest adding Optional fields on BatchPaymentOut."},
+      {"endpoint": "GET /api/batches/{bid}/compute-milestones", "issue": "Internal helper _prop() is dead code (returns placeholder); harmless but should be removed."},
+      {"endpoint": "GET /api/batches/{bid}/compute-1st-milestone", "issue": "Backward-compat: legacy field 'total' now equals 30%*role+uniform (new spec). Older iter-15 test test_compute_spec_example_exact still asserts the OLD formula (100%*role+uniform) and therefore fails. This is an expected spec change, not a regression — but the stale iter-15 test should be updated by the main agent (or deprecated) to match the new milestone semantics. All other 12 iter-15 tests still pass."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter16_milestone_recovery.py",
+    "/app/test_reports/pytest/iteration_16.xml"
+  ],
+  "action_items": [
+    "Update /app/backend/tests/test_iter15_job_roles_tds.py::TestComputeFirstMilestone::test_compute_spec_example_exact — it still asserts 'total = role_total + uniform' (old 100% formula). Under iter-16 the legacy endpoint returns 'total = 30%*role + uniform' (= 77,466.5 for the spec example, not 2,04,555). Either retire that test or rewrite it for the new formula.",
+    "(Minor) Add 'recovery_txn_id', 'tds_txn_id', 'txn_ids' as Optional fields on BatchPaymentOut so the FE can deep-link to the auto-created expense rows.",
+    "(Cleanup) Remove dead _prop() inner helper inside _compute_batch_milestones in server.py — it is never invoked."
+  ],
+  "critical_code_review_comments": [
+    "Math is correct and matches the user-supplied canonical example exactly (verified via API + UI).",
+    "Income txn is correctly recorded at GROSS, with separate expense txns for candidate_recovery and tds_deduction; net_amount = gross - tds - recovery is correctly persisted on the batch_payment row.",
+    "Recovery field correctly gated: it only appears in Configure 2nd dialog (verified pay-recovery present for 2nd, absent for 1st and 3rd); pay-uniform field correctly only appears for 1st.",
+    "Frontend breakdown cards data-testid bd-1st/bd-2nd/bd-3rd render correct values and warning '4 failed' is shown alongside header counts.",
+    "Server.py is 3961 lines — exceeds the 700-line guideline. Recommend modularising milestones/HRMS/auth into sub-modules (not blocking)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter16_milestone_recovery.py (new)"
+  ],
+  "success_rate": {"backend": "100% (11/11 iter-16) + 12/13 iter-15 retain", "frontend": "100% (all spec checks passed)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Each test creates ephemeral TEST_-prefixed project/center/batch records; not cleaned up but isolated by uuid suffix.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iter-16 introduces 3-milestone calc with recovery. Canonical numbers: role_total=3,38,100; 1st=1,31,430; 2nd gross=1,17,208 / recovery=13,524 / net=1,03,684; 3rd=67,620; TDS@2% taxable=117208 -> tds=2344.16; net_amount=101,339.84. Frontend testids: batch-passed, batch-placed, job-roles-totals, bd-1st, bd-2nd, bd-3rd, pay-recovery, pay-uniform. Receive flow creates separate expense rows source='candidate_recovery' (only when >0) and source='tds_deduction'. Legacy /compute-1st-milestone endpoint preserved but its 'total' field now uses NEW formula (30%*role+uniform).",
+  "rca of the issue": "N/A — feature works as specified."
+}

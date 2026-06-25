@@ -18,7 +18,7 @@ import PrintButton from "@/components/PrintButton";
 
 const MILESTONES = ["1st", "2nd", "3rd"];
 
-// Must match backend constants in server.py (JOB_CATEGORY_RATES + UNIFORM_PER_CANDIDATE)
+// Must match backend constants in server.py (JOB_CATEGORY_RATES + UNIFORM_PER_CANDIDATE + MILESTONE_SHARES)
 const CATEGORY_RATES = { "1": 56.35, "2": 52.50, "3": 36.85 };
 const CATEGORY_LABEL = {
   "1": "Category 1 (₹56.35/hr)",
@@ -26,6 +26,7 @@ const CATEGORY_LABEL = {
   "3": "Category 3 (₹36.85/hr)",
 };
 const UNIFORM_PER_CANDIDATE = 1000;
+const SHARES = { "1st": 0.30, "2nd": 0.40, "3rd": 0.30 };
 // 2-decimal INR formatter, used for TDS / net amounts (gross/role/uniform stay integer via inr())
 const inr2 = (n) => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2,
@@ -36,7 +37,7 @@ const TDS_OPTIONS = [
   { v: "10", label: "10%" },
 ];
 
-function computeFirstMilestone(rows) {
+function computeMilestones(rows, passed, placed) {
   let roleTotal = 0;
   let totalCandidates = 0;
   (rows || []).forEach((r) => {
@@ -46,14 +47,32 @@ function computeFirstMilestone(rows) {
     roleTotal += c * rate * h;
     totalCandidates += c;
   });
-  const uniformTotal = totalCandidates * UNIFORM_PER_CANDIDATE;
+  roleTotal = Math.round(roleTotal * 100) / 100;
+  const uniform = totalCandidates * UNIFORM_PER_CANDIDATE;
+  const p = Math.max(0, Math.min(parseInt(passed, 10) || 0, totalCandidates));
+  const pl = Math.max(0, Math.min(parseInt(placed, 10) || 0, totalCandidates));
+  const failed = Math.max(0, totalCandidates - p);
+  const denom = totalCandidates || 1;
+  const round2 = (x) => Math.round(x * 100) / 100;
+  const firstAmount = round2(roleTotal * SHARES["1st"] + uniform);
+  const secondGross = round2(roleTotal * SHARES["2nd"] * (p / denom));
+  const secondRecovery = round2(roleTotal * SHARES["1st"] * (failed / denom));
+  const secondNet = round2(secondGross - secondRecovery);
+  const thirdAmount = round2(roleTotal * SHARES["3rd"] * (pl / denom));
   return {
-    roleTotal: Math.round(roleTotal * 100) / 100,
-    uniformTotal,
-    total: Math.round((roleTotal + uniformTotal) * 100) / 100,
-    totalCandidates,
+    roleTotal, uniform, totalCandidates,
+    passed: p, placed: pl, failed,
+    first: { amount: firstAmount, rolePortion: round2(roleTotal * SHARES["1st"]), uniform },
+    second: { gross: secondGross, recovery: secondRecovery, amount: secondNet, basedOn: `${p}/${totalCandidates} passed`, failed },
+    third: { amount: thirdAmount, basedOn: `${pl}/${totalCandidates} placed` },
   };
 }
+
+// Back-compat alias used by older sections
+const computeFirstMilestone = (rows) => {
+  const b = computeMilestones(rows, 0, 0);
+  return { roleTotal: b.roleTotal, uniformTotal: b.uniform, total: b.first.amount, totalCandidates: b.totalCandidates };
+};
 
 function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onReceive, onEdit, onDelete }) {
   const received = payment?.status === "received";
@@ -94,11 +113,17 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
             {milestone === "1st" && payment.uniform_amount > 0 && (
               <div className="flex justify-between"><span className="overline">Uniform</span><span className="num">{inr(payment.uniform_amount)}</span></div>
             )}
+            {received && payment.recovery_amount > 0 && (
+              <div className="flex justify-between text-[var(--danger)]"><span className="overline">Recovery</span><span className="num">−{inr2(payment.recovery_amount)}</span></div>
+            )}
             {received && payment.tds_percent > 0 && (
               <>
                 <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({payment.tds_percent}%)</span><span className="num">−{inr2(payment.tds_amount)}</span></div>
                 <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - payment.tds_amount))}</span></div>
               </>
+            )}
+            {received && payment.tds_percent === 0 && payment.recovery_amount > 0 && (
+              <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - payment.recovery_amount))}</span></div>
             )}
             {payment.expected_date && (
               <div className="flex justify-between"><span className="overline">Expected</span><span className="num">{payment.expected_date}</span></div>
@@ -146,15 +171,15 @@ export default function Programs() {
   // Batch dialog
   const [batchOpen, setBatchOpen] = useState(false);
   const [editingBatch, setEditingBatch] = useState(null);
-  const emptyBatch = { project_id: "", center_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "", job_roles: [] };
+  const emptyBatch = { project_id: "", center_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "", job_roles: [], passed_candidates: 0, placed_candidates: 0 };
   const [bForm, setBForm] = useState(emptyBatch);
 
   // Payment dialog
   const [payOpen, setPayOpen] = useState(false);
   const [editingPay, setEditingPay] = useState(null);
-  const emptyPay = { batch_id: "", milestone: "1st", amount: "", expected_date: "", description: "", uniform_amount: 0 };
+  const emptyPay = { batch_id: "", milestone: "1st", amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0 };
   const [pForm, setPForm] = useState(emptyPay);
-  const [autoFill1st, setAutoFill1st] = useState(false); // hint flag
+  const [autoFilled, setAutoFilled] = useState(false); // hint flag
 
   // Receive dialog (TDS confirmation)
   const [recvOpen, setRecvOpen] = useState(false);
@@ -198,11 +223,18 @@ export default function Programs() {
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const activeBatch = batches.find((b) => b.id === selectedBatchId);
 
-  // Live 1st milestone breakdown for batch dialog
-  const bFormBreakdown = useMemo(() => computeFirstMilestone(bForm.job_roles), [bForm.job_roles]);
-  // For showing on active batch summary card
+  // Live milestone breakdown for batch dialog (3-milestone with passed/placed)
+  const bFormBreakdown = useMemo(
+    () => computeMilestones(bForm.job_roles, bForm.passed_candidates, bForm.placed_candidates),
+    [bForm.job_roles, bForm.passed_candidates, bForm.placed_candidates],
+  );
+  // For showing on active batch summary card — uses persisted passed/placed
   const activeBatchBreakdown = useMemo(
-    () => activeBatch ? computeFirstMilestone(activeBatch.job_roles || []) : null,
+    () => activeBatch ? computeMilestones(
+      activeBatch.job_roles || [],
+      activeBatch.passed_candidates || 0,
+      activeBatch.placed_candidates || 0,
+    ) : null,
     [activeBatch],
   );
 
@@ -235,6 +267,8 @@ export default function Programs() {
       name: b.name, start_date: b.start_date || "", end_date: b.end_date || "",
       total_beneficiaries: b.total_beneficiaries || 0, description: b.description || "",
       job_roles: b.job_roles || [],
+      passed_candidates: b.passed_candidates || 0,
+      placed_candidates: b.placed_candidates || 0,
     });
     setBatchOpen(true);
   };
@@ -249,6 +283,8 @@ export default function Programs() {
         total_beneficiaries: computedBeneficiaries || +bForm.total_beneficiaries || 0,
         center_id: bForm.center_id || null,
         partner_ids: bForm.partner_ids || [],
+        passed_candidates: parseInt(bForm.passed_candidates, 10) || 0,
+        placed_candidates: parseInt(bForm.placed_candidates, 10) || 0,
         job_roles: (bForm.job_roles || []).map((r) => ({
           category: String(r.category || "1"),
           job_role: r.job_role || "",
@@ -282,22 +318,43 @@ export default function Programs() {
   // Payment CRUD
   const openNewPayment = (milestone) => {
     setEditingPay(null);
-    // Pre-fill 1st milestone from job-role computation
-    if (milestone === "1st" && activeBatch) {
-      const bd = computeFirstMilestone(activeBatch.job_roles || []);
-      if (bd.total > 0) {
+    if (activeBatch) {
+      const bd = computeMilestones(
+        activeBatch.job_roles || [],
+        activeBatch.passed_candidates || 0,
+        activeBatch.placed_candidates || 0,
+      );
+      if (milestone === "1st" && bd.first.amount > 0) {
         setPForm({
-          batch_id: selectedBatchId, milestone, amount: bd.total,
-          expected_date: "", description: `Auto-calculated · roles ₹${bd.roleTotal.toLocaleString("en-IN")} + uniform ₹${bd.uniformTotal.toLocaleString("en-IN")} (${bd.totalCandidates} candidates × ₹1000)`,
-          uniform_amount: bd.uniformTotal,
+          batch_id: selectedBatchId, milestone, amount: bd.first.amount,
+          expected_date: "",
+          description: `Auto · 30% × ₹${bd.roleTotal.toLocaleString("en-IN")} role + uniform ₹${bd.uniform.toLocaleString("en-IN")} (${bd.totalCandidates} candidates × ₹1000)`,
+          uniform_amount: bd.uniform, recovery_amount: 0,
         });
-        setAutoFill1st(true);
-        setPayOpen(true);
-        return;
+        setAutoFilled(true); setPayOpen(true); return;
+      }
+      if (milestone === "2nd" && bd.second.gross > 0) {
+        // Set gross as amount; recovery captured separately and applied on Receive
+        setPForm({
+          batch_id: selectedBatchId, milestone, amount: bd.second.gross,
+          expected_date: "",
+          description: `Auto · 40% × ₹${bd.roleTotal.toLocaleString("en-IN")} × ${bd.passed}/${bd.totalCandidates} passed. Recovery for ${bd.failed} failed = ₹${bd.second.recovery.toLocaleString("en-IN")}`,
+          uniform_amount: 0, recovery_amount: bd.second.recovery,
+        });
+        setAutoFilled(true); setPayOpen(true); return;
+      }
+      if (milestone === "3rd" && bd.third.amount > 0) {
+        setPForm({
+          batch_id: selectedBatchId, milestone, amount: bd.third.amount,
+          expected_date: "",
+          description: `Auto · 30% × ₹${bd.roleTotal.toLocaleString("en-IN")} × ${bd.placed}/${bd.totalCandidates} placed`,
+          uniform_amount: 0, recovery_amount: 0,
+        });
+        setAutoFilled(true); setPayOpen(true); return;
       }
     }
-    setPForm({ batch_id: selectedBatchId, milestone, amount: "", expected_date: "", description: "", uniform_amount: 0 });
-    setAutoFill1st(false);
+    setPForm({ batch_id: selectedBatchId, milestone, amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0 });
+    setAutoFilled(false);
     setPayOpen(true);
   };
   const openEditPayment = (p) => {
@@ -306,8 +363,9 @@ export default function Programs() {
       batch_id: p.batch_id, milestone: p.milestone, amount: p.amount,
       expected_date: p.expected_date || "", description: p.description || "",
       uniform_amount: p.uniform_amount || 0,
+      recovery_amount: p.recovery_amount || 0,
     });
-    setAutoFill1st(false);
+    setAutoFilled(false);
     setPayOpen(true);
   };
   const savePayment = async () => {
@@ -317,6 +375,7 @@ export default function Programs() {
         ...pForm,
         amount: parseFloat(pForm.amount),
         uniform_amount: parseFloat(pForm.uniform_amount) || 0,
+        recovery_amount: parseFloat(pForm.recovery_amount) || 0,
       };
       if (editingPay) await api.put(`/batch-payments/${editingPay.id}`, payload);
       else await api.post("/batch-payments", payload);
@@ -364,11 +423,12 @@ export default function Programs() {
     if (!recvTarget) return null;
     const gross = recvTarget.amount || 0;
     const uniform = recvTarget.uniform_amount || 0;
+    const recovery = recvTarget.recovery_amount || 0;
     const pct = parseFloat(recvTds) || 0;
     const taxable = Math.max(0, gross - uniform);
     const tds = Math.round(taxable * pct) / 100;
-    const net = gross - tds;
-    return { gross, uniform, taxable, pct, tds, net };
+    const net = gross - tds - recovery;
+    return { gross, uniform, recovery, taxable, pct, tds, net };
   }, [recvTarget, recvTds]);
 
   return (
@@ -454,15 +514,18 @@ export default function Programs() {
                     <div className="swiss-card p-3"><div className="overline">Total Received</div><div className="num font-bold text-xl value-positive">{inr(totalReceived)}</div></div>
                   </div>
 
-                  {/* Job roles breakdown card (auto 1st milestone) */}
-                  {activeBatchBreakdown && activeBatchBreakdown.total > 0 && (
+                  {/* Job roles breakdown card (auto all 3 milestones) */}
+                  {activeBatchBreakdown && activeBatchBreakdown.roleTotal > 0 && (
                     <div className="swiss-card p-4" data-testid="job-roles-breakdown">
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                           <Calculator size={16} className="text-[var(--brand)]" />
-                          <div className="overline">1st Milestone — Auto Calculation from Job Roles</div>
+                          <div className="overline">Milestone Auto-Calculation</div>
                         </div>
-                        <span className="overline">{activeBatchBreakdown.totalCandidates} candidate{activeBatchBreakdown.totalCandidates === 1 ? "" : "s"}</span>
+                        <div className="text-xs text-[var(--muted)]">
+                          {activeBatchBreakdown.totalCandidates} candidates · {activeBatchBreakdown.passed} passed · {activeBatchBreakdown.placed} placed
+                          {activeBatchBreakdown.failed > 0 && <> · <span className="text-[var(--danger)]">{activeBatchBreakdown.failed} failed</span></>}
+                        </div>
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-sm">
@@ -493,19 +556,39 @@ export default function Programs() {
                               );
                             })}
                             <tr className="border-t-2 border-[var(--border)]">
-                              <td className="p-2 font-medium" colSpan={5}>Role subtotal</td>
+                              <td className="p-2 font-medium" colSpan={5}>Role total (basis for milestone split)</td>
                               <td className="p-2 text-right num font-bold">{inr(activeBatchBreakdown.roleTotal)}</td>
-                            </tr>
-                            <tr>
-                              <td className="p-2" colSpan={5}>Uniform allowance ({activeBatchBreakdown.totalCandidates} × ₹{UNIFORM_PER_CANDIDATE})</td>
-                              <td className="p-2 text-right num">{inr(activeBatchBreakdown.uniformTotal)}</td>
-                            </tr>
-                            <tr className="border-t-2 border-[var(--brand)] bg-blue-50">
-                              <td className="p-2 font-heading font-bold" colSpan={5}>1st Milestone Total</td>
-                              <td className="p-2 text-right num font-bold text-[var(--brand)]">{inr(activeBatchBreakdown.total)}</td>
                             </tr>
                           </tbody>
                         </table>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+                        <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm" data-testid="bd-1st">
+                          <div className="overline">1st Milestone · 30%</div>
+                          <div className="space-y-0.5 mt-2">
+                            <div className="flex justify-between"><span>Role 30%</span><span className="num">{inr(activeBatchBreakdown.first.rolePortion)}</span></div>
+                            <div className="flex justify-between"><span>Uniform</span><span className="num">+{inr(activeBatchBreakdown.uniform)}</span></div>
+                            <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1 font-bold"><span>Total</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.first.amount)}</span></div>
+                          </div>
+                        </div>
+                        <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm" data-testid="bd-2nd">
+                          <div className="overline">2nd Milestone · 40% × passed</div>
+                          <div className="space-y-0.5 mt-2">
+                            <div className="flex justify-between"><span>{activeBatchBreakdown.second.basedOn}</span><span className="num">{inr(activeBatchBreakdown.second.gross)}</span></div>
+                            {activeBatchBreakdown.failed > 0 && (
+                              <div className="flex justify-between text-[var(--danger)]"><span>Recovery ({activeBatchBreakdown.failed} failed)</span><span className="num">−{inr(activeBatchBreakdown.second.recovery)}</span></div>
+                            )}
+                            <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1 font-bold"><span>Net</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.second.amount)}</span></div>
+                          </div>
+                        </div>
+                        <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm" data-testid="bd-3rd">
+                          <div className="overline">3rd Milestone · 30% × placed</div>
+                          <div className="space-y-0.5 mt-2">
+                            <div className="flex justify-between"><span>{activeBatchBreakdown.third.basedOn}</span><span className="num">{inr(activeBatchBreakdown.third.amount)}</span></div>
+                            <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1 font-bold"><span>Total</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.third.amount)}</span></div>
+                          </div>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -683,20 +766,45 @@ export default function Programs() {
                       </div>
                     );
                   })}
-                  <div className="border-t border-[var(--border)] pt-2 mt-2 bg-blue-50 px-3 py-2 grid grid-cols-3 gap-2 text-sm" data-testid="job-roles-totals">
+                  <div className="border-t border-[var(--border)] pt-2 mt-2 bg-blue-50 px-3 py-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-sm" data-testid="job-roles-totals">
                     <div>
                       <div className="overline text-xs">Role total</div>
                       <div className="num font-bold">{inr(bFormBreakdown.roleTotal)}</div>
                     </div>
                     <div>
-                      <div className="overline text-xs">Uniform ({bFormBreakdown.totalCandidates} × ₹1000)</div>
-                      <div className="num font-bold">{inr(bFormBreakdown.uniformTotal)}</div>
+                      <div className="overline text-xs">1st (30% + Uniform)</div>
+                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.first.amount)}</div>
                     </div>
                     <div>
-                      <div className="overline text-xs">1st Milestone Total</div>
-                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.total)}</div>
+                      <div className="overline text-xs">2nd net (40%×P − recovery)</div>
+                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.second.amount)}</div>
+                    </div>
+                    <div>
+                      <div className="overline text-xs">3rd (30%×Placed)</div>
+                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.third.amount)}</div>
                     </div>
                   </div>
+                </div>
+              )}
+            </div>
+
+            <div className="col-span-2 grid grid-cols-2 gap-3 border-t border-[var(--border)] pt-3">
+              <div>
+                <Label>Passed Candidates <span className="overline text-[10px]">(drives 2nd milestone)</span></Label>
+                <Input type="number" min="0" value={bForm.passed_candidates}
+                  onChange={(e) => setBForm({ ...bForm, passed_candidates: e.target.value })}
+                  className="rounded-none num" data-testid="batch-passed" />
+              </div>
+              <div>
+                <Label>Placed Candidates <span className="overline text-[10px]">(drives 3rd milestone)</span></Label>
+                <Input type="number" min="0" value={bForm.placed_candidates}
+                  onChange={(e) => setBForm({ ...bForm, placed_candidates: e.target.value })}
+                  className="rounded-none num" data-testid="batch-placed" />
+              </div>
+              {bFormBreakdown.failed > 0 && (
+                <div className="col-span-2 text-xs text-[var(--muted)] border-l-2 border-[var(--danger)] pl-2 py-1">
+                  ⚠ {bFormBreakdown.failed} failed candidate{bFormBreakdown.failed === 1 ? "" : "s"} · 2nd milestone recovery
+                  = {inr(bFormBreakdown.second.recovery)} (30% × {bFormBreakdown.failed}/{bFormBreakdown.totalCandidates} of role)
                 </div>
               )}
             </div>
@@ -742,9 +850,9 @@ export default function Programs() {
       <Dialog open={payOpen} onOpenChange={setPayOpen}>
         <DialogContent className="rounded-none">
           <DialogHeader><DialogTitle className="font-heading">{editingPay ? "Edit" : "Configure"} Milestone Payment</DialogTitle></DialogHeader>
-          {autoFill1st && !editingPay && (
+          {autoFilled && !editingPay && (
             <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-2 text-xs">
-              <strong>Auto-filled</strong> from this batch&apos;s job roles. You can override.
+              <strong>Auto-filled</strong> from this batch&apos;s job roles + outcome counts. You can override.
             </div>
           )}
           <div className="grid grid-cols-2 gap-3">
@@ -763,6 +871,13 @@ export default function Programs() {
               <div className="col-span-2">
                 <Label>Uniform Amount (excluded from TDS) <span className="overline text-[10px]">{UNIFORM_PER_CANDIDATE} × candidates</span></Label>
                 <Input type="number" step="0.01" value={pForm.uniform_amount} onChange={(e) => setPForm({ ...pForm, uniform_amount: e.target.value })} className="rounded-none num" data-testid="pay-uniform" />
+              </div>
+            )}
+            {pForm.milestone === "2nd" && (
+              <div className="col-span-2">
+                <Label>Recovery Amount <span className="overline text-[10px]">claw-back of 1st milestone for failed candidates</span></Label>
+                <Input type="number" step="0.01" value={pForm.recovery_amount} onChange={(e) => setPForm({ ...pForm, recovery_amount: e.target.value })} className="rounded-none num" data-testid="pay-recovery" />
+                <p className="text-[10px] text-[var(--muted)] mt-1">Formula: 30% × role_total × (failed / total). Applied on Mark Received → separate expense txn (source=candidate_recovery).</p>
               </div>
             )}
             <div className="col-span-2">
@@ -794,7 +909,10 @@ export default function Programs() {
                 {recvTarget.milestone === "1st" && recvPreview.uniform > 0 && (
                   <div className="flex justify-between"><span className="overline">Uniform (TDS-exempt)</span><span className="num">{inr(recvPreview.uniform)}</span></div>
                 )}
-                <div className="flex justify-between"><span className="overline">Taxable base</span><span className="num">{inr(recvPreview.taxable)}</span></div>
+                {recvPreview.recovery > 0 && (
+                  <div className="flex justify-between text-[var(--danger)]"><span className="overline">Recovery (failed candidates)</span><span className="num">−{inr2(recvPreview.recovery)}</span></div>
+                )}
+                <div className="flex justify-between"><span className="overline">Taxable base (gross − uniform)</span><span className="num">{inr(recvPreview.taxable)}</span></div>
               </div>
               <div>
                 <Label>TDS Deduction by Department</Label>
