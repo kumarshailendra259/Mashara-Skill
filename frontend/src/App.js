@@ -20,6 +20,7 @@ import Programs from "@/pages/Programs";
 import CheckIn from "@/pages/CheckIn";
 import ForgotPassword from "@/pages/ForgotPassword";
 import PartnerAssociations from "@/pages/PartnerAssociations";
+import TdsRegister from "@/pages/TdsRegister";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
@@ -51,6 +52,7 @@ function App() {
             <Route path="/hr-settings" element={<ProtectedRoute><Shell><HrSettings /></Shell></ProtectedRoute>} />
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
+            <Route path="/tds-register" element={<ProtectedRoute><Shell><TdsRegister /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

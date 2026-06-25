@@ -3862,6 +3862,161 @@ async def delete_batch_payment(pid: str, _=Depends(require_role("admin"))):
         raise HTTPException(404, "Not found")
     return {"ok": True}
 
+# ---------- TDS Register (Form 26Q quarterly filing helper) ----------
+def _fy_bounds(fy_label: str) -> tuple[str, str]:
+    """Convert 'YYYY-YY' (e.g. '2025-26') into (start_iso, end_iso_exclusive) for Indian FY (Apr-Mar)."""
+    try:
+        start_year = int(fy_label.split("-")[0])
+    except (ValueError, IndexError):
+        raise HTTPException(400, "fy must be in format YYYY-YY, e.g. 2025-26")
+    return f"{start_year}-04-01", f"{start_year + 1}-04-01"
+
+
+# Indian FY quarter boundaries (Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar)
+def _quarter_bounds(fy_label: str, q: str) -> tuple[str, str]:
+    try:
+        start_year = int(fy_label.split("-")[0])
+    except (ValueError, IndexError, AttributeError):
+        raise HTTPException(400, "fy must be in format YYYY-YY, e.g. 2025-26")
+    q = (q or "all").upper()
+    table = {
+        "Q1": (f"{start_year}-04-01", f"{start_year}-07-01"),
+        "Q2": (f"{start_year}-07-01", f"{start_year}-10-01"),
+        "Q3": (f"{start_year}-10-01", f"{start_year + 1}-01-01"),
+        "Q4": (f"{start_year + 1}-01-01", f"{start_year + 1}-04-01"),
+        "ALL": (f"{start_year}-04-01", f"{start_year + 1}-04-01"),
+    }
+    if q not in table:
+        raise HTTPException(400, "quarter must be Q1, Q2, Q3, Q4 or all")
+    return table[q]
+
+
+def _date_to_quarter(date_str: str, fy_start_year: int) -> str:
+    """Return 'Q1'..'Q4' for a YYYY-MM-DD date relative to FY start year."""
+    try:
+        m = int(date_str[5:7])
+    except (ValueError, IndexError):
+        return "Q?"
+    if 4 <= m <= 6:
+        return "Q1"
+    if 7 <= m <= 9:
+        return "Q2"
+    if 10 <= m <= 12:
+        return "Q3"
+    if 1 <= m <= 3:
+        return "Q4"
+    return "Q?"
+
+
+@api.get("/reports/tds-register")
+async def tds_register(
+    fy: str = Query("2025-26", description="Financial year, e.g. 2025-26"),
+    quarter: str = Query("all", description="Q1/Q2/Q3/Q4 or all"),
+    project_id: Optional[str] = None,
+    user=Depends(require_role("admin", "accountant", "senior_manager", "hr")),
+):
+    """Returns the TDS register for a given FY/quarter — all transactions with
+    source='tds_deduction', grouped + summarised for Form 26Q quarterly filing.
+
+    Response:
+      {
+        fy, quarter, range: {start, end},
+        rows: [{date, txn_id, project_id/name, center_id/name, batch info,
+                gross_taxable, tds_percent, tds_amount, milestone, partner_id, description}],
+        by_quarter: { "Q1": amount, ... },
+        by_project: [{project_id, project_name, tds_amount}],
+        totals: { tds_amount, count }
+      }
+    """
+    start, end = _quarter_bounds(fy, quarter)
+    fy_start_year = int(fy.split("-")[0])
+
+    q: dict = {"source": "tds_deduction", "status": "approved", "date": {"$gte": start, "$lt": end}}
+    if project_id:
+        q["project_id"] = project_id
+
+    txns = await db.transactions.find(q, {"_id": 0}).sort("date", 1).to_list(5000)
+
+    # Resolve project / center names in bulk
+    proj_ids = {t.get("project_id") for t in txns if t.get("project_id")}
+    cent_ids = {t.get("center_id") for t in txns if t.get("center_id")}
+    proj_map = {p["id"]: p["name"] for p in await db.projects.find({"id": {"$in": list(proj_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)}
+    cent_map = {c["id"]: c["name"] for c in await db.centers.find({"id": {"$in": list(cent_ids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)}
+
+    rows = []
+    by_quarter = {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0}
+    by_project: dict[str, float] = {}
+    total_tds = 0.0
+
+    for t in txns:
+        amt = float(t.get("amount") or 0)
+        qkey = _date_to_quarter(t.get("date", ""), fy_start_year)
+        if qkey in by_quarter:
+            by_quarter[qkey] += amt
+        total_tds += amt
+        pid = t.get("project_id") or "__unassigned"
+        by_project[pid] = by_project.get(pid, 0.0) + amt
+        rows.append({
+            "date": t.get("date"),
+            "txn_id": t.get("id"),
+            "project_id": t.get("project_id"),
+            "project_name": proj_map.get(t.get("project_id"), ""),
+            "center_id": t.get("center_id"),
+            "center_name": cent_map.get(t.get("center_id"), ""),
+            "milestone": t.get("milestone"),
+            "tds_amount": round(amt, 2),
+            "description": t.get("description", ""),
+            "quarter": qkey,
+            "partner_id": t.get("partner_id"),
+        })
+
+    by_project_list = [
+        {"project_id": k if k != "__unassigned" else None,
+         "project_name": proj_map.get(k, "Unassigned" if k == "__unassigned" else k),
+         "tds_amount": round(v, 2)}
+        for k, v in sorted(by_project.items(), key=lambda kv: -kv[1])
+    ]
+
+    return {
+        "fy": fy,
+        "quarter": quarter.upper() if quarter else "ALL",
+        "range": {"start": start, "end": end},
+        "rows": rows,
+        "by_quarter": {k: round(v, 2) for k, v in by_quarter.items()},
+        "by_project": by_project_list,
+        "totals": {"tds_amount": round(total_tds, 2), "count": len(rows)},
+    }
+
+
+@api.get("/reports/tds-register/csv")
+async def tds_register_csv(
+    fy: str = Query("2025-26"),
+    quarter: str = Query("all"),
+    project_id: Optional[str] = None,
+    user=Depends(require_role("admin", "accountant", "senior_manager", "hr")),
+):
+    """CSV download of the TDS register — ready to feed into 26Q upload tools / TRACES."""
+    data = await tds_register(fy=fy, quarter=quarter, project_id=project_id, user=user)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Date", "Quarter", "Project", "Center", "Milestone", "Description", "TDS Amount (INR)", "Txn ID"])
+    for r in data["rows"]:
+        writer.writerow([
+            r["date"], r["quarter"], r["project_name"], r["center_name"],
+            r["milestone"] or "", r["description"], f"{r['tds_amount']:.2f}", r["txn_id"],
+        ])
+    writer.writerow([])
+    writer.writerow(["TOTAL", "", "", "", "", "", f"{data['totals']['tds_amount']:.2f}", ""])
+    csv_bytes = buf.getvalue().encode("utf-8")
+    qsuffix = quarter.upper() if quarter else "ALL"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="tds_register_{fy}_{qsuffix}.csv"'},
+    )
+
+
+
 
 # ---------- Notifications ----------
 async def _notify(user_ids, message: str, ntype: str = "info", ref_id: Optional[str] = None, link: Optional[str] = None):
