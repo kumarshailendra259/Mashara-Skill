@@ -26,6 +26,10 @@ const CATEGORY_LABEL = {
   "3": "Category 3 (₹36.85/hr)",
 };
 const UNIFORM_PER_CANDIDATE = 1000;
+// 2-decimal INR formatter, used for TDS / net amounts (gross/role/uniform stay integer via inr())
+const inr2 = (n) => new Intl.NumberFormat("en-IN", {
+  style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2,
+}).format(Number(n || 0));
 const TDS_OPTIONS = [
   { v: "0", label: "0% — No TDS" },
   { v: "2", label: "2%" },
@@ -92,8 +96,8 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
             )}
             {received && payment.tds_percent > 0 && (
               <>
-                <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({payment.tds_percent}%)</span><span className="num">−{inr(payment.tds_amount)}</span></div>
-                <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr(payment.net_amount || (payment.amount - payment.tds_amount))}</span></div>
+                <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({payment.tds_percent}%)</span><span className="num">−{inr2(payment.tds_amount)}</span></div>
+                <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - payment.tds_amount))}</span></div>
               </>
             )}
             {payment.expected_date && (
@@ -569,8 +573,8 @@ export default function Programs() {
                             <tr key={m} className="border-b border-[var(--border)]">
                               <td className="p-3 font-medium">{m}</td>
                               <td className="p-3 num text-right">{p ? inr(p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
-                              <td className="p-3 num text-right">{p && p.tds_percent > 0 ? `${p.tds_percent}% · ${inr(p.tds_amount)}` : <span className="text-[var(--muted)]">—</span>}</td>
-                              <td className="p-3 num text-right font-medium">{p && p.status === "received" ? inr(p.net_amount || p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
+                              <td className="p-3 num text-right">{p && p.tds_percent > 0 ? `${p.tds_percent}% · ${inr2(p.tds_amount)}` : <span className="text-[var(--muted)]">—</span>}</td>
+                              <td className="p-3 num text-right font-medium">{p && p.status === "received" ? inr2(p.net_amount || p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
                               <td className="p-3 num">{p?.expected_date || "—"}</td>
                               <td className="p-3 overline text-xs">{p?.status || "—"}</td>
                               <td className="p-3 num">{p?.received_date || "—"}</td>
@@ -804,8 +808,8 @@ export default function Programs() {
               <div className="space-y-1 text-sm border-l-2 border-[var(--brand)] bg-blue-50 p-3">
                 {recvPreview.pct > 0 ? (
                   <>
-                    <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({recvPreview.pct}%)</span><span className="num">−{inr(recvPreview.tds)}</span></div>
-                    <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1"><span className="overline">Net credited to bank</span><span className="num font-bold value-positive">{inr(recvPreview.net)}</span></div>
+                    <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({recvPreview.pct}%)</span><span className="num">−{inr2(recvPreview.tds)}</span></div>
+                    <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1"><span className="overline">Net credited to bank</span><span className="num font-bold value-positive">{inr2(recvPreview.net)}</span></div>
                     <div className="overline text-[10px] text-[var(--muted)] pt-1">Income txn records gross. Separate expense txn (source=tds_deduction) records the TDS.</div>
                   </>
                 ) : (
