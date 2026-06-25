@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration-15 — Tested job-role-wise 1st milestone auto-computation + uniform allowance + per-receive TDS deduction (0/2/10%). Backend: 13/13 NEW pytest tests PASS (test_iter15_job_roles_tds.py): job_roles persistence+update+backfill, compute-1st-milestone math (10×Cat1×200 + 5×Cat2×150 + 8×Cat3×100 + 23×₹1000 = ₹2,04,555 EXACT), BatchPaymentIn.uniform_amount persistence, 422 on invalid tds_percent=5, TDS=0 path (no expense txn), TDS=2% on ₹2,04,555 / ₹23,000 → tds_amount=₹3,631.10 + net_amount=₹2,00,923.90 + separate expense txn source='tds_deduction' + income txns still GROSS, TDS=10% with uniform=0, 400 on double-receive. Frontend e2e on /programs: New Batch dialog adds 3 job-role rows, live subtotal shows ₹1,81,555/₹23,000/₹2,04,555, save → Job Roles Breakdown card visible, Configure 1st auto-fills amount+uniform, Configure 2nd hides Uniform field, Mark Received dialog shows Gross/Uniform/Taxable, TDS dropdown live-updates Net, Confirm Receive flips to status=received with ₹3,631 TDS in payments table. No bugs found in this iteration's feature surface.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Receive dialog & breakdown card", "issues": ["Net Credited and TDS in dialog display as '₹2,00,924' / '₹3,631' (integer-rounded INR formatting via inr() helper) while backend persists ₹2,00,923.90 / ₹3,631.10. Math is correct in DB — only the display rounds. Consider using a 2-decimal formatter for these summary lines to avoid user confusion vs the 'taxable ₹1,81,555.00' values shown elsewhere."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter15_job_roles_tds.py",
+    "/app/test_reports/pytest/iteration_15.xml"
+  ],
+  "action_items": [
+    "LOW: Consider showing 2-decimal INR (₹3,631.10 / ₹2,00,923.90) in the Mark Received dialog and 1st-milestone Breakdown card for consistency — backend already stores correct decimals.",
+    "LOW (pre-existing, not from this iter): _id and update-null-clearing bugs flagged in iteration_14 still pending."
+  ],
+  "critical_code_review_comments": [
+    "server.py:_compute_1st_milestone treats missing/blank category as rate=0 silently (rows_out includes them with rate 0.0). Acceptable for compute but the API could 400/422 on unknown category strings to fail loud on bad input.",
+    "server.py receive_batch_payment splits gross evenly across partner_ids, BUT TDS is deducted only once (correctly) — however the TDS expense txn has partner_id=null even when income txns are per-partner. If P&L is partner-wise this hides the TDS cost from each partner's books. Worth confirming with finance requirement.",
+    "BatchPaymentIn.uniform_amount has no upper bound vs computed uniform — admin could persist a uniform larger than gross which would make taxable=max(0, gross-uniform)=0 and silently zero out TDS. Consider validating uniform_amount <= amount.",
+    "/api/batch-payments/{pid}/receive doesn't allow toggling/reverting TDS once received (already-received → 400). Reasonable, but no admin override path exists if the wrong TDS bucket is chosen — would require manual DB edit.",
+    "BatchPaymentOut.tds_percent is typed float in the response model but ReceivePaymentIn.tds_percent is Literal[0,2,10] (int). The response loses the type narrowing — minor."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter15_job_roles_tds.py (new, 13 tests)",
+    "/app/test_reports/iteration_15.json (new)",
+    "/app/test_reports/pytest/iteration_15.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (13/13 new tests)", "frontend": "100% (e2e job-roles → compute → configure 1st → receive with TDS 2%)"},
+  "test_credentials": "admin@finance.app / Admin@123 (verified intact)",
+  "seed_data_creation": "Per-run: 1 TEST_iter15_proj_{TAG} project, 1 TEST_iter15_center_{TAG} center, ~6 TEST_iter15_batch batches (create/update/legacy/spec/zerocand/empty/pay1/notds/tdsinvalid/tds10), associated batch_payments + tds_deduction expense txn. Frontend created 1 TEST_iter15_UI_proj project + 1 TEST_iter15_UI_batch batch + 1 received 1st-milestone payment with TDS@2%.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/test_iter15_job_roles_tds.py -v` — 13/13 in ~2s. Spec math is canonical: 10×Cat1(56.35)×200 + 5×Cat2(52.50)×150 + 8×Cat3(36.85)×100 = 181555; +23×1000 = 204555; @2% TDS on (204555-23000)=181555 → 3631.10; net 200923.90. Backend exposes JOB_CATEGORY_RATES={'1':56.35,'2':52.50,'3':36.85} and UNIFORM_PER_CANDIDATE=1000.0 (server.py:3456). receive endpoint accepts Literal[0,2,10] only — any other value (incl. 5) returns 422. tds_deduction txn is created with partner_id=null even when income txns are partner-split (one TDS row per batch_payment, not per split). Frontend Programs.jsx: project tabs auto-select first project; new-batch dialog is max-h-[90vh] scrollable; Mark Received dialog uses shadcn Select for TDS — open with click then click [role='option'].",
+  "rca of the issue": "No bugs found in iter-15 feature surface. Display-rounding nit in Mark Received dialog is cosmetic — backend persists exact 2-decimal values (verified via pytest); UI uses inr() which appears to round to integer ₹. Not a math bug; just a presentation choice."
+}

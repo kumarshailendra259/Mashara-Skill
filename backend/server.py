@@ -3442,11 +3442,52 @@ class BatchIn(BaseModel):
     end_date: Optional[str] = ""
     total_beneficiaries: int = 0
     description: Optional[str] = ""
+    # New: job-role rows used to auto-compute 1st milestone amount.
+    # Each row: {category: "1"|"2"|"3", job_role: str, candidates: int, hours: float}
+    job_roles: List[dict] = Field(default_factory=list)
 
 
 class BatchOut(BatchIn):
     id: str
     created_at: str
+
+
+# Category hourly rates (fixed business config — change here if statutory rates revise)
+JOB_CATEGORY_RATES = {"1": 56.35, "2": 52.50, "3": 36.85}
+UNIFORM_PER_CANDIDATE = 1000.0  # one-time uniform allowance, applied ONLY on 1st milestone
+
+
+def _compute_1st_milestone(job_roles: list) -> dict:
+    """Compute 1st milestone breakdown from job_roles list.
+    Returns: { rows: [...with row_total], role_total, uniform_total, total, total_candidates }
+    """
+    rows_out = []
+    role_total = 0.0
+    total_candidates = 0
+    for r in (job_roles or []):
+        cat = str(r.get("category", "")).strip()
+        rate = JOB_CATEGORY_RATES.get(cat, 0.0)
+        candidates = int(r.get("candidates") or 0)
+        hours = float(r.get("hours") or 0)
+        row_total = round(candidates * rate * hours, 2)
+        role_total += row_total
+        total_candidates += candidates
+        rows_out.append({
+            "category": cat,
+            "job_role": r.get("job_role", "") or "",
+            "candidates": candidates,
+            "hours": hours,
+            "rate": rate,
+            "row_total": row_total,
+        })
+    uniform_total = round(total_candidates * UNIFORM_PER_CANDIDATE, 2)
+    return {
+        "rows": rows_out,
+        "role_total": round(role_total, 2),
+        "uniform_total": uniform_total,
+        "total": round(role_total + uniform_total, 2),
+        "total_candidates": total_candidates,
+    }
 
 
 MilestoneType = Literal["1st", "2nd", "3rd"]
@@ -3459,6 +3500,8 @@ class BatchPaymentIn(BaseModel):
     amount: float = Field(gt=0)
     expected_date: Optional[str] = ""
     description: Optional[str] = ""
+    # Uniform amount portion (only relevant on 1st milestone). Excluded from TDS.
+    uniform_amount: float = Field(default=0, ge=0)
 
 
 class BatchPaymentOut(BatchPaymentIn):
@@ -3467,7 +3510,16 @@ class BatchPaymentOut(BatchPaymentIn):
     received_date: Optional[str] = None
     received_by: Optional[str] = None
     txn_id: Optional[str] = None
+    tds_percent: float = 0
+    tds_amount: float = 0
+    net_amount: Optional[float] = None  # gross - tds
     created_at: str
+
+
+class ReceivePaymentIn(BaseModel):
+    """Body for marking a milestone payment as received."""
+    model_config = ConfigDict(extra="ignore")
+    tds_percent: Literal[0, 2, 10] = 0
 
 
 @api.get("/batches", response_model=List[BatchOut])
@@ -3538,6 +3590,18 @@ async def list_batch_payments(batch_id: Optional[str] = None, _=Depends(get_curr
     return [BatchPaymentOut(**d) for d in docs]
 
 
+@api.get("/batches/{bid}/compute-1st-milestone")
+async def compute_first_milestone(bid: str, _=Depends(get_current_user)):
+    """Returns the auto-computed 1st milestone breakdown for the batch's job_roles."""
+    batch = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    breakdown = _compute_1st_milestone(batch.get("job_roles") or [])
+    breakdown["rates"] = JOB_CATEGORY_RATES
+    breakdown["uniform_per_candidate"] = UNIFORM_PER_CANDIDATE
+    return breakdown
+
+
 @api.post("/batch-payments", response_model=BatchPaymentOut)
 async def create_batch_payment(body: BatchPaymentIn, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
     # Enforce one-row-per (batch_id, milestone)
@@ -3569,13 +3633,16 @@ async def update_batch_payment(pid: str, body: BatchPaymentIn, _=Depends(require
 
 
 @api.patch("/batch-payments/{pid}/receive", response_model=BatchPaymentOut)
-async def receive_batch_payment(pid: str, user=Depends(require_role("admin", "accountant", "senior_manager"))):
-    """Mark a milestone payment as received and auto-create approved income transaction(s).
+async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymentIn(),
+                                 user=Depends(require_role("admin", "accountant", "senior_manager"))):
+    """Mark a milestone payment as received and auto-create approved transactions.
 
-    If the parent batch has `partner_ids`, the amount is split equally and one approved
-    income transaction is created per partner (each carrying source='milestone' and
-    milestone='1st|2nd|3rd' for downstream aggregations). Otherwise a single transaction
-    is created with no partner_id.
+    Behaviour:
+    - Income transaction(s) created at the GROSS milestone amount (per partner split if applicable).
+    - If tds_percent > 0: an additional EXPENSE transaction (source='tds_deduction') is created for
+      the TDS amount = (gross − uniform_amount) × tds_percent / 100. Uniform portion is excluded
+      from TDS by statute (training-uniform allowance). TDS is recorded once per batch payment,
+      not per partner split.
     """
     rec = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
     if not rec:
@@ -3591,9 +3658,9 @@ async def receive_batch_payment(pid: str, user=Depends(require_role("admin", "ac
     today = now[:10]
     partner_ids = list((batch or {}).get("partner_ids") or [])
     splits = partner_ids if partner_ids else [None]
-    share = round(rec["amount"] / len(splits), 2)
-    # Adjust last split so the sum exactly equals total (handle rounding tail)
-    last_share = round(rec["amount"] - share * (len(splits) - 1), 2)
+    gross = float(rec["amount"])
+    share = round(gross / len(splits), 2)
+    last_share = round(gross - share * (len(splits) - 1), 2)
     description_base = f"{project_name} — {batch.get('name','') if batch else ''} — {rec['milestone']} milestone"
     created_txn_ids: list[str] = []
     for idx, pid_split in enumerate(splits):
@@ -3619,12 +3686,47 @@ async def receive_batch_payment(pid: str, user=Depends(require_role("admin", "ac
         }
         await db.transactions.insert_one(txn)
         created_txn_ids.append(txn["id"])
+
+    # TDS deduction: separate expense transaction (uniform amount excluded from taxable base)
+    tds_percent = float(body.tds_percent or 0)
+    uniform_amount = float(rec.get("uniform_amount") or 0)
+    tds_amount = 0.0
+    tds_txn_id = None
+    if tds_percent > 0:
+        taxable = max(0.0, gross - uniform_amount)
+        tds_amount = round(taxable * tds_percent / 100.0, 2)
+        if tds_amount > 0:
+            tds_txn = {
+                "id": str(uuid.uuid4()),
+                "type": "expense",
+                "amount": tds_amount,
+                "date": today,
+                "description": f"TDS {tds_percent}% deducted by department on {description_base} (taxable ₹{taxable:,.2f})",
+                "company_id": None,
+                "partner_id": None,
+                "center_id": (batch or {}).get("center_id"),
+                "project_id": (batch or {}).get("project_id"),
+                "items": [], "attachments": [],
+                "source": "tds_deduction",
+                "milestone": rec["milestone"],
+                "created_by": user["id"], "created_at": now,
+                "status": "approved", "approved_by": user["id"], "approved_at": now,
+                "rejected_reason": None,
+            }
+            await db.transactions.insert_one(tds_txn)
+            tds_txn_id = tds_txn["id"]
+
+    net_amount = round(gross - tds_amount, 2)
     res = await db.batch_payments.find_one_and_update(
         {"id": pid},
         {"$set": {
             "status": "received", "received_date": today, "received_by": user["id"],
             "txn_id": created_txn_ids[0] if created_txn_ids else None,
             "txn_ids": created_txn_ids,
+            "tds_percent": tds_percent,
+            "tds_amount": tds_amount,
+            "tds_txn_id": tds_txn_id,
+            "net_amount": net_amount,
         }},
         return_document=True,
     )
