@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogT
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
 const TXN_TYPES = ["investment", "income", "expense"];
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
@@ -84,15 +85,16 @@ export default function Transactions() {
   };
 
   const eligibleIds = items.filter((it) => it.status !== "approved").map((it) => it.id);
-  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selected.has(id));
+  const allIds = items.map((it) => it.id);
+  const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id));
   const toggleOne = (id) => setSelected((s) => {
     const n = new Set(s);
     if (n.has(id)) n.delete(id); else n.add(id);
     return n;
   });
   const toggleAll = () => setSelected((s) => {
-    if (eligibleIds.every((id) => s.has(id))) return new Set();
-    return new Set(eligibleIds);
+    if (allIds.every((id) => s.has(id))) return new Set();
+    return new Set(allIds);
   });
   const bulkApprove = async () => {
     const ids = Array.from(selected).filter((id) => eligibleIds.includes(id));
@@ -103,6 +105,22 @@ export default function Transactions() {
       await load();
       toast.success(`Approved ${data.approved} transaction${data.approved === 1 ? "" : "s"}`);
     } catch (e) { toast.error(formatError(e)); }
+  };
+
+  // Bulk delete state
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const bulkDelete = async () => {
+    setBulkDeleteBusy(true);
+    try {
+      const ids = Array.from(selected);
+      const { data } = await api.post("/transactions/bulk-delete", { ids });
+      setSelected(new Set());
+      setBulkDeleteOpen(false);
+      await load();
+      toast.success(`Deleted ${data.deleted} transaction${data.deleted === 1 ? "" : "s"}`);
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkDeleteBusy(false); }
   };
 
   useEffect(() => { loadEntities(); }, []);
@@ -225,6 +243,11 @@ export default function Transactions() {
               <CheckSquare size={14} /> Approve ({selected.size})
             </Button>
           )}
+          {isAdmin && selected.size > 0 && (
+            <Button onClick={() => setBulkDeleteOpen(true)} variant="outline" className="rounded-none gap-2 border-[var(--danger)] text-[var(--danger)] hover:bg-red-50" data-testid="btn-bulk-delete-txn">
+              <Trash2 size={14} /> Delete ({selected.size})
+            </Button>
+          )}
           <PrintButton />
           <Button variant="outline" onClick={exportCsv} className="rounded-none gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
           {canEdit && (
@@ -316,8 +339,7 @@ export default function Transactions() {
                       type="checkbox"
                       checked={selected.has(it.id)}
                       onChange={() => toggleOne(it.id)}
-                      disabled={it.status === "approved"}
-                      className="cursor-pointer disabled:cursor-not-allowed disabled:opacity-30"
+                      className="cursor-pointer"
                       data-testid={`select-txn-${it.id}`}
                     />
                   </td>
@@ -529,6 +551,16 @@ export default function Transactions() {
           </datalist>
         </DialogContent>
       </Dialog>
+
+      <BulkDeleteDialog
+        open={bulkDeleteOpen}
+        onClose={() => setBulkDeleteOpen(false)}
+        count={selected.size}
+        itemLabel="transactions"
+        busy={bulkDeleteBusy}
+        onConfirm={bulkDelete}
+        warning="Approved transactions will also be deleted — re-running 'mark received' on a milestone will recreate them."
+      />
     </div>
   );
 }

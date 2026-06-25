@@ -11,7 +11,8 @@ import {
 } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Printer, Search, AlertTriangle, Check } from "lucide-react";
+import { Plus, Printer, Search, AlertTriangle, Check, Trash2 } from "lucide-react";
+import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
 const TXN_TYPES = ["expense", "investment", "income"];
 
@@ -19,12 +20,17 @@ export default function Stock() {
   const { t } = useLang();
   const { user } = useAuth();
   const canAdd = ["admin", "manager", "center_manager", "accountant"].includes(user?.role);
+  const isAdmin = user?.role === "admin";
 
   const [centers, setCenters] = useState([]);
   const [rows, setRows] = useState([]);
   const [filters, setFilters] = useState({ center_id: "", txn_type: "", start: "", end: "", search: "" });
   const [loading, setLoading] = useState(false);
   const [itemSuggestions, setItemSuggestions] = useState([]);
+  // Bulk delete by parent txn_id (admin-only)
+  const [selected, setSelected] = useState(new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   // Quick-add stock dialog (creates a 1-line expense txn)
   const [open, setOpen] = useState(false);
@@ -45,12 +51,28 @@ export default function Stock() {
 
   const load = () => {
     setLoading(true);
-    api.get("/stock", { params }).then((r) => setRows(r.data)).catch(() => setRows([])).finally(() => setLoading(false));
+    api.get("/stock", { params }).then((r) => { setRows(r.data); setSelected(new Set()); }).catch(() => setRows([])).finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, [params]);
 
   const setF = (k, v) => setFilters((s) => ({ ...s, [k]: v }));
+
+  const uniqueTxnIds = useMemo(() => Array.from(new Set(rows.map((r) => r.txn_id).filter(Boolean))), [rows]);
+  const allSelected = uniqueTxnIds.length > 0 && uniqueTxnIds.every((id) => selected.has(id));
+  const toggleOne = (id) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(uniqueTxnIds));
+
+  const bulkDelete = async () => {
+    setBulkBusy(true);
+    try {
+      const res = await api.post("/transactions/bulk-delete", { ids: Array.from(selected) });
+      toast.success(`${res.data?.deleted || 0} source transaction(s) deleted`);
+      setBulkOpen(false);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
 
   const amount = (parseFloat(form.quantity) || 0) * (parseFloat(form.rate) || 0);
 
@@ -97,6 +119,11 @@ export default function Stock() {
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">Center-wise Stock</h1>
         </div>
         <div className="flex flex-wrap gap-2 no-print">
+          {isAdmin && selected.size > 0 && (
+            <Button onClick={() => setBulkOpen(true)} variant="outline" className="rounded-none gap-2 border-[var(--danger)] text-[var(--danger)] hover:bg-red-50" data-testid="bulk-delete-stock">
+              <Trash2 size={14} /> Delete ({selected.size})
+            </Button>
+          )}
           <Button variant="outline" onClick={() => window.print()} className="rounded-none gap-2" data-testid="btn-print"><Printer size={14} /> Print</Button>
           {canAdd && (
             <Dialog open={open} onOpenChange={setOpen}>
@@ -209,6 +236,11 @@ export default function Stock() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] overline bg-gray-50">
+              {isAdmin && (
+                <th className="p-3 w-10">
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={uniqueTxnIds.length === 0} className="cursor-pointer" data-testid="select-all-stock" />
+                </th>
+              )}
               <th className="text-left p-3">Purchase Date</th>
               <th className="text-left p-3">Item</th>
               <th className="text-left p-3">Center</th>
@@ -222,11 +254,16 @@ export default function Stock() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={9} className="text-center py-8 overline">Loading…</td></tr>
+              <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8 overline">Loading…</td></tr>
             ) : rows.length === 0 ? (
-              <tr><td colSpan={9} className="text-center py-8 overline">No stock items</td></tr>
+              <tr><td colSpan={isAdmin ? 10 : 9} className="text-center py-8 overline">No stock items</td></tr>
             ) : rows.map((r, i) => (
               <tr key={`${r.txn_id}-${r.name}-${i}`} className={`border-b border-[var(--border)] hover:bg-gray-50 ${r.is_duplicate ? "bg-[#fffaf0]" : ""}`}>
+                {isAdmin && (
+                  <td className="p-3">
+                    <input type="checkbox" checked={selected.has(r.txn_id)} onChange={() => toggleOne(r.txn_id)} className="cursor-pointer" data-testid={`select-stock-${i}`} />
+                  </td>
+                )}
                 <td className="p-3 num">{r.date}</td>
                 <td className="p-3 font-medium">{r.name}</td>
                 <td className="p-3">{r.center_name || <span className="text-[var(--muted)]">—</span>}</td>
@@ -258,7 +295,7 @@ export default function Stock() {
           {rows.length > 0 && (
             <tfoot>
               <tr className="border-t-2 border-[var(--border)] bg-gray-50 font-semibold">
-                <td colSpan={4} className="p-3 text-right overline">Total</td>
+                <td colSpan={isAdmin ? 5 : 4} className="p-3 text-right overline">Total</td>
                 <td className="p-3 num">{totals.qty.toLocaleString()}</td>
                 <td></td>
                 <td className="p-3 num">{inr(totals.amount)}</td>
@@ -268,6 +305,16 @@ export default function Stock() {
           )}
         </table>
       </div>
+
+      <BulkDeleteDialog
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        count={selected.size}
+        itemLabel="source transactions"
+        busy={bulkBusy}
+        onConfirm={bulkDelete}
+        warning="Stock rows derive from underlying transactions. Deleting will remove the entire source transaction (including any other items on it)."
+      />
     </div>
   );
 }

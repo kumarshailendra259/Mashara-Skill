@@ -13,9 +13,10 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
+import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
 const STEPS = ["submitted", "l1_approved", "accountant_approved", "paid"];
 
@@ -326,6 +327,26 @@ export default function HRMS() {
   const canManageStaff = isAdmin || user?.role === "manager" || user?.role === "hr";
   const canDeleteStaff = isAdmin || user?.role === "hr";
 
+  // Bulk archive staff (admin only)
+  const [selectedStaff, setSelectedStaff] = useState(new Set());
+  const [bulkStaffOpen, setBulkStaffOpen] = useState(false);
+  const [bulkStaffBusy, setBulkStaffBusy] = useState(false);
+  const staffIds = staff.map((s) => s.id);
+  const allStaffSelected = staffIds.length > 0 && staffIds.every((id) => selectedStaff.has(id));
+  const toggleStaff = (id) => setSelectedStaff((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleAllStaff = () => setSelectedStaff(allStaffSelected ? new Set() : new Set(staffIds));
+  const bulkArchiveStaff = async () => {
+    setBulkStaffBusy(true);
+    try {
+      const res = await api.post("/staff/bulk-archive", { ids: Array.from(selectedStaff) });
+      toast.success(`${res.data?.archived || 0} staff archived`);
+      setBulkStaffOpen(false);
+      setSelectedStaff(new Set());
+      loadAll();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkStaffBusy(false); }
+  };
+
   const openEditStaff = (s) => {
     setEditingStaffId(s.id);
     setStaffForm({
@@ -596,7 +617,12 @@ export default function HRMS() {
         {/* Staff */}
         <TabsContent value="staff" className="mt-4 space-y-4">
           {canManageStaff && (
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              {isAdmin && selectedStaff.size > 0 && (
+                <Button onClick={() => setBulkStaffOpen(true)} variant="outline" className="rounded-none gap-2 border-[var(--danger)] text-[var(--danger)] hover:bg-red-50" data-testid="bulk-archive-staff">
+                  <Archive size={14} /> Archive ({selectedStaff.size})
+                </Button>
+              )}
               <Dialog open={openS} onOpenChange={(o) => { setOpenS(o); if (!o) { setEditingStaffId(null); setStaffForm(emptyStaffForm); } }}>
                 <DialogTrigger asChild><Button onClick={openAddStaff} className="brand-btn rounded-none gap-2" data-testid="btn-new-staff"><Plus size={16} /> Add Staff</Button></DialogTrigger>
                 <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto">
@@ -729,6 +755,11 @@ export default function HRMS() {
           )}
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
             <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
+              {isAdmin && (
+                <th className="p-3 w-10">
+                  <input type="checkbox" checked={allStaffSelected} onChange={toggleAllStaff} disabled={staffIds.length === 0} className="cursor-pointer" data-testid="select-all-staff" />
+                </th>
+              )}
               <th className="text-left p-3">Name</th>
               <th className="text-left p-3">Designation</th>
               <th className="text-left p-3">Email</th>
@@ -738,9 +769,17 @@ export default function HRMS() {
               <th className="text-right p-3">Per-Day</th>
               {canManageStaff && <th className="text-right p-3 no-print">Actions</th>}
             </tr></thead><tbody>
-              {staff.length === 0 ? <tr><td colSpan={canManageStaff ? 8 : 7} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
-                <tr key={s.id} className="border-b border-[var(--border)] hover:bg-gray-50">
-                  <td className="p-3 font-medium">{s.name}</td>
+              {staff.length === 0 ? <tr><td colSpan={(canManageStaff ? 8 : 7) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
+                <tr key={s.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${s.is_active === false ? "opacity-50" : ""}`}>
+                  {isAdmin && (
+                    <td className="p-3">
+                      <input type="checkbox" checked={selectedStaff.has(s.id)} onChange={() => toggleStaff(s.id)} className="cursor-pointer" data-testid={`select-staff-${s.id}`} />
+                    </td>
+                  )}
+                  <td className="p-3 font-medium">
+                    {s.name}
+                    {s.is_active === false && <span className="ml-2 text-xs text-[var(--muted)]">(archived)</span>}
+                  </td>
                   <td className="p-3">{s.designation}</td>
                   <td className="p-3 text-[var(--muted)] text-xs">{s.email || "—"}</td>
                   <td className="p-3 text-[var(--muted)] text-xs">{s.mobile || "—"}</td>
@@ -1164,6 +1203,17 @@ export default function HRMS() {
         onClose={() => setTrackTimeline({ type: null, id: null })}
         canAct={isAdmin || user?.role === "hr" || user?.role === "manager" || isAccountant}
         onAfterAct={loadAll}
+      />
+
+      <BulkDeleteDialog
+        open={bulkStaffOpen}
+        onClose={() => setBulkStaffOpen(false)}
+        count={selectedStaff.size}
+        itemLabel="staff"
+        mode="archive"
+        busy={bulkStaffBusy}
+        onConfirm={bulkArchiveStaff}
+        warning="Linked login access will be disabled. Attendance, payroll & leave history are preserved for reports."
       />
     </div>
   );

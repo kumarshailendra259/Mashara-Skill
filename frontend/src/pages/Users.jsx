@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { useLang } from "@/context/LangContext";
+import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -11,27 +12,53 @@ import {
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
-import { Pencil } from "lucide-react";
+import { Pencil, Archive } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
 const ROLES = ["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer"];
 
 export default function Users() {
   const { t } = useLang();
+  const { user: currentUser } = useAuth();
+  const isAdmin = currentUser?.role === "admin";
   const [users, setUsers] = useState([]);
   const [centers, setCenters] = useState([]);
   const [partners, setPartners] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ role: "viewer", assigned_center_ids: [], assigned_partner_id: "" });
+  // Bulk archive state
+  const [selected, setSelected] = useState(new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = () => Promise.all([
     api.get("/auth/users"),
     api.get("/entities/center"),
     api.get("/entities/partner"),
-  ]).then(([u, c, p]) => { setUsers(u.data); setCenters(c.data); setPartners(p.data); });
+  ]).then(([u, c, p]) => { setUsers(u.data); setCenters(c.data); setPartners(p.data); setSelected(new Set()); });
 
   useEffect(() => { load(); }, []);
+
+  const archivableIds = users.filter((u) => u.id !== currentUser?.id).map((u) => u.id);
+  const allSelected = archivableIds.length > 0 && archivableIds.every((id) => selected.has(id));
+  const toggleOne = (id) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleAll = () => {
+    if (allSelected) setSelected(new Set());
+    else setSelected(new Set(archivableIds));
+  };
+
+  const bulkArchive = async () => {
+    setBulkBusy(true);
+    try {
+      const res = await api.post("/auth/users/bulk-archive", { ids: Array.from(selected) });
+      toast.success(`${res.data?.archived || 0} user(s) archived`);
+      setBulkOpen(false);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
 
   const openEdit = (u) => {
     setEditing(u);
@@ -68,12 +95,24 @@ export default function Users() {
           <div className="overline">{t("user_management")}</div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("user_management")}</h1>
         </div>
-        <PrintButton />
+        <div className="flex items-center gap-2">
+          {isAdmin && selected.size > 0 && (
+            <Button onClick={() => setBulkOpen(true)} variant="outline" className="rounded-none gap-1 border-[var(--danger)] text-[var(--danger)] hover:bg-red-50" data-testid="bulk-archive-users">
+              <Archive size={14} /> Archive ({selected.size})
+            </Button>
+          )}
+          <PrintButton />
+        </div>
       </div>
       <div className="swiss-card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] overline bg-gray-50">
+              {isAdmin && (
+                <th className="p-3 w-10">
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={archivableIds.length === 0} className="cursor-pointer" data-testid="select-all-users" />
+                </th>
+              )}
               <th className="text-left p-3">{t("name")}</th>
               <th className="text-left p-3">{t("email")}</th>
               <th className="text-left p-3">{t("role")}</th>
@@ -84,13 +123,30 @@ export default function Users() {
           </thead>
           <tbody>
             {users.length === 0 ? (
-              <tr><td colSpan={6} className="text-center py-8 overline">{t("no_data")}</td></tr>
+              <tr><td colSpan={isAdmin ? 7 : 6} className="text-center py-8 overline">{t("no_data")}</td></tr>
             ) : users.map((u) => {
               const centerNames = (u.assigned_center_ids || []).map((id) => centers.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
               const partnerName = partners.find((p) => p.id === u.assigned_partner_id)?.name || "—";
+              const isSelf = u.id === currentUser?.id;
               return (
-                <tr key={u.id} className="border-b border-[var(--border)] hover:bg-gray-50">
-                  <td className="p-3 font-medium">{u.name}</td>
+                <tr key={u.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${u.is_active === false ? "opacity-50" : ""}`}>
+                  {isAdmin && (
+                    <td className="p-3">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(u.id)}
+                        onChange={() => toggleOne(u.id)}
+                        disabled={isSelf}
+                        title={isSelf ? "Cannot archive yourself" : ""}
+                        className="cursor-pointer disabled:opacity-30"
+                        data-testid={`select-user-${u.id}`}
+                      />
+                    </td>
+                  )}
+                  <td className="p-3 font-medium">
+                    {u.name}
+                    {u.is_active === false && <span className="ml-2 text-xs text-[var(--muted)]">(archived)</span>}
+                  </td>
                   <td className="p-3">{u.email}</td>
                   <td className="p-3"><span className="inline-block px-2 py-0.5 text-xs border border-[var(--brand)] text-[var(--brand)]">{u.role}</span></td>
                   <td className="p-3 text-[var(--muted)]">{centerNames || "—"}</td>
@@ -104,6 +160,16 @@ export default function Users() {
           </tbody>
         </table>
       </div>
+
+      <BulkDeleteDialog
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        count={selected.size}
+        itemLabel="users"
+        mode="archive"
+        busy={bulkBusy}
+        onConfirm={bulkArchive}
+      />
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="rounded-none max-w-md">

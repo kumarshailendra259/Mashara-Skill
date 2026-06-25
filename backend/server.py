@@ -968,6 +968,82 @@ async def bulk_approve(body: BulkIds, user=Depends(require_role("admin", "senior
     return {"approved": r.modified_count}
 
 
+# ---------- Bulk Delete / Archive endpoints (admin-only) ----------
+# Convention: hard-delete for transactional / configuration data; soft-archive for
+# identity / personnel data (staff, users). Soft-archive sets is_active=false so the
+# row remains queryable for historical reports but is hidden from default listings.
+
+@api.post("/transactions/bulk-delete")
+async def bulk_delete_transactions(body: BulkIds, _=Depends(require_role("admin"))):
+    if not body.ids:
+        return {"deleted": 0}
+    r = await db.transactions.delete_many({"id": {"$in": body.ids}})
+    return {"deleted": r.deleted_count}
+
+
+@api.post("/entities/{etype}/bulk-delete")
+async def bulk_delete_entities(etype: EntityType, body: BulkIds, _=Depends(require_role("admin"))):
+    if not body.ids:
+        return {"deleted": 0}
+    col = ENTITY_COLLECTION[etype]
+    r = await db[col].delete_many({"id": {"$in": body.ids}})
+    return {"deleted": r.deleted_count}
+
+
+@api.post("/batches/bulk-delete")
+async def bulk_delete_batches(body: BulkIds, _=Depends(require_role("admin"))):
+    if not body.ids:
+        return {"deleted": 0}
+    await db.batch_payments.delete_many({"batch_id": {"$in": body.ids}})
+    r = await db.batches.delete_many({"id": {"$in": body.ids}})
+    return {"deleted": r.deleted_count}
+
+
+@api.post("/partner-associations/bulk-delete")
+async def bulk_delete_partner_associations(body: BulkIds, _=Depends(require_role("admin"))):
+    if not body.ids:
+        return {"deleted": 0}
+    r = await db.partner_associations.delete_many({"id": {"$in": body.ids}})
+    return {"deleted": r.deleted_count}
+
+
+@api.post("/staff/bulk-archive")
+async def bulk_archive_staff(body: BulkIds, _=Depends(require_role("admin"))):
+    """Soft-archive staff (sets is_active=false). Linked user account also archived."""
+    if not body.ids:
+        return {"archived": 0}
+    docs = await db.staff.find({"id": {"$in": body.ids}}, {"_id": 0, "id": 1, "user_id": 1}).to_list(5000)
+    linked_user_ids = [d["user_id"] for d in docs if d.get("user_id")]
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.staff.update_many(
+        {"id": {"$in": body.ids}},
+        {"$set": {"is_active": False, "archived_at": now}},
+    )
+    if linked_user_ids:
+        await db.users.update_many(
+            {"id": {"$in": linked_user_ids}},
+            {"$set": {"is_active": False, "archived_at": now}},
+        )
+    return {"archived": r.modified_count, "linked_users_archived": len(linked_user_ids)}
+
+
+@api.post("/auth/users/bulk-archive")
+async def bulk_archive_users(body: BulkIds, current=Depends(require_role("admin"))):
+    """Soft-archive users (sets is_active=false). Cannot archive yourself."""
+    if not body.ids:
+        return {"archived": 0}
+    safe_ids = [i for i in body.ids if i != current["id"]]
+    if not safe_ids:
+        raise HTTPException(400, "You cannot archive your own account")
+    r = await db.users.update_many(
+        {"id": {"$in": safe_ids}},
+        {"$set": {"is_active": False, "archived_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    return {"archived": r.modified_count, "skipped_self": len(body.ids) - len(safe_ids)}
+
+
+
+
 @api.post("/transactions/{tid}/approve", response_model=TransactionOut)
 async def approve_transaction(tid: str, user=Depends(require_role("admin", "senior_manager"))):
     now = datetime.now(timezone.utc).isoformat()

@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogT
 import { toast } from "sonner";
 import { Pencil, Trash2, Plus } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
 export default function Entities({ etype }) {
   const { t } = useLang();
@@ -20,8 +21,12 @@ export default function Entities({ etype }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", description: "" });
+  // Bulk select state
+  const [selected, setSelected] = useState(new Set());
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
-  const load = () => api.get(`/entities/${etype}`).then((r) => setItems(r.data));
+  const load = () => api.get(`/entities/${etype}`).then((r) => { setItems(r.data); setSelected(new Set()); });
   useEffect(() => { load(); }, [etype]);
 
   const openNew = () => { setEditing(null); setForm({ name: "", description: "" }); setOpen(true); };
@@ -43,6 +48,22 @@ export default function Entities({ etype }) {
     catch (e) { toast.error(formatError(e)); }
   };
 
+  const allIds = items.map((i) => i.id);
+  const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id));
+  const toggleOne = (id) => setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(allIds));
+
+  const bulkDelete = async () => {
+    setBulkBusy(true);
+    try {
+      const res = await api.post(`/entities/${etype}/bulk-delete`, { ids: Array.from(selected) });
+      toast.success(`${res.data?.deleted || 0} deleted`);
+      setBulkOpen(false);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
+
   const titleKey = etype + "s"; // companies, partners, centers, projects
 
   return (
@@ -53,6 +74,11 @@ export default function Entities({ etype }) {
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t(titleKey)}</h1>
         </div>
         <div className="flex gap-2">
+          {canDelete && selected.size > 0 && (
+            <Button onClick={() => setBulkOpen(true)} variant="outline" className="rounded-none gap-1 border-[var(--danger)] text-[var(--danger)] hover:bg-red-50" data-testid={`bulk-delete-${etype}`}>
+              <Trash2 size={14} /> Delete ({selected.size})
+            </Button>
+          )}
           <PrintButton />
           {canEdit && (
             <Dialog open={open} onOpenChange={setOpen}>
@@ -91,6 +117,11 @@ export default function Entities({ etype }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] overline bg-gray-50">
+              {canDelete && (
+                <th className="p-3 w-10">
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={allIds.length === 0} className="cursor-pointer" data-testid={`select-all-${etype}`} />
+                </th>
+              )}
               <th className="text-left p-3">{t("name")}</th>
               <th className="text-left p-3">{t("description")}</th>
               {canEdit && <th className="p-3 w-32 text-right">{t("actions")}</th>}
@@ -98,9 +129,20 @@ export default function Entities({ etype }) {
           </thead>
           <tbody>
             {items.length === 0 ? (
-              <tr><td colSpan={3} className="text-center py-8 overline">{t("no_data")}</td></tr>
+              <tr><td colSpan={canDelete ? 4 : 3} className="text-center py-8 overline">{t("no_data")}</td></tr>
             ) : items.map((it) => (
               <tr key={it.id} className="border-b border-[var(--border)] hover:bg-gray-50">
+                {canDelete && (
+                  <td className="p-3">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(it.id)}
+                      onChange={() => toggleOne(it.id)}
+                      className="cursor-pointer"
+                      data-testid={`select-${etype}-${it.id}`}
+                    />
+                  </td>
+                )}
                 <td className="p-3 font-medium">{it.name}</td>
                 <td className="p-3 text-[var(--muted)]">{it.description || "—"}</td>
                 {canEdit && (
@@ -116,6 +158,16 @@ export default function Entities({ etype }) {
           </tbody>
         </table>
       </div>
+
+      <BulkDeleteDialog
+        open={bulkOpen}
+        onClose={() => setBulkOpen(false)}
+        count={selected.size}
+        itemLabel={titleKey}
+        busy={bulkBusy}
+        onConfirm={bulkDelete}
+        warning="Related transactions referencing these entities will become orphaned (their fields remain but won't resolve to a name)."
+      />
     </div>
   );
 }
