@@ -3497,12 +3497,6 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
     placed = max(0, min(int(placed or 0), total_candidates))
     failed = max(0, total_candidates - passed)
 
-    # Helper for safe proportional share
-    def _prop(numer: int) -> float:
-        if total_candidates == 0:
-            return 0.0
-        return round(role_total * MILESTONE_SHARES["1st"] * 0, 2)  # placeholder, overridden below
-
     # Compute explicit milestone amounts
     first_amount = round(role_total * MILESTONE_SHARES["1st"] + uniform_total, 2)
     second_gross = round(role_total * MILESTONE_SHARES["2nd"] * (passed / total_candidates), 2) if total_candidates else 0.0
@@ -3586,9 +3580,12 @@ class BatchPaymentOut(BatchPaymentIn):
     received_date: Optional[str] = None
     received_by: Optional[str] = None
     txn_id: Optional[str] = None
+    txn_ids: List[str] = Field(default_factory=list)
     tds_percent: float = 0
     tds_amount: float = 0
-    net_amount: Optional[float] = None  # gross - tds (after recovery already deducted from amount)
+    tds_txn_id: Optional[str] = None
+    recovery_txn_id: Optional[str] = None
+    net_amount: Optional[float] = None  # gross - tds - recovery
     created_at: str
 
 

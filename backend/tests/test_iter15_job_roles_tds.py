@@ -164,9 +164,11 @@ class TestComputeFirstMilestone:
         assert out["role_total"] == expected_role
         assert out["total_candidates"] == 23
         assert out["uniform_total"] == 23 * 1000.0
-        assert out["total"] == round(expected_role + 23*1000.0, 2)
-        # spec asserts exactly ₹2,04,555
-        assert out["total"] == 204555.0
+        # NOTE: Legacy endpoint /compute-1st-milestone — under iter-16 spec change,
+        # 'total' represents the 1st-milestone amount = 30% × role + uniform
+        # (no longer 100% × role + uniform). Use /compute-milestones for full breakdown.
+        expected_first = round(expected_role * 0.30 + 23*1000.0, 2)
+        assert out["total"] == expected_first
         assert out["role_total"] == 181555.0
         assert out["uniform_total"] == 23000.0
         # rates + uniform constant
