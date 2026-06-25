@@ -205,9 +205,11 @@ def test_receive_creates_recovery_and_tds_txns(admin_client, project_center):
     assert r.status_code == 200, r.text
     d = r.json()
     assert d["status"] == "received"
-    assert d["tds_amount"] == pytest.approx(2344.16, abs=0.01)
+    # NOTE: Iter-18 spec change — TDS taxable now = (gross − uniform − recovery), not just (gross − uniform).
+    # So taxable = 117208 − 0 − 13524 = 103684, TDS @ 2% = 2073.68.
+    assert d["tds_amount"] == pytest.approx(2073.68, abs=0.01)
     assert d["recovery_amount"] == 13524
-    assert d["net_amount"] == pytest.approx(117208 - 2344.16 - 13524, abs=0.01)
+    assert d["net_amount"] == pytest.approx(117208 - 2073.68 - 13524, abs=0.01)
     # Verify both expense txns exist
     txns = admin_client.get(f"{BASE_URL}/api/transactions",
                             params={"project_id": project_center["project_id"], "type": "expense"}).json()
@@ -216,7 +218,7 @@ def test_receive_creates_recovery_and_tds_txns(admin_client, project_center):
     assert "candidate_recovery" in sources
     assert "tds_deduction" in sources
     assert sources["candidate_recovery"]["amount"] == 13524
-    assert sources["tds_deduction"]["amount"] == pytest.approx(2344.16, abs=0.01)
+    assert sources["tds_deduction"]["amount"] == pytest.approx(2073.68, abs=0.01)
     # Income at gross
     inc = admin_client.get(f"{BASE_URL}/api/transactions",
                            params={"project_id": project_center["project_id"], "type": "income"}).json()

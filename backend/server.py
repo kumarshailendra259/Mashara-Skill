@@ -3816,9 +3816,12 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
     - If recovery_amount > 0 (only relevant on 2nd milestone): an additional EXPENSE transaction
       (source='candidate_recovery') is created — represents the claw-back of 1st-milestone money
       already paid for candidates who failed the exam. Reduces net P&L.
-    - If tds_percent > 0: an additional EXPENSE transaction (source='tds_deduction') is created for
-      the TDS amount = (gross − uniform_amount) × tds_percent / 100. Uniform portion is excluded
-      from TDS by statute. TDS is recorded once per batch payment, not per partner split.
+    - If tds_percent > 0: an additional EXPENSE transaction (source='tds_deduction') is created.
+      Taxable base = (gross − uniform_amount − recovery_amount). Uniform (1st milestone only) and
+      recovery (2nd milestone) are both excluded from the taxable base by spec.
+    - If assessment_fee_total > 0 (2nd milestone only): a separate EXPENSE transaction
+      (source='assessment_fee') is recorded for the per-passed-candidate assessment fee.
+    - net_amount on the payment row = gross − tds_amount − recovery_amount − assessment_fee_total.
     """
     rec = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
     if not rec:
