@@ -126,3 +126,51 @@ async def send_credentials_email(
     except Exception as e:  # noqa: BLE001 — non-fatal
         logger.error("Resend send failed for %s: %s", to_email, e)
         return {"sent": False, "reason": str(e)}
+
+
+async def send_otp_email(to_email: str, otp: str, validity_minutes: int = 15) -> dict:
+    """Send a password-reset OTP. Never raises."""
+    if not _client_ready():
+        logger.warning("Resend not configured — OTP email skipped for %s", to_email)
+        return {"sent": False, "reason": "resend_not_configured"}
+
+    sender = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev").strip() or "onboarding@resend.dev"
+    html = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:#f3f5fb;font-family:Arial,Helvetica,sans-serif;color:#111;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#f3f5fb;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="background:#ffffff;border:1px solid #e2e6ec;">
+        <tr><td style="background:#0a3bc5;color:#ffffff;padding:22px 24px;">
+          <div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85;">Mashara Skills and Creative Learning Pvt Ltd</div>
+          <div style="font-size:20px;font-weight:900;margin-top:4px;">Password Reset OTP</div>
+        </td></tr>
+        <tr><td style="padding:24px;font-size:14px;line-height:1.55;">
+          <p style="margin:0 0 14px;">Namaste,</p>
+          <p style="margin:0 0 14px;">We received a request to reset the password for <strong>{to_email}</strong>. Use the OTP below to continue:</p>
+          <div style="background:#f7f8fb;border:1px solid #e2e6ec;padding:18px;text-align:center;margin:8px 0 18px;">
+            <div style="font-family:'Courier New',monospace;font-weight:900;font-size:34px;letter-spacing:0.4em;color:#0a3bc5;">{otp}</div>
+          </div>
+          <p style="margin:0 0 8px;color:#5b6573;">This OTP is valid for <strong>{validity_minutes} minutes</strong> and can be used only once.</p>
+          <p style="margin:10px 0 0;color:#b51d2a;font-size:12px;">If you did not request this reset, you can safely ignore this email — your password will remain unchanged.</p>
+        </td></tr>
+        <tr><td style="background:#0a3bc5;color:#ffffff;padding:12px 24px;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;text-align:center;">
+          Mashara Finance — Secure Password Reset
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>
+"""
+    params = {
+        "from": sender,
+        "to": [to_email],
+        "subject": "Your Mashara Finance password reset OTP",
+        "html": html,
+    }
+    try:
+        res = await asyncio.to_thread(resend.Emails.send, params)
+        return {"sent": True, "id": res.get("id") if isinstance(res, dict) else None}
+    except Exception as e:  # noqa: BLE001
+        logger.error("Resend OTP send failed for %s: %s", to_email, e)
+        return {"sent": False, "reason": str(e)}

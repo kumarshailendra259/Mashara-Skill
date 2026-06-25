@@ -63,8 +63,13 @@ export default function Login() {
           <Button type="submit" disabled={busy} className="w-full brand-btn rounded-none h-11 font-medium" data-testid="login-submit">
             {busy ? "…" : t("login")}
           </Button>
-          <div className="text-sm text-[var(--muted)]">
-            New here? <Link to="/register" className="text-[var(--brand)] hover:underline" data-testid="link-register">{t("create_account")}</Link>
+          <div className="flex items-center justify-between text-sm">
+            <Link to="/forgot-password" className="text-[var(--brand)] hover:underline" data-testid="link-forgot-password">
+              Forgot password?
+            </Link>
+            <span className="text-[var(--muted)]">
+              New here? <Link to="/register" className="text-[var(--brand)] hover:underline" data-testid="link-register">{t("create_account")}</Link>
+            </span>
           </div>
         </form>
       </div>

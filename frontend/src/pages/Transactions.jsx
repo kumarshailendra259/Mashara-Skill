@@ -24,6 +24,8 @@ export default function Transactions() {
   const canEdit = ["admin", "manager", "center_manager", "partner", "accountant"].includes(user?.role);
   const canDelete = user?.role === "admin";
   const isAdmin = user?.role === "admin";
+  const isPartner = user?.role === "partner";
+  const myPartnerId = user?.assigned_partner_id || null;
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [items, setItems] = useState([]);
   const [filters, setFilters] = useState({ type: "", status: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
@@ -62,6 +64,23 @@ export default function Transactions() {
     const reason = window.prompt("Reason (optional):") || "";
     try { await api.post(`/transactions/${id}/reject`, { reason }); load(); toast.success("Rejected"); }
     catch (e) { toast.error(formatError(e)); }
+  };
+  const partnerApproveTxn = async (id) => {
+    try {
+      await api.post(`/transactions/${id}/partner-approve`);
+      load();
+      toast.success("Approved (partner cross-approval)");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  // A partner can cross-approve a pending txn if it's NOT created by them, NOT their own partner profile,
+  // and (same project / center) OR a custom pairing exists. Custom pairing check is done server-side on click;
+  // here we show the button optimistically and let the server enforce eligibility (returns 403 with reason).
+  const canPartnerCrossApprove = (it) => {
+    if (!isPartner || !myPartnerId) return false;
+    if (it.status !== "pending") return false;
+    if (it.created_by === user.id) return false;
+    if (!it.partner_id || it.partner_id === myPartnerId) return false;
+    return true;
   };
 
   const eligibleIds = items.filter((it) => it.status !== "approved").map((it) => it.id);
@@ -346,6 +365,17 @@ export default function Transactions() {
                       )}
                       {isAdmin && it.status !== "rejected" && (
                         <Button size="sm" variant="ghost" onClick={() => rejectTxn(it.id)} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`reject-${it.id}`}>{t("reject")}</Button>
+                      )}
+                      {canPartnerCrossApprove(it) && (
+                        <Button
+                          size="sm" variant="ghost"
+                          onClick={() => partnerApproveTxn(it.id)}
+                          className="rounded-none h-8 px-2 text-[var(--success)] border border-[var(--success)]/40"
+                          title="Approve as associated partner"
+                          data-testid={`partner-approve-${it.id}`}
+                        >
+                          ✓ Partner Approve
+                        </Button>
                       )}
                       <Button size="icon" variant="ghost" onClick={() => openEdit(it)} className="rounded-none h-8 w-8"><Pencil size={14} /></Button>
                       {canDelete && <Button size="icon" variant="ghost" disabled={deleting.has(it.id)} onClick={() => remove(it)} className="rounded-none h-8 w-8 hover:text-[var(--danger)] disabled:opacity-40"><Trash2 size={14} /></Button>}

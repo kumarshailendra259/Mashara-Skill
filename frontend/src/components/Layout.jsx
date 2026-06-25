@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +26,7 @@ const navItems = [
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
   { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
+  { to: "/partner-associations", key: "partner_associations", icon: Link2, adminManagerOnly: true },
   { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
 ];
@@ -87,6 +88,7 @@ export default function Layout({ children }) {
   const visibleNavItems = useMemo(
     () => navItems.filter((it) => {
       if (it.adminOnly && user?.role !== "admin") return false;
+      if (it.adminManagerOnly && !["admin", "manager"].includes(user?.role)) return false;
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       return true;
     }),

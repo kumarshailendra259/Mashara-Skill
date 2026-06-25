@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration-14 — Tested two new features: (1) Forgot Password OTP flow (forgot-password / verify-otp / reset-password endpoints + 3-step UI at /forgot-password), and (2) Partner cross-approval (partner-associations CRUD + /transactions/{tid}/partner-approve + eligibility helper + /partner-associations admin page). Backend: 19/19 NEW pytest tests PASS (test_iter14_forgot_pwd_partner_approve.py). Full regression: 175/182 PASS — 7 failures are PRE-EXISTING (HRMS leaves, file-upload viewer 403, notifications) unrelated to current iteration. Frontend: forgot-password 3-step flow works end-to-end (request OTP → verify OTP seeded in DB → set new password → 'Go to login' → login with new password succeeds via API). PartnerAssociations page loads, creates a pairing via 2 Select dropdowns + 'Add pairing' button (toast 'Association created' shown), and the new row is API-verified, then deleted successfully. Sidebar 'Partner Pairings' link visible to admin. Admin password (Admin@123) preserved end-to-end. Found 2 backend bugs (see action_items).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PATCH /api/auth/users/{uid}", "issue": "Uses `if v is not None` to filter the update — making it IMPOSSIBLE to clear assigned_partner_id (or assigned_center_ids) via the API. To strip a partner role from a user the admin must directly write null into Mongo. Switch to `body.model_dump(exclude_unset=True)` so explicit nulls are respected."},
+      {"endpoint": "POST /api/transactions/{tid}/partner-approve (response model)", "issue": "TransactionOut inherits from TransactionIn and DOES NOT declare approval_via / approval_reason / approved_by / approved_at fields. These are persisted in Mongo by partner-approve (and by normal /approve) but never returned to the client, so the UI cannot show 'approved by partner peer (...)'. Add the optional fields to TransactionOut."},
+      {"endpoint": "POST /api/auth/forgot-password / verify-otp", "issue": "expires_at is stored as native datetime (good for TTL index) but created_at is stored as ISO string — the rate-limit query compares created_at to an ISO string `window_start` (works because ISO-8601 lexical order = chronological), but mixing datetime/string types in the same collection is fragile. Standardize one type."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter14_forgot_pwd_partner_approve.py",
+    "/app/test_reports/pytest/iteration_14_new.xml",
+    "/app/test_reports/pytest/iteration_14_all.xml"
+  ],
+  "action_items": [
+    "MED: Fix PATCH /auth/users so admins can clear assigned_partner_id via JSON {\"assigned_partner_id\": null}. Currently the code drops any None value, so demoting a partner is only possible via direct DB write. Use exclude_unset=True or distinguish 'omitted' vs 'explicit null' (e.g., Optional[str] with a sentinel).",
+    "MED: Add approval_via, approval_reason, approved_by, approved_at as optional fields on TransactionOut. They are saved in DB by both /approve and /partner-approve but never returned, so frontend has no way to show who/why approved.",
+    "LOW: 7 pre-existing regression failures across HRMS / leaves / file-upload viewer / reimbursement notifications are unrelated to this iteration — they appear to be flaky/data-pollution issues from many earlier test iterations sharing the same Mongo. Recommend the main agent investigate separately."
+  ],
+  "critical_code_review_comments": [
+    "PATCH /auth/users (server.py:521) — `{k: v for k, v in body.model_dump().items() if v is not None}` makes nullable fields un-clearable via the API. Real bug, blocks partner-role demotion.",
+    "TransactionOut model omits approval_via/approval_reason/approved_by/approved_at — fields written but never read out by the API.",
+    "forgot_password rate-limit query mixes types: created_at stored as ISO string but expires_at as native datetime in same collection. Works today because ISO-8601 sorts lexically, but a footgun.",
+    "verify_otp returns 400 'OTP expired or not found' for BOTH 'no doc' and 'expired doc' branches — the test for max_attempts depends on the doc still existing within the 15-min window. Acceptable but worth documenting.",
+    "_shares_project_or_center counts ANY transaction by the approver's partner at the same project/center (including pending/rejected). If a partner once created a single rejected txn in a project, they gain cross-approval rights for that project forever. Consider restricting to status=approved or to active batches only.",
+    "/partner-associations DELETE allows admin/manager to delete any pairing without confirmation; consider audit logging."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter14_forgot_pwd_partner_approve.py (new, 19 tests)",
+    "/app/test_reports/iteration_14.json (new)",
+    "/app/test_reports/pytest/iteration_14_new.xml (new)",
+    "/app/test_reports/pytest/iteration_14_all.xml (new)"
+  ],
+  "success_rate": {"backend": "100% on new feature tests (19/19); 96% full regression (175/182, 7 pre-existing failures)", "frontend": "100% (forgot-password 3-step flow + partner-associations CRUD + sidebar)"},
+  "test_credentials": "admin@finance.app / Admin@123 (verified intact post-test)",
+  "seed_data_creation": "Per-run: 1 fresh partner test user for OTP flow (reset_{TAG}@finance.app), 1 user for rate-limit (fprl_{TAG}), several partner-role users (creator/approver/samep/unrel/nopid), 3 TEST_P1/P2/P3 partners + 1 project + 1 center + 1 company for cross-approval scope. Frontend also created TEST_FE_PA / TEST_FE_PB partners. OTP docs seeded directly into password_reset_otps with sha256('123456') hash.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run `pytest /app/backend/tests/test_iter14_forgot_pwd_partner_approve.py -v` — 19/19 in ~11s. Two minor backend bugs flagged: (1) PATCH /auth/users can't clear assigned_partner_id (test works around via direct Mongo write — see line ~305), (2) TransactionOut missing approval_via field (test relaxed to only assert status=='approved'). Forgot-password rate-limit kicks in at the 4th call within 15 min for the SAME email, so re-running the rate-limit test back-to-back on the same email requires cleaning password_reset_otps for that email first (the test does this). For partner-approve scope detection, _shares_project_or_center counts ANY txn (incl. pending/rejected) — be aware when seeding scope data. Frontend partner-associations Select uses shadcn — open with click then click option via `page.get_by_role('option', name=...).click(force=True)`. Toast 'Association created' confirms success.",
+  "rca of the issue": "Bug 1 RCA: server.py line 521 `update = {k: v for k, v in body.model_dump().items() if v is not None}` — Pydantic always includes default-None fields in model_dump(), so the dict-comprehension drops them. There's no way to express 'set to null' via the API. Fix: use model_dump(exclude_unset=True) to only update fields the client explicitly sent. Bug 2 RCA: server.py line 218 `class TransactionOut(TransactionIn):` — inherits the create-input fields but not the approval metadata. find_one_and_update returns the full doc with approval_via/approval_reason/approved_by/approved_at, but TransactionOut(**res) silently drops them. Add `approval_via: Optional[str] = None`, `approval_reason: Optional[str] = None`, `approved_by: Optional[str] = None`, `approved_at: Optional[str] = None` to TransactionOut."
+}

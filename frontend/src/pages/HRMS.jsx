@@ -13,7 +13,8 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge } from "lucide-react";
+import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 
 const STEPS = ["submitted", "l1_approved", "accountant_approved", "paid"];
@@ -73,6 +74,79 @@ export default function HRMS() {
 
   const [pMonth, setPMonth] = useState(new Date().getMonth() + 1);
   const [pYear, setPYear] = useState(new Date().getFullYear());
+
+  // Approval timeline modal state
+  const [trackTimeline, setTrackTimeline] = useState({ type: null, id: null });
+
+  // Download payroll bank CSV
+  const downloadBankCsv = async (m, y) => {
+    try {
+      const apiBase = process.env.REACT_APP_BACKEND_URL;
+      const res = await fetch(`${apiBase}/api/payroll/bank-csv?month=${m}&year=${y}&status=draft`, { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `payroll_bank_${y}_${String(m).padStart(2,"0")}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      const written = res.headers.get("X-Rows-Written") || "?";
+      const skipped = res.headers.get("X-Rows-Skipped") || "?";
+      toast.success(`CSV downloaded · ${written} rows (${skipped} skipped — no bank or zero net)`);
+    } catch (e) { toast.error(`Download failed: ${e.message}`); }
+  };
+
+  // Print/download single payslip via browser
+  const printPayslip = (p) => {
+    const staffRow = staff.find((s) => s.id === p.staff_id) || {};
+    const monthName = new Date(p.year, p.month - 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+    const w = window.open("", "_blank");
+    if (!w) { toast.error("Popup blocked — allow popups to print payslip"); return; }
+    const earn = [
+      ["Basic", p.basic], ["HRA", p.hra], ["DA", p.da], ["Conveyance", p.conveyance], ["Bonus", p.bonus], ["Incentive", p.incentive],
+    ].filter(([, v]) => v && v > 0);
+    const ded = [
+      ["PF", p.pf_deduction], ["ESI", p.esi_deduction], ["Late Penalty", p.late_deduction],
+      ...((p.other_deductions || []).map((li) => [li.label, li.amount])),
+    ].filter(([, v]) => v && v > 0);
+    const rows = (arr) => arr.map(([k, v]) => `<tr><td style="padding:6px 10px;border-bottom:1px solid #eee">${k}</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;font-variant-numeric:tabular-nums">${inr(v)}</td></tr>`).join("");
+    w.document.write(`<!doctype html><html><head><title>Payslip — ${p.staff_name} — ${monthName}</title>
+      <style>
+        body{font-family:Helvetica,Arial,sans-serif;color:#111;max-width:760px;margin:24px auto;padding:0 16px}
+        h1{font-size:22px;margin:0 0 4px;letter-spacing:0.5px}
+        .meta{font-size:11px;color:#666;text-transform:uppercase;letter-spacing:1px}
+        .grid{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:24px}
+        h3{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#666;border-bottom:2px solid #111;padding-bottom:4px;margin-bottom:8px}
+        table{width:100%;border-collapse:collapse;font-size:13px}
+        .total{font-weight:700;font-size:15px;border-top:2px solid #111;padding-top:8px}
+        .net{font-size:24px;font-weight:900;margin-top:24px;padding:16px;background:#f0f9f3;border-left:4px solid #16a34a}
+        @media print{body{margin:0}}
+      </style></head><body>
+      <div style="display:flex;justify-content:space-between;align-items:flex-end">
+        <div>
+          <div class="meta">Mashara Skills · Payslip</div>
+          <h1>${p.staff_name || ""}</h1>
+          <div style="font-size:12px;color:#444;margin-top:4px">${staffRow.designation || ""} · A/C ${staffRow.bank_account_no ? "****" + staffRow.bank_account_no.slice(-4) : "—"}</div>
+        </div>
+        <div style="text-align:right">
+          <div class="meta">Period</div>
+          <div style="font-size:18px;font-weight:700">${monthName}</div>
+          <div style="font-size:11px;color:#666;margin-top:2px">${p.days_present || 0} days present${p.late_days ? ` · ${p.late_days} late day(s)` : ""}</div>
+        </div>
+      </div>
+      <div class="grid">
+        <div><h3>Earnings</h3><table>${rows(earn) || '<tr><td colspan="2" style="padding:6px 10px;color:#999">—</td></tr>'}
+        <tr class="total"><td style="padding:8px 10px">Gross</td><td style="padding:8px 10px;text-align:right;font-variant-numeric:tabular-nums">${inr(p.gross || 0)}</td></tr></table></div>
+        <div><h3>Deductions</h3><table>${rows(ded) || '<tr><td colspan="2" style="padding:6px 10px;color:#999">—</td></tr>'}
+        <tr class="total"><td style="padding:8px 10px">Total Deductions</td><td style="padding:8px 10px;text-align:right;font-variant-numeric:tabular-nums">${inr(p.deductions || 0)}</td></tr></table></div>
+      </div>
+      <div class="net">Net Pay: <span style="float:right;font-variant-numeric:tabular-nums">${inr(p.net || 0)}</span></div>
+      ${p.remarks ? `<div style="margin-top:16px;font-size:12px;color:#555">Remarks: ${p.remarks}</div>` : ""}
+      <div style="margin-top:48px;font-size:10px;color:#999;text-align:center">Generated on ${new Date().toLocaleString("en-IN")} · This is a system-generated payslip; no signature required.</div>
+      <script>window.onload = () => { window.print(); }</script>
+      </body></html>`);
+    w.document.close();
+  };
 
   // Payroll edit dialog state
   const [payrollOpen, setPayrollOpen] = useState(false);
@@ -239,8 +313,10 @@ export default function HRMS() {
   };
 
   const decideLeave = async (lid, decision) => {
+    const remarks = window.prompt(`Remarks for ${decision} (mandatory, min 3 chars):`);
+    if (!remarks || remarks.trim().length < 3) { toast.error("Remarks required (min 3 chars)"); return; }
     try {
-      await api.patch(`/leaves/${lid}?decision=${decision}`);
+      await api.patch(`/leaves/${lid}?decision=${decision}&remarks=${encodeURIComponent(remarks.trim())}`);
       const lv = await api.get("/leaves");
       setLeaves(lv.data);
       toast.success(decision === "approved" ? "Approved" : "Rejected");
@@ -486,7 +562,10 @@ export default function HRMS() {
                     <td className="p-3 text-[var(--muted)]">{r.category || "—"}{r.attachments?.length ? <span className="ml-2 inline-flex items-center gap-1 text-xs text-[var(--brand)] border border-[var(--brand)] px-1 py-0.5" title={`${r.attachments.length} attachments`}><Paperclip size={10} /> {r.attachments.length}</span> : null}</td>
                     <td className="p-3"><Stepper status={r.status} /></td>
                     <td className="p-3 text-right">
-                      <div className="inline-flex gap-1">
+                      <div className="inline-flex gap-1 flex-wrap justify-end">
+                        {r.chain_snapshot?.length && (
+                          <Button size="sm" variant="ghost" onClick={() => setTrackTimeline({ type: "reimbursement", id: r.id })} className="rounded-none h-8 px-2 text-[var(--brand)] gap-1" title="Track approval chain" data-testid={`track-reimb-${r.id}`}><GitMerge size={12} /> Track</Button>
+                        )}
                         {r.status === "submitted" && (
                           <>
                             <Button size="sm" variant="ghost" onClick={() => act(r.id, "l1-approve")} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`l1-${r.id}`}>L1 ✓</Button>
@@ -924,12 +1003,17 @@ export default function HRMS() {
                       }`}>{l.status}</span>
                     </td>
                     <td className="p-3 text-right">
-                      {l.status === "pending" && canMarkAttendance && (
-                        <div className="inline-flex gap-1">
-                          <Button size="sm" variant="ghost" onClick={() => decideLeave(l.id, "approved")} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`leave-approve-${l.id}`}><Check size={14} /></Button>
-                          <Button size="sm" variant="ghost" onClick={() => decideLeave(l.id, "rejected")} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`leave-reject-${l.id}`}><X size={14} /></Button>
-                        </div>
-                      )}
+                      <div className="inline-flex gap-1 flex-wrap justify-end">
+                        {l.chain_snapshot?.length && (
+                          <Button size="sm" variant="ghost" onClick={() => setTrackTimeline({ type: "leave", id: l.id })} className="rounded-none h-8 px-2 text-[var(--brand)] gap-1" title="Track approval chain" data-testid={`track-leave-${l.id}`}><GitMerge size={12} /> Track</Button>
+                        )}
+                        {l.status === "pending" && canMarkAttendance && (
+                          <>
+                            <Button size="sm" variant="ghost" onClick={() => decideLeave(l.id, "approved")} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`leave-approve-${l.id}`}><Check size={14} /></Button>
+                            <Button size="sm" variant="ghost" onClick={() => decideLeave(l.id, "rejected")} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`leave-reject-${l.id}`}><X size={14} /></Button>
+                          </>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -941,10 +1025,11 @@ export default function HRMS() {
         {/* Payroll */}
         <TabsContent value="payroll" className="mt-4 space-y-4">
           {(isAdmin || isAccountant) && (
-            <div className="swiss-card p-4 flex items-end gap-3">
+            <div className="swiss-card p-4 flex items-end gap-3 flex-wrap">
               <div><Label className="overline">Month</Label><Input type="number" min={1} max={12} value={pMonth} onChange={(e) => setPMonth(+e.target.value)} className="rounded-none w-24" /></div>
               <div><Label className="overline">Year</Label><Input type="number" value={pYear} onChange={(e) => setPYear(+e.target.value)} className="rounded-none w-28" /></div>
               <Button onClick={runPayroll} className="brand-btn rounded-none" data-testid="run-payroll">Run Payroll</Button>
+              <Button onClick={() => downloadBankCsv(pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="bank-csv-btn"><Download size={14} /> Bank Transfer CSV</Button>
             </div>
           )}
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
@@ -971,6 +1056,7 @@ export default function HRMS() {
                   <td className="p-3"><span className={`inline-block px-2 py-0.5 text-xs border ${p.status === "paid" ? "border-[var(--success)] text-[var(--success)]" : "border-[var(--warning)] text-[#9a7a00]"}`}>{p.status}</span></td>
                   <td className="p-3 text-right no-print">
                     <div className="flex gap-1 justify-end">
+                      <Button size="sm" variant="outline" onClick={() => printPayslip(p)} className="rounded-none h-8 px-2" title="Download payslip" data-testid={`payslip-pdf-${p.id}`}><FileText size={14} /></Button>
                       {p.status !== "paid" && canManageStaff && (
                         <Button size="sm" variant="outline" onClick={() => openEditPayroll(p)} className="rounded-none h-8 px-2" data-testid={`edit-payroll-${p.id}`} title="Edit"><Pencil size={14} /></Button>
                       )}
@@ -1071,6 +1157,14 @@ export default function HRMS() {
           </Dialog>
         </TabsContent>
       </Tabs>
+
+      <ApprovalTimelineModal
+        type={trackTimeline.type}
+        requestId={trackTimeline.id}
+        onClose={() => setTrackTimeline({ type: null, id: null })}
+        canAct={isAdmin || user?.role === "hr" || user?.role === "manager" || isAccountant}
+        onAfterAct={loadAll}
+      />
     </div>
   );
 }

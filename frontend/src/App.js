@@ -18,6 +18,8 @@ import ApprovalWorkflows from "@/pages/ApprovalWorkflows";
 import HrSettings from "@/pages/HrSettings";
 import Programs from "@/pages/Programs";
 import CheckIn from "@/pages/CheckIn";
+import ForgotPassword from "@/pages/ForgotPassword";
+import PartnerAssociations from "@/pages/PartnerAssociations";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
@@ -33,6 +35,7 @@ function App() {
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route path="/" element={<ProtectedRoute><Shell><Dashboard /></Shell></ProtectedRoute>} />
             <Route path="/companies" element={<ProtectedRoute><Shell><Entities etype="company" /></Shell></ProtectedRoute>} />
             <Route path="/partners" element={<ProtectedRoute><Shell><Entities etype="partner" /></Shell></ProtectedRoute>} />
@@ -47,6 +50,7 @@ function App() {
             <Route path="/approval-workflows" element={<ProtectedRoute><Shell><ApprovalWorkflows /></Shell></ProtectedRoute>} />
             <Route path="/hr-settings" element={<ProtectedRoute><Shell><HrSettings /></Shell></ProtectedRoute>} />
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
+            <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

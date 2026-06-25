@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogT
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 
 const STATUS_OPTIONS = [
   { v: "present", label: "Present" },
@@ -745,6 +746,28 @@ function SalaryTab() {
   const rows = data.payroll || [];
   const ytd = rows.filter((r) => r.year === new Date().getFullYear()).reduce((acc, r) => acc + (r.net || 0), 0);
 
+  const printMobilePayslip = (p, staffRow) => {
+    const monthName = new Date(p.year, p.month - 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
+    const w = window.open("", "_blank");
+    if (!w) { toast.error("Popup blocked"); return; }
+    const earn = [["Basic", p.basic], ["HRA", p.hra], ["DA", p.da], ["Conveyance", p.conveyance], ["Bonus", p.bonus], ["Incentive", p.incentive]].filter(([, v]) => v && v > 0);
+    const ded = [["PF", p.pf_deduction], ["ESI", p.esi_deduction], ["Late", p.late_deduction], ...((p.other_deductions || []).map((li) => [li.label, li.amount]))].filter(([, v]) => v && v > 0);
+    const rowsHtml = (arr) => arr.map(([k, v]) => `<tr><td style="padding:6px 10px;border-bottom:1px solid #eee">${k}</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right">${inr(v)}</td></tr>`).join("");
+    w.document.write(`<!doctype html><html><head><title>Payslip ${monthName}</title>
+      <style>body{font-family:Helvetica,Arial,sans-serif;color:#111;max-width:680px;margin:24px auto;padding:0 16px}h1{font-size:20px;margin:0 0 4px}.meta{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:1px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:20px}h3{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#666;border-bottom:2px solid #111;padding-bottom:4px;margin-bottom:8px}table{width:100%;border-collapse:collapse;font-size:12px}.total{font-weight:700;border-top:2px solid #111}.net{font-size:22px;font-weight:900;margin-top:20px;padding:14px;background:#f0f9f3;border-left:4px solid #16a34a}@media print{body{margin:0}}</style></head><body>
+      <div class="meta">Mashara Skills · Payslip</div>
+      <h1>${staffRow.name || ""}</h1>
+      <div style="font-size:11px;color:#444">${staffRow.designation || ""} · ${monthName} · ${p.days_present || 0} days</div>
+      <div class="grid">
+        <div><h3>Earnings</h3><table>${rowsHtml(earn) || '<tr><td colspan="2" style="padding:6px 10px;color:#999">—</td></tr>'}<tr class="total"><td style="padding:8px 10px">Gross</td><td style="padding:8px 10px;text-align:right">${inr(p.gross || 0)}</td></tr></table></div>
+        <div><h3>Deductions</h3><table>${rowsHtml(ded) || '<tr><td colspan="2" style="padding:6px 10px;color:#999">—</td></tr>'}<tr class="total"><td style="padding:8px 10px">Total</td><td style="padding:8px 10px;text-align:right">${inr(p.deductions || 0)}</td></tr></table></div>
+      </div>
+      <div class="net">Net Pay <span style="float:right">${inr(p.net || 0)}</span></div>
+      <div style="margin-top:32px;font-size:9px;color:#999;text-align:center">Generated ${new Date().toLocaleString("en-IN")}</div>
+      <script>window.onload=()=>window.print()</script></body></html>`);
+    w.document.close();
+  };
+
   return (
     <div className="space-y-4">
       <div className="swiss-card p-4 border-l-4 border-[var(--brand)]">
@@ -862,6 +885,7 @@ function SalaryTab() {
                   <div className="text-right">
                     <div className="font-heading font-bold">{inr(r.net || 0)}</div>
                     <span className={`text-xs uppercase font-bold px-2 py-0.5 ${r.status === "paid" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                    <button onClick={() => printMobilePayslip(r, s)} className="block mt-1 text-[10px] text-[var(--brand)] hover:underline" data-testid={`payslip-pdf-mob-${r.id}`}>Download</button>
                   </div>
                 </div>
               </li>
@@ -873,68 +897,4 @@ function SalaryTab() {
   );
 }
 
-/* ============================================================
-   APPROVAL TIMELINE MODAL — reusable
-   ============================================================ */
-function ApprovalTimelineModal({ type, requestId, onClose }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    if (!requestId) { setData(null); return; }
-    (async () => {
-      setLoading(true);
-      try { const r = await api.get(`/approvals/${type}/${requestId}/timeline`); setData(r.data); }
-      catch (e) { toast.error(formatError(e)); onClose(); }
-      finally { setLoading(false); }
-    })();
-  }, [type, requestId, onClose]);
-  if (!requestId) return null;
-  return (
-    <Dialog open={!!requestId} onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent className="rounded-none max-w-md max-h-[90vh] overflow-y-auto">
-        <DialogHeader><DialogTitle className="font-heading">Approval Workflow</DialogTitle></DialogHeader>
-        {loading || !data ? (
-          <div className="overline text-center py-8 text-[var(--muted)]">Loading…</div>
-        ) : (
-          <div className="space-y-3">
-            <div className="text-xs text-[var(--muted)]">
-              Status: <span className="font-bold uppercase">{data.status}</span> · Level {data.current_level} of {data.total_levels}
-              {data.amount ? <> · {inr(data.amount)}</> : null}
-            </div>
-            <ol className="space-y-3">
-              {data.timeline.map((s) => {
-                const icon = s.state === "done" ? "✓" : s.state === "rejected" ? "✗" : s.state === "current" ? "→" : s.state === "skipped" ? "⟳" : "·";
-                const bg = s.state === "done" ? "bg-green-100 text-green-700" :
-                          s.state === "rejected" ? "bg-red-100 text-red-700" :
-                          s.state === "current" ? "bg-[var(--brand)] text-white" :
-                          s.state === "skipped" ? "bg-gray-200 text-gray-600" :
-                          "bg-gray-100 text-gray-500";
-                return (
-                  <li key={s.level} className="flex items-start gap-3">
-                    <div className={`w-8 h-8 flex items-center justify-center font-bold shrink-0 ${bg}`}>{icon}</div>
-                    <div className="flex-1 text-sm">
-                      <div className="font-medium">L{s.level} — {s.label}</div>
-                      <div className="text-[10px] text-[var(--muted)]">
-                        {s.state === "current" && "Pending with: "}
-                        {s.state === "pending" && "Will go to: "}
-                        {s.state === "done" && "Approved by: "}
-                        {s.state === "rejected" && "Rejected by: "}
-                        {s.history.length > 0 ? (s.history.map((h) => h.by).join(", ")) : (s.approver_names.slice(0, 3).join(", ") + (s.approver_names.length > 3 ? ` +${s.approver_names.length - 3}` : ""))}
-                      </div>
-                      {s.history.map((h, i) => (
-                        <div key={i} className="text-[11px] mt-1 bg-gray-50 border border-[var(--border)] p-1.5">
-                          <span className="capitalize font-medium">{h.action}</span> · {new Date(h.at).toLocaleString()}
-                          {h.remarks && <div className="text-[var(--muted)] mt-0.5 italic">&ldquo;{h.remarks}&rdquo;</div>}
-                        </div>
-                      ))}
-                    </div>
-                  </li>
-                );
-              })}
-            </ol>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
-  );
-}
+/* ApprovalTimelineModal moved to /components/ApprovalTimelineModal.jsx for reuse */

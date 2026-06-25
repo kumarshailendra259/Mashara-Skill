@@ -139,6 +139,32 @@ class LoginIn(BaseModel):
     password: str
 
 
+class ForgotPwdIn(BaseModel):
+    email: EmailStr
+
+
+class VerifyOtpIn(BaseModel):
+    email: EmailStr
+    otp: str = Field(min_length=6, max_length=6)
+
+
+class ResetPwdIn(BaseModel):
+    reset_token: str
+    new_password: str = Field(min_length=6)
+
+
+class PartnerAssociationIn(BaseModel):
+    partner_a_id: str
+    partner_b_id: str
+
+
+class PartnerAssociationOut(BaseModel):
+    id: str
+    partner_a_id: str
+    partner_b_id: str
+    created_at: str
+    created_by: Optional[str] = None
+
 class EntityIn(BaseModel):
     name: str
     description: Optional[str] = ""
@@ -289,6 +315,12 @@ async def on_startup():
     await db.geofences.create_index([("center_id", 1), ("active", 1)])
     await db.regularisations.create_index([("created_by", 1), ("status", 1)])
     await db.staff_documents.create_index([("staff_id", 1), ("uploaded_at", -1)])
+    # Password reset OTPs — TTL on expires_at (auto-purge expired docs)
+    await db.password_reset_otps.create_index("email")
+    await db.password_reset_otps.create_index("expires_at", expireAfterSeconds=0)
+    # Partner cross-approval associations
+    await db.partner_associations.create_index("id", unique=True)
+    await db.partner_associations.create_index([("partner_a_id", 1), ("partner_b_id", 1)], unique=True)
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -495,6 +527,263 @@ async def update_user(uid: str, body: UserUpdateIn, _=Depends(require_role("admi
     if not res:
         raise HTTPException(404, "User not found")
     return UserOut(**res)
+
+
+# ---------- Password Reset (OTP via email) ----------
+import secrets as _secrets  # local alias to avoid shadowing
+import hashlib as _hashlib
+import hmac as _hmac
+
+OTP_VALIDITY_MIN = 15
+OTP_MAX_ATTEMPTS = 5
+OTP_RATE_LIMIT_PER_WINDOW = 3  # max OTP sends per email per window
+OTP_RATE_WINDOW_MIN = 15
+RESET_TOKEN_VALIDITY_MIN = 10
+
+
+def _hash_otp(otp: str) -> str:
+    return _hashlib.sha256(otp.encode()).hexdigest()
+
+
+def _gen_otp() -> str:
+    return f"{_secrets.randbelow(1000000):06d}"
+
+
+def _gen_reset_token() -> str:
+    return _secrets.token_urlsafe(32)
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(body: ForgotPwdIn):
+    """Always returns success (prevents email enumeration). Sends OTP if email exists."""
+    email = body.email.lower().strip()
+    generic = {"ok": True, "message": "If an account exists for that email, an OTP has been sent."}
+    user = await db.users.find_one({"email": email})
+    if not user:
+        return generic
+
+    # Rate-limit: count OTP rows created in last window for this email
+    now = datetime.now(timezone.utc)
+    window_start = (now - timedelta(minutes=OTP_RATE_WINDOW_MIN)).isoformat()
+    recent = await db.password_reset_otps.count_documents({"email": email, "created_at": {"$gt": window_start}})
+    if recent >= OTP_RATE_LIMIT_PER_WINDOW:
+        raise HTTPException(429, "Too many OTP requests. Please try again later.")
+
+    otp = _gen_otp()
+    expires_at = now + timedelta(minutes=OTP_VALIDITY_MIN)
+    await db.password_reset_otps.insert_one({
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "otp_hash": _hash_otp(otp),
+        "attempts": 0,
+        "used": False,
+        "reset_token": None,
+        "reset_token_expires_at": None,
+        "created_at": now.isoformat(),
+        "expires_at": expires_at,  # native datetime → TTL index will purge
+    })
+
+    # Send OTP via Resend (non-fatal)
+    try:
+        from email_utils import send_otp_email
+        await send_otp_email(to_email=email, otp=otp, validity_minutes=OTP_VALIDITY_MIN)
+    except Exception as e:  # noqa: BLE001
+        log.error("OTP email send failed: %s", e)
+
+    return generic
+
+
+@api.post("/auth/verify-otp")
+async def verify_otp(body: VerifyOtpIn):
+    """Verifies OTP and returns a short-lived reset_token on success."""
+    email = body.email.lower().strip()
+    otp = (body.otp or "").strip()
+    if not otp.isdigit() or len(otp) != 6:
+        raise HTTPException(400, "Invalid OTP format")
+    # Most recent unused, unexpired OTP for this email
+    now = datetime.now(timezone.utc)
+    doc = await db.password_reset_otps.find_one(
+        {"email": email, "used": False, "expires_at": {"$gt": now}},
+        sort=[("created_at", -1)],
+    )
+    if not doc:
+        raise HTTPException(400, "OTP expired or not found. Please request a new one.")
+    if doc.get("attempts", 0) >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many invalid attempts. Please request a new OTP.")
+
+    expected = doc["otp_hash"]
+    actual = _hash_otp(otp)
+    if not _hmac.compare_digest(expected, actual):
+        await db.password_reset_otps.update_one({"_id": doc["_id"]}, {"$inc": {"attempts": 1}})
+        raise HTTPException(400, "Incorrect OTP")
+
+    # OTP correct → issue reset token (single-use, 10 min)
+    reset_token = _gen_reset_token()
+    reset_expires = now + timedelta(minutes=RESET_TOKEN_VALIDITY_MIN)
+    await db.password_reset_otps.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {
+            "reset_token_hash": _hash_otp(reset_token),
+            "reset_token_expires_at": reset_expires.isoformat(),
+        }},
+    )
+    return {"ok": True, "reset_token": reset_token, "expires_in": RESET_TOKEN_VALIDITY_MIN * 60}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(body: ResetPwdIn):
+    """Consumes the reset_token from verify-otp and sets a new password."""
+    token = (body.reset_token or "").strip()
+    if not token:
+        raise HTTPException(400, "Missing reset token")
+    token_hash = _hash_otp(token)
+    now = datetime.now(timezone.utc)
+    doc = await db.password_reset_otps.find_one({
+        "reset_token_hash": token_hash,
+        "used": False,
+        "expires_at": {"$gt": now},
+    })
+    if not doc:
+        raise HTTPException(400, "Invalid or expired reset token. Please restart the flow.")
+    # Reset token must also be within its own validity window
+    rte = doc.get("reset_token_expires_at")
+    if rte:
+        try:
+            rte_dt = datetime.fromisoformat(rte)
+            if rte_dt.tzinfo is None:
+                rte_dt = rte_dt.replace(tzinfo=timezone.utc)
+            if rte_dt < now:
+                raise HTTPException(400, "Reset token expired. Please restart the flow.")
+        except ValueError:
+            pass
+
+    email = doc["email"]
+    user = await db.users.find_one({"email": email})
+    if not user:
+        raise HTTPException(400, "Account not found")
+
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"password_hash": hash_password(body.new_password)}},
+    )
+    # Mark OTP doc consumed + invalidate any other open OTPs for this email
+    await db.password_reset_otps.update_one({"_id": doc["_id"]}, {"$set": {"used": True}})
+    await db.password_reset_otps.update_many(
+        {"email": email, "used": False},
+        {"$set": {"used": True}},
+    )
+    return {"ok": True, "message": "Password updated successfully. Please log in."}
+
+
+# ---------- Partner Associations (cross-approval mapping) ----------
+def _norm_pair(a: str, b: str) -> tuple:
+    return tuple(sorted([a, b]))
+
+
+@api.get("/partner-associations", response_model=List[PartnerAssociationOut])
+async def list_partner_associations(_=Depends(get_current_user)):
+    docs = await db.partner_associations.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return [PartnerAssociationOut(**d) for d in docs]
+
+
+@api.post("/partner-associations", response_model=PartnerAssociationOut)
+async def create_partner_association(body: PartnerAssociationIn, user=Depends(require_role("admin", "manager"))):
+    if body.partner_a_id == body.partner_b_id:
+        raise HTTPException(400, "Cannot associate a partner with itself")
+    a, b = _norm_pair(body.partner_a_id, body.partner_b_id)
+    # Validate both partners exist
+    pa = await db.partners.find_one({"id": a})
+    pb = await db.partners.find_one({"id": b})
+    if not pa or not pb:
+        raise HTTPException(400, "One or both partners not found")
+    existing = await db.partner_associations.find_one({"partner_a_id": a, "partner_b_id": b})
+    if existing:
+        existing.pop("_id", None)
+        return PartnerAssociationOut(**existing)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "partner_a_id": a,
+        "partner_b_id": b,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": user["id"],
+    }
+    await db.partner_associations.insert_one(doc)
+    doc.pop("_id", None)
+    return PartnerAssociationOut(**doc)
+
+
+@api.delete("/partner-associations/{assoc_id}")
+async def delete_partner_association(assoc_id: str, _=Depends(require_role("admin", "manager"))):
+    r = await db.partner_associations.delete_one({"id": assoc_id})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Association not found")
+    return {"ok": True}
+
+
+async def _custom_associated_partners(partner_id: str) -> set:
+    """Return set of partner_ids that are explicitly paired with `partner_id`."""
+    if not partner_id:
+        return set()
+    docs = await db.partner_associations.find(
+        {"$or": [{"partner_a_id": partner_id}, {"partner_b_id": partner_id}]},
+        {"_id": 0, "partner_a_id": 1, "partner_b_id": 1},
+    ).to_list(1000)
+    out = set()
+    for d in docs:
+        out.add(d["partner_a_id"])
+        out.add(d["partner_b_id"])
+    out.discard(partner_id)
+    return out
+
+
+async def _shares_project_or_center(approver_pid: str, owner_pid: str,
+                                    project_id: Optional[str], center_id: Optional[str]) -> bool:
+    """True if approver_pid has any past approved/pending transaction at the SAME project_id
+    or center_id as the target transaction (i.e., they operate in the same scope as owner)."""
+    if not approver_pid:
+        return False
+    or_clauses = []
+    if project_id:
+        or_clauses.append({"project_id": project_id})
+    if center_id:
+        or_clauses.append({"center_id": center_id})
+    if not or_clauses:
+        return False
+    q = {"partner_id": approver_pid, "$or": or_clauses}
+    cnt = await db.transactions.count_documents(q)
+    if cnt > 0:
+        return True
+    # Also check batches.partner_ids at same project_id
+    if project_id:
+        bcnt = await db.batches.count_documents({"project_id": project_id, "partner_ids": approver_pid})
+        if bcnt > 0:
+            return True
+    return False
+
+
+async def _can_partner_approve(user: dict, txn: dict) -> tuple[bool, str]:
+    """Returns (allowed, reason). True if user (partner role) can cross-approve this txn."""
+    if user.get("role") != "partner":
+        return (False, "Only partner role can perform partner-approval")
+    approver_pid = user.get("assigned_partner_id")
+    if not approver_pid:
+        return (False, "Your account is not linked to a partner profile")
+    owner_pid = txn.get("partner_id")
+    if not owner_pid:
+        return (False, "Transaction has no partner attached")
+    if approver_pid == owner_pid:
+        return (False, "You cannot approve your own partner's transactions")
+    if txn.get("created_by") == user["id"]:
+        return (False, "You cannot approve a transaction you created")
+    # Check custom pairing
+    custom = await _custom_associated_partners(approver_pid)
+    if owner_pid in custom:
+        return (True, "Linked via custom partner-association")
+    # Check same project / center
+    if await _shares_project_or_center(approver_pid, owner_pid, txn.get("project_id"), txn.get("center_id")):
+        return (True, "Shares same project/center")
+    return (False, "Not associated with the transaction's partner")
+
 
 
 # ---------- Entity (company/partner/center/project) ----------
@@ -708,6 +997,60 @@ async def reject_transaction(tid: str, body: RejectIn, user=Depends(require_role
                       "Your transaction was rejected" + (f": {body.reason}" if body.reason else ""),
                       ntype="txn_rejected", ref_id=tid, link="/transactions")
     return TransactionOut(**res)
+
+
+@api.post("/transactions/{tid}/partner-approve", response_model=TransactionOut)
+async def partner_approve_transaction(tid: str, user=Depends(get_current_user)):
+    """Cross-partner approval: an associated partner approves another partner's transaction.
+    Eligibility (any of):
+      • Custom pairing in `partner_associations`
+      • Shares the same project_id OR center_id (via transactions or batch.partner_ids)
+    Creator-self approval is blocked. 1 valid approval → status=approved.
+    """
+    txn = await db.transactions.find_one({"id": tid})
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    if txn.get("status") == "approved":
+        raise HTTPException(400, "Already approved")
+    if txn.get("status") == "rejected":
+        raise HTTPException(400, "Transaction was rejected — cannot partner-approve")
+    allowed, reason = await _can_partner_approve(user, txn)
+    if not allowed:
+        raise HTTPException(403, reason)
+    now = datetime.now(timezone.utc).isoformat()
+    res = await db.transactions.find_one_and_update(
+        {"id": tid, "status": {"$ne": "approved"}},
+        {"$set": {
+            "status": "approved",
+            "approved_by": user["id"],
+            "approved_at": now,
+            "approval_via": "partner_cross",
+            "approval_reason": reason,
+            "rejected_reason": None,
+        }},
+        return_document=True,
+    )
+    if not res:
+        raise HTTPException(409, "Could not approve (race condition)")
+    res.pop("_id", None)
+    if res.get("created_by") and res["created_by"] != user["id"]:
+        await _notify(res["created_by"],
+                      f"Your transaction was approved by a partner peer (₹{res.get('amount', 0):,.0f})",
+                      ntype="txn_approved", ref_id=tid, link="/transactions")
+    return TransactionOut(**res)
+
+
+@api.get("/transactions/{tid}/partner-approve-eligibility")
+async def partner_approve_eligibility(tid: str, user=Depends(get_current_user)):
+    """UI helper: returns whether the current user can partner-approve a given txn."""
+    txn = await db.transactions.find_one({"id": tid})
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    if txn.get("status") == "approved":
+        return {"eligible": False, "reason": "Already approved"}
+    allowed, reason = await _can_partner_approve(user, txn)
+    return {"eligible": allowed, "reason": reason}
+
 
 
 @api.delete("/transactions/{tid}")
@@ -1997,6 +2340,40 @@ async def list_pending_approvals(user=Depends(get_current_user)):
     return out
 
 
+@api.post("/approvals/{request_type}/{request_id}/nudge")
+async def nudge_approver(request_type: str, request_id: str, user=Depends(get_current_user)):
+    """Send a polite reminder notification to the currently-pending approver(s).
+    Only the request submitter (or admin/HR) can nudge."""
+    if request_type not in ("reimbursement", "leave", "transaction"):
+        raise HTTPException(400, "Invalid request_type")
+    coll_name = {"reimbursement": "reimbursements", "leave": "leaves", "transaction": "transactions"}[request_type]
+    rec = await db[coll_name].find_one({"id": request_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if not (user.get("role") in ("admin", "hr") or rec.get("created_by") == user["id"]):
+        raise HTTPException(403, "Only the submitter (or admin/HR) can nudge")
+    if not rec.get("current_level") or rec["current_level"] <= 0:
+        raise HTTPException(400, "Request is not pending — nothing to nudge")
+    step = await _current_step(rec)
+    if not step:
+        raise HTTPException(400, "No current step resolved")
+    approver_ids = await _resolve_step_user_ids(step, rec)
+    if not approver_ids:
+        raise HTTPException(400, "No approver resolvable for current step")
+    submitter = await db.users.find_one({"id": rec.get("created_by")}, {"_id": 0, "name": 1, "email": 1})
+    name = (submitter or {}).get("name") or user.get("name") or "A staff member"
+    for uid in approver_ids:
+        if uid == user["id"]:
+            continue
+        await _notify(
+            uid,
+            f"Reminder from {name}: please review their pending {request_type} (Level {rec['current_level']}: {step.get('label','')})",
+            ntype=f"{request_type}_nudge", ref_id=request_id,
+            link=("/hrms" if request_type != "transaction" else "/transactions"),
+        )
+    return {"ok": True, "notified": len(approver_ids)}
+
+
 @api.get("/approvals/{request_type}/{request_id}/timeline")
 async def approval_timeline(request_type: str, request_id: str, _=Depends(get_current_user)):
     """Return a human-readable timeline of this request's approval chain.
@@ -2477,6 +2854,57 @@ async def list_payroll(month: Optional[int] = None, year: Optional[int] = None, 
         q["year"] = year
     docs = await db.payroll.find(q, {"_id": 0}).sort([("year", -1), ("month", -1)]).to_list(5000)
     return docs
+
+
+@api.get("/payroll/bank-csv")
+async def payroll_bank_csv(month: int = Query(..., ge=1, le=12), year: int = Query(..., ge=2020, le=2100),
+                           status: str = Query("draft", pattern="^(draft|paid|all)$"),
+                           _=Depends(require_role("admin", "accountant", "hr"))):
+    """Download a bank-transfer CSV for the given month — one row per staff with
+    bank details + net amount. Only includes staff with verified bank + non-zero net.
+    """
+    import io
+    q: dict = {"month": month, "year": year}
+    if status != "all":
+        q["status"] = status
+    rows = await db.payroll.find(q, {"_id": 0}).sort("staff_name", 1).to_list(5000)
+    staff_ids = [r["staff_id"] for r in rows]
+    staff_map = {s["id"]: s for s in await db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0}).to_list(5000)}
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Staff Name", "Account Holder", "Bank Name", "Account No", "IFSC", "Verified", "Net Amount (₹)", "Period", "Notes"])
+    skipped = 0
+    written = 0
+    for r in rows:
+        s = staff_map.get(r["staff_id"]) or {}
+        if not s.get("bank_account_no") or not s.get("ifsc"):
+            skipped += 1
+            continue
+        if (r.get("net") or 0) <= 0:
+            skipped += 1
+            continue
+        writer.writerow([
+            r.get("staff_name") or s.get("name") or "",
+            s.get("account_holder_name") or s.get("name") or "",
+            s.get("bank_name") or "",
+            s.get("bank_account_no") or "",
+            s.get("ifsc") or "",
+            "Yes" if s.get("bank_verified") else "No",
+            round(r.get("net") or 0, 2),
+            f"{month:02d}/{year}",
+            r.get("remarks") or "",
+        ])
+        written += 1
+    csv_bytes = buf.getvalue().encode("utf-8")
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="payroll_bank_{year}_{month:02d}.csv"',
+            "X-Rows-Written": str(written),
+            "X-Rows-Skipped": str(skipped),
+        },
+    )
 
 
 @api.get("/payroll/my")
