@@ -224,6 +224,8 @@ class TransactionOut(TransactionIn):
     status: TxnStatus = "pending"
     approved_by: Optional[str] = None
     approved_at: Optional[str] = None
+    approval_via: Optional[str] = None  # "partner_cross" when cross-approved by associated partner
+    approval_reason: Optional[str] = None
     rejected_reason: Optional[str] = None
 
 
@@ -518,7 +520,8 @@ async def list_users(_=Depends(require_role("admin", "hr"))):
 
 @api.patch("/auth/users/{uid}", response_model=UserOut)
 async def update_user(uid: str, body: UserUpdateIn, _=Depends(require_role("admin"))):
-    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    # Use exclude_unset so the admin can explicitly clear nullable fields (e.g. {"assigned_partner_id": null})
+    update = body.model_dump(exclude_unset=True)
     if not update:
         raise HTTPException(400, "Nothing to update")
     res = await db.users.find_one_and_update(

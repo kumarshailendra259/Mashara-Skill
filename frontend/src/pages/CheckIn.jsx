@@ -89,6 +89,14 @@ export default function CheckIn() {
           <Button type="submit" disabled={busyLogin} className="brand-btn rounded-none w-full h-12 text-base" data-testid="checkin-login-btn">
             {busyLogin ? "Signing in…" : "Sign In"}
           </Button>
+          <button
+            type="button"
+            onClick={() => nav("/forgot-password", { state: { from: "/check-in" } })}
+            className="block w-full text-center text-sm text-[var(--brand)] hover:underline"
+            data-testid="checkin-forgot-password"
+          >
+            Forgot password?
+          </button>
           <button type="button" onClick={() => nav("/")} className="block w-full text-center text-sm text-[var(--muted)] hover:underline">
             Open full portal →
           </button>

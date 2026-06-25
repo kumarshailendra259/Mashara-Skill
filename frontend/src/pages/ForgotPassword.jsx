@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useLocation } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,6 +9,8 @@ import { Mail, KeyRound, Lock, ArrowLeft, CheckCircle2 } from "lucide-react";
 
 export default function ForgotPassword() {
   const nav = useNavigate();
+  const location = useLocation();
+  const returnTo = location.state?.from || "/login";
   // step: 1=email, 2=otp, 3=new password, 4=done
   const [step, setStep] = useState(1);
   const [email, setEmail] = useState("");
@@ -90,8 +92,8 @@ export default function ForgotPassword() {
 
       <div className="flex items-center justify-center p-8 bg-white">
         <div className="w-full max-w-sm space-y-6">
-          <Link to="/login" className="inline-flex items-center gap-1 text-xs text-[var(--muted)] hover:text-[var(--brand)]" data-testid="back-to-login">
-            <ArrowLeft size={12} /> Back to login
+          <Link to={returnTo} className="inline-flex items-center gap-1 text-xs text-[var(--muted)] hover:text-[var(--brand)]" data-testid="back-to-login">
+            <ArrowLeft size={12} /> Back to {returnTo === "/check-in" ? "staff app" : "login"}
           </Link>
 
           {/* Progress dots */}
@@ -209,8 +211,8 @@ export default function ForgotPassword() {
                 <h2 className="font-heading font-black text-2xl tracking-tight">Password updated</h2>
                 <p className="text-sm text-[var(--muted)] mt-1">You can now sign in with your new password.</p>
               </div>
-              <Button onClick={() => nav("/login", { replace: true })} className="w-full brand-btn rounded-none h-11" data-testid="fp-go-login">
-                Go to login
+              <Button onClick={() => nav(returnTo, { replace: true })} className="w-full brand-btn rounded-none h-11" data-testid="fp-go-login">
+                {returnTo === "/check-in" ? "Open staff app" : "Go to login"}
               </Button>
             </div>
           )}
