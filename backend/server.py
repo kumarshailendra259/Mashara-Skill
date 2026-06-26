@@ -1362,7 +1362,7 @@ async def milestone_income_summary(
     proj_by_id = {p["id"]: p["name"] for p in projmap}
 
     total = 0.0
-    by_milestone: dict = {"1st": 0.0, "2nd": 0.0, "3rd": 0.0}
+    by_milestone: dict = {"1st": 0.0, "2nd": 0.0, "3rd": 0.0, "other": 0.0}
     partner_agg: dict = {}
     project_agg: dict = {}
     for d in docs:
@@ -3636,7 +3636,7 @@ def _compute_1st_milestone(job_roles: list) -> dict:
     }
 
 
-MilestoneType = Literal["1st", "2nd", "3rd"]
+MilestoneType = Literal["1st", "2nd", "3rd", "other"]
 
 
 class BatchPaymentIn(BaseModel):

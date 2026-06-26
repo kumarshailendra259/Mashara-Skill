@@ -16,7 +16,8 @@ import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Check, Clock, Calculator } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 
-const MILESTONES = ["1st", "2nd", "3rd"];
+const MILESTONES = ["1st", "2nd", "3rd", "other"];
+const MILESTONE_LABEL = { "1st": "1st", "2nd": "2nd", "3rd": "3rd", other: "Other (manual)" };
 
 // Must match backend constants in server.py (JOB_CATEGORY_RATES + UNIFORM_PER_CANDIDATE + MILESTONE_SHARES)
 const CATEGORY_RATES = { "1": 56.35, "2": 52.50, "3": 36.85 };
@@ -82,7 +83,7 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
       <div className="flex items-center justify-between mb-2">
         <div>
           <div className="overline text-xs">Milestone</div>
-          <div className="font-heading font-black text-xl tracking-tight">{milestone}</div>
+          <div className="font-heading font-black text-xl tracking-tight">{MILESTONE_LABEL[milestone] || milestone}</div>
         </div>
         {received ? (
           <span className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-[var(--success)] text-[var(--success)]">
@@ -359,6 +360,7 @@ export default function Programs() {
         });
         setAutoFilled(true); setPayOpen(true); return;
       }
+      // "other" milestone — always purely manual entry, no auto-fill
     }
     setPForm({ batch_id: selectedBatchId, milestone, amount: "", expected_date: "", description: "", uniform_amount: 0, recovery_amount: 0, assessment_fee_per_candidate: 0, assessment_fee_total: 0 });
     setAutoFilled(false);
@@ -695,7 +697,7 @@ export default function Programs() {
                           const p = paymentByMilestone[m];
                           return (
                             <tr key={m} className="border-b border-[var(--border)]">
-                              <td className="p-3 font-medium">{m}</td>
+                              <td className="p-3 font-medium">{MILESTONE_LABEL[m] || m}</td>
                               <td className="p-3 num text-right">{p ? inr(p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
                               <td className="p-3 num text-right">{p && p.tds_percent > 0 ? `${p.tds_percent}% · ${inr2(p.tds_amount)}` : <span className="text-[var(--muted)]">—</span>}</td>
                               <td className="p-3 num text-right font-medium">{p && p.status === "received" ? inr2(p.net_amount || p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
@@ -924,7 +926,7 @@ export default function Programs() {
               <Label>Milestone</Label>
               <Select value={pForm.milestone} onValueChange={(v) => setPForm({ ...pForm, milestone: v })} disabled={!!editingPay}>
                 <SelectTrigger className="rounded-none"><SelectValue /></SelectTrigger>
-                <SelectContent>{MILESTONES.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}</SelectContent>
+                <SelectContent>{MILESTONES.map((m) => <SelectItem key={m} value={m}>{MILESTONE_LABEL[m] || m}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div>
@@ -997,7 +999,7 @@ export default function Programs() {
       <Dialog open={recvOpen} onOpenChange={setRecvOpen}>
         <DialogContent className="rounded-none">
           <DialogHeader>
-            <DialogTitle className="font-heading">Mark {recvTarget?.milestone} Milestone as Received</DialogTitle>
+            <DialogTitle className="font-heading">Mark {MILESTONE_LABEL[recvTarget?.milestone] || recvTarget?.milestone} Milestone as Received</DialogTitle>
           </DialogHeader>
           {recvTarget && recvPreview && (
             <div className="space-y-4">
