@@ -124,6 +124,7 @@ def batch_two_partners(admin, project_id, center_id, partner_a, partner_b):
     r = admin.post(f"{API}/batches", json={
         "project_id": project_id, "center_id": center_id,
         "partner_ids": [partner_a, partner_b],
+        "partner_share_percent": 100,  # iter-19: all gross goes to partner pool (matches legacy equal-split semantics)
         "name": f"TEST_split_batch_{TAG}",
     }, timeout=15)
     assert r.status_code == 200
@@ -178,6 +179,7 @@ class TestReceiveSplit:
         b = admin.post(f"{API}/batches", json={
             "project_id": project_id, "center_id": center_id,
             "partner_ids": [partner_a, partner_b, p3],
+            "partner_share_percent": 100,
             "name": f"TEST_rounding_{TAG}",
         }, timeout=15).json()["id"]
         # amount=100 → 33.33 + 33.33 + 33.34
