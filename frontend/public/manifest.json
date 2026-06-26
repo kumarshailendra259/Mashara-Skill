@@ -11,8 +11,8 @@
   "display": "standalone",
   "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
   "orientation": "portrait",
-  "theme_color": "#0a3bc5",
-  "background_color": "#ffffff",
+  "theme_color": "#005a59",
+  "background_color": "#005a59",
   "prefer_related_applications": false,
   "icons": [
     { "src": "/icons/icon-72.png",  "sizes": "72x72",   "type": "image/png", "purpose": "any" },
