@@ -51,11 +51,25 @@ export default function Transactions() {
       const e = {}; ENTITY_TYPES.forEach((tt, i) => (e[tt] = r[i].data)); setEntities(e);
     });
 
+  const [pendingMyApproval, setPendingMyApproval] = useState(false);
   const params = useMemo(() => {
-    const p = {}; Object.entries(filters).forEach(([k, v]) => v && (p[k] = v)); return p;
-  }, [filters]);
+    const p = {}; Object.entries(filters).forEach(([k, v]) => v && (p[k] = v));
+    if (pendingMyApproval) p.status = "pending";
+    return p;
+  }, [filters, pendingMyApproval]);
 
-  const load = () => api.get("/transactions", { params }).then((r) => setItems(r.data));
+  const load = () => api.get("/transactions", { params }).then((r) => {
+    const list = r.data || [];
+    if (pendingMyApproval && isPartner && myPartnerId) {
+      // Client-side filter: only txns NOT created by me + with a partner_id != mine
+      setItems(list.filter((it) =>
+        it.status === "pending" && it.created_by !== user.id &&
+        it.partner_id && it.partner_id !== myPartnerId
+      ));
+    } else {
+      setItems(list);
+    }
+  });
 
   const approveTxn = async (id) => {
     try { await api.post(`/transactions/${id}/approve`); load(); toast.success("Approved"); }
@@ -261,7 +275,22 @@ export default function Transactions() {
       </div>
 
       {/* Filters */}
-      <div className="swiss-card p-4 grid grid-cols-2 md:grid-cols-7 gap-3">
+      <div className="swiss-card p-4 space-y-3">
+        {isPartner && (
+          <div className="flex items-center gap-2 border-l-2 border-[var(--brand)] bg-blue-50 px-3 py-2">
+            <input
+              type="checkbox" id="pending-my-approval"
+              checked={pendingMyApproval}
+              onChange={(e) => setPendingMyApproval(e.target.checked)}
+              data-testid="filter-pending-my-approval"
+            />
+            <label htmlFor="pending-my-approval" className="text-sm cursor-pointer">
+              <span className="font-medium">Show only transactions awaiting MY partner-approval</span>
+              <span className="overline text-[10px] text-[var(--muted)] block">(submitted by associated partners, status=pending)</span>
+            </label>
+          </div>
+        )}
+        <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
         <div>
           <Label className="overline">{t("status")}</Label>
           <Select value={filters.status || "__all"} onValueChange={(v) => setF("status", v === "__all" ? "" : v)}>
@@ -303,6 +332,7 @@ export default function Transactions() {
         <div>
           <Label className="overline">To</Label>
           <Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-none" />
+        </div>
         </div>
       </div>
 

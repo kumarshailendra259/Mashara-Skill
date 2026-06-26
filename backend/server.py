@@ -918,6 +918,44 @@ async def create_transaction(body: TransactionIn, user=Depends(require_role("adm
                 if uid and uid != user["id"]:
                     await _notify(uid, f"New transaction awaiting your approval (₹{doc.get('amount', 0):,.0f})",
                                   ntype="txn_pending", ref_id=doc["id"], link="/transactions")
+    # PARTNER cross-approval routing: when a partner creates a txn, alert ALL associated
+    # partners (custom pairings + same project/center peers) so any one of them can
+    # tap "Partner Approve" — even before admin/chain approval clears.
+    if user.get("role") == "partner" and doc.get("status") == "pending":
+        owner_pid = user.get("assigned_partner_id") or doc.get("partner_id")
+        notified_users: set[str] = set()
+        if owner_pid:
+            peers = await _custom_associated_partners(owner_pid)
+            # Also include partners sharing project/center on this txn
+            if doc.get("project_id") or doc.get("center_id"):
+                or_c = []
+                if doc.get("project_id"):
+                    or_c.append({"project_id": doc["project_id"]})
+                if doc.get("center_id"):
+                    or_c.append({"center_id":  doc["center_id"]})
+                peer_txns = await db.transactions.find(
+                    {"partner_id": {"$ne": owner_pid, "$nin": [None]}, "$or": or_c},
+                    {"_id": 0, "partner_id": 1},
+                ).to_list(2000)
+                for t in peer_txns:
+                    if t.get("partner_id"):
+                        peers.add(t["partner_id"])
+            # Resolve linked users for these partner_ids
+            if peers:
+                peer_users = await db.users.find(
+                    {"role": "partner", "assigned_partner_id": {"$in": list(peers)}},
+                    {"_id": 0, "id": 1},
+                ).to_list(2000)
+                for u in peer_users:
+                    uid = u.get("id")
+                    if uid and uid != user["id"]:
+                        notified_users.add(uid)
+        for uid in notified_users:
+            await _notify(
+                uid,
+                f"Associated partner submitted txn for your approval (₹{doc.get('amount', 0):,.0f})",
+                ntype="txn_partner_approve", ref_id=doc["id"], link="/transactions",
+            )
     return TransactionOut(**doc)
 
 
