@@ -182,7 +182,7 @@ export default function Programs() {
   // Batch dialog
   const [batchOpen, setBatchOpen] = useState(false);
   const [editingBatch, setEditingBatch] = useState(null);
-  const emptyBatch = { project_id: "", center_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "", job_roles: [], passed_candidates: 0, placed_candidates: 0, partner_share_percent: 0 };
+  const emptyBatch = { project_id: "", center_id: "", company_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "", job_roles: [], passed_candidates: 0, placed_candidates: 0, partner_share_percent: 0 };
   const [bForm, setBForm] = useState(emptyBatch);
 
   // Payment dialog
@@ -281,6 +281,7 @@ export default function Programs() {
     setEditingBatch(b);
     setBForm({
       project_id: b.project_id, center_id: b.center_id || "",
+      company_id: b.company_id || "",
       partner_ids: b.partner_ids || [],
       name: b.name, start_date: b.start_date || "", end_date: b.end_date || "",
       total_beneficiaries: b.total_beneficiaries || 0, description: b.description || "",
@@ -301,6 +302,7 @@ export default function Programs() {
         ...bForm,
         total_beneficiaries: computedBeneficiaries || +bForm.total_beneficiaries || 0,
         center_id: bForm.center_id || null,
+        company_id: bForm.company_id || null,
         partner_ids: bForm.partner_ids || [],
         passed_candidates: parseInt(bForm.passed_candidates, 10) || 0,
         placed_candidates: parseInt(bForm.placed_candidates, 10) || 0,
@@ -418,7 +420,8 @@ export default function Programs() {
   const openReceive = (p) => {
     setRecvTarget(p);
     setRecvTds("0");
-    setRecvCompanyId(p.company_id || "");
+    // Pre-fill company from BatchPayment row, falling back to active batch's company_id
+    setRecvCompanyId(p.company_id || activeBatch?.company_id || "");
     setRecvOpen(true);
   };
   const confirmReceive = async () => {
@@ -651,6 +654,7 @@ export default function Programs() {
                               <div className="border border-[var(--brand)] p-2 text-sm bg-blue-50" data-testid="company-share-card">
                                 <div className="font-medium truncate flex items-center gap-1">
                                   <span className="overline text-[10px] bg-[var(--brand)] text-white px-1">COMPANY</span>
+                                  <span className="truncate">{companies.find((c) => c.id === activeBatch.company_id)?.name || "Unassigned"}</span>
                                 </div>
                                 <div className="overline text-xs mt-1">Configured ({(100 - pct).toFixed(2)}%)</div>
                                 <div className="num font-bold">{inr(companyShare)}</div>
@@ -906,6 +910,20 @@ export default function Programs() {
                   })()}
                 </div>
               </div>
+            </div>
+
+            <div className="col-span-2">
+              <Label>Company <span className="overline text-[10px]">(company-share income will be tagged under this company on dashboard)</span></Label>
+              <Select
+                value={bForm.company_id || "__none__"}
+                onValueChange={(v) => setBForm({ ...bForm, company_id: v === "__none__" ? "" : v })}
+              >
+                <SelectTrigger className="rounded-none" data-testid="batch-company-select"><SelectValue placeholder="Select company" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">— None (uncategorised) —</SelectItem>
+                  {companies.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="col-span-2">

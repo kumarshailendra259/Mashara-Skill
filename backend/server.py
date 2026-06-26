@@ -3541,6 +3541,9 @@ class BatchIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     project_id: str
     center_id: Optional[str] = None
+    # Company under which this batch's company-share income will be tagged on every
+    # milestone receive. Can be overridden at receive-time per milestone.
+    company_id: Optional[str] = None
     partner_ids: List[str] = Field(default_factory=list)
     name: str = Field(min_length=1)
     start_date: Optional[str] = ""
@@ -3892,8 +3895,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
     # is recorded as company income (partner_id=null).
     partner_pool = round(gross * partner_share_pct / 100.0, 2) if partner_ids and partner_share_pct > 0 else 0.0
     company_amount = round(gross - partner_pool, 2)
-    # Resolve company tag for the company-share txn: request body wins, then BatchPayment row.
-    company_id_resolved = body.company_id or rec.get("company_id")
+    # Resolve company tag for the company-share txn (priority: body override → BatchPayment → Batch)
+    company_id_resolved = body.company_id or rec.get("company_id") or (batch or {}).get("company_id")
     splits: list[tuple[Optional[str], float, str]] = []  # (partner_id, amount, suffix)
     if company_amount > 0:
         suffix = f" (company {round(100.0 - partner_share_pct, 2)}% share)" if partner_pool > 0 else ""
