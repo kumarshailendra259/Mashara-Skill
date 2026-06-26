@@ -31,6 +31,7 @@ export default function Dashboard() {
   });
   const [data, setData] = useState(null);
   const [milestoneSummary, setMilestoneSummary] = useState(null);
+  const [foodingSummary, setFoodingSummary] = useState(null);
 
   useEffect(() => {
     Promise.all(ENTITY_TYPES.map((tt) => api.get(`/entities/${tt}`))).then((res) => {
@@ -49,6 +50,7 @@ export default function Dashboard() {
   useEffect(() => {
     api.get("/dashboard/summary", { params: query }).then((r) => setData(r.data)).catch(() => setData(null));
     api.get("/dashboard/milestone-income", { params: query }).then((r) => setMilestoneSummary(r.data)).catch(() => setMilestoneSummary(null));
+    api.get("/dashboard/fooding-income", { params: query }).then((r) => setFoodingSummary(r.data)).catch(() => setFoodingSummary(null));
   }, [query]);
 
   useEffect(() => {
@@ -332,6 +334,90 @@ export default function Dashboard() {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Fooding Income Section */}
+      {foodingSummary && foodingSummary.count > 0 && (
+        <div className="space-y-3" data-testid="fooding-income-section">
+          <h2 className="font-heading font-black tracking-tight text-2xl flex items-center gap-2">
+            <span>🍽️</span> Fooding Income
+          </h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="swiss-card p-3"><div className="overline">Total Fooding</div><div className="num font-bold text-2xl value-positive">{inr(foodingSummary.total)}</div></div>
+            <div className="swiss-card p-3"><div className="overline">Company Share</div><div className="num font-bold text-xl">{inr(foodingSummary.company_total)}</div></div>
+            <div className="swiss-card p-3"><div className="overline">Partners Share</div><div className="num font-bold text-xl">{inr(foodingSummary.partner_total)}</div></div>
+            <div className="swiss-card p-3"><div className="overline">Entries</div><div className="num font-bold text-2xl">{foodingSummary.count}</div></div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            {/* Monthly trend bar chart */}
+            <div className="swiss-card p-4 lg:col-span-2 h-72" data-testid="fooding-monthly-chart">
+              <div className="overline mb-2">Monthly Trend</div>
+              {foodingSummary.monthly.length === 0 ? (
+                <EmptyChart text="No monthly data" />
+              ) : (
+                <ResponsiveContainer width="100%" height="88%">
+                  <BarChart data={foodingSummary.monthly}>
+                    <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
+                    <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
+                    <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                    <Bar dataKey="amount" fill="#0a3bc5" />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* By company table */}
+            <div className="swiss-card p-4" data-testid="fooding-by-company">
+              <div className="overline mb-2">By Company</div>
+              {foodingSummary.by_company.length === 0 ? (
+                <div className="overline text-center py-6">No company data</div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b border-[var(--border)] overline">
+                    <th className="text-left py-2">Company</th>
+                    <th className="text-right py-2">Amount</th>
+                  </tr></thead>
+                  <tbody>
+                    {foodingSummary.by_company.map((r) => (
+                      <tr key={r.company_id || "unassigned"} className="border-b border-[var(--border)]">
+                        <td className="py-2 font-medium">{r.company_name}</td>
+                        <td className="py-2 num value-positive">{inr(r.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          {/* Partner-wise split */}
+          {foodingSummary.by_partner.length > 0 && (
+            <div className="swiss-card p-4" data-testid="fooding-by-partner">
+              <div className="overline mb-2">By Partner</div>
+              <table className="w-full text-sm">
+                <thead><tr className="border-b border-[var(--border)] overline">
+                  <th className="text-left py-2">Partner</th>
+                  <th className="text-right py-2">Amount</th>
+                  <th className="text-right py-2">Share</th>
+                </tr></thead>
+                <tbody>
+                  {foodingSummary.by_partner.map((r) => {
+                    const pct = foodingSummary.partner_total > 0 ? (r.amount / foodingSummary.partner_total * 100).toFixed(1) : "0.0";
+                    return (
+                      <tr key={r.partner_id} className="border-b border-[var(--border)]">
+                        <td className="py-2 font-medium">{r.partner_name}</td>
+                        <td className="py-2 num value-positive">{inr(r.amount)}</td>
+                        <td className="py-2 num text-[var(--muted)]">{pct}%</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

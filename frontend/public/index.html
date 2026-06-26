@@ -9,6 +9,9 @@
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
         <meta name="apple-mobile-web-app-title" content="Mashara Check-In" />
+        <link rel="apple-touch-icon" href="%PUBLIC_URL%/icons/icon-192.png" />
+        <link rel="icon" type="image/png" sizes="192x192" href="%PUBLIC_URL%/icons/icon-192.png" />
+        <link rel="icon" type="image/png" sizes="512x512" href="%PUBLIC_URL%/icons/icon-512.png" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap" rel="stylesheet" />
@@ -35,6 +38,14 @@
     <body>
         <noscript>You need to enable JavaScript to run this app.</noscript>
         <div id="root"></div>
+        <script>
+          // Service worker registration — required for PWA Builder / Play Store install criteria.
+          if ("serviceWorker" in navigator) {
+            window.addEventListener("load", function () {
+              navigator.serviceWorker.register("/sw.js").catch(function () {});
+            });
+          }
+        </script>
         <script>
             !(function (t, e) {
                 var o, n, p, r;

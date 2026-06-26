@@ -1402,6 +1402,82 @@ async def milestone_income_summary(
     }
 
 
+@api.get("/dashboard/fooding-income")
+async def fooding_income_summary(
+    user=Depends(get_current_user),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    project_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+):
+    """Aggregate source='fooding' approved transactions.
+
+    Returns total, monthly trend, company-vs-partner split, and per-partner breakdown.
+    """
+    q: dict = {"source": "fooding", "status": "approved"}
+    if start or end:
+        rng: dict = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end
+        q["date"] = rng
+    if project_id:
+        q["project_id"] = project_id
+    if center_id:
+        q["center_id"] = center_id
+    q.update(_txn_scope_for_user(user))
+
+    docs = await db.transactions.find(q, {"_id": 0}).to_list(20000)
+    pmap = await db.partners.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+    pname = {p["id"]: p["name"] for p in pmap}
+    cmap = await db.companies.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
+    cname = {c["id"]: c["name"] for c in cmap}
+
+    total = 0.0
+    company_total = 0.0
+    partner_total = 0.0
+    monthly: dict = {}
+    partner_agg: dict = {}
+    company_agg: dict = {}
+    for d in docs:
+        amt = float(d.get("amount") or 0)
+        total += amt
+        m = (d.get("date") or "")[:7]
+        if m:
+            monthly[m] = monthly.get(m, 0.0) + amt
+        pid = d.get("partner_id")
+        cid = d.get("company_id")
+        if pid:
+            partner_total += amt
+            partner_agg[pid] = partner_agg.get(pid, 0.0) + amt
+        else:
+            company_total += amt
+            key = cid or "__unassigned"
+            company_agg[key] = company_agg.get(key, 0.0) + amt
+
+    monthly_list = [{"month": m, "amount": round(v, 2)} for m, v in sorted(monthly.items())]
+    by_partner = [
+        {"partner_id": k, "partner_name": pname.get(k, "Unknown"), "amount": round(v, 2)}
+        for k, v in sorted(partner_agg.items(), key=lambda x: -x[1])
+    ]
+    by_company = [
+        {"company_id": k if k != "__unassigned" else None,
+         "company_name": cname.get(k, "Unassigned") if k != "__unassigned" else "Unassigned",
+         "amount": round(v, 2)}
+        for k, v in sorted(company_agg.items(), key=lambda x: -x[1])
+    ]
+    return {
+        "total": round(total, 2),
+        "company_total": round(company_total, 2),
+        "partner_total": round(partner_total, 2),
+        "monthly": monthly_list,
+        "by_partner": by_partner,
+        "by_company": by_company,
+        "count": len(docs),
+    }
+
+
 @api.get("/dashboard/settlement")
 async def settlement_view(
     user=Depends(get_current_user),
