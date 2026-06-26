@@ -3533,7 +3533,10 @@ class BatchOut(BatchIn):
     created_at: str
 
 
-# Category hourly rates (fixed business config — change here if statutory rates revise)
+# Category hourly rates (fixed business config — change here if statutory rates revise).
+# Category "other" is a custom-rate row — admin enters the rate manually per row (stored
+# in r["custom_rate"]). JOB_CATEGORY_RATES lookup returns 0.0 for "other"; effective rate
+# is resolved in _compute_batch_milestones.
 JOB_CATEGORY_RATES = {"1": 56.35, "2": 52.50, "3": 36.85}
 UNIFORM_PER_CANDIDATE = 1000.0  # one-time uniform allowance, applied ONLY on 1st milestone
 
@@ -3558,7 +3561,11 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
     total_candidates = 0
     for r in (job_roles or []):
         cat = str(r.get("category", "")).strip()
-        rate = JOB_CATEGORY_RATES.get(cat, 0.0)
+        # "other" → use per-row custom_rate (default 0 if not set). Cat 1/2/3 use the fixed table.
+        if cat == "other":
+            rate = float(r.get("custom_rate") or 0)
+        else:
+            rate = JOB_CATEGORY_RATES.get(cat, 0.0)
         candidates = int(r.get("candidates") or 0)
         hours = float(r.get("hours") or 0)
         row_total = round(candidates * rate * hours, 2)
@@ -3568,6 +3575,7 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
             "category": cat, "job_role": r.get("job_role", "") or "",
             "candidates": candidates, "hours": hours, "rate": rate,
             "row_total": row_total,
+            "custom_rate": float(r.get("custom_rate") or 0) if cat == "other" else None,
         })
     role_total = round(role_total, 2)
     uniform_total = round(total_candidates * UNIFORM_PER_CANDIDATE, 2)

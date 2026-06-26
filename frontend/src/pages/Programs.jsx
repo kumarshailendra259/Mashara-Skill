@@ -25,6 +25,12 @@ const CATEGORY_LABEL = {
   "1": "Category 1 (₹56.35/hr)",
   "2": "Category 2 (₹52.50/hr)",
   "3": "Category 3 (₹36.85/hr)",
+  other: "Other (custom rate)",
+};
+// Returns the effective hourly rate for a job-role row (cat 1/2/3 use fixed table, "other" uses custom_rate)
+const rateForRow = (r) => {
+  if (String(r?.category) === "other") return parseFloat(r?.custom_rate) || 0;
+  return CATEGORY_RATES[String(r?.category)] || 0;
 };
 const UNIFORM_PER_CANDIDATE = 1000;
 const SHARES = { "1st": 0.30, "2nd": 0.40, "3rd": 0.30 };
@@ -42,7 +48,7 @@ function computeMilestones(rows, passed, placed) {
   let roleTotal = 0;
   let totalCandidates = 0;
   (rows || []).forEach((r) => {
-    const rate = CATEGORY_RATES[String(r.category)] || 0;
+    const rate = rateForRow(r);
     const c = parseInt(r.candidates, 10) || 0;
     const h = parseFloat(r.hours) || 0;
     roleTotal += c * rate * h;
@@ -296,6 +302,7 @@ export default function Programs() {
           job_role: r.job_role || "",
           candidates: parseInt(r.candidates, 10) || 0,
           hours: parseFloat(r.hours) || 0,
+          custom_rate: String(r.category) === "other" ? (parseFloat(r.custom_rate) || 0) : 0,
         })),
       };
       if (editingBatch) await api.put(`/batches/${editingBatch.id}`, payload);
@@ -556,13 +563,13 @@ export default function Programs() {
                           </thead>
                           <tbody>
                             {(activeBatch.job_roles || []).map((r, i) => {
-                              const rate = CATEGORY_RATES[String(r.category)] || 0;
+                              const rate = rateForRow(r);
                               const c = parseInt(r.candidates, 10) || 0;
                               const h = parseFloat(r.hours) || 0;
                               return (
                                 <tr key={`${r.category}-${r.job_role}-${i}`} className="border-b border-[var(--border)]">
                                   <td className="p-2">{r.job_role || <span className="text-[var(--muted)]">—</span>}</td>
-                                  <td className="p-2 overline text-xs">Cat {r.category}</td>
+                                  <td className="p-2 overline text-xs">{r.category === "other" ? "Other" : `Cat ${r.category}`}</td>
                                   <td className="p-2 text-right num">{c}</td>
                                   <td className="p-2 text-right num">{h}</td>
                                   <td className="p-2 text-right num">₹{rate.toFixed(2)}</td>
@@ -770,22 +777,36 @@ export default function Programs() {
               ) : (
                 <div className="space-y-2">
                   {bForm.job_roles.map((r, idx) => {
-                    const rate = CATEGORY_RATES[String(r.category)] || 0;
+                    const rate = rateForRow(r);
                     const subtotal = (parseInt(r.candidates, 10) || 0) * (parseFloat(r.hours) || 0) * rate;
+                    const isOther = String(r.category) === "other";
                     return (
                       <div key={`jr-${idx}`} className="grid grid-cols-12 gap-2 items-end border border-[var(--border)] p-2" data-testid={`job-role-row-${idx}`}>
-                        <div className="col-span-3">
+                        <div className={isOther ? "col-span-2" : "col-span-3"}>
                           <div className="overline text-xs mb-1">Category</div>
-                          <Select value={String(r.category)} onValueChange={(v) => updateJobRoleRow(idx, { category: v })}>
+                          <Select value={String(r.category)} onValueChange={(v) => updateJobRoleRow(idx, { category: v, custom_rate: v === "other" ? (r.custom_rate || 0) : 0 })}>
                             <SelectTrigger className="rounded-none h-9" data-testid={`jr-cat-${idx}`}><SelectValue /></SelectTrigger>
                             <SelectContent>
                               <SelectItem value="1">{CATEGORY_LABEL["1"]}</SelectItem>
                               <SelectItem value="2">{CATEGORY_LABEL["2"]}</SelectItem>
                               <SelectItem value="3">{CATEGORY_LABEL["3"]}</SelectItem>
+                              <SelectItem value="other">{CATEGORY_LABEL.other}</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
-                        <div className="col-span-3">
+                        {isOther && (
+                          <div className="col-span-1">
+                            <div className="overline text-xs mb-1">Rate/hr</div>
+                            <Input
+                              type="number" min="0" step="0.01"
+                              value={r.custom_rate || 0}
+                              onChange={(e) => updateJobRoleRow(idx, { custom_rate: e.target.value })}
+                              className="rounded-none h-9 num"
+                              data-testid={`jr-rate-${idx}`}
+                            />
+                          </div>
+                        )}
+                        <div className={isOther ? "col-span-3" : "col-span-3"}>
                           <div className="overline text-xs mb-1">Job Role</div>
                           <Input value={r.job_role || ""} onChange={(e) => updateJobRoleRow(idx, { job_role: e.target.value })} placeholder="e.g. Trainer" className="rounded-none h-9" data-testid={`jr-name-${idx}`} />
                         </div>
