@@ -174,7 +174,7 @@ export default function Programs() {
   // Batch dialog
   const [batchOpen, setBatchOpen] = useState(false);
   const [editingBatch, setEditingBatch] = useState(null);
-  const emptyBatch = { project_id: "", center_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "", job_roles: [], passed_candidates: 0, placed_candidates: 0 };
+  const emptyBatch = { project_id: "", center_id: "", partner_ids: [], name: "", start_date: "", end_date: "", total_beneficiaries: 0, description: "", job_roles: [], passed_candidates: 0, placed_candidates: 0, partner_share_percent: 0 };
   const [bForm, setBForm] = useState(emptyBatch);
 
   // Payment dialog
@@ -272,6 +272,7 @@ export default function Programs() {
       job_roles: b.job_roles || [],
       passed_candidates: b.passed_candidates || 0,
       placed_candidates: b.placed_candidates || 0,
+      partner_share_percent: b.partner_share_percent || 0,
     });
     setBatchOpen(true);
   };
@@ -288,6 +289,7 @@ export default function Programs() {
         partner_ids: bForm.partner_ids || [],
         passed_candidates: parseInt(bForm.passed_candidates, 10) || 0,
         placed_candidates: parseInt(bForm.placed_candidates, 10) || 0,
+        partner_share_percent: parseFloat(bForm.partner_share_percent) || 0,
         job_roles: (bForm.job_roles || []).map((r) => ({
           category: String(r.category || "1"),
           job_role: r.job_role || "",
@@ -604,31 +606,59 @@ export default function Programs() {
                     </div>
                   )}
 
-                  {(activeBatch.partner_ids || []).length > 0 && (
+                  {((activeBatch.partner_ids || []).length > 0 || (activeBatch.partner_share_percent || 0) > 0) && (
                     <div className="swiss-card p-4" data-testid="partner-split-section">
                       <div className="flex items-center justify-between mb-3">
-                        <div className="overline">Partners on this batch · income splits equally on Receive</div>
-                        <span className="overline">{activeBatch.partner_ids.length} partner{activeBatch.partner_ids.length === 1 ? "" : "s"}</span>
+                        <div className="overline">
+                          Income split · Partner pool {activeBatch.partner_share_percent || 0}% of gross
+                          {(activeBatch.partner_ids || []).length > 1 && ` ÷ ${(activeBatch.partner_ids || []).length} partners`}
+                        </div>
+                        <span className="overline">Company keeps {(100 - (activeBatch.partner_share_percent || 0)).toFixed(2)}%</span>
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                        {activeBatch.partner_ids.map((pid) => {
-                          const name = partners.find((p) => p.id === pid)?.name || pid;
-                          const split = activeBatch.partner_ids.length > 0 ? totalConfigured / activeBatch.partner_ids.length : 0;
-                          const splitReceived = activeBatch.partner_ids.length > 0 ? totalReceived / activeBatch.partner_ids.length : 0;
+                        {(() => {
+                          const pct = activeBatch.partner_share_percent || 0;
+                          const nP = (activeBatch.partner_ids || []).length;
+                          const partnerPool = totalConfigured * pct / 100;
+                          const partnerPoolReceived = totalReceived * pct / 100;
+                          const perPartner = nP > 0 ? partnerPool / nP : 0;
+                          const perPartnerRecv = nP > 0 ? partnerPoolReceived / nP : 0;
+                          const companyShare = totalConfigured - partnerPool;
+                          const companyShareRecv = totalReceived - partnerPoolReceived;
                           return (
-                            <div key={pid} className="border border-[var(--border)] p-2 text-sm" data-testid={`partner-split-${pid}`}>
-                              <div className="font-medium truncate">{name}</div>
-                              <div className="overline text-xs mt-1">Configured share</div>
-                              <div className="num font-bold">{inr(split)}</div>
-                              {splitReceived > 0 && (
-                                <>
-                                  <div className="overline text-xs mt-1">Received</div>
-                                  <div className="num font-bold value-positive">{inr(splitReceived)}</div>
-                                </>
-                              )}
-                            </div>
+                            <>
+                              <div className="border border-[var(--brand)] p-2 text-sm bg-blue-50" data-testid="company-share-card">
+                                <div className="font-medium truncate flex items-center gap-1">
+                                  <span className="overline text-[10px] bg-[var(--brand)] text-white px-1">COMPANY</span>
+                                </div>
+                                <div className="overline text-xs mt-1">Configured ({(100 - pct).toFixed(2)}%)</div>
+                                <div className="num font-bold">{inr(companyShare)}</div>
+                                {companyShareRecv > 0 && (
+                                  <>
+                                    <div className="overline text-xs mt-1">Received</div>
+                                    <div className="num font-bold value-positive">{inr(companyShareRecv)}</div>
+                                  </>
+                                )}
+                              </div>
+                              {(activeBatch.partner_ids || []).map((pid) => {
+                                const name = partners.find((p) => p.id === pid)?.name || pid;
+                                return (
+                                  <div key={pid} className="border border-[var(--border)] p-2 text-sm" data-testid={`partner-split-${pid}`}>
+                                    <div className="font-medium truncate">{name}</div>
+                                    <div className="overline text-xs mt-1">Configured share ({nP > 0 ? (pct / nP).toFixed(2) : 0}%)</div>
+                                    <div className="num font-bold">{inr(perPartner)}</div>
+                                    {perPartnerRecv > 0 && (
+                                      <>
+                                        <div className="overline text-xs mt-1">Received</div>
+                                        <div className="num font-bold value-positive">{inr(perPartnerRecv)}</div>
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </>
                           );
-                        })}
+                        })()}
                       </div>
                     </div>
                   )}
@@ -818,6 +848,29 @@ export default function Programs() {
                   = {inr(bFormBreakdown.second.recovery)} (30% × {bFormBreakdown.failed}/{bFormBreakdown.totalCandidates} of role)
                 </div>
               )}
+            </div>
+
+            <div className="col-span-2 border-t border-[var(--border)] pt-3">
+              <Label>Partner Share % of Gross Milestone <span className="overline text-[10px]">total partner pool; split equally among partner_ids · company keeps remainder</span></Label>
+              <div className="grid grid-cols-3 gap-2 items-end">
+                <Input
+                  type="number" min="0" max="100" step="0.01"
+                  value={bForm.partner_share_percent}
+                  onChange={(e) => setBForm({ ...bForm, partner_share_percent: e.target.value })}
+                  className="rounded-none num"
+                  data-testid="batch-partner-share-pct"
+                />
+                <div className="col-span-2 text-xs text-[var(--muted)] bg-blue-50 border-l-2 border-[var(--brand)] px-2 py-1">
+                  {(() => {
+                    const pct = parseFloat(bForm.partner_share_percent) || 0;
+                    const nP = (bForm.partner_ids || []).length;
+                    if (pct === 0) return "0% → entire gross goes to company (no partner share).";
+                    if (nP === 0) return `${pct}% set but no partners assigned → all to company until you add partners.`;
+                    const perPct = (pct / nP).toFixed(2);
+                    return `${nP} partner${nP === 1 ? "" : "s"} → each gets ${perPct}% · company keeps ${(100 - pct).toFixed(2)}%`;
+                  })()}
+                </div>
+              </div>
             </div>
 
             <div className="col-span-2">

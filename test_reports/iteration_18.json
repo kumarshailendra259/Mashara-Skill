@@ -1,0 +1,39 @@
+{
+  "summary": "Iter-19: per-batch partner_share_percent + new income-split semantics. 14/14 new backend tests PASS. Frontend dialog hint logic (0%, pct-but-no-partners, multi-partner) all correct. Active-batch partner-split-section renders company-share-card + per-partner cards with exact percentages. iter15-18 regression 70/70 PASS. iter12 has 3 EXPECTED stale failures (old equal-split-among-partners behaviour replaced as flagged by main agent).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/batch-payments/{pid}/receive", "issue": "3 stale assertions in /app/backend/tests/test_iter12_milestone_partners.py expected old behaviour (equal split among partner_ids with no pct). New spec routes all gross to company when partner_share_percent=0. Tests: test_receive_splits_among_two_partners, test_receive_rounding_tail_three_partners, test_project_filter_isolates_amounts. Per main-agent note: these can be reproduced by setting partner_share_percent=100 (equal split among partners, zero to company)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter19_partner_share_percent.py",
+    "/app/test_reports/pytest/iter19_results.xml",
+    "/app/test_reports/pytest/iter15_18_regression.xml"
+  ],
+  "action_items": [
+    "Update stale assertions in /app/backend/tests/test_iter12_milestone_partners.py: either (a) add partner_share_percent=100 to the batch fixtures to reproduce old equal-split behaviour, or (b) rewrite to assert the new company+partner split with explicit pct. Affects 3 tests; non-blocking — these tests assert OBSOLETE behaviour, not real regressions."
+  ],
+  "critical_code_review_comments": [
+    "/app/backend/server.py is now 4248 lines — still well over the 700-line guideline. The new receive_batch_payment splits logic is clean and well-commented, but the file desperately needs router splitting (auth, transactions, batches/payments, entities, hrms, programs).",
+    "receive_batch_payment partner-pool rounding: per_partner is computed via round(partner_pool / N, 2) and last partner takes the tail (round(partner_pool - per_partner*(N-1), 2)). Verified exact-sum behaviour via test_rounding_tail_three_partners_25_pct_odd_amount (gross 100001, pct 25, 3 partners → sums to exactly 100001.00). Good.",
+    "When partner_share_pct=100, company_amount becomes 0 and no company txn is appended (suffix only applied if partner_pool>0). Correct, but defensively the condition uses `if company_amount > 0` which depends on rounding; consider explicit `if partner_share_pct < 100` for clarity.",
+    "Description suffix for company is `(company {round(100.0 - partner_share_pct, 2)}% share)` — includes trailing '.0' for whole pct (e.g., '75.0%' not '75%'). Cosmetic only; tests use substring '75' so still pass.",
+    "Frontend Programs.jsx active-batch split card correctly accounts for partial milestone receipts (companyShareRecv = totalReceived * (1-pct/100)). Verified visually with 25%/2-partner batch: ₹1L received → ₹75k company + ₹12.5k×2 partners shown side-by-side in 'Received' rows."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter19_partner_share_percent.py (created)"
+  ],
+  "success_rate": {"backend": "100% on new iter-19 (14/14); 100% on iter15-18 regression (70/70); 4/7 on iter12 (3 stale)", "frontend": "100% on dialog hint + partner-split-section + company-share-card"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "TEST_iter19_-prefixed projects, centers, partners (3), batches with various pct/partner combinations created via fixtures. Multiple batches with received milestones persisted to DB. Not cleaned up — historical pattern.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-19 = per-batch partner_share_percent (0-100, default 0). Income split per receive: company gets gross*(1-pct/100) with partner_id=null; partners share pool=gross*pct/100 equally, last partner takes rounding tail. TDS/recovery/assessment_fee remain SINGLE company expenses, NOT pro-rated. Frontend dialog input: [data-testid=batch-partner-share-pct], with live hint showing '{N} partners → each gets {pct/N}% · company keeps {100-pct}%'. Active batch view shows [data-testid=partner-split-section] containing [data-testid=company-share-card] + [data-testid=partner-split-{pid}] cards. iter12 has 3 stale assertions to update — see action_items.",
+  "rca of the issue": "iter12 test failures: those tests were written assuming pre-iter-19 behaviour where having partner_ids on a batch automatically caused income to be split equally among partners. The iter-19 spec explicitly changed this: partners now get only what partner_share_percent says, with default=0 meaning everything goes to company. Tests need updating, not the code."
+}

@@ -3523,6 +3523,9 @@ class BatchIn(BaseModel):
     # Outcome counters used for 2nd / 3rd milestone proportional splits + failed-candidate recovery
     passed_candidates: int = Field(default=0, ge=0)
     placed_candidates: int = Field(default=0, ge=0)
+    # Partner profit-share % of GROSS milestone income that goes to partners (split equally among
+    # partner_ids). Company keeps (100 − this). Default 0 = no partner share (all to company).
+    partner_share_percent: float = Field(default=0, ge=0, le=100)
 
 
 class BatchOut(BatchIn):
@@ -3836,14 +3839,30 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
     now = datetime.now(timezone.utc).isoformat()
     today = now[:10]
     partner_ids = list((batch or {}).get("partner_ids") or [])
-    splits = partner_ids if partner_ids else [None]
+    partner_share_pct = float((batch or {}).get("partner_share_percent") or 0)
     gross = float(rec["amount"])
-    share = round(gross / len(splits), 2)
-    last_share = round(gross - share * (len(splits) - 1), 2)
     description_base = f"{project_name} — {batch.get('name','') if batch else ''} — {rec['milestone']} milestone"
     created_txn_ids: list[str] = []
-    for idx, pid_split in enumerate(splits):
-        amt = last_share if idx == len(splits) - 1 else share
+
+    # Income split: partners get partner_share_pct% of gross (split equally among them),
+    # company keeps the rest. If no partners OR partner_share_pct == 0, the whole amount
+    # is recorded as company income (partner_id=null).
+    partner_pool = round(gross * partner_share_pct / 100.0, 2) if partner_ids and partner_share_pct > 0 else 0.0
+    company_amount = round(gross - partner_pool, 2)
+    splits: list[tuple[Optional[str], float, str]] = []  # (partner_id, amount, suffix)
+    if company_amount > 0:
+        suffix = f" (company {round(100.0 - partner_share_pct, 2)}% share)" if partner_pool > 0 else ""
+        splits.append((None, company_amount, suffix))
+    if partner_pool > 0:
+        per_partner = round(partner_pool / len(partner_ids), 2)
+        # Distribute rounding tail to last partner so the sum is exact
+        last = round(partner_pool - per_partner * (len(partner_ids) - 1), 2)
+        for idx, pid_split in enumerate(partner_ids):
+            amt = last if idx == len(partner_ids) - 1 else per_partner
+            sfx = f" (partner share {partner_share_pct}% ÷ {len(partner_ids)} = {round(partner_share_pct / len(partner_ids), 2)}%)"
+            splits.append((pid_split, amt, sfx))
+
+    for pid_split, amt, sfx in splits:
         if amt <= 0:
             continue
         txn = {
@@ -3851,7 +3870,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "type": "income",
             "amount": amt,
             "date": today,
-            "description": description_base + (f" (partner split {idx+1}/{len(splits)})" if pid_split else ""),
+            "description": description_base + sfx,
             "company_id": None,
             "partner_id": pid_split,
             "center_id": (batch or {}).get("center_id"),
