@@ -289,6 +289,9 @@ def _txn_scope_for_user(user: dict) -> dict:
     - center_manager / center_staff: only transactions where center_id is in their assigned_center_ids
     - partner: only transactions where partner_id == their assigned_partner_id
     - viewer: only their own created transactions
+
+    NOTE: Caller passing `extra_partner_ids` (computed from partner_associations) lets
+    a partner additionally see (and approve) transactions of their associated partners.
     """
     role = user.get("role")
     if role in ("admin", "manager", "senior_manager", "accountant", "hr"):
@@ -297,9 +300,47 @@ def _txn_scope_for_user(user: dict) -> dict:
         return {"center_id": {"$in": user.get("assigned_center_ids") or []}}
     if role == "partner":
         pid = user.get("assigned_partner_id")
-        return {"partner_id": pid} if pid else {"_never_": True}
+        if not pid:
+            return {"_never_": True}
+        # Include associated partner IDs cached on the user (populated by middleware)
+        extras = user.get("_associated_partner_ids") or []
+        all_pids = list({pid, *extras})
+        return {"partner_id": {"$in": all_pids}}
     # viewer / any other → own data only
     return {"created_by": user["id"]}
+
+
+async def _enrich_user_with_associations(user: dict) -> dict:
+    """Mutates `user` to add `_associated_partner_ids` for partner-role users.
+    Called inside endpoints that filter txns by scope so cross-partner approvals work."""
+    if user.get("role") != "partner":
+        return user
+    pid = user.get("assigned_partner_id")
+    if not pid or user.get("_associated_partner_ids") is not None:
+        return user
+    peers: set = await _custom_associated_partners(pid)
+    # Also include partners sharing project/center on existing transactions
+    own_txns = await db.transactions.find(
+        {"partner_id": pid},
+        {"_id": 0, "project_id": 1, "center_id": 1},
+    ).to_list(2000)
+    proj_ids = {t.get("project_id") for t in own_txns if t.get("project_id")}
+    center_ids = {t.get("center_id") for t in own_txns if t.get("center_id")}
+    if proj_ids or center_ids:
+        or_clauses = []
+        if proj_ids:
+            or_clauses.append({"project_id": {"$in": list(proj_ids)}})
+        if center_ids:
+            or_clauses.append({"center_id": {"$in": list(center_ids)}})
+        peer_txns = await db.transactions.find(
+            {"partner_id": {"$ne": pid, "$nin": [None]}, "$or": or_clauses},
+            {"_id": 0, "partner_id": 1},
+        ).to_list(5000)
+        for t in peer_txns:
+            if t.get("partner_id"):
+                peers.add(t["partner_id"])
+    user["_associated_partner_ids"] = list(peers)
+    return user
 
 
 def _can_auto_approve(user: dict) -> bool:
@@ -864,6 +905,7 @@ async def list_transactions(
     end: Optional[str] = None,
 ):
     q: dict = {}
+    await _enrich_user_with_associations(user)
     q.update(_txn_scope_for_user(user))
     if type:
         q["type"] = type
@@ -1261,6 +1303,7 @@ async def dashboard_summary(
     include_pending: bool = False,
 ):
     match: dict = {}
+    await _enrich_user_with_associations(user)
     match.update(_txn_scope_for_user(user))
     # Only approved entries count toward financial summary by default
     if not include_pending:
@@ -1394,6 +1437,7 @@ async def milestone_income_summary(
     if center_id:
         q["center_id"] = center_id
     # Apply scope
+    await _enrich_user_with_associations(user)
     q.update(_txn_scope_for_user(user))
 
     docs = await db.transactions.find(q, {"_id": 0}).to_list(20000)
@@ -1464,6 +1508,7 @@ async def fooding_income_summary(
         q["project_id"] = project_id
     if center_id:
         q["center_id"] = center_id
+    await _enrich_user_with_associations(user)
     q.update(_txn_scope_for_user(user))
 
     docs = await db.transactions.find(q, {"_id": 0}).to_list(20000)
@@ -2540,8 +2585,11 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
 
 @api.get("/approvals/pending")
 async def list_pending_approvals(user=Depends(get_current_user)):
-    """Return all requests across types where the current user is the resolved approver for the current step."""
+    """Return all requests across types where the current user is the resolved approver
+    for the current step. ALSO includes transactions partner-cross-approve-eligible
+    for the requesting user (so associated partners see them here)."""
     out: List[dict] = []
+    seen_txn_ids: set[str] = set()
     for req_type, coll_name in [("reimbursement", "reimbursements"), ("leave", "leaves"), ("transaction", "transactions")]:
         rows = await db[coll_name].find({"current_level": {"$gt": 0}}, {"_id": 0}).sort("created_at", -1).to_list(2000)
         for rec in rows:
@@ -2558,7 +2606,34 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                         "description": rec.get("description") or rec.get("reason"),
                     },
                     "created_at": rec.get("created_at"),
+                    "via": "chain",
                 })
+                if req_type == "transaction":
+                    seen_txn_ids.add(rec["id"])
+    # Add partner-cross-approve-eligible transactions (not already in chain list)
+    if user.get("role") == "partner":
+        pending_txns = await db.transactions.find(
+            {"status": "pending"}, {"_id": 0},
+        ).sort("created_at", -1).to_list(2000)
+        for t in pending_txns:
+            if t["id"] in seen_txn_ids:
+                continue
+            if await _can_partner_approve(user, t):
+                out.append({
+                    "request_type": "transaction",
+                    "request_id": t["id"],
+                    "current_level": t.get("current_level"),
+                    "step_label": "Partner cross-approval",
+                    "summary": {
+                        "amount": t.get("amount"),
+                        "date": t.get("date"),
+                        "description": t.get("description"),
+                    },
+                    "created_at": t.get("created_at"),
+                    "via": "partner_cross",
+                })
+    # Sort newest first
+    out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return out
 
 
@@ -4616,7 +4691,7 @@ async def mark_read(nid: str, user=Depends(get_current_user)):
 @api.get("/tasks/my")
 async def my_tasks(user=Depends(get_current_user)):
     role = user.get("role")
-    counts = {"txn_pending": 0, "reimb_l1": 0, "reimb_accountant": 0, "reimb_pay": 0, "payroll_pay": 0}
+    counts = {"txn_pending": 0, "reimb_l1": 0, "reimb_accountant": 0, "reimb_pay": 0, "payroll_pay": 0, "pending_approvals": 0}
     if role == "admin":
         counts["txn_pending"] = await db.transactions.count_documents({"status": "pending"})
     my_staff = await _staff_for_user(user["id"])
@@ -4626,6 +4701,12 @@ async def my_tasks(user=Depends(get_current_user)):
         counts["reimb_accountant"] = await db.reimbursements.count_documents({"status": "l1_approved"})
         counts["reimb_pay"] = await db.reimbursements.count_documents({"status": "accountant_approved"})
         counts["payroll_pay"] = await db.payroll.count_documents({"status": {"$ne": "paid"}})
+    # Cross-functional badge — anything across types that needs MY action right now
+    try:
+        pending = await list_pending_approvals(user=user)
+        counts["pending_approvals"] = len(pending)
+    except Exception:
+        counts["pending_approvals"] = 0
     counts["total"] = sum(v for k, v in counts.items() if k != "total")
     return counts
 

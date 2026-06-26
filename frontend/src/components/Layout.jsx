@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +21,7 @@ const navItems = [
   { to: "/projects", key: "projects", icon: Briefcase },
   { to: "/programs", key: "programs", icon: Layers },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight },
+  { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
   { to: "/stock", key: "stock", icon: Package },
   { to: "/reports", key: "reports", icon: FileBarChart2 },
   { to: "/tds-register", key: "tds_register", icon: Receipt, accountingOnly: true },
@@ -77,6 +78,7 @@ export default function Layout({ children }) {
   const badgeFor = (key) => {
     if (key === "transactions") return tasks.txn_pending;
     if (key === "HRMS") return tasks.reimb_l1 + tasks.reimb_accountant + tasks.reimb_pay + tasks.payroll_pay;
+    if (key === "pending_approvals") return tasks.pending_approvals || 0;
     return 0;
   };
 

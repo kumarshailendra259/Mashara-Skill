@@ -21,6 +21,7 @@ import CheckIn from "@/pages/CheckIn";
 import ForgotPassword from "@/pages/ForgotPassword";
 import PartnerAssociations from "@/pages/PartnerAssociations";
 import TdsRegister from "@/pages/TdsRegister";
+import PendingApprovals from "@/pages/PendingApprovals";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
@@ -53,6 +54,7 @@ function App() {
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
             <Route path="/tds-register" element={<ProtectedRoute><Shell><TdsRegister /></Shell></ProtectedRoute>} />
+            <Route path="/pending-approvals" element={<ProtectedRoute><Shell><PendingApprovals /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
