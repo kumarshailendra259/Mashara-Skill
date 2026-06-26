@@ -13,8 +13,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Check, Clock, Calculator } from "lucide-react";
+import { Plus, Pencil, Trash2, Check, Clock, Calculator, Lock, LockOpen, Utensils } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import FoodingTab from "@/components/FoodingTab";
+import {
+  Tabs, TabsList, TabsTrigger, TabsContent,
+} from "@/components/ui/tabs";
 
 const MILESTONES = ["1st", "2nd", "3rd", "other"];
 const MILESTONE_LABEL = { "1st": "1st", "2nd": "2nd", "3rd": "3rd", other: "Other (manual)" };
@@ -338,6 +342,14 @@ export default function Programs() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  const toggleClose = async (b, close) => {
+    try {
+      const r = await api.patch(`/batches/${b.id}/${close ? "close" : "reopen"}`);
+      setBatches((bs) => bs.map((x) => x.id === b.id ? r.data : x));
+      toast.success(close ? "Batch closed" : "Batch reopened");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   // Payment CRUD
   const openNewPayment = (milestone) => {
     setEditingPay(null);
@@ -534,6 +546,15 @@ export default function Programs() {
                   {activeBatch && canEditBatches && (
                     <>
                       <Button variant="outline" onClick={() => openEditBatch(activeBatch)} className="rounded-none" data-testid="btn-edit-batch"><Pencil size={14} /></Button>
+                      {activeBatch.closed ? (
+                        <Button variant="outline" onClick={() => toggleClose(activeBatch, false)} className="rounded-none" data-testid="btn-reopen-batch" title="Reopen batch">
+                          <LockOpen size={14} />
+                        </Button>
+                      ) : (
+                        <Button variant="outline" onClick={() => toggleClose(activeBatch, true)} className="rounded-none" data-testid="btn-close-batch" title="Close batch (stops new fooding entries)">
+                          <Lock size={14} />
+                        </Button>
+                      )}
                       <Button variant="outline" onClick={() => deleteBatch(activeBatch)} className="rounded-none hover:text-[var(--danger)]" data-testid="btn-delete-batch"><Trash2 size={14} /></Button>
                     </>
                   )}
@@ -688,51 +709,76 @@ export default function Programs() {
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3" data-testid="milestones-grid">
-                    {MILESTONES.map((m) => (
-                      <MilestoneCard
-                        key={m}
-                        milestone={m}
-                        payment={paymentByMilestone[m]}
+                  <Tabs defaultValue="milestones" data-testid="programs-income-tabs">
+                    <TabsList className="rounded-none bg-transparent border-b border-[var(--border)] p-0 h-auto">
+                      <TabsTrigger value="milestones" data-testid="tab-milestones"
+                        className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
+                        <Calculator size={14} className="mr-1.5" /> Milestone Income
+                      </TabsTrigger>
+                      <TabsTrigger value="fooding" data-testid="tab-fooding"
+                        className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
+                        <Utensils size={14} className="mr-1.5" /> Fooding Income
+                      </TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="milestones" className="mt-4 space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3" data-testid="milestones-grid">
+                        {MILESTONES.map((m) => (
+                          <MilestoneCard
+                            key={m}
+                            milestone={m}
+                            payment={paymentByMilestone[m]}
+                            canEdit={canEditPayments}
+                            canReceive={canReceive}
+                            onAdd={() => openNewPayment(m)}
+                            onReceive={openReceive}
+                            onEdit={openEditPayment}
+                            onDelete={deletePayment}
+                          />
+                        ))}
+                      </div>
+
+                      <div className="swiss-card overflow-x-auto" data-testid="payments-table">
+                        <table className="w-full text-sm">
+                          <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
+                            <th className="text-left p-3">Milestone</th>
+                            <th className="text-right p-3">Gross</th>
+                            <th className="text-right p-3">TDS</th>
+                            <th className="text-right p-3">Net</th>
+                            <th className="text-left p-3">Expected</th>
+                            <th className="text-left p-3">Status</th>
+                            <th className="text-left p-3">Received</th>
+                          </tr></thead>
+                          <tbody>
+                            {MILESTONES.map((m) => {
+                              const p = paymentByMilestone[m];
+                              return (
+                                <tr key={m} className="border-b border-[var(--border)]">
+                                  <td className="p-3 font-medium">{MILESTONE_LABEL[m] || m}</td>
+                                  <td className="p-3 num text-right">{p ? inr(p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
+                                  <td className="p-3 num text-right">{p && p.tds_percent > 0 ? `${p.tds_percent}% · ${inr2(p.tds_amount)}` : <span className="text-[var(--muted)]">—</span>}</td>
+                                  <td className="p-3 num text-right font-medium">{p && p.status === "received" ? inr2(p.net_amount || p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
+                                  <td className="p-3 num">{p?.expected_date || "—"}</td>
+                                  <td className="p-3 overline text-xs">{p?.status || "—"}</td>
+                                  <td className="p-3 num">{p?.received_date || "—"}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </TabsContent>
+
+                    <TabsContent value="fooding" className="mt-4">
+                      <FoodingTab
+                        batch={activeBatch}
+                        companies={companies}
+                        partners={partners}
                         canEdit={canEditPayments}
                         canReceive={canReceive}
-                        onAdd={() => openNewPayment(m)}
-                        onReceive={openReceive}
-                        onEdit={openEditPayment}
-                        onDelete={deletePayment}
                       />
-                    ))}
-                  </div>
-
-                  <div className="swiss-card overflow-x-auto" data-testid="payments-table">
-                    <table className="w-full text-sm">
-                      <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
-                        <th className="text-left p-3">Milestone</th>
-                        <th className="text-right p-3">Gross</th>
-                        <th className="text-right p-3">TDS</th>
-                        <th className="text-right p-3">Net</th>
-                        <th className="text-left p-3">Expected</th>
-                        <th className="text-left p-3">Status</th>
-                        <th className="text-left p-3">Received</th>
-                      </tr></thead>
-                      <tbody>
-                        {MILESTONES.map((m) => {
-                          const p = paymentByMilestone[m];
-                          return (
-                            <tr key={m} className="border-b border-[var(--border)]">
-                              <td className="p-3 font-medium">{MILESTONE_LABEL[m] || m}</td>
-                              <td className="p-3 num text-right">{p ? inr(p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
-                              <td className="p-3 num text-right">{p && p.tds_percent > 0 ? `${p.tds_percent}% · ${inr2(p.tds_amount)}` : <span className="text-[var(--muted)]">—</span>}</td>
-                              <td className="p-3 num text-right font-medium">{p && p.status === "received" ? inr2(p.net_amount || p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
-                              <td className="p-3 num">{p?.expected_date || "—"}</td>
-                              <td className="p-3 overline text-xs">{p?.status || "—"}</td>
-                              <td className="p-3 num">{p?.received_date || "—"}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
+                    </TabsContent>
+                  </Tabs>
                 </>
               )}
             </>

@@ -311,7 +311,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -3558,6 +3558,9 @@ class BatchIn(BaseModel):
     # Partner profit-share % of GROSS milestone income that goes to partners (split equally among
     # partner_ids). Company keeps (100 − this). Default 0 = no partner share (all to company).
     partner_share_percent: float = Field(default=0, ge=0, le=100)
+    # When True, batch is closed — no new fooding entries can be created.
+    # Set/unset via /batches/{id}/close and /batches/{id}/reopen endpoints.
+    closed: bool = False
 
 
 class BatchOut(BatchIn):
@@ -4047,6 +4050,236 @@ async def delete_batch_payment(pid: str, _=Depends(require_role("admin"))):
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
     return {"ok": True}
+
+
+# ---------- Batch Close / Reopen ----------
+@api.patch("/batches/{bid}/close")
+async def close_batch(bid: str, _=Depends(require_role("admin", "manager", "senior_manager"))):
+    """Mark a batch as closed. Closed batches reject new fooding entry creation."""
+    r = await db.batches.find_one_and_update({"id": bid}, {"$set": {"closed": True}}, return_document=True)
+    if not r:
+        raise HTTPException(404, "Batch not found")
+    r.pop("_id", None)
+    return BatchOut(**r)
+
+
+@api.patch("/batches/{bid}/reopen")
+async def reopen_batch(bid: str, _=Depends(require_role("admin"))):
+    r = await db.batches.find_one_and_update({"id": bid}, {"$set": {"closed": False}}, return_document=True)
+    if not r:
+        raise HTTPException(404, "Batch not found")
+    r.pop("_id", None)
+    return BatchOut(**r)
+
+
+# ---------- Fooding Income (per-month boarding cost × mandays) ----------
+# Each batch can have N monthly fooding entries until it's closed.
+# Formula: gross = mandays_claimed × boarding_cost_per_manday.
+# On Mark-Received, income transactions are split using the SAME partner_share_percent
+# logic as milestone payments. TDS is NOT applied to fooding income (admin spec).
+
+class FoodingEntryIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    batch_id: str
+    month: str = Field(min_length=7, max_length=7)  # 'YYYY-MM'
+    mandays_claimed: float = Field(ge=0)
+    boarding_cost_per_manday: float = Field(ge=0)
+    description: Optional[str] = ""
+
+
+class FoodingEntryOut(FoodingEntryIn):
+    id: str
+    gross_amount: float = 0
+    status: Literal["pending", "received"] = "pending"
+    company_id: Optional[str] = None  # tagged at receive time (override or inherits from batch)
+    received_date: Optional[str] = None
+    received_by: Optional[str] = None
+    txn_ids: List[str] = Field(default_factory=list)
+    created_at: str
+    created_by: Optional[str] = None
+
+
+def _month_re_ok(m: str) -> bool:
+    if not m or len(m) != 7 or m[4] != "-":
+        return False
+    try:
+        y, mm = int(m[:4]), int(m[5:7])
+        return 1 <= mm <= 12 and 2000 <= y <= 2100
+    except ValueError:
+        return False
+
+
+@api.get("/fooding-entries", response_model=List[FoodingEntryOut])
+async def list_fooding(batch_id: Optional[str] = None, _=Depends(get_current_user)):
+    q: dict = {}
+    if batch_id:
+        q["batch_id"] = batch_id
+    docs = await db.fooding_entries.find(q, {"_id": 0}).sort([("batch_id", 1), ("month", 1)]).to_list(5000)
+    return [FoodingEntryOut(**d) for d in docs]
+
+
+@api.post("/fooding-entries", response_model=FoodingEntryOut)
+async def create_fooding(body: FoodingEntryIn, user=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
+    if not _month_re_ok(body.month):
+        raise HTTPException(400, "month must be YYYY-MM")
+    batch = await db.batches.find_one({"id": body.batch_id}, {"_id": 0})
+    if not batch:
+        raise HTTPException(400, "batch_id does not exist")
+    if batch.get("closed"):
+        raise HTTPException(400, "Batch is closed — reopen it before adding fooding entries")
+    # Enforce one entry per (batch, month) to avoid double-counting
+    if await db.fooding_entries.find_one({"batch_id": body.batch_id, "month": body.month}):
+        raise HTTPException(400, f"Fooding entry for {body.month} already exists on this batch")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["gross_amount"] = round(body.mandays_claimed * body.boarding_cost_per_manday, 2)
+    doc["status"] = "pending"
+    doc["company_id"] = batch.get("company_id")
+    doc["received_date"] = None
+    doc["received_by"] = None
+    doc["txn_ids"] = []
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["created_by"] = user["id"]
+    await db.fooding_entries.insert_one(doc)
+    return FoodingEntryOut(**doc)
+
+
+@api.put("/fooding-entries/{fid}", response_model=FoodingEntryOut)
+async def update_fooding(fid: str, body: FoodingEntryIn, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
+    if not _month_re_ok(body.month):
+        raise HTTPException(400, "month must be YYYY-MM")
+    rec = await db.fooding_entries.find_one({"id": fid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") == "received":
+        raise HTTPException(400, "Cannot edit a received entry — delete the linked transactions first")
+    update = body.model_dump()
+    update["gross_amount"] = round(body.mandays_claimed * body.boarding_cost_per_manday, 2)
+    res = await db.fooding_entries.find_one_and_update({"id": fid}, {"$set": update}, return_document=True)
+    res.pop("_id", None)
+    return FoodingEntryOut(**res)
+
+
+@api.delete("/fooding-entries/{fid}")
+async def delete_fooding(fid: str, _=Depends(require_role("admin"))):
+    rec = await db.fooding_entries.find_one({"id": fid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") == "received":
+        # Cascade delete the linked income transactions
+        if rec.get("txn_ids"):
+            await db.transactions.delete_many({"id": {"$in": rec["txn_ids"]}})
+    await db.fooding_entries.delete_one({"id": fid})
+    return {"ok": True}
+
+
+class FoodingReceiveIn(BaseModel):
+    """Optional company_id override at receive-time (else uses Batch.company_id)."""
+    model_config = ConfigDict(extra="ignore")
+    company_id: Optional[str] = None
+
+
+@api.patch("/fooding-entries/{fid}/receive", response_model=FoodingEntryOut)
+async def receive_fooding(fid: str, body: FoodingReceiveIn = FoodingReceiveIn(),
+                          user=Depends(require_role("admin", "accountant", "senior_manager"))):
+    """Mark fooding entry as received — creates split income transactions using same
+    partner_share_percent logic as milestone payments. NO TDS deduction."""
+    rec = await db.fooding_entries.find_one({"id": fid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") == "received":
+        raise HTTPException(400, "Already received")
+    batch = await db.batches.find_one({"id": rec["batch_id"]}, {"_id": 0})
+    project_name = ""
+    if batch:
+        proj = await db.projects.find_one({"id": batch.get("project_id")}, {"_id": 0, "name": 1})
+        project_name = (proj or {}).get("name", "")
+    gross = float(rec["gross_amount"])
+    if gross <= 0:
+        raise HTTPException(400, "Cannot receive zero-amount entry")
+    now = datetime.now(timezone.utc).isoformat()
+    today = now[:10]
+    partner_ids = list((batch or {}).get("partner_ids") or [])
+    partner_share_pct = float((batch or {}).get("partner_share_percent") or 0)
+    company_id_resolved = body.company_id or rec.get("company_id") or (batch or {}).get("company_id")
+    description_base = f"Fooding — {project_name} — {batch.get('name','') if batch else ''} — {rec['month']}"
+    created_txn_ids: list[str] = []
+
+    partner_pool = round(gross * partner_share_pct / 100.0, 2) if partner_ids and partner_share_pct > 0 else 0.0
+    company_amount = round(gross - partner_pool, 2)
+    splits: list[tuple[Optional[str], float, str]] = []
+    if company_amount > 0:
+        sfx = f" (company {round(100.0 - partner_share_pct, 2)}% share)" if partner_pool > 0 else ""
+        splits.append((None, company_amount, sfx))
+    if partner_pool > 0:
+        per_partner = round(partner_pool / len(partner_ids), 2)
+        last = round(partner_pool - per_partner * (len(partner_ids) - 1), 2)
+        for idx, pid_split in enumerate(partner_ids):
+            amt = last if idx == len(partner_ids) - 1 else per_partner
+            sfx = f" (partner share {partner_share_pct}% ÷ {len(partner_ids)})"
+            splits.append((pid_split, amt, sfx))
+
+    for pid_split, amt, sfx in splits:
+        if amt <= 0:
+            continue
+        txn = {
+            "id": str(uuid.uuid4()),
+            "type": "income",
+            "amount": amt,
+            "date": today,
+            "description": description_base + sfx,
+            "company_id": company_id_resolved if pid_split is None else None,
+            "partner_id": pid_split,
+            "center_id": (batch or {}).get("center_id"),
+            "project_id": (batch or {}).get("project_id"),
+            "items": [], "attachments": [],
+            "source": "fooding",
+            "milestone": None,
+            "created_by": user["id"], "created_at": now,
+            "status": "approved", "approved_by": user["id"], "approved_at": now,
+            "rejected_reason": None,
+        }
+        await db.transactions.insert_one(txn)
+        created_txn_ids.append(txn["id"])
+
+    res = await db.fooding_entries.find_one_and_update(
+        {"id": fid},
+        {"$set": {
+            "status": "received", "received_date": today, "received_by": user["id"],
+            "txn_ids": created_txn_ids, "company_id": company_id_resolved,
+        }},
+        return_document=True,
+    )
+    res.pop("_id", None)
+    return FoodingEntryOut(**res)
+
+
+@api.get("/batches/{bid}/mandays-suggestion")
+async def suggest_mandays(bid: str, month: str, _=Depends(get_current_user)):
+    """Auto-suggest mandays for a given YYYY-MM:
+    Sum of 'present' attendance records for staff at this batch's center in that month.
+    Falls back to total_beneficiaries × working_days estimate when no attendance present."""
+    if not _month_re_ok(month):
+        raise HTTPException(400, "month must be YYYY-MM")
+    batch = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    start = f"{month}-01"
+    # naive month-end: last day prefix YYYY-MM-31 works because date is ISO string compare
+    end = f"{month}-31"
+    center_id = batch.get("center_id")
+    present_count = 0
+    if center_id:
+        present_count = await db.attendance.count_documents({
+            "center_id": center_id,
+            "date": {"$gte": start, "$lte": end},
+            "status": "present",
+        })
+    # Fallback estimate when no HRMS data: candidates × 26 working days
+    if present_count == 0:
+        present_count = int((batch.get("total_beneficiaries") or 0) * 26)
+    return {"month": month, "mandays_suggestion": present_count, "source": "attendance" if center_id and present_count > 0 else "estimate"}
+
 
 # ---------- TDS Register (Form 26Q quarterly filing helper) ----------
 def _fy_bounds(fy_label: str) -> tuple[str, str]:
