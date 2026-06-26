@@ -70,19 +70,22 @@ export default function PendingApprovals() {
     }
     const { item, action } = acting;
     try {
-      if (item.request_type === "transaction") {
-        if (item.via === "partner_cross") {
-          if (action === "approve") {
-            await api.post(`/transactions/${item.request_id}/partner-approve`, { remarks });
-          } else {
-            // No partner-cross reject path — fall back to chain-style reject
-            await api.post(`/approvals/transaction/${item.request_id}/act`, { action: "reject", remarks });
-          }
+      if (item.request_type === "transaction" && item.via === "partner_cross") {
+        if (action === "approve") {
+          await api.post(`/transactions/${item.request_id}/partner-approve`, { remarks });
         } else {
-          await api.post(`/approvals/transaction/${item.request_id}/act`, { action, remarks });
+          // Partner cross-approval rejection still uses the chain-act endpoint
+          await api.post(`/approvals/act`, {
+            request_type: "transaction", request_id: item.request_id,
+            action: "reject", remarks,
+          });
         }
       } else {
-        await api.post(`/approvals/${item.request_type}/${item.request_id}/act`, { action, remarks });
+        // Chain-based: transactions / leaves / reimbursements all dispatch through /approvals/act
+        await api.post(`/approvals/act`, {
+          request_type: item.request_type, request_id: item.request_id,
+          action, remarks,
+        });
       }
       toast.success(`${action === "approve" ? "Approved" : "Rejected"} successfully`);
       setActing(null);
