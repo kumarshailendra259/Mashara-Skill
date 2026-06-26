@@ -171,6 +171,7 @@ export default function Programs() {
   const [projects, setProjects] = useState([]);
   const [centers, setCenters] = useState([]);
   const [partners, setPartners] = useState([]);
+  const [companies, setCompanies] = useState([]);
   const [activeProjectId, setActiveProjectId] = useState("");
   const [selectedCenterId, setSelectedCenterId] = useState("__all");
 
@@ -191,17 +192,24 @@ export default function Programs() {
   const [pForm, setPForm] = useState(emptyPay);
   const [autoFilled, setAutoFilled] = useState(false); // hint flag
 
-  // Receive dialog (TDS confirmation)
+  // Receive dialog (TDS confirmation + company selector)
   const [recvOpen, setRecvOpen] = useState(false);
   const [recvTarget, setRecvTarget] = useState(null);
   const [recvTds, setRecvTds] = useState("0");
+  const [recvCompanyId, setRecvCompanyId] = useState("");
 
   useEffect(() => {
-    Promise.all([api.get("/entities/project"), api.get("/entities/center"), api.get("/entities/partner")])
-      .then(([p, c, pa]) => {
+    Promise.all([
+      api.get("/entities/project"),
+      api.get("/entities/center"),
+      api.get("/entities/partner"),
+      api.get("/entities/company"),
+    ])
+      .then(([p, c, pa, co]) => {
         setProjects(p.data);
         setCenters(c.data);
         setPartners(pa.data);
+        setCompanies(co.data);
         if (!activeProjectId && p.data.length) setActiveProjectId(p.data[0].id);
       })
       .catch(() => {});
@@ -410,12 +418,16 @@ export default function Programs() {
   const openReceive = (p) => {
     setRecvTarget(p);
     setRecvTds("0");
+    setRecvCompanyId(p.company_id || "");
     setRecvOpen(true);
   };
   const confirmReceive = async () => {
     if (!recvTarget) return;
     try {
-      await api.patch(`/batch-payments/${recvTarget.id}/receive`, { tds_percent: parseInt(recvTds, 10) || 0 });
+      await api.patch(`/batch-payments/${recvTarget.id}/receive`, {
+        tds_percent: parseInt(recvTds, 10) || 0,
+        company_id: recvCompanyId || null,
+      });
       const r = await api.get("/batch-payments", { params: { batch_id: selectedBatchId } });
       setPayments(r.data);
       setRecvOpen(false);
@@ -1036,6 +1048,17 @@ export default function Programs() {
                 {recvPreview.assessmentFee > 0 && (
                   <div className="flex justify-between text-[var(--danger)]"><span className="overline">Assessment fee</span><span className="num">−{inr2(recvPreview.assessmentFee)}</span></div>
                 )}
+              </div>
+              <div>
+                <Label>Company (Income credited under)</Label>
+                <Select value={recvCompanyId || "__none__"} onValueChange={(v) => setRecvCompanyId(v === "__none__" ? "" : v)}>
+                  <SelectTrigger className="rounded-none" data-testid="recv-company-select"><SelectValue placeholder="Select company" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">— None (uncategorised) —</SelectItem>
+                    {companies.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <div className="text-[10px] text-[var(--muted)] mt-1">Company-share portion of this income will be tagged to the selected company on dashboard.</div>
               </div>
               <div>
                 <Label>TDS Deduction by Department</Label>

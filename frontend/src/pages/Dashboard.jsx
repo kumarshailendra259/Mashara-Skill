@@ -149,6 +149,9 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Company vs Partner — separated charts */}
+      <CompanyPartnerCharts entities={entities} baseFilters={filters} />
+
       {/* Partner Settlement */}
       {showSettlement && settlement?.centers?.length > 0 && (
         <div className="swiss-card p-5" data-testid="settlement-section">
@@ -337,4 +340,125 @@ export default function Dashboard() {
 
 function EmptyChart({ text }) {
   return <div className="h-full flex items-center justify-center overline">{text}</div>;
+}
+
+/**
+ * Section: Company Income chart (separate) and Partner charts (Investment+Income+Expense)
+ * with a per-partner dropdown filter. Both blocks reuse /dashboard/summary
+ * with company_id / partner_id filters so monthly data is already scoped.
+ */
+function CompanyPartnerCharts({ entities, baseFilters }) {
+  const [companyId, setCompanyId] = useState("");
+  const [partnerId, setPartnerId] = useState("");
+  const [companyData, setCompanyData] = useState(null);
+  const [partnerData, setPartnerData] = useState(null);
+
+  // Build common filter params (excluding partner/company so each chart can override)
+  const commonParams = useMemo(() => {
+    const p = {};
+    if (baseFilters.center_id) p.center_id = baseFilters.center_id;
+    if (baseFilters.project_id) p.project_id = baseFilters.project_id;
+    if (baseFilters.start) p.start = baseFilters.start;
+    if (baseFilters.end) p.end = baseFilters.end;
+    return p;
+  }, [baseFilters]);
+
+  // Company chart: fetch with company_id filter (if any). Shows monthly income trend.
+  useEffect(() => {
+    const params = { ...commonParams };
+    if (companyId) params.company_id = companyId;
+    api.get("/dashboard/summary", { params })
+      .then((r) => setCompanyData(r.data))
+      .catch(() => setCompanyData(null));
+  }, [companyId, commonParams]);
+
+  // Partner chart: requires a partner selected
+  useEffect(() => {
+    if (!partnerId) { setPartnerData(null); return; }
+    const params = { ...commonParams, partner_id: partnerId };
+    api.get("/dashboard/summary", { params })
+      .then((r) => setPartnerData(r.data))
+      .catch(() => setPartnerData(null));
+  }, [partnerId, commonParams]);
+
+  // Income-only monthly for company chart
+  const companyMonthly = (companyData?.monthly || []).map((m) => ({ month: m.month, income: m.income || 0 }));
+  const companyTotal = companyData?.totals?.income || 0;
+
+  return (
+    <div className="space-y-4" data-testid="company-partner-section">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Company Income */}
+        <div className="swiss-card p-5" data-testid="chart-company-income">
+          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div>
+              <div className="overline">Company</div>
+              <div className="font-heading font-bold tracking-tight text-lg">Company Income</div>
+              <div className="num text-sm value-positive mt-0.5">Total: {inr(companyTotal)}</div>
+            </div>
+            <Select value={companyId || "__all"} onValueChange={(v) => setCompanyId(v === "__all" ? "" : v)}>
+              <SelectTrigger className="rounded-none w-56" data-testid="filter-company-chart"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all">All Companies</SelectItem>
+                {entities.company.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="h-64">
+            {companyMonthly.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={companyMonthly}>
+                  <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
+                  <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
+                  <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                  <Bar dataKey="income" fill="#00A859" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : <EmptyChart text="No company income in range" />}
+          </div>
+        </div>
+
+        {/* Partner — Investment + Income + Expense */}
+        <div className="swiss-card p-5" data-testid="chart-partner">
+          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <div>
+              <div className="overline">Partner</div>
+              <div className="font-heading font-bold tracking-tight text-lg">Investment · Income · Expense</div>
+              {partnerData && (
+                <div className="text-xs num mt-0.5 flex gap-3">
+                  <span>Inv <span className="font-semibold">{inr(partnerData.totals.investment)}</span></span>
+                  <span className="value-positive">Inc <span className="font-semibold">{inr(partnerData.totals.income)}</span></span>
+                  <span className="value-negative">Exp <span className="font-semibold">{inr(partnerData.totals.expense)}</span></span>
+                </div>
+              )}
+            </div>
+            <Select value={partnerId || "__none"} onValueChange={(v) => setPartnerId(v === "__none" ? "" : v)}>
+              <SelectTrigger className="rounded-none w-56" data-testid="filter-partner-chart"><SelectValue placeholder="Select partner" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none">— Select partner —</SelectItem>
+                {entities.partner.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="h-64">
+            {partnerData?.monthly?.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={partnerData.monthly}>
+                  <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
+                  <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
+                  <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Line type="monotone" dataKey="investment" stroke="#002FA7" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="income" stroke="#00A859" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="expense" stroke="#FF2A2A" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : <EmptyChart text={partnerId ? "No data for selected partner" : "Select a partner to view chart"} />}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }

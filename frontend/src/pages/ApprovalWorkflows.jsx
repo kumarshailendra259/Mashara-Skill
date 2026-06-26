@@ -29,6 +29,8 @@ const ROLE_OPTIONS = ["admin", "manager", "senior_manager", "center_manager", "h
 
 const emptyStep = () => ({ level: 1, kind: "reports_to", value: "1", label: "", optional: false });
 
+const CENTER_NONE = "__global__";  // sentinel for "applies to all centers (default)"
+
 export default function ApprovalWorkflows() {
   const { user } = useAuth();
   const canEdit = ["admin", "hr"].includes(user?.role);
@@ -36,21 +38,24 @@ export default function ApprovalWorkflows() {
   const [chains, setChains] = useState([]);
   const [staffList, setStaffList] = useState([]);
   const [usersList, setUsersList] = useState([]);
+  const [centersList, setCentersList] = useState([]);
 
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState({ name: "", type: "reimbursement", steps: [emptyStep()], active: true });
+  const [form, setForm] = useState({ name: "", type: "reimbursement", center_id: "", steps: [emptyStep()], active: true });
 
   const load = async () => {
     try {
-      const [c, s, u] = await Promise.all([
+      const [c, s, u, ct] = await Promise.all([
         api.get("/approval-chains"),
         api.get("/staff"),
         canEdit ? api.get("/auth/users") : Promise.resolve({ data: [] }),
+        api.get("/entities/center"),
       ]);
       setChains(c.data || []);
       setStaffList(s.data || []);
       setUsersList(u.data || []);
+      setCentersList(ct.data || []);
     } catch (e) { toast.error(formatError(e)); }
   };
 
@@ -58,7 +63,7 @@ export default function ApprovalWorkflows() {
 
   const openCreate = () => {
     setEditingId(null);
-    setForm({ name: "", type: "reimbursement", steps: [emptyStep()], active: true });
+    setForm({ name: "", type: "reimbursement", center_id: "", steps: [emptyStep()], active: true });
     setOpen(true);
   };
 
@@ -67,6 +72,7 @@ export default function ApprovalWorkflows() {
     setForm({
       name: c.name,
       type: c.type,
+      center_id: c.center_id || "",
       active: !!c.active,
       steps: (c.steps || []).map((s) => ({ ...s })),
     });
@@ -78,7 +84,10 @@ export default function ApprovalWorkflows() {
       if (!form.name.trim()) { toast.error("Name is required"); return; }
       if (!form.steps.length) { toast.error("Add at least one step"); return; }
       const payload = {
-        ...form,
+        name: form.name,
+        type: form.type,
+        active: !!form.active,
+        center_id: form.center_id || null,
         steps: form.steps.map((s, i) => ({
           level: i + 1,
           kind: s.kind,
@@ -103,7 +112,7 @@ export default function ApprovalWorkflows() {
 
   const toggleActive = async (c) => {
     try {
-      await api.put(`/approval-chains/${c.id}`, { name: c.name, type: c.type, steps: c.steps, active: !c.active });
+      await api.put(`/approval-chains/${c.id}`, { name: c.name, type: c.type, center_id: c.center_id || null, steps: c.steps, active: !c.active });
       load();
     } catch (e) { toast.error(formatError(e)); }
   };
@@ -186,10 +195,23 @@ export default function ApprovalWorkflows() {
                         <SelectContent>{TYPES.map((t) => <SelectItem key={t.v} value={t.v}>{t.label}</SelectItem>)}</SelectContent>
                       </Select>
                     </div>
-                    <div className="flex items-end">
+                    <div><Label>Center</Label>
+                      <Select
+                        value={form.center_id || CENTER_NONE}
+                        onValueChange={(v) => setForm({ ...form, center_id: v === CENTER_NONE ? "" : v })}
+                      >
+                        <SelectTrigger className="rounded-none" data-testid="chain-center"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={CENTER_NONE}>All Centers (Global Default)</SelectItem>
+                          {centersList.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      <div className="text-[10px] text-[var(--muted)] mt-1">Requests on this center route through these approvers. Leave blank for global fallback.</div>
+                    </div>
+                    <div className="col-span-2 flex items-end">
                       <label className="flex items-center gap-2 text-sm">
                         <input type="checkbox" checked={!!form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} data-testid="chain-active" />
-                        <span><span className="font-medium">Active</span> <span className="text-[var(--muted)]">— activating deactivates other chains of same type</span></span>
+                        <span><span className="font-medium">Active</span> <span className="text-[var(--muted)]">— one active chain per (type + center)</span></span>
                       </label>
                     </div>
                   </div>
@@ -262,14 +284,20 @@ export default function ApprovalWorkflows() {
             <div className="swiss-card p-6 text-center text-sm text-[var(--muted)]">No chain configured for {t.label}. Defaults are seeded on startup — refresh if missing.</div>
           ) : (
             <div className="grid md:grid-cols-2 gap-3">
-              {chainsByType(t.v).map((c) => (
+              {chainsByType(t.v).map((c) => {
+                const centerName = c.center_id ? (centersList.find((x) => x.id === c.center_id)?.name || "Unknown center") : null;
+                return (
                 <div key={c.id} className={`swiss-card p-4 ${c.active ? "border-l-4 border-[var(--brand)]" : "opacity-70"}`} data-testid={`chain-card-${c.id}`}>
                   <div className="flex items-start justify-between gap-2 mb-3">
                     <div>
                       <div className="font-heading font-bold text-lg leading-tight flex items-center gap-2">
                         <GitMerge size={18} className="text-[var(--brand)]" /> {c.name}
                       </div>
-                      <div className="text-xs text-[var(--muted)] mt-0.5">{c.steps?.length || 0} steps · {c.active ? <span className="text-[var(--success)] font-medium">Active</span> : <span>Inactive</span>}</div>
+                      <div className="text-xs text-[var(--muted)] mt-0.5">
+                        {c.steps?.length || 0} steps · {c.active ? <span className="text-[var(--success)] font-medium">Active</span> : <span>Inactive</span>}
+                        {" · "}
+                        {centerName ? <span className="font-medium text-[var(--brand)]">Center: {centerName}</span> : <span>All Centers (Global)</span>}
+                      </div>
                     </div>
                     {canEdit && (
                       <div className="flex gap-1 no-print">
@@ -291,7 +319,8 @@ export default function ApprovalWorkflows() {
                     ))}
                   </ol>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

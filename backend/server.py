@@ -261,6 +261,10 @@ class ApprovalChainIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
     type: ApprovalType
+    # Center-scoped chain: if set, ONLY requests on this center route through it.
+    # Multiple active chains allowed per type AS LONG AS each has a distinct center_id.
+    # A chain with center_id=None is the global default fallback for centers without a specific chain.
+    center_id: Optional[str] = None
     steps: List[ApprovalStep] = Field(default_factory=list)
     active: bool = True
 
@@ -2113,8 +2117,21 @@ async def _seed_default_chains():
         await db.approval_chains.insert_one(doc)
 
 
-async def _find_active_chain(req_type: str) -> Optional[dict]:
-    return await db.approval_chains.find_one({"type": req_type, "active": True}, {"_id": 0})
+async def _find_active_chain(req_type: str, center_id: Optional[str] = None) -> Optional[dict]:
+    """Find the most-specific active chain for this request type.
+    - First look for an active chain matching (type, center_id)
+    - Fall back to active chain with center_id=None (global default)
+    """
+    if center_id:
+        specific = await db.approval_chains.find_one(
+            {"type": req_type, "active": True, "center_id": center_id}, {"_id": 0},
+        )
+        if specific:
+            return specific
+    return await db.approval_chains.find_one(
+        {"type": req_type, "active": True, "$or": [{"center_id": None}, {"center_id": {"$exists": False}}]},
+        {"_id": 0},
+    )
 
 
 async def _resolve_reports_to_user_ids(submitter_user_id: str, depth: int) -> List[str]:
@@ -2161,8 +2178,11 @@ async def _resolve_step_user_ids(step: dict, request_doc: dict) -> List[str]:
 
 async def _attach_chain_to_request(req_type: str, request_doc: dict) -> dict:
     """Look up active chain, snapshot it onto the request_doc, set current_level=1.
-    Mutates and returns the same doc. If no chain is configured, leaves doc unchanged."""
-    chain = await _find_active_chain(req_type)
+    Mutates and returns the same doc. If no chain is configured, leaves doc unchanged.
+
+    Center-scoping: if the request_doc has a center_id, prefer a chain bound to that
+    center over the global default. Used so each center can have its own approvers."""
+    chain = await _find_active_chain(req_type, center_id=request_doc.get("center_id"))
     if not chain or not chain.get("steps"):
         request_doc["chain_id"] = None
         request_doc["current_level"] = None
@@ -2227,9 +2247,14 @@ async def create_approval_chain(body: ApprovalChainIn, user=Depends(require_role
     for i, s in enumerate(sorted_steps, 1):
         s["level"] = i
     doc["steps"] = sorted_steps
-    # If activated, deactivate other chains of the same type to keep one active per type
+    # If activated, deactivate other chains of same (type, center_id) to keep one active per scope.
+    # Chains for different centers (or one center vs global) can coexist as active.
     if doc.get("active"):
-        await db.approval_chains.update_many({"type": doc["type"], "active": True}, {"$set": {"active": False}})
+        await db.approval_chains.update_many(
+            {"type": doc["type"], "active": True,
+             "center_id": doc.get("center_id")},
+            {"$set": {"active": False}},
+        )
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     doc["created_by"] = user["id"]
@@ -2247,7 +2272,11 @@ async def update_approval_chain(cid: str, body: ApprovalChainIn, _=Depends(requi
         s["level"] = i
     update["steps"] = sorted_steps
     if update.get("active"):
-        await db.approval_chains.update_many({"type": update["type"], "active": True, "id": {"$ne": cid}}, {"$set": {"active": False}})
+        await db.approval_chains.update_many(
+            {"type": update["type"], "active": True, "center_id": update.get("center_id"),
+             "id": {"$ne": cid}},
+            {"$set": {"active": False}},
+        )
     res = await db.approval_chains.find_one_and_update(
         {"id": cid}, {"$set": update}, return_document=True,
     )
@@ -3654,6 +3683,9 @@ class BatchPaymentIn(BaseModel):
     amount: float = Field(gt=0)
     expected_date: Optional[str] = ""
     description: Optional[str] = ""
+    # Company under which this milestone's company-share income will be recorded.
+    # Optional; if None, the income txn is created without a company tag.
+    company_id: Optional[str] = None
     # Uniform amount portion (only relevant on 1st milestone). Excluded from TDS.
     uniform_amount: float = Field(default=0, ge=0)
     # Recovery (only relevant on 2nd milestone): the portion of already-disbursed 1st milestone
@@ -3685,6 +3717,9 @@ class ReceivePaymentIn(BaseModel):
     """Body for marking a milestone payment as received."""
     model_config = ConfigDict(extra="ignore")
     tds_percent: Literal[0, 2, 10] = 0
+    # Optional company override at receive-time. If provided, the company-share income
+    # txn is tagged with this company. Falls back to BatchPayment.company_id when omitted.
+    company_id: Optional[str] = None
 
 
 @api.get("/batches", response_model=List[BatchOut])
@@ -3857,6 +3892,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
     # is recorded as company income (partner_id=null).
     partner_pool = round(gross * partner_share_pct / 100.0, 2) if partner_ids and partner_share_pct > 0 else 0.0
     company_amount = round(gross - partner_pool, 2)
+    # Resolve company tag for the company-share txn: request body wins, then BatchPayment row.
+    company_id_resolved = body.company_id or rec.get("company_id")
     splits: list[tuple[Optional[str], float, str]] = []  # (partner_id, amount, suffix)
     if company_amount > 0:
         suffix = f" (company {round(100.0 - partner_share_pct, 2)}% share)" if partner_pool > 0 else ""
@@ -3879,7 +3916,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "amount": amt,
             "date": today,
             "description": description_base + sfx,
-            "company_id": None,
+            # Only the company-share txn carries the company_id; partner txns leave it null
+            "company_id": company_id_resolved if pid_split is None else None,
             "partner_id": pid_split,
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
@@ -3991,6 +4029,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "assessment_fee_total": assessment_fee_total,
             "assessment_fee_per_candidate": assessment_fee_per,
             "assessment_fee_txn_id": assessment_fee_txn_id,
+            "company_id": company_id_resolved,
             "net_amount": net_amount,
         }},
         return_document=True,
