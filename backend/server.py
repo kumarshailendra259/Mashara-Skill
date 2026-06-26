@@ -1203,6 +1203,47 @@ async def partner_approve_transaction(tid: str, user=Depends(get_current_user)):
     return TransactionOut(**res)
 
 
+class PartnerRejectIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    remarks: str = Field(min_length=3)
+
+
+@api.post("/transactions/{tid}/partner-reject", response_model=TransactionOut)
+async def partner_reject_transaction(tid: str, body: PartnerRejectIn, user=Depends(get_current_user)):
+    """Cross-partner rejection: an associated partner rejects another partner's pending txn.
+    Eligibility identical to partner-approve. Sets status=rejected with mandatory remarks."""
+    txn = await db.transactions.find_one({"id": tid})
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    if txn.get("status") == "approved":
+        raise HTTPException(400, "Already approved — cannot partner-reject")
+    if txn.get("status") == "rejected":
+        raise HTTPException(400, "Already rejected")
+    allowed, reason = await _can_partner_approve(user, txn)
+    if not allowed:
+        raise HTTPException(403, reason)
+    res = await db.transactions.find_one_and_update(
+        {"id": tid, "status": {"$ne": "approved"}},
+        {"$set": {
+            "status": "rejected",
+            "approved_by": user["id"],
+            "approved_at": None,
+            "approval_via": "partner_cross",
+            "rejected_reason": body.remarks,
+        }},
+        return_document=True,
+    )
+    if not res:
+        raise HTTPException(409, "Could not reject (race condition)")
+    res.pop("_id", None)
+    if res.get("created_by") and res["created_by"] != user["id"]:
+        await _notify(res["created_by"],
+                      f"Your transaction was rejected by a partner peer: {body.remarks}",
+                      ntype="txn_rejected", ref_id=tid, link="/transactions")
+    return TransactionOut(**res)
+
+
+
 @api.get("/transactions/{tid}/partner-approve-eligibility")
 async def partner_approve_eligibility(tid: str, user=Depends(get_current_user)):
     """UI helper: returns whether the current user can partner-approve a given txn."""

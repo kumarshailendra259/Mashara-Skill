@@ -74,11 +74,8 @@ export default function PendingApprovals() {
         if (action === "approve") {
           await api.post(`/transactions/${item.request_id}/partner-approve`, { remarks });
         } else {
-          // Partner cross-approval rejection still uses the chain-act endpoint
-          await api.post(`/approvals/act`, {
-            request_type: "transaction", request_id: item.request_id,
-            action: "reject", remarks,
-          });
+          // Partner cross-rejection uses dedicated endpoint with same eligibility check
+          await api.post(`/transactions/${item.request_id}/partner-reject`, { remarks });
         }
       } else {
         // Chain-based: transactions / leaves / reimbursements all dispatch through /approvals/act
