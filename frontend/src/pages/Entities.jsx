@@ -132,11 +132,51 @@ export default function Entities({ etype }) {
   const titleKey = etype + "s";
   const extraColumns = useMemo(() => {
     if (etype === "company") return [{ key: "gst_number", label: "GST" }, { key: "email", label: "Email" }];
-    if (etype === "partner") return [{ key: "email", label: "Email" }, { key: "mobile", label: "Mobile" }];
-    if (etype === "center")  return [{ key: "manager_name", label: "Manager" }, { key: "email", label: "Email" }];
+    if (etype === "partner") return [{ key: "email", label: "Email" }, { key: "mobile", label: "Mobile" }, { key: "_mail_status", label: "Login Mail" }];
+    if (etype === "center")  return [{ key: "manager_name", label: "Manager" }, { key: "email", label: "Email" }, { key: "_mail_status", label: "Login Mail" }];
     if (etype === "project") return [{ key: "project_type", label: "Type" }, { key: "project_code", label: "Code" }];
     return [];
   }, [etype]);
+
+  const resendCredentials = async (it) => {
+    if (!window.confirm(`Resend login credentials to ${it.email}?\nA NEW temporary password will be generated.`)) return;
+    try {
+      const r = await api.post(`/entities/${etype}/${it.id}/resend-credentials`);
+      load();
+      if (r.data?.generated_password) {
+        setCredModal({
+          email: r.data.email || it.email, password: r.data.generated_password,
+          entityName: it.name, role: etype === "center" ? "Center Manager" : "Partner",
+        });
+        setCopied(false);
+      }
+      if (r.data?.sent) toast.success(`Email sent to ${it.email}`);
+      else toast.error(`Email failed: ${r.data?.reason || "unknown"}. Password shown — copy manually.`);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const renderCell = (it, key) => {
+    if (key === "_mail_status") {
+      if (!it.email) return <span className="text-[var(--muted)]">—</span>;
+      if (it.credentials_mail_sent) {
+        return (
+          <span className="inline-flex items-center gap-1 text-[var(--success)]">
+            <Check size={14} />
+            <span className="overline text-[10px]">Sent {it.credentials_mail_at ? new Date(it.credentials_mail_at).toLocaleDateString("en-IN") : ""}</span>
+          </span>
+        );
+      }
+      if (it.credentials_mail_error) {
+        return (
+          <span className="inline-flex items-center gap-1 text-[var(--danger)]" title={it.credentials_mail_error}>
+            <span className="overline text-[10px]">⚠ Failed</span>
+          </span>
+        );
+      }
+      return <span className="overline text-[10px] text-[var(--muted)]">Not sent</span>;
+    }
+    return <span className="text-[var(--muted)]">{it[key] || "—"}</span>;
+  };
 
   const renderForm = () => (
     <div className="grid grid-cols-2 gap-3">
@@ -278,12 +318,17 @@ export default function Entities({ etype }) {
                 )}
                 <td className="p-3 font-medium">{it.name}</td>
                 {extraColumns.map((c) => (
-                  <td key={c.key} className="p-3 num text-[var(--muted)]">{it[c.key] || "—"}</td>
+                  <td key={c.key} className="p-3 num">{renderCell(it, c.key)}</td>
                 ))}
                 <td className="p-3 text-[var(--muted)] max-w-xs truncate">{it.description || "—"}</td>
                 {canEdit && (
                   <td className="p-3 text-right">
                     <div className="inline-flex gap-1">
+                      {(etype === "center" || etype === "partner") && it.email && (
+                        <Button size="icon" variant="ghost" onClick={() => resendCredentials(it)} className="rounded-none h-8 w-8" title="Re-send login credentials (new password)" data-testid={`resend-${it.id}`}>
+                          <Mail size={14} />
+                        </Button>
+                      )}
                       <Button size="icon" variant="ghost" onClick={() => openEdit(it)} className="rounded-none h-8 w-8" data-testid={`edit-${it.id}`}><Pencil size={14} /></Button>
                       {canDelete && <Button size="icon" variant="ghost" onClick={() => remove(it)} className="rounded-none h-8 w-8 hover:text-[var(--danger)]" data-testid={`delete-${it.id}`}><Trash2 size={14} /></Button>}
                     </div>

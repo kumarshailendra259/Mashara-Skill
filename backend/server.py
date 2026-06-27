@@ -204,6 +204,11 @@ class EntityOut(EntityIn):
     # plain-text password ONCE on POST response so admin can copy + share.
     # Stored hashed in DB; this field is never persisted on the entity doc.
     generated_password: Optional[str] = None
+    # Mail-send audit fields (persisted)
+    credentials_mail_sent: Optional[bool] = None
+    credentials_mail_at: Optional[str] = None
+    credentials_mail_error: Optional[str] = None
+    credentials_mail_id: Optional[str] = None
 
 
 EntityType = Literal["company", "partner", "center", "project"]
@@ -904,19 +909,21 @@ def _gen_password(length: int = 12) -> str:
     return "".join(secrets.choice(chars) for _ in range(length))
 
 
-async def _maybe_send_credentials_email(email: str, name: str, password: str, role_label: str):
-    """Best-effort: send login credentials via Resend. Failures are silent (admin still has password)."""
+async def _maybe_send_credentials_email(email: str, name: str, password: str, role_label: str) -> dict:
+    """Best-effort: send login credentials via Resend. Returns the result dict
+    so callers can persist {sent, id|reason} to the entity for an audit trail.
+    """
     try:
         from email_utils import send_credentials_email
         portal_url = "https://finance.masharaskills.com"
         check_in_url = "https://finance.masharaskills.com/check-in"
-        await send_credentials_email(
+        result = await send_credentials_email(
             to_email=email, name=name or "there",
             password=password, check_in_url=check_in_url, portal_url=portal_url,
         )
-    except Exception:
-        # Never fail the entity-creation flow on email errors.
-        pass
+        return result if isinstance(result, dict) else {"sent": False, "reason": "no_response"}
+    except Exception as e:
+        return {"sent": False, "reason": str(e)[:200]}
 
 
 async def _auto_create_user_for_entity(etype: str, entity_doc: dict) -> Optional[str]:
@@ -967,8 +974,12 @@ async def _auto_create_user_for_entity(etype: str, entity_doc: dict) -> Optional
     }
     await db.users.insert_one(user_doc)
     entity_doc["linked_user_id"] = user_doc["id"]
-    # Fire-and-forget Resend email (silent on failure)
-    await _maybe_send_credentials_email(email, user_doc["name"], plain, role_label)
+    # Fire-and-forget Resend email — capture result for audit trail
+    mail_res = await _maybe_send_credentials_email(email, user_doc["name"], plain, role_label)
+    entity_doc["credentials_mail_sent"] = bool(mail_res.get("sent"))
+    entity_doc["credentials_mail_at"] = datetime.now(timezone.utc).isoformat() if mail_res.get("sent") else None
+    entity_doc["credentials_mail_id"] = mail_res.get("id")
+    entity_doc["credentials_mail_error"] = mail_res.get("reason") if not mail_res.get("sent") else None
     return plain
 
 
@@ -1028,6 +1039,49 @@ async def delete_entity(etype: EntityType, eid: str, _=Depends(require_role("adm
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
     return {"ok": True}
+
+
+@api.post("/entities/{etype}/{eid}/resend-credentials")
+async def resend_entity_credentials(etype: EntityType, eid: str, _=Depends(require_role("admin", "manager"))):
+    """Regenerate a fresh password for the linked user + re-send credentials email.
+    Returns {sent, generated_password} on success. Only valid for center/partner with linked user."""
+    col = ENTITY_COLLECTION[etype]
+    ent = await db[col].find_one({"id": eid}, {"_id": 0})
+    if not ent:
+        raise HTTPException(404, "Entity not found")
+    email = (ent.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "Entity has no email — add email first to enable credentials")
+    if etype not in ("center", "partner"):
+        raise HTTPException(400, "Resend credentials only supported for center/partner entities")
+    linked_uid = ent.get("linked_user_id")
+    role_label = "Center Manager" if etype == "center" else "Partner"
+    plain = _gen_password()
+    if linked_uid:
+        await db.users.update_one({"id": linked_uid}, {"$set": {"password_hash": hash_password(plain)}})
+        user_name = (await db.users.find_one({"id": linked_uid}, {"_id": 0, "name": 1}) or {}).get("name", "")
+    else:
+        # No linked user yet — create one now (treats this as the first onboarding)
+        await _auto_create_user_for_entity(etype, ent)
+        # _auto_create_user_for_entity set linked_user_id on `ent` dict but didn't persist; persist now
+        await db[col].update_one({"id": eid}, {"$set": {"linked_user_id": ent.get("linked_user_id")}})
+        return {"sent": ent.get("credentials_mail_sent"), "generated_password": None,
+                "note": "User account created with new credentials (email sent if Resend configured)"}
+    mail_res = await _maybe_send_credentials_email(email, user_name, plain, role_label)
+    # Persist mail audit + password rotation timestamp
+    await db[col].update_one({"id": eid}, {"$set": {
+        "credentials_mail_sent": bool(mail_res.get("sent")),
+        "credentials_mail_at": datetime.now(timezone.utc).isoformat() if mail_res.get("sent") else None,
+        "credentials_mail_id": mail_res.get("id"),
+        "credentials_mail_error": mail_res.get("reason") if not mail_res.get("sent") else None,
+        "credentials_rotated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+    return {
+        "sent": bool(mail_res.get("sent")),
+        "reason": mail_res.get("reason"),
+        "generated_password": plain,  # admin can copy + share manually if email fails
+        "email": email,
+    }
 
 
 # ---------- Project Types (admin-configurable lookup) ----------
