@@ -41,22 +41,22 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
-            <Route path="/" element={<ProtectedRoute><Shell><Dashboard /></Shell></ProtectedRoute>} />
+            <Route path="/" element={<ProtectedRoute requireFinance><Shell><Dashboard /></Shell></ProtectedRoute>} />
             <Route path="/companies" element={<ProtectedRoute><Shell><Entities etype="company" /></Shell></ProtectedRoute>} />
             <Route path="/partners" element={<ProtectedRoute><Shell><Entities etype="partner" /></Shell></ProtectedRoute>} />
             <Route path="/centers" element={<ProtectedRoute><Shell><Entities etype="center" /></Shell></ProtectedRoute>} />
             <Route path="/projects" element={<ProtectedRoute><Shell><Entities etype="project" /></Shell></ProtectedRoute>} />
-            <Route path="/transactions" element={<ProtectedRoute><Shell><Transactions /></Shell></ProtectedRoute>} />
-            <Route path="/reports" element={<ProtectedRoute><Shell><Reports /></Shell></ProtectedRoute>} />
+            <Route path="/transactions" element={<ProtectedRoute requireFinance><Shell><Transactions /></Shell></ProtectedRoute>} />
+            <Route path="/reports" element={<ProtectedRoute requireFinance><Shell><Reports /></Shell></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute><Shell><Users /></Shell></ProtectedRoute>} />
             <Route path="/hrms" element={<ProtectedRoute><Shell><HRMS /></Shell></ProtectedRoute>} />
             <Route path="/stock" element={<ProtectedRoute><Shell><Stock /></Shell></ProtectedRoute>} />
             <Route path="/approvals" element={<ProtectedRoute><Shell><ApprovalLog /></Shell></ProtectedRoute>} />
             <Route path="/approval-workflows" element={<ProtectedRoute><Shell><ApprovalWorkflows /></Shell></ProtectedRoute>} />
             <Route path="/hr-settings" element={<ProtectedRoute><Shell><HrSettings /></Shell></ProtectedRoute>} />
-            <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
+            <Route path="/programs" element={<ProtectedRoute requireFinance><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
-            <Route path="/tds-register" element={<ProtectedRoute><Shell><TdsRegister /></Shell></ProtectedRoute>} />
+            <Route path="/tds-register" element={<ProtectedRoute requireFinance><Shell><TdsRegister /></Shell></ProtectedRoute>} />
             <Route path="/pending-approvals" element={<ProtectedRoute><Shell><PendingApprovals /></Shell></ProtectedRoute>} />
             <Route path="/login-history" element={<ProtectedRoute><Shell><LoginHistory /></Shell></ProtectedRoute>} />
             <Route path="/assets" element={<ProtectedRoute><Shell><AssetManagement /></Shell></ProtectedRoute>} />

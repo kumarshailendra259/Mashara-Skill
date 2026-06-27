@@ -14,19 +14,19 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const navItems = [
-  { to: "/", key: "dashboard", icon: LayoutDashboard, end: true },
+  { to: "/", key: "dashboard", icon: LayoutDashboard, end: true, financeOnly: true },
   { to: "/companies", key: "companies", icon: Building2 },
   { to: "/partners", key: "partners", icon: Users },
   { to: "/centers", key: "centers", icon: MapPin },
   { to: "/projects", key: "projects", icon: Briefcase },
-  { to: "/programs", key: "programs", icon: Layers },
-  { to: "/transactions", key: "transactions", icon: ArrowLeftRight },
+  { to: "/programs", key: "programs", icon: Layers, financeOnly: true },
+  { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
   { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
   { to: "/stock", key: "stock", icon: Package },
   { to: "/assets", key: "assets", icon: Box },
   { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
-  { to: "/reports", key: "reports", icon: FileBarChart2 },
-  { to: "/tds-register", key: "tds_register", icon: Receipt, accountingOnly: true },
+  { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
+  { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
   { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
@@ -35,6 +35,10 @@ const navItems = [
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
   { to: "/login-history", key: "login_history", icon: History, adminOnly: true },
 ];
+
+// Roles that may see investments / income / expense / profit-loss / milestones / TDS.
+// Must mirror FINANCE_VISIBLE_ROLES in backend/server.py.
+const FINANCE_VISIBLE_ROLES = ["admin", "partner", "senior_manager", "hr", "accountant"];
 
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
@@ -98,6 +102,7 @@ export default function Layout({ children }) {
       if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
+      if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
       return true;
     }),
     [user?.role],

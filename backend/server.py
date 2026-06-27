@@ -107,13 +107,30 @@ def require_role(*roles: str):
     return dep
 
 
+# ---- Finance Visibility Gate -------------------------------------------------
+# Roles allowed to see investments / income / expense / profit-loss / TDS / milestone income.
+# Other roles (center_manager, center_staff, manager, viewer, reporting_authority, center_partner)
+# get a 403 on any financial endpoint. Operational endpoints (attendance, leave, staff, stock)
+# remain accessible.
+FINANCE_VISIBLE_ROLES = {"admin", "partner", "senior_manager", "hr", "accountant"}
+
+
+def require_finance_visible(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("role") not in FINANCE_VISIBLE_ROLES:
+        raise HTTPException(status_code=403, detail="Financial data is restricted for your role")
+    return user
+
+
 # ---------- Models ----------
 ROLE_LITERAL = Literal["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer", "reporting_authority", "center_partner"]
 
 
 class UserOut(BaseModel):
     id: str
-    email: EmailStr
+    # Use plain str here (not EmailStr) — register/login already validate format via EmailStr.
+    # Some legacy test/seed users have RFC-6761 reserved TLDs (.local/.test) which pydantic 2.x
+    # rejects, and we don't want a single bad row to crash GET /auth/users.
+    email: str
     name: str
     role: str
     assigned_center_ids: List[str] = Field(default_factory=list)
@@ -1198,7 +1215,7 @@ async def delete_project_type(ptid: str, _=Depends(require_role("admin"))):
 # ---------- Transactions ----------
 @api.get("/transactions", response_model=List[TransactionOut])
 async def list_transactions(
-    user=Depends(get_current_user),
+    user=Depends(require_finance_visible),
     type: Optional[TxnType] = None,
     status: Optional[TxnStatus] = None,
     company_id: Optional[str] = None,
@@ -1640,7 +1657,7 @@ async def import_transactions(file: UploadFile = File(...), user=Depends(require
 # ---------- Dashboard ----------
 @api.get("/dashboard/summary")
 async def dashboard_summary(
-    user=Depends(get_current_user),
+    user=Depends(require_finance_visible),
     company_id: Optional[str] = None,
     partner_id: Optional[str] = None,
     center_id: Optional[str] = None,
@@ -1756,7 +1773,7 @@ async def _items_breakdown(match: dict) -> list:
 
 @api.get("/dashboard/milestone-income")
 async def milestone_income_summary(
-    user=Depends(get_current_user),
+    user=Depends(require_finance_visible),
     start: Optional[str] = None,
     end: Optional[str] = None,
     project_id: Optional[str] = None,
@@ -1833,7 +1850,7 @@ async def milestone_income_summary(
 
 @api.get("/dashboard/fooding-income")
 async def fooding_income_summary(
-    user=Depends(get_current_user),
+    user=Depends(require_finance_visible),
     start: Optional[str] = None,
     end: Optional[str] = None,
     project_id: Optional[str] = None,
@@ -1910,7 +1927,7 @@ async def fooding_income_summary(
 
 @api.get("/dashboard/settlement")
 async def settlement_view(
-    user=Depends(get_current_user),
+    user=Depends(require_finance_visible),
     center_id: Optional[str] = None,
     partner_id: Optional[str] = None,
     start: Optional[str] = None,
@@ -4520,7 +4537,7 @@ class ReceivePaymentIn(BaseModel):
 
 @api.get("/batches", response_model=List[BatchOut])
 async def list_batches(project_id: Optional[str] = None, center_id: Optional[str] = None,
-                       user=Depends(get_current_user)):
+                       user=Depends(require_finance_visible)):
     q: dict = {}
     if project_id:
         q["project_id"] = project_id
@@ -4584,7 +4601,7 @@ async def delete_batch(bid: str, _=Depends(require_role("admin"))):
 
 
 @api.get("/batch-payments", response_model=List[BatchPaymentOut])
-async def list_batch_payments(batch_id: Optional[str] = None, _=Depends(get_current_user)):
+async def list_batch_payments(batch_id: Optional[str] = None, _=Depends(require_finance_visible)):
     q: dict = {}
     if batch_id:
         q["batch_id"] = batch_id
@@ -5128,7 +5145,7 @@ async def tds_register(
     fy: str = Query("2025-26", description="Financial year, e.g. 2025-26"),
     quarter: str = Query("all", description="Q1/Q2/Q3/Q4 or all"),
     project_id: Optional[str] = None,
-    user=Depends(require_role("admin", "accountant", "senior_manager", "hr")),
+    user=Depends(require_role("admin", "accountant", "senior_manager", "hr", "partner")),
 ):
     """Returns the TDS register for a given FY/quarter — all transactions with
     source='tds_deduction', grouped + summarised for Form 26Q quarterly filing.
@@ -5208,7 +5225,7 @@ async def tds_register_csv(
     fy: str = Query("2025-26"),
     quarter: str = Query("all"),
     project_id: Optional[str] = None,
-    user=Depends(require_role("admin", "accountant", "senior_manager", "hr")),
+    user=Depends(require_role("admin", "accountant", "senior_manager", "hr", "partner")),
 ):
     """CSV download of the TDS register — ready to feed into 26Q upload tools / TRACES."""
     data = await tds_register(fy=fy, quarter=quarter, project_id=project_id, user=user)

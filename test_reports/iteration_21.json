@@ -1,0 +1,39 @@
+{
+  "summary": "Iter-23 verification of (a) GET /api/auth/users no-longer-500 fix (UserOut.email -> plain str), and (b) Finance-visibility gating across backend + frontend. Backend: 234/234 pytest pass (test_iter23_finance_gate.py) — covers /auth/users 200 with RFC-6761 reserved-TLD users, 9 finance endpoints × 5 finance-roles = 45 expected-200 (all OK), same 9 endpoints × 6 restricted-roles = 54 expected-403 (all OK), 11 operational endpoints × 11 roles = 121 expected-200 (all OK), role-widgets 200 for every role, admin regression (/dashboard/summary + approval-workflows + 3 default chains present). Frontend smoke (Playwright): route-guard redirects WORK — center_staff→/check-in, center_manager→/hrms, viewer/reporting_authority→/pending-approvals from /, /transactions, /reports, /tds-register, /programs. Sidebar nav for center_manager hides nav-{dashboard,transactions,reports,tds_register,programs} and shows nav-{companies,partners,centers,projects,pending_approvals,stock,assets,HRMS}. Admin /approval-workflows page loads cleanly (no 500), shows Reimbursement/Leave/Transaction/Employee Transfer chains.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/approval-workflows", "issues": ["Default 'Asset Purchase' chain header was not present in document.innerText during automated scan (only Reimbursement/Leave/Transaction/Employee Transfer headers found). The chain DOES exist in DB (GET /api/approval-chains returns it with name 'Asset Purchase — Default (4 levels)'), so either the page filters out asset_purchase, or the section label is rendered differently. Worth a manual visual check — non-blocking since core RBAC requirement is met."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter23_finance_gate.py",
+    "/app/test_reports/pytest/iteration_23.xml"
+  ],
+  "action_items": [
+    "Optional: confirm /approval-workflows page renders the Asset Purchase default chain section — backend has it, frontend visual scan didn't surface it.",
+    "Optional: harmonise the 403 detail message — /reports/tds-register uses require_role and returns generic 'Forbidden' while /transactions, /dashboard/*, /batches, /batch-payments use require_finance_visible and return 'Financial data is restricted for your role'. Consistency would help the FE show a single nicer toast."
+  ],
+  "critical_code_review_comments": [
+    "FINANCE_VISIBLE_ROLES list is now duplicated in 3 places: backend/server.py (set), frontend/components/Layout.jsx (array), frontend/components/ProtectedRoute.jsx (array). Acceptable since FE cannot import from BE, but if the set ever changes in only one place the guards silently diverge. Add a comment on each definition warning of the other two.",
+    "ProtectedRoute.LANDING_FOR_ROLE silently falls back to '/hrms' for any unknown role. If a brand-new role is added later that is NOT in FINANCE_VISIBLE_ROLES and NOT in LANDING_FOR_ROLE (e.g. typo or new role), users will be looped to /hrms which may itself bounce them. Consider falling back to /login or showing a 'No landing page configured' screen.",
+    "UserOut.email is now `str` (not EmailStr). RegisterIn still validates EmailStr so future users will be well-formed; consider running a one-off migration to drop or fix the legacy `.local`/`.test` rows so the gap is closed permanently and the schema can be tightened back to EmailStr.",
+    "/api/auth/users is unprotected by role — any authenticated user (e.g. center_staff) can list every user incl. admin. Probably intentional for the user-picker UI but worth confirming: the data leak is name/email/role/center-assignments of everyone.",
+    "require_finance_visible is applied at the endpoint level but only protects 9 endpoints; if a 10th finance endpoint is added in the future the author has to remember the gate. Consider a router-level dependency or a dedicated 'finance' APIRouter."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter23_finance_gate.py (created — 234 tests, 100% pass)"
+  ],
+  "success_rate": {"backend": "100% (234/234)", "frontend": "100% on all checks executed (route-guard 11/11 redirects, nav-gating 13/13 items correct, approval-workflows loads with no 500)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md). Per-run ephemeral users registered as TEST_iter23_{role}_{RUN}@example.com / Passw0rd!",
+  "seed_data_creation": "12 ephemeral users (one per role) created with TEST_iter23_*_{RUN}@example.com pattern. No production / seeded data modified. Earlier seed data from iter-19..22 preserved.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-23 verified bug fix for /api/auth/users 500 + finance-visibility gating end-to-end (BE + FE nav + route guard). FINANCE_VISIBLE_ROLES = {admin, partner, senior_manager, hr, accountant}; RESTRICTED_ROLES = {manager, center_manager, center_staff, viewer, reporting_authority, center_partner}. Restricted roles get 403 on /transactions, /batches, /batch-payments, /dashboard/summary, /dashboard/milestone-income, /dashboard/fooding-income, /dashboard/settlement, /reports/tds-register, /reports/tds-register/csv. role-widgets is intentionally NOT gated — returns role-specific shape for everyone. LANDING_FOR_ROLE on FE: center_manager/manager → /hrms, center_staff → /check-in, viewer/reporting_authority/center_partner → /pending-approvals. Re-use the per-RUN suffix pattern. Note: /api/pending-approvals does NOT exist — the correct endpoint is /api/approvals/pending. Use type (not request_type) when querying approval-chains response.",
+  "rca of the issue": "Original /auth/users 500 root cause: UserOut.email was EmailStr; some legacy users created by seed/test had RFC-6761 reserved-TLD emails (.local, .test) which pydantic 2.x rejects. Fix in backend/server.py line 133 changed UserOut.email to plain str — register/login still validate via EmailStr (RegisterIn/LoginIn). Verified by GET /auth/users returning 200 with admin row + all newly registered TEST_ users."
+}
