@@ -16,6 +16,7 @@ import {
   Legend, PieChart, Pie, Cell, LineChart, Line,
 } from "recharts";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import RoleWidgets from "@/components/RoleWidgets";
 
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
 const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
@@ -81,6 +82,9 @@ export default function Dashboard() {
         </div>
         <PrintButton />
       </div>
+
+      {/* Role-specific personalised widgets (Center Manager, Accountant, HR, Senior Mgr, RA, Center Partner) */}
+      <RoleWidgets />
 
       {/* Filters */}
       <div className="swiss-card p-4 grid grid-cols-2 md:grid-cols-6 gap-3" data-testid="dashboard-filters">

@@ -1994,6 +1994,135 @@ async def settlement_view(
     return {"centers": sorted(out_centers, key=lambda x: x["center_name"])}
 
 
+
+# ---------- Role-specific dashboard widgets ----------
+@api.get("/dashboard/role-widgets")
+async def role_widgets(user=Depends(get_current_user)):
+    """Returns aggregated KPIs + lists tuned to the logged-in user's role.
+
+    Each role gets a different shape — the frontend keys off `role` to render
+    the appropriate widget set. Centralised here so the frontend stays lean."""
+    role = user.get("role")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out: dict = {"role": role, "as_of": today}
+
+    # Center-scoped query helper used by center_manager + center_staff
+    center_scope = {}
+    if role in ("center_manager", "center_staff"):
+        center_scope = {"center_id": {"$in": user.get("assigned_center_ids") or []}}
+
+    # ----- Center Manager / Center Staff -----
+    if role in ("center_manager", "center_staff"):
+        scoped_ids = user.get("assigned_center_ids") or []
+        out["center_ids"] = scoped_ids
+        # Today attendance
+        out["attendance_today_present"] = await db.attendance.count_documents({**center_scope, "date": today, "status": "present"})
+        out["attendance_today_absent"]  = await db.attendance.count_documents({**center_scope, "date": today, "status": "absent"})
+        out["staff_total"]              = await db.staff.count_documents(center_scope)
+        # Stock value
+        stock_txns = await db.transactions.find(
+            {**center_scope, "type": "expense", "status": "approved"}, {"_id": 0, "items": 1},
+        ).to_list(2000)
+        stock_value = 0.0
+        for t in stock_txns:
+            for it in (t.get("items") or []):
+                stock_value += float(it.get("amount") or 0)
+        out["stock_value"] = round(stock_value, 2)
+        # Pending expense requests (created at this center)
+        out["pending_expense_requests"] = await db.transactions.count_documents({**center_scope, "type": "expense", "status": "pending"})
+        # Active batches
+        out["batches_active"] = await db.batches.count_documents({**center_scope, "closed": {"$ne": True}})
+        # Recent leave requests
+        leaves = await db.leaves.find({**center_scope, "status": {"$in": ["pending", "submitted"]}}, {"_id": 0}).sort("created_at", -1).to_list(10)
+        out["pending_leaves"] = [{"id": lv["id"], "status": lv.get("status"), "reason": lv.get("reason", "")[:60]} for lv in leaves]
+
+    # ----- Accountant -----
+    if role == "accountant":
+        out["pending_payments"]      = await db.transactions.count_documents({"status": "pending"})
+        out["payroll_unpaid"]        = await db.payroll.count_documents({"status": {"$ne": "paid"}})
+        out["reimb_to_pay"]          = await db.reimbursements.count_documents({"status": "accountant_approved"})
+        out["reimb_l1_approved"]     = await db.reimbursements.count_documents({"status": "l1_approved"})
+        # Monthly cash-flow (current + prev 5 months)
+        cf = await db.transactions.aggregate([
+            {"$match": {"status": "approved"}},
+            {"$group": {
+                "_id": {"month": {"$substr": ["$date", 0, 7]}, "type": "$type"},
+                "amount": {"$sum": "$amount"},
+            }},
+            {"$sort": {"_id.month": -1}},
+            {"$limit": 24},
+        ]).to_list(24)
+        monthly: dict = {}
+        for row in cf:
+            m = row["_id"].get("month") or ""
+            t = row["_id"].get("type") or ""
+            monthly.setdefault(m, {"month": m, "income": 0, "expense": 0, "investment": 0})
+            if t in ("income", "expense", "investment"):
+                monthly[m][t] += float(row.get("amount") or 0)
+        out["cash_flow_monthly"] = sorted(monthly.values(), key=lambda x: x["month"])[-6:]
+        # GST exposure: sum of approved expense amounts (rough — actual GST extracted elsewhere)
+        tot = await db.transactions.aggregate([
+            {"$match": {"status": "approved"}}, {"$group": {"_id": "$type", "amount": {"$sum": "$amount"}}},
+        ]).to_list(10)
+        out["totals_by_type"] = {row["_id"]: round(row.get("amount") or 0, 2) for row in tot if row.get("_id")}
+
+    # ----- HR -----
+    if role == "hr":
+        out["staff_total"]    = await db.staff.count_documents({})
+        out["staff_active"]   = await db.staff.count_documents({"status": {"$ne": "exited"}})
+        # New joiners in last 30 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+        out["new_joiners_30d"] = await db.staff.count_documents({"doj": {"$gte": cutoff}})
+        # Attendance compliance: % present today / total
+        present = await db.attendance.count_documents({"date": today, "status": "present"})
+        total_s = max(1, out["staff_active"])
+        out["attendance_compliance_pct"] = round(100.0 * present / total_s, 1)
+        out["pending_leaves"]    = await db.leaves.count_documents({"status": {"$in": ["pending", "submitted", "l1_approved"]}})
+        out["pending_reimb_hr"]  = await db.reimbursements.count_documents({"status": "accountant_approved"})
+
+    # ----- Senior Manager -----
+    if role in ("senior_manager", "manager"):
+        # Center-wise performance ranking (count of approved txns + total income last 30d)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+        pipeline = [
+            {"$match": {"status": "approved", "date": {"$gte": cutoff}, "type": "income"}},
+            {"$group": {"_id": "$center_id", "amount": {"$sum": "$amount"}, "count": {"$sum": 1}}},
+            {"$sort": {"amount": -1}},
+            {"$limit": 10},
+        ]
+        rank = await db.transactions.aggregate(pipeline).to_list(10)
+        centers_map = {c["id"]: c["name"] for c in await db.centers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)}
+        out["center_ranking_30d"] = [
+            {"center_id": r["_id"], "center_name": centers_map.get(r["_id"], "Unknown"),
+             "income": round(float(r.get("amount") or 0), 2), "txn_count": r.get("count") or 0}
+            for r in rank if r.get("_id")
+        ]
+        out["pending_approvals_count"] = await db.transactions.count_documents({"status": "pending"})
+
+    # ----- Reporting Authority -----
+    if role == "reporting_authority":
+        # Pending verifications routed via approval chain to this user (best-effort)
+        await _enrich_user_with_associations(user)
+        out["pending_verifications"] = await db.transactions.count_documents({"status": "pending"})
+        # Recent escalations: pending >3 days
+        old_cutoff = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        out["escalations_3d"] = await db.transactions.count_documents({"status": "pending", "created_at": {"$lt": old_cutoff}})
+
+    # ----- Center Partner -----
+    if role == "center_partner":
+        # Profitability: sum of approved income - expense across own scope
+        agg = await db.transactions.aggregate([
+            {"$match": {"status": "approved"}}, {"$group": {"_id": "$type", "amount": {"$sum": "$amount"}}},
+        ]).to_list(10)
+        agg_map = {r["_id"]: round(float(r.get("amount") or 0), 2) for r in agg}
+        out["income_total"]  = agg_map.get("income", 0)
+        out["expense_total"] = agg_map.get("expense", 0)
+        out["profit"]        = round(out["income_total"] - out["expense_total"], 2)
+        out["pending_expense_requests"] = await db.transactions.count_documents({"type": "expense", "status": "pending"})
+
+    return out
+
+
 @api.get("/")
 async def root():
     return {"service": "finance-tracker", "ok": True}
