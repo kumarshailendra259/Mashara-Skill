@@ -108,7 +108,7 @@ def require_role(*roles: str):
 
 
 # ---------- Models ----------
-ROLE_LITERAL = Literal["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer"]
+ROLE_LITERAL = Literal["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer", "reporting_authority", "center_partner"]
 
 
 class UserOut(BaseModel):
@@ -571,14 +571,47 @@ async def register(body: RegisterIn, response: Response):
 
 
 @api.post("/auth/login", response_model=UserOut)
-async def login(body: LoginIn, response: Response):
+async def login(body: LoginIn, request: Request, response: Response):
     email = body.email.lower()
     user = await db.users.find_one({"email": email})
+    ip = (request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip") or
+          (request.client.host if request.client else None) or "unknown")
+    ua = request.headers.get("user-agent", "")[:300]
+    now = datetime.now(timezone.utc).isoformat()
     if not user or not verify_password(body.password, user["password_hash"]):
+        # Record failed attempt (admin can review brute-force attempts)
+        await db.login_logs.insert_one({
+            "id": str(uuid.uuid4()), "email": email, "user_id": None,
+            "success": False, "ip": ip, "user_agent": ua, "at": now,
+            "reason": "invalid_credentials",
+        })
         raise HTTPException(status_code=401, detail="Invalid email or password")
     token = create_access_token(user["id"], user["email"])
     set_auth_cookie(response, token)
+    # Record success
+    await db.login_logs.insert_one({
+        "id": str(uuid.uuid4()), "email": email, "user_id": user["id"],
+        "success": True, "ip": ip, "user_agent": ua, "at": now,
+    })
     return UserOut(**user)
+
+
+@api.get("/auth/login-history")
+async def login_history(
+    email: Optional[str] = None, user_id: Optional[str] = None, limit: int = 200,
+    user=Depends(get_current_user),
+):
+    """Admin/HR see all; other users see only their own login attempts."""
+    q: dict = {}
+    if user.get("role") not in ("admin", "hr"):
+        q["user_id"] = user["id"]
+    else:
+        if email:
+            q["email"] = email.lower()
+        if user_id:
+            q["user_id"] = user_id
+    docs = await db.login_logs.find(q, {"_id": 0}).sort("at", -1).to_list(max(10, min(limit, 1000)))
+    return docs
 
 
 @api.post("/auth/logout")

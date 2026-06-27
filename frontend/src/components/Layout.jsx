@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,6 +31,7 @@ const navItems = [
   { to: "/partner-associations", key: "partner_associations", icon: Link2, adminManagerOnly: true },
   { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
   { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
+  { to: "/login-history", key: "login_history", icon: History, adminOnly: true },
 ];
 
 export default function Layout({ children }) {

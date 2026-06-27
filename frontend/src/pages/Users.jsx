@@ -16,7 +16,7 @@ import { Pencil, Archive } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
-const ROLES = ["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer"];
+const ROLES = ["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "reporting_authority", "center_partner", "viewer"];
 
 export default function Users() {
   const { t } = useLang();
