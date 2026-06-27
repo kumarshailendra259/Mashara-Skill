@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -16,11 +16,15 @@ import { useNavigate } from "react-router-dom";
 // - Transactions (chain approver OR partner cross-approval eligible)
 // - Leave requests
 // - Reimbursements
+// - Asset purchase requests
+// - Employee transfer requests
 
 const TYPE_META = {
-  transaction:   { icon: ArrowLeftRight, label: "Transaction",   color: "bg-blue-50 text-[var(--brand)]" },
-  leave:         { icon: Plane,          label: "Leave",         color: "bg-purple-50 text-purple-700" },
-  reimbursement: { icon: Receipt,        label: "Reimbursement", color: "bg-orange-50 text-orange-700" },
+  transaction:       { icon: ArrowLeftRight, label: "Transaction",       color: "bg-blue-50 text-[var(--brand)]" },
+  leave:             { icon: Plane,          label: "Leave",              color: "bg-purple-50 text-purple-700" },
+  reimbursement:     { icon: Receipt,        label: "Reimbursement",      color: "bg-orange-50 text-orange-700" },
+  asset_purchase:    { icon: Box,            label: "Asset Purchase",     color: "bg-emerald-50 text-emerald-700" },
+  employee_transfer: { icon: UserCog,        label: "Employee Transfer",  color: "bg-amber-50 text-amber-700" },
 };
 
 export default function PendingApprovals() {
@@ -47,7 +51,7 @@ export default function PendingApprovals() {
   );
 
   const counts = useMemo(() => {
-    const c = { all: items.length, transaction: 0, leave: 0, reimbursement: 0 };
+    const c = { all: items.length, transaction: 0, leave: 0, reimbursement: 0, asset_purchase: 0, employee_transfer: 0 };
     items.forEach((i) => { c[i.request_type] = (c[i.request_type] || 0) + 1; });
     return c;
   }, [items]);
@@ -92,6 +96,8 @@ export default function PendingApprovals() {
 
   const openDetail = (item) => {
     if (item.request_type === "transaction") nav("/transactions");
+    else if (item.request_type === "asset_purchase") nav("/assets");
+    else if (item.request_type === "employee_transfer") nav("/employee-transfers");
     else nav("/hrms");
   };
 
@@ -116,10 +122,12 @@ export default function PendingApprovals() {
       {/* Type tabs */}
       <div className="flex gap-1 border-b border-[var(--border)] flex-wrap">
         {[
-          { key: "all",           label: "All" },
-          { key: "transaction",   label: "Transactions" },
-          { key: "leave",         label: "Leaves" },
-          { key: "reimbursement", label: "Reimbursements" },
+          { key: "all",               label: "All" },
+          { key: "transaction",       label: "Transactions" },
+          { key: "leave",             label: "Leaves" },
+          { key: "reimbursement",     label: "Reimbursements" },
+          { key: "asset_purchase",    label: "Assets" },
+          { key: "employee_transfer", label: "Transfers" },
         ].map((t) => (
           <button
             key={t.key}

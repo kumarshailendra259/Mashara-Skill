@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +23,8 @@ const navItems = [
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight },
   { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
   { to: "/stock", key: "stock", icon: Package },
+  { to: "/assets", key: "assets", icon: Box },
+  { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
   { to: "/reports", key: "reports", icon: FileBarChart2 },
   { to: "/tds-register", key: "tds_register", icon: Receipt, accountingOnly: true },
   { to: "/hrms", key: "HRMS", icon: Users },
@@ -95,6 +97,7 @@ export default function Layout({ children }) {
       if (it.adminManagerOnly && !["admin", "manager"].includes(user?.role)) return false;
       if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
+      if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
       return true;
     }),
     [user?.role],

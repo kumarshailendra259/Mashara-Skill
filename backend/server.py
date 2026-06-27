@@ -271,8 +271,19 @@ class RejectIn(BaseModel):
 # ============================================================================
 # Approval Chains — configurable multi-level approval workflows
 # ============================================================================
-ApprovalType = Literal["reimbursement", "leave", "transaction"]
+ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer"]
 ApproverKind = Literal["role", "staff", "user", "reports_to"]
+
+# Central mapping from approval-type → backing collection. Used by /approvals/act, /approvals/pending,
+# /approvals/{type}/{id}/nudge and /approvals/{type}/{id}/timeline. When adding a new approval type
+# update this single dict and the chain seeder below — no further plumbing required.
+APPROVAL_TYPE_COLL: dict = {
+    "reimbursement":     "reimbursements",
+    "leave":             "leaves",
+    "transaction":       "transactions",
+    "asset_purchase":    "asset_purchase_requests",
+    "employee_transfer": "employee_transfers",
+}
 
 
 class ApprovalStep(BaseModel):
@@ -387,7 +398,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -2736,6 +2747,27 @@ DEFAULT_CHAINS: List[dict] = [
             {"level": 1, "kind": "role", "value": "admin", "label": "Admin", "optional": False},
         ],
     },
+    {
+        "name": "Asset Purchase — Default (4 levels)",
+        "type": "asset_purchase",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "center_manager",  "label": "Center Manager (initiator)", "optional": True},
+            {"level": 2, "kind": "role", "value": "senior_manager",  "label": "Senior Manager",            "optional": False},
+            {"level": 3, "kind": "role", "value": "accountant",      "label": "Accountant",                "optional": False},
+            {"level": 4, "kind": "role", "value": "admin",           "label": "Admin (Final)",             "optional": False},
+        ],
+    },
+    {
+        "name": "Employee Transfer — Default (3 levels)",
+        "type": "employee_transfer",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "hr",             "label": "HR Verification",  "optional": False},
+            {"level": 2, "kind": "role", "value": "senior_manager", "label": "Senior Manager",   "optional": False},
+            {"level": 3, "kind": "role", "value": "admin",          "label": "Admin (Final)",    "optional": False},
+        ],
+    },
 ]
 
 
@@ -2867,6 +2899,17 @@ def _history_entry(level: int, action: str, user: dict, remarks: str = "") -> di
     }
 
 
+def _approval_link(req_type: str) -> str:
+    """Frontend route to open for a given approval request type's notifications."""
+    return {
+        "transaction":       "/transactions",
+        "leave":             "/hrms",
+        "reimbursement":     "/hrms",
+        "asset_purchase":    "/assets",
+        "employee_transfer": "/employee-transfers",
+    }.get(req_type, "/pending-approvals")
+
+
 # -------- Approval Chain CRUD --------
 @api.get("/approval-chains", response_model=List[ApprovalChainOut])
 async def list_approval_chains(_=Depends(get_current_user)):
@@ -2939,7 +2982,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
     On final-approve of a reimbursement, automatically creates the offsetting expense transaction
     (preserving the existing payroll/reimbursement-ledger sync behaviour).
     """
-    coll_name = {"reimbursement": "reimbursements", "leave": "leaves", "transaction": "transactions"}[body.request_type]
+    coll_name = APPROVAL_TYPE_COLL[body.request_type]
     coll = db[coll_name]
     rec = await coll.find_one({"id": body.request_id}, {"_id": 0})
     if not rec:
@@ -2970,7 +3013,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             await _notify(rec["created_by"],
                           f"Your {body.request_type} was rejected" + (f": {body.remarks}" if body.remarks else ""),
                           ntype=f"{body.request_type}_rejected", ref_id=body.request_id,
-                          link=("/hrms" if body.request_type != "transaction" else "/transactions"))
+                          link=_approval_link(body.request_type))
         return {"ok": True, "status": "rejected"}
 
     # Approve flow
@@ -3028,6 +3071,72 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "decided_by": user["id"],
                 "decided_at": datetime.now(timezone.utc).isoformat(),
             }
+        elif body.request_type == "asset_purchase":
+            # Final-approval converts request → Asset record + offsetting expense transaction.
+            now = datetime.now(timezone.utc).isoformat()
+            asset = {
+                "id": str(uuid.uuid4()),
+                "name": rec.get("name") or "Asset",
+                "category": rec.get("category"),
+                "serial_no": rec.get("serial_no"),
+                "vendor": rec.get("vendor"),
+                "purchase_amount": float(rec.get("est_amount") or 0),
+                "purchase_date": rec.get("required_date") or now[:10],
+                "depreciation_rate_pct": float(rec.get("depreciation_rate_pct") or 0),
+                "useful_life_years": rec.get("useful_life_years"),
+                "center_id": rec.get("center_id"),
+                "assigned_to_staff_id": None,
+                "status": "active",
+                "attachments": rec.get("attachments") or [],
+                "purchase_request_id": rec["id"],
+                "created_by": user["id"],
+                "created_at": now,
+            }
+            await db.assets.insert_one(asset)
+            txn = None
+            if asset["purchase_amount"] > 0:
+                txn = {
+                    "id": str(uuid.uuid4()),
+                    "type": "expense",
+                    "amount": asset["purchase_amount"],
+                    "date": asset["purchase_date"],
+                    "description": f"Asset Purchase: {asset['name']}" + (f" (SN {asset['serial_no']})" if asset.get("serial_no") else ""),
+                    "company_id": None, "partner_id": None,
+                    "center_id": asset.get("center_id"),
+                    "project_id": None,
+                    "items": [], "attachments": asset.get("attachments") or [],
+                    "created_by": user["id"], "created_at": now,
+                    "status": "approved", "approved_by": user["id"], "approved_at": now,
+                    "rejected_reason": None,
+                    "asset_id": asset["id"],
+                }
+                await db.transactions.insert_one(txn)
+                await db.assets.update_one({"id": asset["id"]}, {"$set": {"txn_id": txn["id"]}})
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "approved_by": user["id"],
+                "approved_at": now,
+                "asset_id": asset["id"],
+                "txn_id": (txn or {}).get("id"),
+            }
+        elif body.request_type == "employee_transfer":
+            # Final-approval applies the transfer: update staff.center_id and stamp transfer doc.
+            now = datetime.now(timezone.utc).isoformat()
+            if rec.get("staff_id") and rec.get("to_center_id"):
+                await db.staff.update_one(
+                    {"id": rec["staff_id"]},
+                    {"$set": {"center_id": rec["to_center_id"]}},
+                )
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "approved_by": user["id"],
+                "approved_at": now,
+                "applied_at": now,
+            }
         else:  # transaction
             update = {
                 "current_level": 0,
@@ -3042,7 +3151,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             verb = "paid" if body.request_type == "reimbursement" else "approved"
             await _notify(rec["created_by"], f"Your {body.request_type} was {verb}",
                           ntype=f"{body.request_type}_{verb}", ref_id=body.request_id,
-                          link=("/hrms" if body.request_type != "transaction" else "/transactions"))
+                          link=_approval_link(body.request_type))
         return {"ok": True, "status": update["status"]}
 
     # Otherwise advance to next level
@@ -3055,9 +3164,9 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
         for uid in next_uids:
             if uid != user["id"]:
                 await _notify(uid,
-                              f"{body.request_type.title()} awaiting your approval (Level {next_level}: {nxt.get('label','')})",
+                              f"{body.request_type.replace('_',' ').title()} awaiting your approval (Level {next_level}: {nxt.get('label','')})",
                               ntype=f"{body.request_type}_pending", ref_id=body.request_id,
-                              link=("/hrms" if body.request_type != "transaction" else "/transactions"))
+                              link=_approval_link(body.request_type))
     return {"ok": True, "status": "in_progress", "current_level": next_level}
 
 
@@ -3068,7 +3177,7 @@ async def list_pending_approvals(user=Depends(get_current_user)):
     for the requesting user (so associated partners see them here)."""
     out: List[dict] = []
     seen_txn_ids: set[str] = set()
-    for req_type, coll_name in [("reimbursement", "reimbursements"), ("leave", "leaves"), ("transaction", "transactions")]:
+    for req_type, coll_name in APPROVAL_TYPE_COLL.items():
         rows = await db[coll_name].find({"current_level": {"$gt": 0}}, {"_id": 0}).sort("created_at", -1).to_list(2000)
         for rec in rows:
             if await _user_can_act_on_request(user, rec):
@@ -3079,9 +3188,16 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "current_level": rec.get("current_level"),
                     "step_label": (step or {}).get("label"),
                     "summary": {
-                        "amount": rec.get("amount"),
-                        "date": rec.get("date") or rec.get("start_date"),
-                        "description": rec.get("description") or rec.get("reason"),
+                        "amount": rec.get("amount") or rec.get("est_amount"),
+                        "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date"),
+                        "description": (
+                            rec.get("description")
+                            or rec.get("reason")
+                            or (f"{rec.get('name','Asset')} → {rec.get('category') or ''}".strip(" →")
+                                if req_type == "asset_purchase" else None)
+                            or (f"{rec.get('staff_name','Staff')} → center {rec.get('to_center_id','')[:8]}"
+                                if req_type == "employee_transfer" else None)
+                        ),
                     },
                     "created_at": rec.get("created_at"),
                     "via": "chain",
@@ -3119,9 +3235,9 @@ async def list_pending_approvals(user=Depends(get_current_user)):
 async def nudge_approver(request_type: str, request_id: str, user=Depends(get_current_user)):
     """Send a polite reminder notification to the currently-pending approver(s).
     Only the request submitter (or admin/HR) can nudge."""
-    if request_type not in ("reimbursement", "leave", "transaction"):
+    if request_type not in APPROVAL_TYPE_COLL:
         raise HTTPException(400, "Invalid request_type")
-    coll_name = {"reimbursement": "reimbursements", "leave": "leaves", "transaction": "transactions"}[request_type]
+    coll_name = APPROVAL_TYPE_COLL[request_type]
     rec = await db[coll_name].find_one({"id": request_id}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
@@ -3144,7 +3260,7 @@ async def nudge_approver(request_type: str, request_id: str, user=Depends(get_cu
             uid,
             f"Reminder from {name}: please review their pending {request_type} (Level {rec['current_level']}: {step.get('label','')})",
             ntype=f"{request_type}_nudge", ref_id=request_id,
-            link=("/hrms" if request_type != "transaction" else "/transactions"),
+            link=_approval_link(request_type),
         )
     return {"ok": True, "notified": len(approver_ids)}
 
@@ -3159,9 +3275,9 @@ async def approval_timeline(request_type: str, request_id: str, _=Depends(get_cu
       - state: "done" / "current" / "pending"
       - action taken (approve/reject/auto-skip) + by_user_name + at + remarks (from chain_history)
     """
-    if request_type not in ("reimbursement", "leave", "transaction"):
+    if request_type not in APPROVAL_TYPE_COLL:
         raise HTTPException(400, "Invalid request_type")
-    coll_name = {"reimbursement": "reimbursements", "leave": "leaves", "transaction": "transactions"}[request_type]
+    coll_name = APPROVAL_TYPE_COLL[request_type]
     rec = await db[coll_name].find_one({"id": request_id}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Request not found")
@@ -5202,7 +5318,353 @@ async def my_tasks(user=Depends(get_current_user)):
     return counts
 
 
+# ============================================================================
+# Assets & Asset Purchase Requests (Phase-3 RBAC)
+# ----------------------------------------------------------------------------
+# Workflow:
+#   Center Manager creates an Asset-Purchase Request  →  Senior Manager → Accountant → Admin
+#   (chain configurable via /api/approval-chains, default seeded on startup)
+#   On final-approve: an `assets` doc is created AND an offsetting expense `transactions` doc
+#   is recorded against the center. Assets can subsequently be transferred between centers.
+# ============================================================================
+
+
+class AssetPurchaseRequestIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(min_length=2)
+    category: Optional[str] = None
+    description: Optional[str] = None
+    serial_no: Optional[str] = None
+    vendor: Optional[str] = None
+    est_amount: float = Field(ge=0)
+    required_date: Optional[str] = None
+    depreciation_rate_pct: float = Field(ge=0, default=0)
+    useful_life_years: Optional[float] = Field(ge=0, default=None)
+    center_id: Optional[str] = None
+    attachments: List[dict] = Field(default_factory=list)
+
+
+class AssetIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(min_length=2)
+    category: Optional[str] = None
+    serial_no: Optional[str] = None
+    vendor: Optional[str] = None
+    purchase_amount: float = Field(ge=0, default=0)
+    purchase_date: Optional[str] = None
+    depreciation_rate_pct: float = Field(ge=0, default=0)
+    useful_life_years: Optional[float] = Field(ge=0, default=None)
+    center_id: Optional[str] = None
+    assigned_to_staff_id: Optional[str] = None
+    status: Literal["active", "transferred", "disposed", "maintenance"] = "active"
+    attachments: List[dict] = Field(default_factory=list)
+
+
+class AssetTransferIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    asset_id: str
+    to_center_id: str
+    reason: str = Field(min_length=3)
+
+
+def _asset_scope_for_user(user: dict) -> dict:
+    """Mongo filter restricting assets/requests to centers a user can see.
+    (Plain helper, currently inlined in each endpoint — kept for future reuse.)"""
+    role = user.get("role")
+    if role in ("admin", "senior_manager", "accountant", "hr"):
+        return {}
+    if role in ("center_manager", "center_staff", "center_partner"):
+        cids = user.get("assigned_center_ids") or []
+        return {"center_id": {"$in": cids}} if cids else {"center_id": "__none__"}
+    return {}
+
+
+# ---------- Asset Purchase Requests ----------
+@api.post("/asset-purchase-requests")
+async def create_asset_purchase_request(body: AssetPurchaseRequestIn, user=Depends(get_current_user)):
+    role = user.get("role")
+    if role not in ("admin", "center_manager", "senior_manager"):
+        raise HTTPException(403, "Only Center Manager, Senior Manager or Admin can raise asset purchase requests")
+    doc = body.model_dump()
+    # Default center_id from user's first assigned center when not provided
+    if not doc.get("center_id"):
+        cids = user.get("assigned_center_ids") or []
+        doc["center_id"] = cids[0] if cids else None
+    if not doc.get("center_id") and role != "admin":
+        raise HTTPException(400, "center_id is required")
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("email"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+    })
+    await _attach_chain_to_request("asset_purchase", doc)
+    await db.asset_purchase_requests.insert_one(doc)
+    # Notify level-1 approvers
+    snap = doc.get("chain_snapshot") or []
+    if snap:
+        step1 = snap[0]
+        for uid in await _resolve_step_user_ids(step1, doc):
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"Asset purchase request awaiting your approval: {doc['name']} (₹{doc['est_amount']:,.0f})",
+                              ntype="asset_purchase_pending", ref_id=doc["id"], link="/assets")
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/asset-purchase-requests")
+async def list_asset_purchase_requests(
+    status: Optional[str] = None,
+    center_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    q: dict = {}
+    role = user.get("role")
+    if role in ("center_manager", "center_staff", "center_partner"):
+        cids = user.get("assigned_center_ids") or []
+        q["center_id"] = {"$in": cids} if cids else "__none__"
+    if center_id:
+        q["center_id"] = center_id
+    if status:
+        q["status"] = status
+    docs = await db.asset_purchase_requests.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+
+@api.delete("/asset-purchase-requests/{rid}")
+async def delete_asset_purchase_request(rid: str, user=Depends(get_current_user)):
+    rec = await db.asset_purchase_requests.find_one({"id": rid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    # Only initiator or admin can delete, and only while pending
+    if user.get("role") != "admin" and rec.get("created_by") != user["id"]:
+        raise HTTPException(403, "Only the initiator or admin can delete")
+    if rec.get("status") not in ("pending",):
+        raise HTTPException(400, f"Cannot delete (status={rec.get('status')})")
+    await db.asset_purchase_requests.delete_one({"id": rid})
+    return {"ok": True}
+
+
+# ---------- Assets registry ----------
+@api.get("/assets")
+async def list_assets(
+    center_id: Optional[str] = None,
+    status: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    q: dict = {}
+    role = user.get("role")
+    if role in ("center_manager", "center_staff", "center_partner"):
+        cids = user.get("assigned_center_ids") or []
+        q["center_id"] = {"$in": cids} if cids else "__none__"
+    if center_id:
+        q["center_id"] = center_id
+    if status:
+        q["status"] = status
+    docs = await db.assets.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    return docs
+
+
+@api.post("/assets")
+async def create_asset_direct(body: AssetIn, user=Depends(require_role("admin", "accountant"))):
+    """Admin/Accountant can directly register an existing/legacy asset (bypassing the purchase chain).
+    Useful for migrating pre-existing inventory into the new Asset register."""
+    doc = body.model_dump()
+    now = datetime.now(timezone.utc).isoformat()
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "purchase_date": doc.get("purchase_date") or now[:10],
+        "created_by": user["id"],
+        "created_at": now,
+        "manual_entry": True,
+    })
+    await db.assets.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/assets/{aid}")
+async def update_asset(aid: str, body: dict, user=Depends(require_role("admin", "accountant", "center_manager"))):
+    allowed = {"name", "category", "serial_no", "vendor", "purchase_amount", "purchase_date",
+               "depreciation_rate_pct", "useful_life_years", "assigned_to_staff_id", "status", "attachments"}
+    upd = {k: v for k, v in (body or {}).items() if k in allowed}
+    if not upd:
+        raise HTTPException(400, "No allowed fields to update")
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    upd["updated_by"] = user["id"]
+    res = await db.assets.find_one_and_update({"id": aid}, {"$set": upd}, return_document=True)
+    if not res:
+        raise HTTPException(404, "Asset not found")
+    res.pop("_id", None)
+    return res
+
+
+@api.delete("/assets/{aid}")
+async def delete_asset(aid: str, _=Depends(require_role("admin"))):
+    r = await db.assets.delete_one({"id": aid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Asset not found")
+    return {"ok": True}
+
+
+# ---------- Asset Transfers (lightweight 2-step approval: requester → admin) ----------
+@api.post("/asset-transfers")
+async def create_asset_transfer(body: AssetTransferIn, user=Depends(get_current_user)):
+    asset = await db.assets.find_one({"id": body.asset_id}, {"_id": 0})
+    if not asset:
+        raise HTTPException(404, "Asset not found")
+    if asset.get("status") != "active":
+        raise HTTPException(400, f"Asset is not active (status={asset.get('status')})")
+    role = user.get("role")
+    if role not in ("admin", "senior_manager", "center_manager"):
+        raise HTTPException(403, "Only Center Manager, Senior Manager or Admin can initiate asset transfers")
+    if role == "center_manager":
+        cids = user.get("assigned_center_ids") or []
+        if asset.get("center_id") not in cids:
+            raise HTTPException(403, "You do not manage this asset's center")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "asset_id": body.asset_id,
+        "asset_name": asset.get("name"),
+        "from_center_id": asset.get("center_id"),
+        "to_center_id": body.to_center_id,
+        "reason": body.reason,
+        "status": "pending",
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("email"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.asset_transfers.insert_one(doc)
+    # Notify admins
+    admins = await db.users.find({"role": "admin"}, {"_id": 0, "id": 1}).to_list(50)
+    for a in admins:
+        if a["id"] != user["id"]:
+            await _notify(a["id"], f"Asset transfer requested: {asset.get('name')}",
+                          ntype="asset_transfer_pending", ref_id=doc["id"], link="/assets")
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/asset-transfers")
+async def list_asset_transfers(status: Optional[str] = None, user=Depends(get_current_user)):
+    q: dict = {}
+    role = user.get("role")
+    if role in ("center_manager", "center_staff", "center_partner"):
+        cids = user.get("assigned_center_ids") or []
+        q["$or"] = [{"from_center_id": {"$in": cids}}, {"to_center_id": {"$in": cids}}]
+    if status:
+        q["status"] = status
+    docs = await db.asset_transfers.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+
+@api.post("/asset-transfers/{tid}/decide")
+async def decide_asset_transfer(tid: str, body: dict, user=Depends(require_role("admin", "senior_manager"))):
+    action = (body or {}).get("action")
+    remarks = (body or {}).get("remarks", "")
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be 'approve' or 'reject'")
+    rec = await db.asset_transfers.find_one({"id": tid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") != "pending":
+        raise HTTPException(400, f"Already finalised ({rec.get('status')})")
+    now = datetime.now(timezone.utc).isoformat()
+    if action == "approve":
+        # Apply: move asset.center_id, mark asset as transferred-history (still active)
+        await db.assets.update_one({"id": rec["asset_id"]}, {"$set": {"center_id": rec["to_center_id"], "updated_at": now}})
+        upd = {"status": "approved", "decided_by": user["id"], "decided_at": now, "remarks": remarks}
+    else:
+        upd = {"status": "rejected", "decided_by": user["id"], "decided_at": now, "remarks": remarks}
+    await db.asset_transfers.update_one({"id": tid}, {"$set": upd})
+    if rec.get("created_by") and rec["created_by"] != user["id"]:
+        await _notify(rec["created_by"], f"Asset transfer {action}d: {rec.get('asset_name','')}",
+                      ntype=f"asset_transfer_{action}d", ref_id=tid, link="/assets")
+    return {"ok": True, "status": upd["status"]}
+
+
+# ============================================================================
+# Employee Transfers (Phase-4 RBAC)
+# ----------------------------------------------------------------------------
+# Workflow: HR → Senior Manager → Admin. On final-approve staff.center_id is updated.
+# ============================================================================
+
+
+class EmployeeTransferIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    staff_id: str
+    to_center_id: str
+    effective_date: str  # YYYY-MM-DD
+    reason: str = Field(min_length=3)
+    new_designation: Optional[str] = None
+    new_reports_to_id: Optional[str] = None
+
+
+@api.post("/employee-transfers")
+async def create_employee_transfer(body: EmployeeTransferIn, user=Depends(get_current_user)):
+    role = user.get("role")
+    if role not in ("admin", "hr", "senior_manager", "manager", "center_manager"):
+        raise HTTPException(403, "You cannot raise an employee transfer")
+    staff = await db.staff.find_one({"id": body.staff_id}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+    if staff.get("center_id") == body.to_center_id:
+        raise HTTPException(400, "Source and destination centers are the same")
+    doc = body.model_dump()
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "staff_name": staff.get("name"),
+        "from_center_id": staff.get("center_id"),
+        # We route the transfer through the destination center's chain so that center's HR/SrMgr can be involved.
+        "center_id": body.to_center_id,
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("email"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "pending",
+    })
+    await _attach_chain_to_request("employee_transfer", doc)
+    await db.employee_transfers.insert_one(doc)
+    snap = doc.get("chain_snapshot") or []
+    if snap:
+        for uid in await _resolve_step_user_ids(snap[0], doc):
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"Employee transfer awaiting your approval: {staff.get('name')}",
+                              ntype="employee_transfer_pending", ref_id=doc["id"], link="/employee-transfers")
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/employee-transfers")
+async def list_employee_transfers(status: Optional[str] = None, user=Depends(get_current_user)):
+    q: dict = {}
+    role = user.get("role")
+    if role in ("center_manager", "center_staff", "center_partner"):
+        cids = user.get("assigned_center_ids") or []
+        q["$or"] = [{"from_center_id": {"$in": cids}}, {"to_center_id": {"$in": cids}}]
+    if status:
+        q["status"] = status
+    docs = await db.employee_transfers.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+
+@api.delete("/employee-transfers/{tid}")
+async def delete_employee_transfer(tid: str, user=Depends(get_current_user)):
+    rec = await db.employee_transfers.find_one({"id": tid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if user.get("role") != "admin" and rec.get("created_by") != user["id"]:
+        raise HTTPException(403, "Only the initiator or admin can delete")
+    if rec.get("status") not in ("pending",):
+        raise HTTPException(400, f"Cannot delete (status={rec.get('status')})")
+    await db.employee_transfers.delete_one({"id": tid})
+    return {"ok": True}
+
+
 # ============================================================
+
 
 
 # ---------- Register router + CORS ----------
