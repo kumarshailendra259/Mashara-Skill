@@ -28,6 +28,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 3 — Asset Management (Done, Mar 2026):
+- **Asset Purchase Workflow** — 4-level approval chain (Center Manager → Senior Manager → Accountant → Admin)
+- On final approve: Asset row added to `/assets` registry + offsetting expense transaction recorded
+- **Asset Registry** with serial no, vendor, depreciation %, useful life, status (active/transferred/disposed/maintenance)
+- **Inter-center Asset Transfer** with admin/sr-mgr decision; approval moves asset.center_id, reject keeps it
+- Frontend: `/assets` page with 3 tabs (Purchase Requests / Registry / Transfers) + KPI strip
+
+### Phase 4 — Employee Transfer (Done, Mar 2026):
+- 3-level approval chain (HR → Senior Manager → Admin)
+- On final approve: `staff.center_id` updated to destination
+- Initiator scope: admin, hr, senior_manager, manager, center_manager
+- Frontend: `/employee-transfers` page with status pills + cancel-while-pending
+
+### Unified Approvals Inbox extended:
+- `/pending-approvals` now shows 5 tabs: Transactions / Leaves / Reimbursements / **Asset Purchase** / **Employee Transfer**
+- Summary block shows est_amount for assets and meaningful description fallbacks
+
 ### Phase 0 — Core (Done):
 - All 11 roles defined + RBAC enforcement
 - Configurable approval chains (N-level, type-scoped, center-scoped)
@@ -67,36 +84,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Pending Backlog (Phased)
 
-### Phase 2 — Role-specific Dashboards (P1, ~2 days):
-- Custom widget set per role (currently mostly admin-shaped):
-  - Senior Manager: Regional rankings, multi-center comparison, expense analysis
-  - Center Manager: Center attendance, stock summary, asset status, batch performance
-  - Accountant: Pending payments queue, payroll queue, cash flow, reimb queue
-  - HR: Joiners/resignations widget, attendance compliance, leave analytics
-  - Center Partner: Profitability, expense requests, revenue analysis
-  - Reporting Authority: Pending verification queue, escalation cases
+### Phase 5 — Quick wins (P1):
+- Privacy Policy page (`/privacy.html`) for Play Store PWA submission
+- SEO Audit re-run on production URL
+- Announcement Broadcast module (HR push to all/center)
+- Performance Reviews / Warning Letters / Exit-process workflow
 
-### Phase 3 — HR Lifecycle (P1, ~3 days):
+### Phase 6 — HR Lifecycle Extras (P2):
 - Recruitment pipeline (job posts → applicants → interview → offer)
 - Onboarding checklist
-- Employee Exit Process workflow
-- Warning letters
 - Performance Reviews
 
-### Phase 4 — Asset Mgmt + Compliance (P2, ~2 days):
-- Asset Management as separate module (vs current inventory):
-  - Asset Purchase workflow (CM → SrMgr → Acc → Admin)
-  - Asset Transfer
-  - Asset Tracking (serial, depreciation)
-- Compliance Auto-Alerts (PAN missing, GST expiring, document expiry)
-- Announcement Broadcast module (HR push to all/center)
-- Employee Transfer workflow
+### Phase 7 — Compliance Auto-Alerts (P2):
+- PAN missing, GST expiring, document expiry alerts
+- Bulk CSV import for Centers/Partners/Companies
 
-### Phase 5 — Extras (P3):
-- Device Binding (lock attendance to first registered device)
+### Phase 8 — Extras (P3):
 - WhatsApp/SMS notifications (Twilio/Telegram)
+- Device Binding (lock attendance to first registered device)
 - Backup Management UI
-- Bulk import (CSV) for Centers/Partners/Companies
 - Penny-drop bank verification (Razorpay/Cashfree)
 
 ## Key Files

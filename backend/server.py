@@ -5390,8 +5390,8 @@ async def create_asset_purchase_request(body: AssetPurchaseRequestIn, user=Depen
     if not doc.get("center_id"):
         cids = user.get("assigned_center_ids") or []
         doc["center_id"] = cids[0] if cids else None
-    if not doc.get("center_id") and role != "admin":
-        raise HTTPException(400, "center_id is required")
+    if not doc.get("center_id"):
+        raise HTTPException(400, "center_id is required (either via body or via your assigned centers)")
     doc.update({
         "id": str(uuid.uuid4()),
         "created_by": user["id"],
