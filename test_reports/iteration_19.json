@@ -1,0 +1,37 @@
+{
+  "summary": "Iter-21 (Enterprise RBAC Phase-1 + Phase-2) backend regression + new-feature validation. 17/17 PASS. All Phase-1 (login-history with IP/UA, new roles reporting_authority + center_partner, entity auto-user creation with generated_password + credentials_mail_sent, resend-credentials with password rotation) and Phase-2 (/api/dashboard/role-widgets per-role shape — verified admin + accountant + reporting_authority + center_partner) work as spec. Regression on transactions, dashboard/summary, batches with company_id+partner_ids, fooding-entries CRUD + dashboard/fooding-income, and center-scoped approval-chains all clean.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/auth/login-history", "issue": "Field naming inconsistency vs spec: code persists `ip` (not `ip_address` as the review_request mentions). Tests accept either; consider renaming for API consistency or documenting the field name."},
+      {"endpoint": "POST /api/auth/register", "issue": "Pydantic EmailStr rejects modern reserved TLDs like `.local` / `.test` (RFC 6761) — registration with such emails returns 422. Not a bug but front-end devs should be informed (existing iter tests have also used these and silently passed via direct DB inserts)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter21_rbac_phases.py",
+    "/app/test_reports/pytest/iteration_21.xml"
+  ],
+  "action_items": [
+    "Consider renaming login_logs `ip` → `ip_address` to match the review-request contract (or update spec to `ip`). Cosmetic.",
+    "Resend email delivery itself was not verified (would consume quota). Mail-audit fields (credentials_mail_sent / credentials_mail_id / credentials_mail_error) are populated correctly. Per main-agent note this is acceptable."
+  ],
+  "critical_code_review_comments": [
+    "/app/backend/server.py is now 5217 lines — significantly over the 700-line guideline. Strongly recommend splitting into routers: auth, entities (with auto-user logic), approval-chains, transactions/batches/payments, hrms/payroll, dashboard, programs.",
+    "_auto_create_user_for_entity: when an existing user is re-linked (email already registered), the function returns None — admin gets NO indication that the entity was linked vs created. Consider returning a tuple (plain, was_existing) so the EntityOut response can flag this clearly; current behaviour silently omits generated_password which the front-end could misread as a failure.",
+    "/api/entities/{etype}/{eid}/resend-credentials: when linked_uid is missing, code calls _auto_create_user_for_entity then returns generated_password=None even though _auto_create_user_for_entity does generate a password — info loss. Capture and return the plain password (line 1098-1102).",
+    "ApprovalChain step model exposes `value` (str), but the front-end is likely building UI around `role`/`user_id`/`staff_id` selectors. Spec the value semantics in OpenAPI examples to avoid the 422 our test hit on first attempt.",
+    "Role-widgets dashboard does NOT apply center/partner scope to financial aggregates for center_partner role (uses global income/expense totals) — line 2114 aggregates all approved txns. If center_partner is meant to see only their scope this is a leakage; if they are global directors that's fine. Confirm intended semantics.",
+    "login-history endpoint stores IP via `x-forwarded-for` first header; behind k8s ingress this is fine but no truncation/anonymisation. Audit-logging good, but flag for GDPR/IT-policy review."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter21_rbac_phases.py (created)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md). Temporary users created during run use prefix `TEST_*` and unique RUN suffix.",
+  "seed_data_creation": "Per-run RUN=uuid suffix on emails/entities prevents collisions. Created: 1 accountant user, 1 reporting_authority user, 1 center_partner user, 1 center with auto-user (center_manager), 2 partners (one with auto-user), 1 project, 1 company, 1 batch, 1 transaction, 1 fooding entry (deleted), 1 center-scoped approval chain. Not cleaned up — historical pattern across iterations.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-21 added Enterprise RBAC: (a) login_logs collection now appended on every /api/auth/login (success or fail) with id/email/user_id/success/ip/user_agent/at/reason; admin/HR see all, others see only own. (b) Two new roles in ROLE_LITERAL: reporting_authority + center_partner; register/login/widgets all wired. (c) POST /api/entities/center|partner with `email` field auto-creates a user (role=center_manager or partner) and returns generated_password ONCE in EntityOut; ALL subsequent GETs strip it (only persisted as hash). credentials_mail_sent + credentials_mail_id + credentials_mail_error are persisted on the entity doc. (d) POST /api/entities/{etype}/{eid}/resend-credentials rotates the password and returns it once (verified login with new password works). (e) /api/dashboard/role-widgets returns role-specific shape with `role` + `as_of` plus role-specific keys. (f) approval_chains.center_id allows multiple active chains as long as each scoped to a distinct center_id; global fallback chain has center_id=null. Test file: /app/backend/tests/test_iter21_rbac_phases.py — 17 tests, all classes have inter-test dependencies (TestEntityAutoUser creates center+partner used by TestCenterScopedChain) so run the whole file at once.",
+  "rca of the issue": "N/A — no issues blocked the suite. Two initial test failures were author mistakes (used .local TLD which pydantic 2.x EmailStr rejects, and used `role` key instead of `value` on ApprovalStep) — both fixed in-place."
+}
