@@ -166,14 +166,44 @@ class PartnerAssociationOut(BaseModel):
     created_by: Optional[str] = None
 
 class EntityIn(BaseModel):
+    model_config = ConfigDict(extra="allow")
     name: str
     description: Optional[str] = ""
+    # ===== Common optional fields (any subset, depending on etype) =====
+    # All optional — front-end decides which to show based on etype.
+    email: Optional[str] = None           # Login id for partner / center manager
+    mobile: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    # ----- Company -----
+    gst_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    cin_number: Optional[str] = None
+    registration_number: Optional[str] = None
+    logo_url: Optional[str] = None
+    # ----- Center -----
+    manager_name: Optional[str] = None    # Center manager name (creates auto user)
+    # ----- Project -----
+    project_type: Optional[str] = None    # ID from project_types collection (JSDMS/SJKVY/BIRSA/...)
+    project_code: Optional[str] = None
+    funding_agency: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    # ----- Auto-created user reference (set by backend, not by client) -----
+    linked_user_id: Optional[str] = None
 
 
 class EntityOut(EntityIn):
+    model_config = ConfigDict(extra="allow")
     id: str
     type: str
     created_at: str
+    # When backend auto-creates a user (center manager / partner login), return the
+    # plain-text password ONCE on POST response so admin can copy + share.
+    # Stored hashed in DB; this field is never persisted on the entity doc.
+    generated_password: Optional[str] = None
 
 
 EntityType = Literal["company", "partner", "center", "project"]
@@ -810,7 +840,15 @@ async def _shares_project_or_center(approver_pid: str, owner_pid: str,
 
 
 async def _can_partner_approve(user: dict, txn: dict) -> tuple[bool, str]:
-    """Returns (allowed, reason). True if user (partner role) can cross-approve this txn."""
+    """Returns (allowed, reason). True if user (partner role) can cross-approve this txn.
+
+    Allowed when ANY of these are true:
+      • Peer user under SAME partner entity (different user_id, same assigned_partner_id)
+      • Custom pairing in `partner_associations` between approver_pid and owner_pid
+      • Shares the same project_id OR center_id with the txn's partner
+
+    Always blocked when the approver IS the txn creator (own-self check).
+    """
     if user.get("role") != "partner":
         return (False, "Only partner role can perform partner-approval")
     approver_pid = user.get("assigned_partner_id")
@@ -819,10 +857,12 @@ async def _can_partner_approve(user: dict, txn: dict) -> tuple[bool, str]:
     owner_pid = txn.get("partner_id")
     if not owner_pid:
         return (False, "Transaction has no partner attached")
-    if approver_pid == owner_pid:
-        return (False, "You cannot approve your own partner's transactions")
+    # Block creator-self only (NOT same-partner — peers under one partner entity should approve each other)
     if txn.get("created_by") == user["id"]:
         return (False, "You cannot approve a transaction you created")
+    # Peer under the same partner entity
+    if approver_pid == owner_pid:
+        return (True, "Peer user under the same partner entity")
     # Check custom pairing
     custom = await _custom_associated_partners(approver_pid)
     if owner_pid in custom:
@@ -844,13 +884,92 @@ ENTITY_COLLECTION = {
 
 
 def _entity_doc(body: EntityIn, etype: str) -> dict:
+    """Build entity dict including ALL extra fields the user passed (gst, mobile, etc).
+    Uses Pydantic .model_dump() so extra-allow fields make it through."""
+    data = body.model_dump()
+    # Strip system-managed keys client might've supplied
+    data.pop("linked_user_id", None)
     return {
         "id": str(uuid.uuid4()),
         "type": etype,
-        "name": body.name,
-        "description": body.description or "",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        **data,
     }
+
+
+def _gen_password(length: int = 12) -> str:
+    """Generate a human-friendly random password (no ambiguous 0/O/1/l)."""
+    import secrets
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$"
+    return "".join(secrets.choice(chars) for _ in range(length))
+
+
+async def _maybe_send_credentials_email(email: str, name: str, password: str, role_label: str):
+    """Best-effort: send login credentials via Resend. Failures are silent (admin still has password)."""
+    try:
+        from email_utils import send_credentials_email
+        portal_url = "https://finance.masharaskills.com"
+        check_in_url = "https://finance.masharaskills.com/check-in"
+        await send_credentials_email(
+            to_email=email, name=name or "there",
+            password=password, check_in_url=check_in_url, portal_url=portal_url,
+        )
+    except Exception:
+        # Never fail the entity-creation flow on email errors.
+        pass
+
+
+async def _auto_create_user_for_entity(etype: str, entity_doc: dict) -> Optional[str]:
+    """If the entity carries an `email`, auto-create (or re-link) a user account.
+
+    - center → role=center_manager, assigned_center_ids=[entity_id]
+    - partner → role=partner, assigned_partner_id=entity_id
+
+    Returns the plain-text password (for one-time display) OR None when no user
+    was created (e.g. email absent, or email already belongs to a user — in that
+    case the entity is linked to the existing user without resetting password).
+    """
+    if etype not in ("center", "partner"):
+        return None
+    email = (entity_doc.get("email") or "").strip().lower()
+    if not email:
+        return None
+    role = "center_manager" if etype == "center" else "partner"
+    role_label = "Center Manager" if etype == "center" else "Partner"
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        # Re-link existing user to this entity (no password reset)
+        upd: dict = {}
+        if etype == "center":
+            current = set(existing.get("assigned_center_ids") or [])
+            current.add(entity_doc["id"])
+            upd["assigned_center_ids"] = list(current)
+            upd["role"] = role if existing.get("role") in (None, "viewer") else existing.get("role")
+        else:
+            upd["assigned_partner_id"] = entity_doc["id"]
+            upd["role"] = role if existing.get("role") in (None, "viewer") else existing.get("role")
+        if upd:
+            await db.users.update_one({"id": existing["id"]}, {"$set": upd})
+        entity_doc["linked_user_id"] = existing["id"]
+        return None
+    # Create new user
+    plain = _gen_password()
+    user_doc = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "password_hash": hash_password(plain),
+        "name": entity_doc.get("manager_name") or entity_doc.get("name") or email.split("@")[0],
+        "role": role,
+        "assigned_center_ids": [entity_doc["id"]] if etype == "center" else [],
+        "assigned_partner_id": entity_doc["id"] if etype == "partner" else None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_via": f"entity_{etype}",
+    }
+    await db.users.insert_one(user_doc)
+    entity_doc["linked_user_id"] = user_doc["id"]
+    # Fire-and-forget Resend email (silent on failure)
+    await _maybe_send_credentials_email(email, user_doc["name"], plain, role_label)
+    return plain
 
 
 @api.get("/entities/{etype}", response_model=List[EntityOut])
@@ -864,21 +983,41 @@ async def list_entities(etype: EntityType, _=Depends(get_current_user)):
 async def create_entity(etype: EntityType, body: EntityIn, _=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
     doc = _entity_doc(body, etype)
+    plain_password = await _auto_create_user_for_entity(etype, doc)
     await db[col].insert_one(doc)
+    doc.pop("_id", None)
+    if plain_password:
+        return EntityOut(**{**doc, "generated_password": plain_password})
     return EntityOut(**doc)
 
 
 @api.put("/entities/{etype}/{eid}", response_model=EntityOut)
 async def update_entity(etype: EntityType, eid: str, body: EntityIn, _=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
-    res = await db[col].find_one_and_update(
-        {"id": eid},
-        {"$set": {"name": body.name, "description": body.description or ""}},
-        return_document=True,
-    )
-    if not res:
+    existing = await db[col].find_one({"id": eid}, {"_id": 0})
+    if not existing:
         raise HTTPException(404, "Not found")
+    update = body.model_dump()
+    update.pop("linked_user_id", None)  # cannot be set from client
+    # If email changed AND entity already has a linked user, mirror the change on the user record
+    old_email = (existing.get("email") or "").lower()
+    new_email = (update.get("email") or "").lower()
+    linked_uid = existing.get("linked_user_id")
+    plain_password = None
+    if linked_uid and new_email and new_email != old_email:
+        # Conflict check: another user already on new_email?
+        clash = await db.users.find_one({"email": new_email, "id": {"$ne": linked_uid}}, {"_id": 0, "id": 1})
+        if clash:
+            raise HTTPException(400, f"Email '{new_email}' is already used by another user")
+        await db.users.update_one({"id": linked_uid}, {"$set": {"email": new_email}})
+    elif (not linked_uid) and new_email and etype in ("center", "partner"):
+        # No linked user but email now provided → create one on edit too
+        plain_password = await _auto_create_user_for_entity(etype, {**existing, **update, "id": eid})
+        update["linked_user_id"] = (await db[col].find_one({"id": eid}, {"_id": 0, "linked_user_id": 1}) or {}).get("linked_user_id")
+    res = await db[col].find_one_and_update({"id": eid}, {"$set": update}, return_document=True)
     res.pop("_id", None)
+    if plain_password:
+        return EntityOut(**{**res, "generated_password": plain_password})
     return EntityOut(**res)
 
 
@@ -889,6 +1028,73 @@ async def delete_entity(etype: EntityType, eid: str, _=Depends(require_role("adm
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
     return {"ok": True}
+
+
+# ---------- Project Types (admin-configurable lookup) ----------
+# Seed-defaults are inserted on first GET if collection is empty.
+DEFAULT_PROJECT_TYPES = [
+    {"code": "JSDMS",     "name": "JSDMS"},
+    {"code": "SJKVY",     "name": "SJKVY"},
+    {"code": "BIRSA",     "name": "BIRSA"},
+    {"code": "PMKVY",     "name": "PMKVY"},
+    {"code": "DDU_GKY",   "name": "DDU-GKY"},
+    {"code": "NSDC",      "name": "NSDC"},
+    {"code": "MEGA",      "name": "Mega Project"},
+    {"code": "OTHER",     "name": "Other"},
+]
+
+
+class ProjectTypeIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    code: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    active: bool = True
+
+
+class ProjectTypeOut(ProjectTypeIn):
+    id: str
+    created_at: str
+
+
+@api.get("/project-types", response_model=List[ProjectTypeOut])
+async def list_project_types(_=Depends(get_current_user)):
+    docs = await db.project_types.find({}, {"_id": 0}).sort("name", 1).to_list(500)
+    if not docs:
+        now = datetime.now(timezone.utc).isoformat()
+        seed = [{"id": str(uuid.uuid4()), "active": True, "created_at": now, **t} for t in DEFAULT_PROJECT_TYPES]
+        await db.project_types.insert_many(seed)
+        docs = sorted(seed, key=lambda x: x["name"])
+    return [ProjectTypeOut(**d) for d in docs]
+
+
+@api.post("/project-types", response_model=ProjectTypeOut)
+async def create_project_type(body: ProjectTypeIn, _=Depends(require_role("admin", "manager"))):
+    if await db.project_types.find_one({"code": body.code}):
+        raise HTTPException(400, f"Project type with code '{body.code}' already exists")
+    doc = {"id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(), **body.model_dump()}
+    await db.project_types.insert_one(doc)
+    return ProjectTypeOut(**doc)
+
+
+@api.put("/project-types/{ptid}", response_model=ProjectTypeOut)
+async def update_project_type(ptid: str, body: ProjectTypeIn, _=Depends(require_role("admin", "manager"))):
+    res = await db.project_types.find_one_and_update(
+        {"id": ptid}, {"$set": body.model_dump()}, return_document=True,
+    )
+    if not res:
+        raise HTTPException(404, "Not found")
+    res.pop("_id", None)
+    return ProjectTypeOut(**res)
+
+
+@api.delete("/project-types/{ptid}")
+async def delete_project_type(ptid: str, _=Depends(require_role("admin"))):
+    r = await db.project_types.delete_one({"id": ptid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
 
 
 # ---------- Transactions ----------
@@ -968,6 +1174,8 @@ async def create_transaction(body: TransactionIn, user=Depends(require_role("adm
         notified_users: set[str] = set()
         if owner_pid:
             peers = await _custom_associated_partners(owner_pid)
+            # Always include peers under the SAME partner entity (other users linked to same partner)
+            peers.add(owner_pid)
             # Also include partners sharing project/center on this txn
             if doc.get("project_id") or doc.get("center_id"):
                 or_c = []
@@ -1855,9 +2063,22 @@ async def _staff_for_user(user_id: str) -> Optional[dict]:
 
 
 # -------- Staff CRUD --------
+def _center_scope_q(user: dict) -> dict:
+    """Return Mongo center-scope filter for center_manager/center_staff roles.
+    Returns empty dict (no restriction) for admin and other privileged roles."""
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        return {"center_id": {"$in": user.get("assigned_center_ids") or []}}
+    return {}
+
+
 @api.get("/staff", response_model=List[StaffOut])
-async def list_staff(_=Depends(get_current_user)):
-    docs = await db.staff.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+async def list_staff(user=Depends(get_current_user)):
+    q: dict = {}
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        q["center_id"] = {"$in": user.get("assigned_center_ids") or []}
+    docs = await db.staff.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
     return [StaffOut(**d) for d in docs]
 
 
@@ -3554,7 +3775,7 @@ async def list_stock(
     start: Optional[str] = None,
     end: Optional[str] = None,
     search: Optional[str] = None,
-    _=Depends(get_current_user),
+    user=Depends(get_current_user),
 ):
     """Flatten transaction line-items into a stock-view list.
 
@@ -3566,6 +3787,13 @@ async def list_stock(
     q: dict = {}
     if center_id:
         q["center_id"] = center_id
+    # Center-manager / center-staff scoping
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        scoped_ids = user.get("assigned_center_ids") or []
+        if center_id and center_id not in scoped_ids:
+            return []
+        q["center_id"] = {"$in": scoped_ids}
     if txn_type:
         q["type"] = txn_type
     if start or end:
@@ -3960,12 +4188,18 @@ class ReceivePaymentIn(BaseModel):
 
 @api.get("/batches", response_model=List[BatchOut])
 async def list_batches(project_id: Optional[str] = None, center_id: Optional[str] = None,
-                       _=Depends(get_current_user)):
+                       user=Depends(get_current_user)):
     q: dict = {}
     if project_id:
         q["project_id"] = project_id
     if center_id:
         q["center_id"] = center_id
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        scoped_ids = user.get("assigned_center_ids") or []
+        if center_id and center_id not in scoped_ids:
+            return []
+        q["center_id"] = {"$in": scoped_ids}
     docs = await db.batches.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [BatchOut(**d) for d in docs]
 
