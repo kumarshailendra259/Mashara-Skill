@@ -351,11 +351,13 @@ def _txn_scope_for_user(user: dict) -> dict:
 
     - admin / manager / senior_manager / accountant / hr: all transactions
     - center_manager / center_staff: only transactions where center_id is in their assigned_center_ids
-    - partner: only transactions where partner_id == their assigned_partner_id
+    - partner: scoped to centers where this partner is mapped via batches/center.partner_id
+              (i.e. partner X at center A also sees co-partner Y's txns at A, but NOT Y's txns elsewhere)
     - viewer: only their own created transactions
 
-    NOTE: Caller passing `extra_partner_ids` (computed from partner_associations) lets
-    a partner additionally see (and approve) transactions of their associated partners.
+    The caller MUST ensure `_associated_center_ids` is populated on the user (via
+    `_enrich_user_with_associations`) when the role is partner — otherwise the
+    legacy partner-id-based filter is used as a safe fallback.
     """
     role = user.get("role")
     if role in ("admin", "manager", "senior_manager", "accountant", "hr"):
@@ -366,12 +368,56 @@ def _txn_scope_for_user(user: dict) -> dict:
         pid = user.get("assigned_partner_id")
         if not pid:
             return {"_never_": True}
-        # Include associated partner IDs cached on the user (populated by middleware)
+        # NEW: center-based scoping. A partner sees everything that happens at the centers
+        # where they are mapped. This matches the user's mental model: "X is partnered at
+        # Center A and Center B → X sees all of A and B".
+        center_ids = user.get("_associated_center_ids")
+        if center_ids is not None:
+            if not center_ids:
+                # Mapped to a partner but not yet linked to any center → show nothing.
+                return {"_never_": True}
+            return {"center_id": {"$in": center_ids}}
+        # Fallback (should not normally happen): partner-id-based filter retained for safety
         extras = user.get("_associated_partner_ids") or []
         all_pids = list({pid, *extras})
         return {"partner_id": {"$in": all_pids}}
     # viewer / any other → own data only
     return {"created_by": user["id"]}
+
+
+async def _centers_for_partner(partner_id: str) -> list:
+    """Compute the set of center_ids where the given partner is mapped.
+
+    Sources (combined):
+      1. `batches.partner_ids` containing this partner_id (both center_id+partner_ids set)
+      2. Legacy single-partner centers (`centers.partner_id == partner_id`)
+      3. Any approved transaction where partner_id matches and center_id is set
+         (covers cases where the partner-center linkage exists only in txn history)
+    Result: a de-duplicated list (order not guaranteed).
+    """
+    if not partner_id:
+        return []
+    centers: set = set()
+    async for b in db.batches.find(
+        {"partner_ids": partner_id, "center_id": {"$ne": None}},
+        {"_id": 0, "center_id": 1},
+    ):
+        if b.get("center_id"):
+            centers.add(b["center_id"])
+    async for c in db.centers.find(
+        {"partner_id": partner_id},
+        {"_id": 0, "id": 1},
+    ):
+        if c.get("id"):
+            centers.add(c["id"])
+    # Source #3: derive from transactions where this partner has actually transacted at a center.
+    # This covers data where batch.center_id is None but the partner has center-level txn history.
+    txn_centers = await db.transactions.distinct(
+        "center_id",
+        {"partner_id": partner_id, "center_id": {"$ne": None}},
+    )
+    centers.update([c for c in txn_centers if c])
+    return list(centers)
 
 
 async def _enrich_user_with_associations(user: dict) -> dict:
@@ -404,6 +450,11 @@ async def _enrich_user_with_associations(user: dict) -> dict:
             if t.get("partner_id"):
                 peers.add(t["partner_id"])
     user["_associated_partner_ids"] = list(peers)
+    # Also compute the set of centers where THIS partner is mapped (via batches or
+    # legacy centers.partner_id). Used by _txn_scope_for_user + dashboards so a
+    # partner sees only their own centers' data — including co-partners' txns at
+    # those centers, but NOT the co-partner's other-center txns.
+    user["_associated_center_ids"] = await _centers_for_partner(pid)
     return user
 
 
@@ -650,6 +701,19 @@ async def login_history(
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
     return {"ok": True}
+
+
+@api.get("/partners/{pid}/centers")
+async def partners_mapped_centers(pid: str, _=Depends(require_role("admin", "hr", "manager", "senior_manager"))):
+    """Helper for User Management UI: preview the set of centers a partner is currently
+    mapped to (via batches.partner_ids OR centers.partner_id). When admin assigns this
+    partner to a user, the user will get visibility ONLY into these centers.
+    """
+    ids = await _centers_for_partner(pid)
+    if not ids:
+        return {"partner_id": pid, "center_ids": [], "centers": []}
+    docs = await db.centers.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "city": 1, "state": 1}).to_list(500)
+    return {"partner_id": pid, "center_ids": ids, "centers": docs}
 
 
 @api.get("/auth/me", response_model=UserOut)
@@ -1963,11 +2027,14 @@ async def settlement_view(
     center_ids: list[str] = []
     if center_id:
         center_ids = [center_id]
+    elif role == "partner" and own_partner_id:
+        # Restrict to centers where THIS partner is mapped (via batches / centers.partner_id).
+        # Previously we used "any txn with partner_id == own" which leaked co-partner data
+        # for other centers. Now: settlement shows ONLY the partner's own centers.
+        center_ids = await _centers_for_partner(own_partner_id)
     elif own_partner_id:
-        center_ids = await db.transactions.distinct(
-            "center_id",
-            {**base, "partner_id": own_partner_id, "center_id": {"$ne": None}},
-        )
+        # Non-partner caller passed a partner_id filter — pull the centers via batches too.
+        center_ids = await _centers_for_partner(own_partner_id)
     else:
         # admin without filter: all centers that have any partner transaction
         center_ids = await db.transactions.distinct(
@@ -4807,6 +4874,15 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
         if center_id and center_id not in scoped_ids:
             return []
         q["center_id"] = {"$in": scoped_ids}
+    elif role == "partner":
+        # Partner sees only batches at centers where they are mapped.
+        await _enrich_user_with_associations(user)
+        scoped_ids = user.get("_associated_center_ids") or []
+        if center_id and center_id not in scoped_ids:
+            return []
+        if not scoped_ids:
+            return []
+        q["center_id"] = {"$in": scoped_ids}
     docs = await db.batches.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [BatchOut(**d) for d in docs]
 
@@ -4859,10 +4935,23 @@ async def delete_batch(bid: str, _=Depends(require_role("admin"))):
 
 
 @api.get("/batch-payments", response_model=List[BatchPaymentOut])
-async def list_batch_payments(batch_id: Optional[str] = None, _=Depends(require_finance_visible)):
+async def list_batch_payments(batch_id: Optional[str] = None, user=Depends(require_finance_visible)):
     q: dict = {}
     if batch_id:
         q["batch_id"] = batch_id
+    # Partner: restrict to batches at centers where they are mapped.
+    if user.get("role") == "partner":
+        await _enrich_user_with_associations(user)
+        center_ids = user.get("_associated_center_ids") or []
+        if not center_ids:
+            return []
+        scoped_batches = await db.batches.find(
+            {"center_id": {"$in": center_ids}}, {"_id": 0, "id": 1},
+        ).to_list(5000)
+        allowed = [b["id"] for b in scoped_batches]
+        if batch_id and batch_id not in allowed:
+            return []
+        q["batch_id"] = {"$in": allowed}
     docs = await db.batch_payments.find(q, {"_id": 0}).sort([("batch_id", 1), ("milestone", 1)]).to_list(5000)
     return [BatchPaymentOut(**d) for d in docs]
 

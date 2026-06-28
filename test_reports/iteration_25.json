@@ -1,0 +1,40 @@
+{
+  "summary": "iter-27 (Partner center-scope visibility) fully verified. Backend: 26/26 pass in test_iter27_partner_center_scope.py covering /api/partners/{pid}/centers endpoint, partner-user isolation across dashboard/transactions/settlement/batches/batch-payments/milestone-income/fooding-income, admin/manager/hr/accountant unscoped regression, empty-mapping safety (P_NONE), 403 for partner-role on the helper endpoint, and iter-26 regression. Frontend: partner-centers-preview panel (data-testid='partner-centers-preview') renders correctly when role=partner AND assigned_partner_id is set, hides on role switch away from partner, reappears when role switched back. Live preview content shows mapped centers (e.g. 'Birsa Kairo', 'Palojori Deoghar') matching the partner's actual mapping.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_iter27_partner_center_scope.py",
+    "/app/test_reports/pytest/iter27_results.xml"
+  ],
+  "what_was_verified": [
+    "ENDPOINT /api/partners/{pid}/centers: admin gets {partner_id, center_ids[], centers[id,name,city,state]}; correctly derives from batches.partner_ids AND centers.partner_id AND txn history.",
+    "ISOLATION: P_X at center A (with co-partner Y) and at center B (with co-partner Z) → endpoint returns [A,B]. P_Z (only at B) → returns [B]. P_Y (at A and C) → returns [A,C]. P_NONE → empty arrays.",
+    "RBAC GATE: partner-role user gets 401/403 on /api/partners/{pid}/centers (gated by require_role(admin/hr/manager/senior_manager)).",
+    "DASHBOARD /api/dashboard/summary: U_X by_center contains A and B (NOT C). U_Z by_center contains B only (NOT A or C). U_NONE by_center has no leak.",
+    "TRANSACTIONS /api/transactions: U_X sees txns at A and B including co-partner Y's txn at A and Z's txn at B. U_X does NOT see Y's txn at C. U_Z sees only B's txns. U_NONE sees no seeded txns.",
+    "SETTLEMENT /api/dashboard/settlement: U_X gets both A and B center rows; U_Z gets only B. C is never present.",
+    "BATCHES /api/batches: U_X gets batches at {A,B}; U_Z gets batch at B only; U_NONE gets [].",
+    "BATCH-PAYMENTS /api/batch-payments: scoped via batches at mapped centers. U_NONE → [].",
+    "MILESTONE-INCOME + FOODING-INCOME /api/dashboard/milestone-income & /fooding-income: scoped via _txn_scope_for_user (200, no 500, no leak for U_NONE).",
+    "REGRESSION: admin sees ALL seeded txns + batches; admin can hit /partners/{pid}/centers.",
+    "REGRESSION iter-26: /api/me/summary still returns leave_balances/all_holidays; regularisation default chain still active.",
+    "FRONTEND /users edit dialog: role-select + partner-select have data-testids ('user-role-select','user-partner-select'). partner-centers-preview panel: shows heading 'Centers this user will see (auto-derived)' + bullet list of mapped center names when role=partner AND partner picked. Hides instantly on role→viewer. Reappears on viewer→partner without re-picking the partner (form state preserved)."
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py still 6261 lines — repeated recommendation to split into routers; not blocking.",
+    "_centers_for_partner is called twice per request in some paths (e.g. list_batches → _enrich_user_with_associations already calls it, and then we read _associated_center_ids). The current code already short-circuits via the cached field, so no perf concern, but worth a comment so future maintainers don't duplicate the DB hit.",
+    "/api/auth/register accepts assigned_partner_id in the body but does NOT persist it for new users (admin must PATCH after) — acknowledged in iter-27 brief as 'pre-existing behaviour'. Consider documenting in OpenAPI / register response that the field is ignored, OR honouring it for role=partner registrations (admin-initiated only).",
+    "GET /api/partners/{pid}/centers does not 404 when pid is unknown — it returns {partner_id: <pid>, center_ids: [], centers: []}. That's fine for the preview UX (no scary error), but a stricter validator could check pid existence. Not blocking.",
+    "Recharts ResponsiveContainer width(-1) warnings on dashboard load — non-blocking but noisy in console (pre-existing, not iter-27)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter27_partner_center_scope.py (new)"
+  ],
+  "success_rate": { "backend": "100% (26/26)", "frontend": "100% (3/3 smoke checks)" },
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Per-run 6-char UUID suffix. Creates 3 centers (TEST_iter27_CA/CB/CC_<RUN>), 4 partners (PX/PY/PZ/PNONE), 1 project, 3 batches with partner_ids combinations (A→[X,Y], B→[X,Z], C→[Y]), 5 approved investment txns at varied (center,partner) tuples, and 3 partner-role users (UX→PX, UZ→PZ, UNONE→PNONE) via /auth/register + admin PATCH /auth/users/{id} assigned_partner_id. All TEST_iter27 prefixed for easy cleanup. No cleanup performed by test — admin can purge via bulk-delete entity endpoint.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter-27 fully green. Schema gotchas confirmed: (1) Entity creation is POST /api/entities/{etype} for center/partner/project (NOT /api/centers, etc.). (2) BatchIn requires field 'name' (NOT 'batch_name'). (3) Dashboard /api/dashboard/summary by_center uses key 'id' for the center identifier, NOT 'center_id'. (4) Settlement endpoint is /api/dashboard/settlement (NOT /api/settlement-view). (5) Partner-user 401/403 on /partners/{pid}/centers — current behaviour returns 401 (auth-cookie ok but role gate fires); the test accepts both. (6) /api/auth/register STILL doesn't persist assigned_partner_id even when explicitly passed — must follow up with PATCH /auth/users/{id} as admin (pre-existing, not iter-27 work). (7) Admin auto-approves txns at create time — useful for setting up isolation fixtures."
+}

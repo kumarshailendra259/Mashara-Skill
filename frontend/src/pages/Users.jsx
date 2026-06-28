@@ -28,6 +28,9 @@ export default function Users() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ role: "viewer", assigned_center_ids: [], assigned_partner_id: "" });
+  // Preview of centers auto-derived for the picked partner (managed-from-User-Management UX)
+  const [partnerCentersPreview, setPartnerCentersPreview] = useState([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
   // Bulk archive state
   const [selected, setSelected] = useState(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -40,6 +43,22 @@ export default function Users() {
   ]).then(([u, c, p]) => { setUsers(u.data); setCenters(c.data); setPartners(p.data); setSelected(new Set()); });
 
   useEffect(() => { load(); }, []);
+
+  // Whenever the picked partner_id changes (and role==partner), fetch the centers this partner
+  // is mapped to so admin can SEE exactly which centers the user will get visibility into.
+  useEffect(() => {
+    if (form.role !== "partner" || !form.assigned_partner_id) {
+      setPartnerCentersPreview([]);
+      return;
+    }
+    let cancelled = false;
+    setPreviewLoading(true);
+    api.get(`/partners/${form.assigned_partner_id}/centers`)
+      .then((r) => { if (!cancelled) setPartnerCentersPreview(r.data?.centers || []); })
+      .catch(() => { if (!cancelled) setPartnerCentersPreview([]); })
+      .finally(() => { if (!cancelled) setPreviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [form.role, form.assigned_partner_id]);
 
   const archivableIds = users.filter((u) => u.id !== currentUser?.id).map((u) => u.id);
   const allSelected = archivableIds.length > 0 && archivableIds.every((id) => selected.has(id));
@@ -200,12 +219,33 @@ export default function Users() {
             <div>
               <Label>{t("assign_partner")}</Label>
               <Select value={form.assigned_partner_id || "__none"} onValueChange={(v) => setForm({ ...form, assigned_partner_id: v === "__none" ? "" : v })}>
-                <SelectTrigger className="rounded-none"><SelectValue placeholder="—" /></SelectTrigger>
+                <SelectTrigger className="rounded-none" data-testid="user-partner-select"><SelectValue placeholder="—" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__none">—</SelectItem>
                   {partners.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
                 </SelectContent>
               </Select>
+              {form.role === "partner" && form.assigned_partner_id && (
+                <div className="mt-2 border border-[var(--border)] bg-blue-50/40 p-2" data-testid="partner-centers-preview">
+                  <div className="overline text-[10px] mb-1">Centers this user will see (auto-derived)</div>
+                  {previewLoading ? (
+                    <div className="text-xs text-[var(--muted)]">Computing…</div>
+                  ) : partnerCentersPreview.length === 0 ? (
+                    <div className="text-xs text-amber-700">⚠ This partner is not currently mapped to any center (no batches/txns yet) — the user will see nothing until a batch is created.</div>
+                  ) : (
+                    <ul className="text-xs space-y-0.5 max-h-[120px] overflow-y-auto">
+                      {partnerCentersPreview.map((c) => (
+                        <li key={c.id} className="flex items-center gap-2">
+                          <span className="inline-block w-1.5 h-1.5 bg-[var(--brand)]"></span>
+                          <span className="font-medium">{c.name}</span>
+                          {c.city && <span className="text-[var(--muted)]">· {c.city}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <div className="text-[10px] text-[var(--muted)] mt-1">Mapping is derived from batches / center.partner_id / past transactions. Add more batches to grant access to more centers.</div>
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>
