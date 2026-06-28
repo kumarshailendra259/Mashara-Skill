@@ -28,6 +28,17 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 8 — Regularisation Workflow + Leave Balance Bug Fix (Done, Mar 2026):
+- **BUG FIX (HIGH)**: Mobile /check-in LeaveTab was not sending `leave_type_id` — that's why approved leaves never deducted from balance. Now leave type is mandatory in the mobile dialog with a live balance hint (`X/Y left`) per type.
+- **Regularisation is now a first-class Approval Workflow type**:
+  - Added to `APPROVAL_TYPE_COLL` mapping; default 1-level chain (HR/Admin) seeded
+  - POST `/api/regularisations` attaches the configured chain + enriches `center_id`
+  - Appears in **/pending-approvals** under a new "Regularisations" tab (was hidden in HR Settings before)
+  - Final-approve via `/api/approvals/act` upserts the attendance row (status=present/half/leave from the request's `attendance_status`)
+  - Configurable through `/approval-workflows` like any other type
+- **Schema rename**: `RegularisationIn.status` → saved as `attendance_status` to avoid clash with the chain `status` field (pending/approved/rejected)
+- Legacy PATCH `/api/regularisations/{rid}` endpoint kept for back-compat with mobile clients
+
 ### Phase 7 — Leave Routing Fix + Mobile Dashboard + Map Picker (Done, Mar 2026):
 - **BUG FIX (HIGH)**: Leave & reimbursement requests now route through center-bound approval chains correctly. Earlier the doc had no `center_id`, so `_attach_chain_to_request` always fell back to the global default chain. Fix: enrich the request doc with `staff.center_id` (+ `staff.name`) BEFORE attaching the chain.
 - **Mobile Staff App (/check-in)** HomeTab now shows:
