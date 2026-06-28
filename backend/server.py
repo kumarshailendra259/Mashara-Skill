@@ -2704,6 +2704,13 @@ async def apply_leave(body: LeaveIn, user=Depends(get_current_user)):
     doc["status"] = "pending"
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # Enrich with the staff's center_id so center-bound approval chains route correctly.
+    # Without this, a chain bound to (say) Center-A would be skipped because the leave
+    # doc has no center_id of its own.
+    staff_doc = await db.staff.find_one({"id": doc["staff_id"]}, {"_id": 0, "center_id": 1, "name": 1})
+    if staff_doc:
+        doc["center_id"] = staff_doc.get("center_id")
+        doc["staff_name"] = staff_doc.get("name")
     await _attach_chain_to_request("leave", doc)
     await db.leaves.insert_one(doc)
     doc.pop("_id", None)
@@ -3523,6 +3530,10 @@ async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_u
     # snapshot approver chain (legacy fields kept for back-compat with old endpoints)
     staff = await db.staff.find_one({"id": body.staff_id}, {"_id": 0})
     doc["l1_approver_id"] = staff.get("reports_to_id") if staff else None
+    # Enrich doc with the staff's center_id so center-bound chains route correctly.
+    if staff:
+        doc["center_id"] = staff.get("center_id")
+        doc["staff_name"] = staff.get("name")
     doc["l1_approved_at"] = None
     doc["l1_approved_by"] = None
     doc["accountant_approved_at"] = None
@@ -4167,7 +4178,12 @@ async def my_summary(user=Depends(get_current_user)):
     """Combined dashboard data for the mobile staff app home tab."""
     staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
     if not staff:
-        return {"staff": None, "today": None, "month_stats": {}, "pending_counts": {}}
+        # Non-staff user (e.g. admin viewing /check-in): keep response shape stable so the
+        # frontend can iterate over the arrays without optional-chaining everywhere.
+        return {
+            "staff": None, "today": None, "month_stats": {}, "pending_counts": {},
+            "upcoming_holidays": [], "all_holidays": [], "leave_balances": [],
+        }
     today = datetime.now(timezone.utc).date().isoformat()
     today_row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     # This month stats — "complete present" = has both check_in_at + check_out_at
@@ -4197,6 +4213,24 @@ async def my_summary(user=Depends(get_current_user)):
     pending_reimb = await db.reimbursements.count_documents({"created_by": user["id"], "status": {"$nin": ["paid", "rejected"]}})
     pending_reg = await db.regularisations.count_documents({"created_by": user["id"], "status": "pending"})
     upcoming = await db.holidays.find({"date": {"$gte": today}}, {"_id": 0}).sort("date", 1).to_list(3)
+    # Full holiday list for the current calendar year (used by mobile Holidays section)
+    yyyy = today[:4]
+    all_holidays = await db.holidays.find(
+        {"date": {"$regex": f"^{yyyy}"}}, {"_id": 0},
+    ).sort("date", 1).to_list(120)
+    # Leave balances for the current year + the type definitions (mobile staff app dashboard).
+    current_year = int(yyyy)
+    raw_balances = await db.leave_balances.find(
+        {"staff_id": staff["id"], "year": current_year}, {"_id": 0},
+    ).to_list(50)
+    leave_types_list = await db.leave_types.find({}, {"_id": 0}).to_list(50)
+    types_by_id = {t["id"]: t for t in leave_types_list}
+    leave_balances = [
+        {**b,
+         "leave_type_name": (types_by_id.get(b.get("leave_type_id")) or {}).get("name"),
+         "leave_type_color": (types_by_id.get(b.get("leave_type_id")) or {}).get("color")}
+        for b in raw_balances
+    ]
     # Shift info if assigned
     shift = None
     if staff.get("shift_id"):
@@ -4208,6 +4242,8 @@ async def my_summary(user=Depends(get_current_user)):
         "month_stats": month_stats,
         "pending_counts": {"leaves": pending_leaves, "reimbursements": pending_reimb, "regularisations": pending_reg},
         "upcoming_holidays": upcoming,
+        "all_holidays": all_holidays,
+        "leave_balances": leave_balances,
     }
 
 

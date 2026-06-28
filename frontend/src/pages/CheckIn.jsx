@@ -176,6 +176,9 @@ function HomeTab({ summary, reload, setTab }) {
   const checkedOut = !!att?.check_out_at;
   const stats = summary?.month_stats || {};
   const upcoming = summary?.upcoming_holidays || [];
+  const allHolidays = summary?.all_holidays || [];
+  const leaveBalances = summary?.leave_balances || [];
+  const [showAllHolidays, setShowAllHolidays] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -241,25 +244,63 @@ function HomeTab({ summary, reload, setTab }) {
         <QuickStat label="Pending Claims" value={summary?.pending_counts?.reimbursements || 0} onClick={() => setTab("reimburse")} />
       </div>
 
-      {/* Upcoming holidays */}
-      <div className="swiss-card p-4">
-        <div className="overline flex items-center gap-2"><Calendar size={12} /> Upcoming Holidays</div>
-        {upcoming.length === 0 ? (
-          <div className="text-sm text-[var(--muted)] mt-2">No holidays in the next few weeks.</div>
+      {/* Leave Balances — current year, per leave type */}
+      <div className="swiss-card p-4" data-testid="leave-balances-card">
+        <div className="flex items-center justify-between">
+          <div className="overline flex items-center gap-2"><Wallet size={12} /> My Leave Balances · {new Date().getFullYear()}</div>
+          <button onClick={() => setTab("leave")} className="text-[10px] text-[var(--brand)] hover:underline font-bold">APPLY →</button>
+        </div>
+        {leaveBalances.length === 0 ? (
+          <div className="text-sm text-[var(--muted)] mt-2">No leave allocations yet. Ask HR to allocate your annual quota in <em>HR Settings → Leave Allocation</em>.</div>
         ) : (
-          <ul className="mt-2 space-y-2">
-            {upcoming.map((h) => (
-              <li key={h.id} className="flex items-start gap-3 text-sm">
-                <div className="bg-[var(--brand)] text-white text-[10px] font-bold uppercase px-2 py-1 leading-tight text-center min-w-[44px]">
-                  <div>{new Date(h.date).toLocaleDateString(undefined, { month: "short" })}</div>
-                  <div className="text-base leading-none mt-0.5">{new Date(h.date).getDate()}</div>
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            {leaveBalances.map((b) => (
+              <div key={b.id} className="border border-[var(--border)] p-2" data-testid={`mob-bal-${b.leave_type_code}`}>
+                <div className="flex items-center justify-between">
+                  <span className={`inline-block px-1.5 py-0.5 text-[9px] font-bold border ${LEAVE_BADGE[b.leave_type_color] || LEAVE_BADGE.blue}`}>{b.leave_type_code}</span>
+                  <span className="text-[10px] text-[var(--muted)] truncate ml-1">{b.leave_type_name || ""}</span>
                 </div>
-                <div className="flex-1">
-                  <div className="font-medium">{h.name}</div>
-                  <div className="text-xs text-[var(--muted)] capitalize">{h.type || "holiday"}</div>
+                <div className="mt-1.5 flex items-end gap-1">
+                  <span className="text-2xl font-heading font-black value-positive num leading-none">{b.balance}</span>
+                  <span className="text-[10px] text-[var(--muted)] num pb-1">/ {b.allocated}</span>
                 </div>
-              </li>
+                <div className="text-[10px] text-[var(--muted)] num mt-0.5">Used: {b.used}</div>
+              </div>
             ))}
+          </div>
+        )}
+      </div>
+
+      {/* Holidays — upcoming + toggle to full year list */}
+      <div className="swiss-card p-4">
+        <div className="flex items-center justify-between">
+          <div className="overline flex items-center gap-2"><Calendar size={12} /> Holidays · {new Date().getFullYear()}</div>
+          {allHolidays.length > 0 && (
+            <button onClick={() => setShowAllHolidays((v) => !v)} className="text-[10px] text-[var(--brand)] hover:underline font-bold" data-testid="toggle-holidays">
+              {showAllHolidays ? "SHOW UPCOMING" : `SEE ALL (${allHolidays.length})`}
+            </button>
+          )}
+        </div>
+        {(showAllHolidays ? allHolidays : upcoming).length === 0 ? (
+          <div className="text-sm text-[var(--muted)] mt-2">No holidays configured.</div>
+        ) : (
+          <ul className="mt-2 space-y-2 max-h-[280px] overflow-y-auto pr-1">
+            {(showAllHolidays ? allHolidays : upcoming).map((h) => {
+              const d = new Date(h.date);
+              const isPast = d < new Date(new Date().toDateString());
+              return (
+                <li key={h.id} className={`flex items-start gap-3 text-sm ${isPast ? "opacity-50" : ""}`} data-testid={`hol-${h.id}`}>
+                  <div className="bg-[var(--brand)] text-white text-[10px] font-bold uppercase px-2 py-1 leading-tight text-center min-w-[44px]">
+                    <div>{d.toLocaleDateString(undefined, { month: "short" })}</div>
+                    <div className="text-base leading-none mt-0.5">{d.getDate()}</div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-medium">{h.name}</div>
+                    <div className="text-xs text-[var(--muted)] capitalize">{h.type || "holiday"}{isPast ? " · past" : ""}</div>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
@@ -268,6 +309,17 @@ function HomeTab({ summary, reload, setTab }) {
     </div>
   );
 }
+
+// Leave-badge palette mirrors LeaveAllocationTab.jsx for visual consistency.
+const LEAVE_BADGE = {
+  blue:    "bg-blue-50 text-[var(--brand)] border-blue-200",
+  emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  amber:   "bg-amber-50 text-amber-700 border-amber-200",
+  purple:  "bg-purple-50 text-purple-700 border-purple-200",
+  rose:    "bg-rose-50 text-rose-700 border-rose-200",
+  indigo:  "bg-indigo-50 text-indigo-700 border-indigo-200",
+  teal:    "bg-teal-50 text-teal-700 border-teal-200",
+};
 
 const Stat = ({ label, value, color = "" }) => (
   <div>

@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { Plus, Trash2, Pencil, Check, X, MapPin, Calendar, Clock, AlertCircle, Wallet } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import LeaveAllocationTab from "@/components/LeaveAllocationTab";
+import MapPicker from "@/components/MapPicker";
 
 export default function HrSettings() {
   const { user } = useAuth();
@@ -163,7 +164,7 @@ function GeofencesTab() {
       <div className="flex justify-end">
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild><Button className="brand-btn rounded-none gap-2" data-testid="btn-new-fence"><Plus size={16} /> Add Geofence</Button></DialogTrigger>
-          <DialogContent className="rounded-none">
+          <DialogContent className="rounded-none max-w-2xl">
             <DialogHeader><DialogTitle className="font-heading">New Geofence</DialogTitle></DialogHeader>
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2"><Label>Name</Label><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Mumbai Office" className="rounded-none" data-testid="fence-name" /></div>
@@ -176,10 +177,24 @@ function GeofencesTab() {
                   </SelectContent>
                 </Select>
               </div>
-              <div><Label>Latitude</Label><Input value={form.latitude} onChange={(e) => setForm({ ...form, latitude: e.target.value })} placeholder="19.076" className="rounded-none" data-testid="fence-lat" /></div>
-              <div><Label>Longitude</Label><Input value={form.longitude} onChange={(e) => setForm({ ...form, longitude: e.target.value })} placeholder="72.8777" className="rounded-none" data-testid="fence-lng" /></div>
-              <div className="col-span-2"><Button variant="outline" onClick={useMyLocation} className="rounded-none w-full gap-2"><MapPin size={14} /> Use my current location</Button></div>
-              <div><Label>Radius (metres)</Label><Input type="number" value={form.radius_m} onChange={(e) => setForm({ ...form, radius_m: e.target.value })} className="rounded-none" data-testid="fence-radius" /></div>
+              <div className="col-span-2">
+                <Label className="flex items-center justify-between">
+                  <span>Map (click anywhere or <b>drag the marker</b>)</span>
+                  <button type="button" onClick={useMyLocation} className="text-xs text-[var(--brand)] hover:underline inline-flex items-center gap-1" data-testid="fence-use-loc"><MapPin size={12} /> Use my location</button>
+                </Label>
+                <div className="mt-2">
+                  <MapPicker
+                    value={{ lat: form.latitude, lng: form.longitude }}
+                    onChange={(p) => setForm((f) => ({ ...f, latitude: p.lat.toFixed(6), longitude: p.lng.toFixed(6) }))}
+                    radiusM={Number(form.radius_m) || 0}
+                    height={300}
+                  />
+                </div>
+                <div className="text-xs text-[var(--muted)] mt-1">Tip: zoom in, click to drop marker, then drag for precision. Circle shows the radius preview.</div>
+              </div>
+              <div><Label>Latitude</Label><Input value={form.latitude} onChange={(e) => setForm({ ...form, latitude: e.target.value })} placeholder="19.076" className="rounded-none num" data-testid="fence-lat" /></div>
+              <div><Label>Longitude</Label><Input value={form.longitude} onChange={(e) => setForm({ ...form, longitude: e.target.value })} placeholder="72.8777" className="rounded-none num" data-testid="fence-lng" /></div>
+              <div><Label>Radius (metres)</Label><Input type="number" value={form.radius_m} onChange={(e) => setForm({ ...form, radius_m: e.target.value })} className="rounded-none num" data-testid="fence-radius" /></div>
               <div className="flex items-end"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} /> Active</label></div>
             </div>
             <DialogFooter><Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">Cancel</Button><Button onClick={save} className="brand-btn rounded-none" data-testid="fence-save">Save</Button></DialogFooter>

@@ -1,0 +1,34 @@
+{
+  "summary": "Iter-25 full test pass. Backend: 11/11 tests pass in /app/backend/tests/test_iter25_leave_routing.py. Frontend: MapPicker on /hr-settings Geofences dialog and Leave Balances card + holidays toggle on /check-in all working as expected. Empty-staff branch in /me/summary correctly returns the 3 new array keys (upcoming_holidays, all_holidays, leave_balances) — main agent's fix at server.py:4180-4185 verified.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_iter25_leave_routing.py",
+    "/app/test_reports/pytest/iter25_results.xml"
+  ],
+  "what_was_verified": [
+    "BUG FIX 1 (leaves): POST /api/leaves with staff in CENTER_X picks center-bound chain (not global). Verified chain_id == center chain id, current_level=1, chain_snapshot non-empty, doc.center_id == CENTER_X. Approver-user sees the leave in /api/approvals/pending.",
+    "BUG FIX 2 (reimbursements): POST /api/reimbursements with center-bound staff picks center-bound reimbursement chain. Verified center_id enrichment + chain_id match + approver pending list.",
+    "REGRESSION: leave with staff having center_id=None still picks global default chain (chain.center_id is null) — verified by reading the chain doc directly.",
+    "FEATURE /me/summary (staff user): includes leave_balances (list) + all_holidays (list, filtered to current year) + upcoming_holidays (<=3). All pre-existing keys (staff, today, month_stats, pending_counts) preserved.",
+    "FEATURE /me/summary (NO-staff branch — the just-fixed branch): returns upcoming_holidays:[], all_holidays:[], leave_balances:[] as empty arrays alongside staff:null. Previously these keys were missing.",
+    "FEATURE /me/summary leave_balances rows are decorated: row has leave_type_name (matches leave_types.name) and leave_type_color, joined by leave_type_id. Verified after allocating 12 days CL.",
+    "FRONTEND /hr-settings Geofences: 'Add Geofence' opens dialog containing data-testid='map-picker'. .leaflet-container mounts. .leaflet-control-attribution contains 'OpenStreetMap'. Clicking map sets latitude and longitude inputs to numeric strings (21.412162, 80.288086 in the test).",
+    "FRONTEND /check-in HomeTab: admin login renders without console errors; leave-balances-card visible. toggle-holidays button toggles label between 'SEE ALL (N)' and 'SHOW UPCOMING' on click.",
+    "REGRESSION sample: /api/auth/users 200, default chains for leave/reimbursement/transaction/asset_purchase/employee_transfer present, leave-balances/allocate works, center_staff hits 403 on /transactions."
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is 6087 lines — recommend splitting into routers (hrms, finance, approvals, auth, mobile) for maintainability. Not blocking.",
+    "Reimbursement POST body schema uses 'date' field (not 'incurred_on') — minor inconsistency with conceptual naming but functional."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter25_leave_routing.py (new file)"
+  ],
+  "success_rate": { "backend": "100% (11/11)", "frontend": "100%" },
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Per-run UUID suffix used. Created: 1 center (T25Center_<RUN>), 2 staff (T25StaffC + T25StaffN), 2 chains (T25CenterLeaveChain + T25CenterReimbChain), 1 approver user, 1 fresh admin user, 1 staff-linked user + staff, 12 days CL allocation. All prefixed with TEST_iter25_ for easy cleanup.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter-25 fully green. MapPicker (react-leaflet@5 + leaflet@1.9.4) mounts cleanly on the deployed frontend. Reimbursement POST takes 'date', 'amount', 'description', 'category', 'staff_id' (NOT 'incurred_on'). _attach_chain_to_request reads doc['center_id'] which is now correctly enriched from staff.center_id in both /api/leaves and /api/reimbursements (server.py lines 2710-2713 and 3534-3536). The /me/summary empty-staff branch returns the 7 keys at server.py:4183-4186."
+}
