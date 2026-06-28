@@ -16,6 +16,8 @@ const TYPES = [
   { v: "reimbursement", label: "Reimbursement" },
   { v: "leave", label: "Leave" },
   { v: "transaction", label: "Transaction / Payment" },
+  { v: "asset_purchase", label: "Asset Purchase" },
+  { v: "employee_transfer", label: "Employee Transfer" },
 ];
 
 const KINDS = [
@@ -140,10 +142,21 @@ export default function ApprovalWorkflows() {
       );
     }
     if (step.kind === "staff") {
+      // Only staff with a linked user-account (login) can be approvers — others can't
+      // receive notifications and won't be allowed through chain save validation.
+      const eligible = staffList.filter((s) => s.user_id);
       return (
         <Select value={step.value || ""} onValueChange={(v) => setStep(idx, { value: v })}>
-          <SelectTrigger className="rounded-none" data-testid={`step-${idx}-staff`}><SelectValue placeholder="Select staff" /></SelectTrigger>
-          <SelectContent>{staffList.map((s) => <SelectItem key={s.id} value={s.id}>{s.name} {s.designation ? `· ${s.designation}` : ""}</SelectItem>)}</SelectContent>
+          <SelectTrigger className="rounded-none" data-testid={`step-${idx}-staff`}>
+            <SelectValue placeholder={eligible.length ? "Select staff" : "No staff with login — create users first"} />
+          </SelectTrigger>
+          <SelectContent>
+            {eligible.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-[var(--muted)]">No staff has a linked login yet. Go to Users → add a user with the staff&apos;s email.</div>
+            ) : eligible.map((s) => (
+              <SelectItem key={s.id} value={s.id}>{s.name} {s.designation ? `· ${s.designation}` : ""}</SelectItem>
+            ))}
+          </SelectContent>
         </Select>
       );
     }

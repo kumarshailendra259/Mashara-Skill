@@ -215,14 +215,20 @@ export default function HRMS() {
 
   // Leaves state
   const [openL, setOpenL] = useState(false);
-  const [lForm, setLForm] = useState({ staff_id: "", start_date: new Date().toISOString().slice(0,10), end_date: new Date().toISOString().slice(0,10), reason: "" });
+  const [lForm, setLForm] = useState({ staff_id: "", start_date: new Date().toISOString().slice(0,10), end_date: new Date().toISOString().slice(0,10), reason: "", leave_type_id: "" });
+  const [leaveTypes, setLeaveTypes] = useState([]);
+  const [myBalances, setMyBalances] = useState([]);
 
   const canMarkAttendance = isAdmin || user?.role === "manager" || user?.role === "center_manager";
 
   const loadAll = () => Promise.all([
     api.get("/staff"), api.get("/reimbursements"), api.get("/payroll"), api.get("/leaves"),
     api.get("/entities/center"), api.get("/shifts").catch(() => ({ data: [] })),
-  ]).then(([s, r, p, lv, c, sh]) => { setStaff(s.data); setReimbs(r.data); setPayroll(p.data); setLeaves(lv.data); setCenters(c.data); setShifts(sh.data); });
+    api.get("/leave-types").catch(() => ({ data: [] })),
+  ]).then(([s, r, p, lv, c, sh, lt]) => {
+    setStaff(s.data); setReimbs(r.data); setPayroll(p.data); setLeaves(lv.data);
+    setCenters(c.data); setShifts(sh.data); setLeaveTypes(lt.data);
+  });
 
   useEffect(() => { loadAll(); }, []);
 
@@ -306,7 +312,7 @@ export default function HRMS() {
       if (!lForm.staff_id) { toast.error("Select staff"); return; }
       await api.post("/leaves", lForm);
       setOpenL(false);
-      setLForm({ staff_id: "", start_date: new Date().toISOString().slice(0,10), end_date: new Date().toISOString().slice(0,10), reason: "" });
+      setLForm({ staff_id: "", start_date: new Date().toISOString().slice(0,10), end_date: new Date().toISOString().slice(0,10), reason: "", leave_type_id: "" });
       const lv = await api.get("/leaves");
       setLeaves(lv.data);
       toast.success("Leave applied");
@@ -999,10 +1005,41 @@ export default function HRMS() {
                 <DialogHeader><DialogTitle className="font-heading">Apply Leave</DialogTitle></DialogHeader>
                 <div className="space-y-3">
                   <div><Label>Staff</Label>
-                    <Select value={lForm.staff_id} onValueChange={(v) => setLForm({ ...lForm, staff_id: v })}>
+                    <Select value={lForm.staff_id} onValueChange={async (v) => {
+                      setLForm({ ...lForm, staff_id: v });
+                      // Fetch balances for the picked staff (admin/hr can see anyone)
+                      try {
+                        const yr = new Date().getFullYear();
+                        const r = await api.get(`/leave-balances?staff_id=${v}&year=${yr}`);
+                        setMyBalances(r.data || []);
+                      } catch { setMyBalances([]); }
+                    }}>
                       <SelectTrigger className="rounded-none" data-testid="leave-staff"><SelectValue placeholder="Select staff" /></SelectTrigger>
                       <SelectContent>{staff.map((s) => <SelectItem key={s.id} value={s.id}>{s.name} — {s.designation}</SelectItem>)}</SelectContent>
                     </Select></div>
+                  <div><Label>Leave Type</Label>
+                    <Select value={lForm.leave_type_id} onValueChange={(v) => setLForm({ ...lForm, leave_type_id: v })}>
+                      <SelectTrigger className="rounded-none" data-testid="leave-type"><SelectValue placeholder="Pick type (auto-deducts balance on approve)" /></SelectTrigger>
+                      <SelectContent>
+                        {leaveTypes.map((t) => {
+                          const bal = myBalances.find((b) => b.leave_type_id === t.id);
+                          return (
+                            <SelectItem key={t.id} value={t.id}>
+                              {t.code} — {t.name}{bal ? ` · ${bal.balance}/${bal.allocated} left` : " · no balance"}
+                            </SelectItem>
+                          );
+                        })}
+                      </SelectContent>
+                    </Select>
+                    {lForm.staff_id && lForm.leave_type_id && (() => {
+                      const bal = myBalances.find((b) => b.leave_type_id === lForm.leave_type_id);
+                      return bal ? (
+                        <div className="text-[10px] text-[var(--muted)] mt-1 num">Available: <b>{bal.balance}</b> of {bal.allocated} ({bal.used} used)</div>
+                      ) : (
+                        <div className="text-[10px] text-amber-700 mt-1">⚠ No allocation for this type / year — HR can add in HR Settings → Leave Allocation</div>
+                      );
+                    })()}
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div><Label>From</Label><Input type="date" value={lForm.start_date} onChange={(e) => setLForm({ ...lForm, start_date: e.target.value })} className="rounded-none" data-testid="leave-from" /></div>
                     <div><Label>To</Label><Input type="date" value={lForm.end_date} onChange={(e) => setLForm({ ...lForm, end_date: e.target.value })} className="rounded-none" data-testid="leave-to" /></div>

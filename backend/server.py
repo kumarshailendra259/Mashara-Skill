@@ -415,7 +415,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -431,6 +431,9 @@ async def on_startup():
     # Partner cross-approval associations
     await db.partner_associations.create_index("id", unique=True)
     await db.partner_associations.create_index([("partner_a_id", 1), ("partner_b_id", 1)], unique=True)
+    # Leave allocation indices (seeder runs lazily on first GET /leave-types)
+    await db.leave_types.create_index("code", unique=True)
+    await db.leave_balances.create_index([("staff_id", 1), ("leave_type_id", 1), ("year", 1)], unique=True)
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -2283,6 +2286,37 @@ class LeaveIn(BaseModel):
     start_date: str
     end_date: str
     reason: Optional[str] = ""
+    leave_type_id: Optional[str] = None  # links to leave_types collection; deducted on final approve
+
+
+# ----- Leave Allocation (HR provisioning) -----
+class LeaveTypeIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(min_length=2)
+    code: str = Field(min_length=1, max_length=10)  # short ID: CL, SL, PL, COMP, etc.
+    annual_quota: float = Field(ge=0, default=0)
+    paid: bool = True
+    carry_forward: bool = False
+    color: Optional[str] = None  # tailwind hue for UI badges (e.g. "blue", "amber")
+    active: bool = True
+
+
+class LeaveAllocateIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    leave_type_id: str
+    year: int = Field(ge=2020, le=2100)
+    days: float = Field(ge=0)
+    staff_ids: List[str] = Field(default_factory=list)  # empty = ALL active staff
+    center_id: Optional[str] = None  # when set + staff_ids empty: scope to this center
+    mode: Literal["set", "add"] = "set"  # set: overwrite allocated; add: increment
+    remarks: Optional[str] = ""
+
+
+class LeaveBalanceAdjustIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    delta_allocated: float = 0  # +/- to allocated
+    delta_used: float = 0       # +/- to used (rare; manual correction)
+    remarks: str = Field(min_length=3)
 
 
 class ReimbursementIn(BaseModel):
@@ -2848,8 +2882,27 @@ async def _resolve_step_user_ids(step: dict, request_doc: dict) -> List[str]:
     if kind == "user":
         return [value] if value else []
     if kind == "staff":
-        s = await db.staff.find_one({"id": value}, {"_id": 0, "user_id": 1})
-        return [s["user_id"]] if s and s.get("user_id") else []
+        if not value:
+            return []
+        s = await db.staff.find_one({"id": value}, {"_id": 0, "user_id": 1, "email": 1})
+        if not s:
+            return []
+        # Primary: linked user_id stored on the staff record
+        if s.get("user_id"):
+            return [s["user_id"]]
+        # Fallback: resolve via staff.email → users.email (case-insensitive). Many staff are
+        # added without an explicit login linkage; if their email matches a registered user
+        # we still want approvals to route to that user instead of silently dead-ending.
+        if s.get("email"):
+            u = await db.users.find_one(
+                {"email": {"$regex": f"^{re.escape(s['email'])}$", "$options": "i"}},
+                {"_id": 0, "id": 1},
+            )
+            if u:
+                # Self-heal: persist the linkage so future lookups are cheap.
+                await db.staff.update_one({"id": value}, {"$set": {"user_id": u["id"]}})
+                return [u["id"]]
+        return []
     if kind == "reports_to":
         try:
             depth = max(1, int(value or "1"))
@@ -2927,7 +2980,85 @@ def _approval_link(req_type: str) -> str:
     }.get(req_type, "/pending-approvals")
 
 
+def _count_leave_days(start_date: str, end_date: str) -> float:
+    """Inclusive day-count between two YYYY-MM-DD strings. Returns 1 if either parse fails."""
+    try:
+        s = datetime.fromisoformat(start_date)
+        e = datetime.fromisoformat(end_date)
+        days = (e.date() - s.date()).days + 1
+        return float(max(1, days))
+    except (ValueError, TypeError):
+        return 1.0
+
+
+async def _deduct_leave_balance_on_approve(leave_rec: dict) -> None:
+    """If the leave request links a leave_type_id and the staff has a balance row for the
+    leave's year, increment used + recompute balance. Silently no-ops if no balance row
+    is configured (some staff may not have allocations)."""
+    lt_id = leave_rec.get("leave_type_id")
+    staff_id = leave_rec.get("staff_id")
+    start = leave_rec.get("start_date") or ""
+    if not (lt_id and staff_id and start):
+        return
+    try:
+        year = int(start[:4])
+    except (ValueError, TypeError):
+        return
+    days = _count_leave_days(start, leave_rec.get("end_date") or start)
+    bal = await db.leave_balances.find_one(
+        {"staff_id": staff_id, "leave_type_id": lt_id, "year": year}, {"_id": 0},
+    )
+    if not bal:
+        return
+    used = (bal.get("used", 0) or 0) + days
+    allocated = bal.get("allocated", 0) or 0
+    await db.leave_balances.update_one(
+        {"id": bal["id"]},
+        {"$set": {
+            "used": used,
+            "balance": max(0, allocated - used),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+
+
 # -------- Approval Chain CRUD --------
+async def _validate_chain_steps(steps: list) -> None:
+    """Validate step values resolve to a real approver. Raise 400 with a helpful message
+    if a non-optional step is misconfigured (so admins don't silently dead-end approvals)."""
+    for s in steps:
+        kind = s.get("kind")
+        value = (s.get("value") or "").strip()
+        lvl = s.get("level")
+        if s.get("optional"):
+            continue
+        if kind in ("role", "user", "staff") and not value:
+            raise HTTPException(400, f"Level {lvl}: please choose a {kind} for the approver")
+        if kind == "staff" and value:
+            st = await db.staff.find_one({"id": value}, {"_id": 0, "user_id": 1, "email": 1, "name": 1})
+            if not st:
+                raise HTTPException(400, f"Level {lvl}: selected staff no longer exists")
+            if not st.get("user_id"):
+                # Try email-based linkage so admins don't have to provision a login first.
+                if st.get("email"):
+                    u = await db.users.find_one(
+                        {"email": {"$regex": f"^{re.escape(st['email'])}$", "$options": "i"}},
+                        {"_id": 0, "id": 1},
+                    )
+                    if u:
+                        await db.staff.update_one({"id": value}, {"$set": {"user_id": u["id"]}})
+                        continue
+                raise HTTPException(
+                    400,
+                    f"Level {lvl}: staff '{st.get('name')}' has no linked login account. "
+                    "Open Users → Add user with their email so approvals can route to them.",
+                )
+        if kind == "user" and value:
+            u = await db.users.find_one({"id": value}, {"_id": 0, "id": 1})
+            if not u:
+                raise HTTPException(400, f"Level {lvl}: selected user no longer exists")
+
+
 @api.get("/approval-chains", response_model=List[ApprovalChainOut])
 async def list_approval_chains(_=Depends(get_current_user)):
     docs = await db.approval_chains.find({}, {"_id": 0}).sort([("type", 1), ("created_at", 1)]).to_list(200)
@@ -2944,6 +3075,9 @@ async def create_approval_chain(body: ApprovalChainIn, user=Depends(require_role
     for i, s in enumerate(sorted_steps, 1):
         s["level"] = i
     doc["steps"] = sorted_steps
+    # Per-step value validation: 'staff' / 'user' / 'role' MUST have a non-empty value,
+    # otherwise the chain silently dead-ends at that level and the request never reaches an approver.
+    await _validate_chain_steps(sorted_steps)
     # If activated, deactivate other chains of same (type, center_id) to keep one active per scope.
     # Chains for different centers (or one center vs global) can coexist as active.
     if doc.get("active"):
@@ -2968,6 +3102,7 @@ async def update_approval_chain(cid: str, body: ApprovalChainIn, _=Depends(requi
     for i, s in enumerate(sorted_steps, 1):
         s["level"] = i
     update["steps"] = sorted_steps
+    await _validate_chain_steps(sorted_steps)
     if update.get("active"):
         await db.approval_chains.update_many(
             {"type": update["type"], "active": True, "center_id": update.get("center_id"),
@@ -3088,6 +3223,8 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "decided_by": user["id"],
                 "decided_at": datetime.now(timezone.utc).isoformat(),
             }
+            # Auto-deduct from the staff's leave balance if a type is linked + balance row exists for that year.
+            await _deduct_leave_balance_on_approve(rec)
         elif body.request_type == "asset_purchase":
             # Final-approval converts request → Asset record + offsetting expense transaction.
             now = datetime.now(timezone.utc).isoformat()
@@ -5682,6 +5819,223 @@ async def delete_employee_transfer(tid: str, user=Depends(get_current_user)):
 
 # ============================================================
 
+
+
+# ============================================================================
+# Leave Allocation (HR provisioning)
+# ----------------------------------------------------------------------------
+# HR/Admin defines leave types (CL/SL/PL/COMP_OFF) with annual quotas, then allocates
+# day-balances to individual staff or in bulk by center. Used balance is auto-incremented
+# when a leave request is final-approved (links via leaves.leave_type_id).
+# ============================================================================
+
+
+DEFAULT_LEAVE_TYPES = [
+    {"code": "CL",   "name": "Casual Leave",  "annual_quota": 12, "paid": True,  "carry_forward": False, "color": "blue"},
+    {"code": "SL",   "name": "Sick Leave",    "annual_quota": 10, "paid": True,  "carry_forward": False, "color": "amber"},
+    {"code": "PL",   "name": "Privilege/Earned Leave", "annual_quota": 15, "paid": True, "carry_forward": True, "color": "emerald"},
+    {"code": "COMP", "name": "Comp-off",      "annual_quota": 0,  "paid": True,  "carry_forward": True,  "color": "purple"},
+    {"code": "LWP",  "name": "Leave Without Pay", "annual_quota": 0, "paid": False, "carry_forward": False, "color": "rose"},
+]
+
+
+async def _seed_default_leave_types() -> None:
+    """Idempotent: ensure default leave-type rows exist (CL/SL/PL/COMP/LWP)."""
+    for d in DEFAULT_LEAVE_TYPES:
+        if await db.leave_types.find_one({"code": d["code"]}, {"_id": 0}):
+            continue
+        doc = {**d, "id": str(uuid.uuid4()), "active": True,
+               "created_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            await db.leave_types.insert_one(doc)
+        except Exception:
+            # benign race on dup-key during concurrent reloads — ignore
+            pass
+
+
+@api.get("/leave-types")
+async def list_leave_types(_=Depends(get_current_user)):
+    # Lazy-seed on first call so we don't have to forward-declare in startup hook
+    if await db.leave_types.count_documents({}) == 0:
+        await _seed_default_leave_types()
+    docs = await db.leave_types.find({}, {"_id": 0}).sort("name", 1).to_list(200)
+    return docs
+
+
+@api.post("/leave-types")
+async def create_leave_type(body: LeaveTypeIn, user=Depends(require_role("admin", "hr"))):
+    doc = body.model_dump()
+    doc["code"] = doc["code"].upper().strip()
+    if await db.leave_types.find_one({"code": doc["code"]}, {"_id": 0}):
+        raise HTTPException(400, f"Leave type with code '{doc['code']}' already exists")
+    doc["id"] = str(uuid.uuid4())
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["created_by"] = user["id"]
+    await db.leave_types.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.put("/leave-types/{lt_id}")
+async def update_leave_type(lt_id: str, body: LeaveTypeIn, _=Depends(require_role("admin", "hr"))):
+    upd = body.model_dump()
+    upd["code"] = upd["code"].upper().strip()
+    # ensure code uniqueness against other docs
+    dup = await db.leave_types.find_one({"code": upd["code"], "id": {"$ne": lt_id}}, {"_id": 0})
+    if dup:
+        raise HTTPException(400, f"Another leave type already uses code '{upd['code']}'")
+    res = await db.leave_types.find_one_and_update({"id": lt_id}, {"$set": upd}, return_document=True)
+    if not res:
+        raise HTTPException(404, "Leave type not found")
+    res.pop("_id", None)
+    return res
+
+
+@api.delete("/leave-types/{lt_id}")
+async def delete_leave_type(lt_id: str, _=Depends(require_role("admin"))):
+    # Soft-protect: refuse if any balance refers to this type
+    if await db.leave_balances.find_one({"leave_type_id": lt_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "This leave type is used in staff balances — deactivate instead of deleting")
+    r = await db.leave_types.delete_one({"id": lt_id})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Leave type not found")
+    return {"ok": True}
+
+
+# -------- Leave Balances --------
+@api.get("/leave-balances")
+async def list_leave_balances(
+    staff_id: Optional[str] = None,
+    year: Optional[int] = None,
+    center_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    """List balances. HR/Admin see all; center_manager sees own centers; others see only own row."""
+    role = user.get("role")
+    q: dict = {}
+    if year:
+        q["year"] = year
+    # Scope by role
+    if role in ("admin", "hr"):
+        if staff_id:
+            q["staff_id"] = staff_id
+        if center_id:
+            staff_in_center = await db.staff.find({"center_id": center_id}, {"_id": 0, "id": 1}).to_list(5000)
+            q["staff_id"] = {"$in": [s["id"] for s in staff_in_center]}
+    elif role in ("senior_manager", "manager", "accountant", "center_manager"):
+        # See balances of staff in centers they manage (and any specific staff filter)
+        cids = user.get("assigned_center_ids") or []
+        if role == "senior_manager" and not cids:
+            # senior_manager without explicit center assignment → see all
+            pass
+        else:
+            staff_in_centers = await db.staff.find({"center_id": {"$in": cids}}, {"_id": 0, "id": 1}).to_list(5000)
+            q["staff_id"] = {"$in": [s["id"] for s in staff_in_centers]}
+        if staff_id:
+            q["staff_id"] = staff_id
+    else:
+        # All other roles: scope to own staff record
+        own = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+        if not own:
+            return []
+        q["staff_id"] = own["id"]
+    docs = await db.leave_balances.find(q, {"_id": 0}).sort([("year", -1), ("staff_id", 1)]).to_list(10000)
+    return docs
+
+
+@api.get("/leave-balances/my")
+async def my_leave_balances(year: Optional[int] = None, user=Depends(get_current_user)):
+    own = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not own:
+        return {"staff": None, "balances": [], "types": []}
+    q: dict = {"staff_id": own["id"]}
+    if year:
+        q["year"] = year
+    balances = await db.leave_balances.find(q, {"_id": 0}).sort("year", -1).to_list(200)
+    types = await db.leave_types.find({}, {"_id": 0}).to_list(50)
+    return {"staff": own, "balances": balances, "types": types}
+
+
+@api.post("/leave-balances/allocate")
+async def allocate_leaves(body: LeaveAllocateIn, user=Depends(require_role("admin", "hr"))):
+    """Bulk-allocate days to selected staff (or all staff in a center / globally).
+    `mode=set` overwrites the allocated column; `mode=add` adds to existing allocated."""
+    lt = await db.leave_types.find_one({"id": body.leave_type_id}, {"_id": 0})
+    if not lt:
+        raise HTTPException(404, "Leave type not found")
+
+    # Build target staff list
+    target_q: dict = {}
+    if body.staff_ids:
+        target_q["id"] = {"$in": body.staff_ids}
+    elif body.center_id:
+        target_q["center_id"] = body.center_id
+    # else: all staff (no extra filter)
+    targets = await db.staff.find(target_q, {"_id": 0, "id": 1, "name": 1}).to_list(10000)
+    if not targets:
+        raise HTTPException(400, "No staff matched the allocation filter")
+
+    now = datetime.now(timezone.utc).isoformat()
+    upserts = 0
+    for s in targets:
+        existing = await db.leave_balances.find_one(
+            {"staff_id": s["id"], "leave_type_id": body.leave_type_id, "year": body.year},
+            {"_id": 0},
+        )
+        if existing:
+            allocated = existing.get("allocated", 0)
+            new_allocated = body.days if body.mode == "set" else (allocated + body.days)
+            await db.leave_balances.update_one(
+                {"id": existing["id"]},
+                {"$set": {
+                    "allocated": new_allocated,
+                    "balance": max(0, new_allocated - (existing.get("used", 0) or 0)),
+                    "updated_at": now,
+                    "updated_by": user["id"],
+                    "last_remarks": body.remarks or "",
+                }},
+            )
+        else:
+            doc = {
+                "id": str(uuid.uuid4()),
+                "staff_id": s["id"],
+                "leave_type_id": body.leave_type_id,
+                "leave_type_code": lt["code"],
+                "year": body.year,
+                "allocated": body.days,
+                "used": 0,
+                "balance": body.days,
+                "created_at": now,
+                "created_by": user["id"],
+                "last_remarks": body.remarks or "",
+            }
+            await db.leave_balances.insert_one(doc)
+        upserts += 1
+    return {"ok": True, "updated": upserts, "leave_type": lt["code"], "year": body.year}
+
+
+@api.patch("/leave-balances/{bid}")
+async def adjust_leave_balance(bid: str, body: LeaveBalanceAdjustIn, user=Depends(require_role("admin", "hr"))):
+    rec = await db.leave_balances.find_one({"id": bid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Balance not found")
+    allocated = (rec.get("allocated", 0) or 0) + body.delta_allocated
+    used = max(0, (rec.get("used", 0) or 0) + body.delta_used)
+    balance = max(0, allocated - used)
+    upd = {
+        "allocated": allocated,
+        "used": used,
+        "balance": balance,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_by": user["id"],
+        "last_remarks": body.remarks,
+    }
+    await db.leave_balances.update_one({"id": bid}, {"$set": upd})
+    rec.update(upd)
+    return rec
+
+
+# ============================================================
 
 
 # ---------- Register router + CORS ----------

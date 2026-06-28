@@ -28,6 +28,15 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 5 — Finance Visibility Gate (Done, Mar 2026):
+- **Bug fix**: GET /api/auth/users no longer 500s on legacy users with RFC-6761 reserved-TLD emails (UserOut.email → plain `str`)
+- **Role gating** for investments / income / expense / profit-loss / TDS / milestone income:
+  - FULL ACCESS: `admin`, `partner`, `senior_manager`, `hr`, `accountant`
+  - RESTRICTED (403 + nav hidden + route redirect): `manager`, `center_manager`, `center_staff`, `viewer`, `reporting_authority`, `center_partner`
+- Backend: `require_finance_visible` dependency on /transactions, /batches, /batch-payments, /dashboard/{summary, milestone-income, fooding-income, settlement}, /reports/tds-register
+- Frontend: `financeOnly` flag on sidebar nav items (Dashboard, Programs, Transactions, Reports, TDS Register) + `<ProtectedRoute requireFinance>` redirects to per-role landing (`/check-in` for center_staff, `/hrms` for manager/center_manager, `/pending-approvals` for viewer/reporting_authority/center_partner)
+- Approval Workflows page now also configurable for `asset_purchase` and `employee_transfer` chains
+
 ### Phase 3 — Asset Management (Done, Mar 2026):
 - **Asset Purchase Workflow** — 4-level approval chain (Center Manager → Senior Manager → Accountant → Admin)
 - On final approve: Asset row added to `/assets` registry + offsetting expense transaction recorded
