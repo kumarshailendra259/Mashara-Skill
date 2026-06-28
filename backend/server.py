@@ -4165,12 +4165,42 @@ async def list_regularisations(status: Optional[str] = None, user=Depends(get_cu
     if user.get("role") not in ("admin", "hr", "manager"):
         q["created_by"] = user["id"]
     docs = await db.regularisations.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    # Lazy chain attach for legacy docs that were created BEFORE iter-26 (no chain_id).
+    # We patch them in-place so the unified Pending Approvals inbox + UI can show meaningful
+    # progress immediately. Only pending docs are migrated — finalised ones keep their state.
+    for d in docs:
+        if d.get("status") == "pending" and not d.get("chain_id"):
+            await _attach_chain_to_request("regularisation", d)
+            if d.get("chain_id"):
+                await db.regularisations.update_one(
+                    {"id": d["id"]},
+                    {"$set": {
+                        "chain_id": d.get("chain_id"),
+                        "current_level": d.get("current_level"),
+                        "chain_snapshot": d.get("chain_snapshot") or [],
+                        "chain_history": d.get("chain_history") or [],
+                    }},
+                )
     return docs
 
 
 @api.get("/regularisations/my")
 async def my_regularisations(user=Depends(get_current_user)):
     docs = await db.regularisations.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # Same lazy migration so the mobile staff app shows chain progress for older requests.
+    for d in docs:
+        if d.get("status") == "pending" and not d.get("chain_id"):
+            await _attach_chain_to_request("regularisation", d)
+            if d.get("chain_id"):
+                await db.regularisations.update_one(
+                    {"id": d["id"]},
+                    {"$set": {
+                        "chain_id": d.get("chain_id"),
+                        "current_level": d.get("current_level"),
+                        "chain_snapshot": d.get("chain_snapshot") or [],
+                        "chain_history": d.get("chain_history") or [],
+                    }},
+                )
     return docs
 
 

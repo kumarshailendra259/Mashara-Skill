@@ -506,7 +506,7 @@ function AttendanceTab() {
             </DialogTrigger>
             <DialogContent className="rounded-none max-w-sm">
               <DialogHeader><DialogTitle className="font-heading">Regularise Attendance</DialogTitle></DialogHeader>
-              <p className="text-xs text-[var(--muted)]">If you forgot to check in on a past day, submit a request — HR will review and mark it.</p>
+              <p className="text-xs text-[var(--muted)]">If you forgot to check in on a past day, submit a request — it will follow the configured approval workflow.</p>
               <div className="space-y-3">
                 <div><Label className="overline">Date Missed</Label><Input type="date" value={regForm.date} max={new Date().toISOString().slice(0,10)} onChange={(e) => setRegForm({ ...regForm, date: e.target.value })} className="rounded-none h-11" data-testid="reg-date" /></div>
                 <div><Label className="overline">Status Requested</Label>
@@ -530,18 +530,32 @@ function AttendanceTab() {
                     setRegOpen(false);
                     setRegForm({ date: "", status: "present", reason: "" });
                     load();
-                    toast.success("Submitted — pending HR review");
+                    toast.success("Submitted — awaiting approval");
                   } catch (e) { toast.error(formatError(e)); }
                 }} className="brand-btn rounded-none" data-testid="reg-submit">Submit</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
-        {myReg.filter((r) => r.status === "pending").length > 0 && (
-          <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 mt-2">
-            {myReg.filter((r) => r.status === "pending").length} regularisation request(s) pending HR review
-          </div>
-        )}
+        {myReg.filter((r) => r.status === "pending").length > 0 && (() => {
+          const pending = myReg.filter((r) => r.status === "pending");
+          // Group by current step label (chain.snapshot[current_level-1].label or 'Approval')
+          const stepCounts = pending.reduce((acc, r) => {
+            const snap = r.chain_snapshot || [];
+            const step = snap.find((s) => s.level === r.current_level);
+            const label = step?.label || (r.chain_id ? `Level ${r.current_level || 1}` : "HR / Admin");
+            acc[label] = (acc[label] || 0) + 1;
+            return acc;
+          }, {});
+          return (
+            <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 mt-2" data-testid="reg-pending-banner">
+              {pending.length} regularisation request(s) awaiting:{" "}
+              {Object.entries(stepCounts).map(([lbl, n], i) => (
+                <span key={lbl}>{i > 0 ? ", " : ""}<b>{lbl}</b> ({n})</span>
+              ))}
+            </div>
+          );
+        })()}
         {history.length === 0 ? (
           <div className="text-sm text-[var(--muted)] mt-2">No history yet.</div>
         ) : (
