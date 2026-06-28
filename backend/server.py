@@ -288,7 +288,7 @@ class RejectIn(BaseModel):
 # ============================================================================
 # Approval Chains — configurable multi-level approval workflows
 # ============================================================================
-ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer"]
+ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation"]
 ApproverKind = Literal["role", "staff", "user", "reports_to"]
 
 # Central mapping from approval-type → backing collection. Used by /approvals/act, /approvals/pending,
@@ -300,6 +300,7 @@ APPROVAL_TYPE_COLL: dict = {
     "transaction":       "transactions",
     "asset_purchase":    "asset_purchase_requests",
     "employee_transfer": "employee_transfers",
+    "regularisation":    "regularisations",
 }
 
 
@@ -2277,6 +2278,8 @@ class ShiftIn(BaseModel):
 class RegularisationIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     date: str  # YYYY-MM-DD — day to regularise
+    # Renamed on save to attendance_status so it doesn't clash with the chain status
+    # ('pending'/'approved'/'rejected') used by the unified approval engine.
     status: Literal["present", "half", "leave"] = "present"
     reason: str  # mandatory explanation
 
@@ -2826,6 +2829,14 @@ DEFAULT_CHAINS: List[dict] = [
             {"level": 3, "kind": "role", "value": "admin",          "label": "Admin (Final)",    "optional": False},
         ],
     },
+    {
+        "name": "Regularisation — Default (1 level)",
+        "type": "regularisation",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "hr", "label": "HR / Admin", "optional": False},
+        ],
+    },
 ]
 
 
@@ -2984,6 +2995,7 @@ def _approval_link(req_type: str) -> str:
         "reimbursement":     "/hrms",
         "asset_purchase":    "/assets",
         "employee_transfer": "/employee-transfers",
+        "regularisation":    "/pending-approvals",
     }.get(req_type, "/pending-approvals")
 
 
@@ -3298,6 +3310,30 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "approved_at": now,
                 "applied_at": now,
             }
+        elif body.request_type == "regularisation":
+            # Final-approval upserts the attendance row for the staff/date as 'regularised'.
+            now = datetime.now(timezone.utc).isoformat()
+            new_id = str(uuid.uuid4())
+            await db.attendance.update_one(
+                {"staff_id": rec["staff_id"], "date": rec["date"]},
+                {"$set": {
+                    "staff_id": rec["staff_id"], "date": rec["date"],
+                    "status": rec.get("attendance_status") or "present",
+                    "marked_via": "regularised",
+                    "marked_at": now, "marked_by": user["id"],
+                    "check_in_at": now,
+                    "regularised": True, "regularisation_id": rec["id"],
+                }, "$setOnInsert": {"id": new_id}},
+                upsert=True,
+            )
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "decided_by": user["id"],
+                "decided_at": now,
+                "decision_remarks": body.remarks or "",
+            }
         else:  # transaction
             update = {
                 "current_level": 0,
@@ -3358,6 +3394,8 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                                 if req_type == "asset_purchase" else None)
                             or (f"{rec.get('staff_name','Staff')} → center {rec.get('to_center_id','')[:8]}"
                                 if req_type == "employee_transfer" else None)
+                            or (f"Regularise {rec.get('attendance_status','present').upper()} on {rec.get('date','')}"
+                                if req_type == "regularisation" else None)
                         ),
                     },
                     "created_at": rec.get("created_at"),
@@ -4077,27 +4115,44 @@ async def delete_shift(sid: str, _=Depends(require_role("admin", "hr"))):
 # -------- Regularisation requests (missed-attendance fix) --------
 @api.post("/regularisations")
 async def submit_regularisation(body: RegularisationIn, user=Depends(get_current_user)):
-    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "center_id": 1})
     if not staff:
         raise HTTPException(400, "Your user is not linked to any staff record.")
     doc = body.model_dump()
+    # Rename `status` → `attendance_status` so it doesn't clash with the chain status
+    # ('pending'/'approved'/'rejected') that the unified approval engine writes.
+    doc["attendance_status"] = doc.pop("status", "present")
     doc["id"] = str(uuid.uuid4())
     doc["staff_id"] = staff["id"]
     doc["staff_name"] = staff.get("name")
+    # Enrich with center_id so center-bound regularisation chains can route correctly.
+    doc["center_id"] = staff.get("center_id")
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
-    doc["status"] = "pending"  # pending | approved | rejected
+    doc["status"] = "pending"
     doc["decided_by"] = None
     doc["decided_at"] = None
     doc["decision_remarks"] = None
+    # Attach the configurable approval chain so it appears in the unified Pending Approvals inbox.
+    await _attach_chain_to_request("regularisation", doc)
     await db.regularisations.insert_one(doc)
     doc.pop("_id", None)
-    # Notify admin + HR
-    admins = await db.users.find({"role": {"$in": ["admin", "hr"]}}, {"_id": 0, "id": 1}).to_list(50)
-    for a in admins:
-        if a["id"] != user["id"]:
-            await _notify(a["id"], f"New attendance regularisation request from {staff.get('name')} for {doc['date']}",
-                          ntype="regularisation_pending", ref_id=doc["id"], link="/hr-settings")
+    # Notify L1 approvers (via chain). Fallback to admin/HR broadcast if no chain configured.
+    notified = set()
+    if doc.get("chain_snapshot"):
+        first = next((s for s in doc["chain_snapshot"] if s.get("level") == 1), None)
+        if first:
+            for uid in await _resolve_step_user_ids(first, doc):
+                if uid and uid != user["id"]:
+                    notified.add(uid)
+    if not notified:
+        admins = await db.users.find({"role": {"$in": ["admin", "hr"]}}, {"_id": 0, "id": 1}).to_list(50)
+        for a in admins:
+            if a["id"] != user["id"]:
+                notified.add(a["id"])
+    for uid in notified:
+        await _notify(uid, f"New attendance regularisation request from {staff.get('name')} for {doc['date']}",
+                      ntype="regularisation_pending", ref_id=doc["id"], link="/pending-approvals")
     return doc
 
 
@@ -4142,7 +4197,7 @@ async def decide_regularisation(rid: str, decision: str = Query(..., pattern="^(
             {"staff_id": rec["staff_id"], "date": rec["date"]},
             {"$set": {
                 "staff_id": rec["staff_id"], "date": rec["date"],
-                "status": rec.get("status") or "present",
+                "status": rec.get("attendance_status") or rec.get("status") or "present",
                 "marked_via": "regularised",
                 "marked_at": now,
                 "marked_by": user["id"],

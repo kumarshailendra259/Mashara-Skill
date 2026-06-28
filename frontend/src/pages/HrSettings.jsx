@@ -41,14 +41,12 @@ export default function HrSettings() {
           <TabsTrigger value="leave_allocation" data-testid="tab-leave-allocation"><Wallet size={14} className="mr-2" /> Leave Allocation</TabsTrigger>
           <TabsTrigger value="geofences" data-testid="tab-geofences"><MapPin size={14} className="mr-2" /> Geofences</TabsTrigger>
           <TabsTrigger value="shifts" data-testid="tab-shifts"><Clock size={14} className="mr-2" /> Shifts</TabsTrigger>
-          <TabsTrigger value="regularisations" data-testid="tab-reg"><AlertCircle size={14} className="mr-2" /> Regularisations</TabsTrigger>
         </TabsList>
 
         <TabsContent value="holidays" className="mt-4"><HolidaysTab /></TabsContent>
         <TabsContent value="leave_allocation" className="mt-4"><LeaveAllocationTab /></TabsContent>
         <TabsContent value="geofences" className="mt-4"><GeofencesTab /></TabsContent>
         <TabsContent value="shifts" className="mt-4"><ShiftsTab /></TabsContent>
-        <TabsContent value="regularisations" className="mt-4"><RegularisationsTab /></TabsContent>
       </Tabs>
     </div>
   );

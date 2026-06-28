@@ -18,6 +18,7 @@ const TYPES = [
   { v: "transaction", label: "Transaction / Payment" },
   { v: "asset_purchase", label: "Asset Purchase" },
   { v: "employee_transfer", label: "Employee Transfer" },
+  { v: "regularisation", label: "Regularisation" },
 ];
 
 const KINDS = [

@@ -1,0 +1,39 @@
+{
+  "summary": "iter-26 full test pass. Backend: 13/13 in test_iter26_regularisation_chain.py. Frontend: all 4 smoke checks pass (Pending Approvals shows new Regularisations tab with count badge + items rendered correctly; HR Settings has the Regularisations tab removed; Check-In LeaveTab has data-testid='mob-leave-type'; Approval Workflows lists Regularisation as a chain type).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_iter26_regularisation_chain.py",
+    "/app/test_reports/pytest/iter26_results.xml"
+  ],
+  "what_was_verified": [
+    "DEFAULT CHAIN: 'Regularisation — Default (1 level)' is seeded on startup with type=regularisation, step level=1 / kind=role / value=hr. All other defaults (leave/reimbursement/transaction/asset_purchase/employee_transfer) still active.",
+    "SUBMISSION: POST /api/regularisations attaches chain_id + chain_snapshot, sets current_level=1, renames input 'status' to 'attendance_status' (so chain status 'pending' is not clobbered), enriches center_id from the staff record.",
+    "PENDING LIST: Submitted regularisation appears in admin's /api/approvals/pending under request_type='regularisation' with summary.date and a populated description (falls back through reason → 'Regularise X on Y').",
+    "FINAL-APPROVE VIA CHAIN: POST /api/approvals/act {request_type:'regularisation', action:'approve'} sets reg.status='approved', current_level=0 AND upserts an attendance row for (staff_id, date) with status=attendance_status, marked_via='regularised', regularised=True, regularisation_id=<rid>.",
+    "LEGACY PATCH BACK-COMPAT: PATCH /api/regularisations/{rid}?decision=approved still works — picks attendance_status (or legacy 'status' fallback) when creating the attendance row.",
+    "CHAIN CRUD: POST /api/approval-chains + PUT /api/approval-chains/{id} accept type='regularisation' (admin/hr).",
+    "LEAVE BALANCE BUGFIX: POST /api/leaves correctly persists leave_type_id on the leave doc. After final-approve via /approvals/act, leave_balances row has used incremented by inclusive day-count (3 for 11-10→11-12) and balance = allocated - used (12-3=9).",
+    "EDGE: POST /api/leaves without leave_type_id is still accepted; deduction silently no-ops (no balance row impact).",
+    "FRONTEND /pending-approvals: 6 tabs (All / Transactions / Leaves / Reimbursements / Assets / Transfers / Regularisations) — REGULARISATION cards render with date pill + 'HR / Admin' step label and View/Approve/Reject actions.",
+    "FRONTEND /hr-settings: only 4 tabs remain (Holidays, Leave Allocation, Geofences, Shifts). Regularisations tab removed.",
+    "FRONTEND /check-in LeaveTab: data-testid='mob-leave-type' Select renders with placeholder 'Select type', leave-submit button present and enabled (admin login - no staff link so balance hint not shown, expected).",
+    "FRONTEND /approval-workflows: Regularisation listed as a chain type in TYPES list."
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "/app/frontend/src/pages/HrSettings.jsx still contains an unused RegularisationsTab() function (lines ~297-330) even though its TabsTrigger + TabsContent are removed. Dead code — safe to delete to reduce bundle size.",
+    "Approval description fallback chain reads rec.get('reason') BEFORE the regularisation-specific 'Regularise X on Y' fallback. That's correct behavior (user-typed reason is more informative) but worth noting if main agent expected the static label.",
+    "server.py still 6142 lines — repeated recommendation to split into routers; not blocking.",
+    "POST /api/approvals/act 'remarks' has min_length=3 — sensible but not documented in OpenAPI; consider adding example in schema."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter26_regularisation_chain.py (new)"
+  ],
+  "success_rate": { "backend": "100% (13/13)", "frontend": "100% (4/4 smoke checks)" },
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Per-run UUID suffix (RUN=6 chars). Per run: 1 user (TEST_iter26_staff_<RUN>@finance.app role=center_staff), 1 staff linked, 1 leave-type (T<run>), 1 12-day allocation, 2 regularisations (one through chain + one legacy PATCH), 2 leaves (1 with type, 1 without), 1 approval-chain (TEST_iter26 Reg Chain <RUN>, inactive). All TEST_iter26 prefixed for easy cleanup.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter-26 fully green. Two important schema gotchas for future testers: (1) /api/approvals/act payload uses 'action' (not 'decision') and requires 'remarks' with min_length=3 chars. (2) /api/leave-balances/allocate body uses 'days' (not 'allocated'). (3) /api/auth/register valid roles do NOT include 'staff' — use 'center_staff'. (4) When admin_session is also used to register a new user, the Set-Cookie from /auth/register OVERWRITES the admin's JWT cookie; always register via a separate requests.Session to keep admin session clean."
+}

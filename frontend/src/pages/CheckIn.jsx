@@ -579,23 +579,37 @@ function AttendanceTab() {
    ============================================================ */
 function LeaveTab({ staffId }) {
   const [list, setList] = useState([]);
-  const [form, setForm] = useState({ start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), reason: "" });
+  const [types, setTypes] = useState([]);
+  const [balances, setBalances] = useState([]);
+  const [form, setForm] = useState({ start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), reason: "", leave_type_id: "" });
   const [submitting, setSubmitting] = useState(false);
   const [trackId, setTrackId] = useState(null);
 
   const load = async () => {
-    try { const { data } = await api.get("/leaves/my"); setList(data || []); } catch {/* best-effort */}
+    try {
+      const [my, lt, summ] = await Promise.all([
+        api.get("/leaves/my"),
+        api.get("/leave-types"),
+        api.get("/me/summary").catch(() => ({ data: {} })),
+      ]);
+      setList(my.data || []);
+      setTypes(lt.data || []);
+      setBalances(summ.data?.leave_balances || []);
+    } catch {/* best-effort */}
   };
   useEffect(() => { load(); }, []);
 
+  const balOf = (lt_id) => balances.find((b) => b.leave_type_id === lt_id);
+
   const submit = async () => {
     if (!staffId) { toast.error("Staff record not linked yet"); return; }
+    if (!form.leave_type_id) { toast.error("Pick a leave type — balance won't deduct otherwise"); return; }
     if (!form.start_date || !form.end_date) { toast.error("Pick dates"); return; }
     setSubmitting(true);
     try {
       await api.post("/leaves", { staff_id: staffId, ...form });
       toast.success("Leave applied");
-      setForm({ start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), reason: "" });
+      setForm({ start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), reason: "", leave_type_id: "" });
       load();
     } catch (e) { toast.error(formatError(e)); }
     finally { setSubmitting(false); }
@@ -606,6 +620,30 @@ function LeaveTab({ staffId }) {
       <div className="swiss-card p-4">
         <div className="font-heading font-bold text-lg">Apply for Leave</div>
         <div className="space-y-3 mt-3">
+          <div>
+            <Label className="overline">Leave Type *</Label>
+            <Select value={form.leave_type_id} onValueChange={(v) => setForm({ ...form, leave_type_id: v })}>
+              <SelectTrigger className="rounded-none h-11" data-testid="mob-leave-type"><SelectValue placeholder="Select type" /></SelectTrigger>
+              <SelectContent>
+                {types.map((t) => {
+                  const b = balOf(t.id);
+                  return (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.code} — {t.name}{b ? ` · ${b.balance}/${b.allocated} left` : " · no balance"}
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+            {form.leave_type_id && (() => {
+              const b = balOf(form.leave_type_id);
+              return b ? (
+                <div className="text-[10px] text-[var(--muted)] mt-1 num">Available: <b>{b.balance}</b> of {b.allocated} ({b.used} used)</div>
+              ) : (
+                <div className="text-[10px] text-amber-700 mt-1">⚠ No allocation — leave will be applied but balance won&apos;t deduct.</div>
+              );
+            })()}
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div><Label className="overline">From</Label><Input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} className="rounded-none h-11" data-testid="leave-start" /></div>
             <div><Label className="overline">To</Label><Input type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} className="rounded-none h-11" data-testid="leave-end" /></div>

@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -18,6 +18,7 @@ import { useNavigate } from "react-router-dom";
 // - Reimbursements
 // - Asset purchase requests
 // - Employee transfer requests
+// - Attendance regularisations
 
 const TYPE_META = {
   transaction:       { icon: ArrowLeftRight, label: "Transaction",       color: "bg-blue-50 text-[var(--brand)]" },
@@ -25,6 +26,7 @@ const TYPE_META = {
   reimbursement:     { icon: Receipt,        label: "Reimbursement",      color: "bg-orange-50 text-orange-700" },
   asset_purchase:    { icon: Box,            label: "Asset Purchase",     color: "bg-emerald-50 text-emerald-700" },
   employee_transfer: { icon: UserCog,        label: "Employee Transfer",  color: "bg-amber-50 text-amber-700" },
+  regularisation:    { icon: AlertCircle,    label: "Regularisation",     color: "bg-rose-50 text-rose-700" },
 };
 
 export default function PendingApprovals() {
@@ -51,7 +53,7 @@ export default function PendingApprovals() {
   );
 
   const counts = useMemo(() => {
-    const c = { all: items.length, transaction: 0, leave: 0, reimbursement: 0, asset_purchase: 0, employee_transfer: 0 };
+    const c = { all: items.length, transaction: 0, leave: 0, reimbursement: 0, asset_purchase: 0, employee_transfer: 0, regularisation: 0 };
     items.forEach((i) => { c[i.request_type] = (c[i.request_type] || 0) + 1; });
     return c;
   }, [items]);
@@ -98,6 +100,7 @@ export default function PendingApprovals() {
     if (item.request_type === "transaction") nav("/transactions");
     else if (item.request_type === "asset_purchase") nav("/assets");
     else if (item.request_type === "employee_transfer") nav("/employee-transfers");
+    else if (item.request_type === "regularisation") nav("/pending-approvals");
     else nav("/hrms");
   };
 
@@ -128,6 +131,7 @@ export default function PendingApprovals() {
           { key: "reimbursement",     label: "Reimbursements" },
           { key: "asset_purchase",    label: "Assets" },
           { key: "employee_transfer", label: "Transfers" },
+          { key: "regularisation",    label: "Regularisations" },
         ].map((t) => (
           <button
             key={t.key}
