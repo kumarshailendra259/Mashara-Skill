@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const navItems = [
-  { to: "/", key: "dashboard", icon: LayoutDashboard, end: true, financeOnly: true },
+  { to: "/", key: "dashboard", icon: LayoutDashboard, end: true, dashboardRoles: true },
   { to: "/companies", key: "companies", icon: Building2 },
   { to: "/partners", key: "partners", icon: Users },
   { to: "/centers", key: "centers", icon: MapPin },
@@ -39,6 +39,9 @@ const navItems = [
 // Roles that may see investments / income / expense / profit-loss / milestones / TDS.
 // Must mirror FINANCE_VISIBLE_ROLES in backend/server.py.
 const FINANCE_VISIBLE_ROLES = ["admin", "partner", "senior_manager", "hr", "accountant"];
+// Roles that get a useful `/` landing — finance roles see the financial dashboard, plus
+// center_manager which gets the operational dashboard (rendered by App.js based on role).
+const DASHBOARD_ROLES = [...FINANCE_VISIBLE_ROLES, "center_manager"];
 
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
@@ -103,6 +106,7 @@ export default function Layout({ children }) {
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
       if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
+      if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;
       return true;
     }),
     [user?.role],

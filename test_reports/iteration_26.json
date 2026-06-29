@@ -1,0 +1,44 @@
+{
+  "summary": "iter-28 Center Manager dashboard - both backend (17/17 pytest) and frontend (12/12 UI checks) PASSED. New /api/dashboard/center-ops endpoint returns correct ops KPIs scoped by role. center_manager lands on CenterManagerDashboard at / with KPI tiles (3 staff, 2 present 66.7%, 1 absent). Finance endpoints still 403 for center_manager. Other restricted roles still redirect correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter28_center_manager_dashboard.py",
+    "/app/test_reports/pytest/iter28_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py /api/dashboard/center-ops correctly scopes by role (admin/hr/senior_manager/manager see all; center_manager/center_staff see assigned_center_ids only).",
+    "Empty-cids branch returns empty kpi dict instead of zero-filled dict; frontend uses ?? 0 fallbacks so it renders fine, but consider returning zero-filled KPI for consistency.",
+    "my_pending_approvals loops over leaves/regularisations/reimbursements with a 500-item cap per collection and recomputes _current_step for each — could be slow under load. Consider an aggregation or cache.",
+    "ProtectedRoute OPS_DASHBOARD_ROLES = ['center_manager'] correctly keeps CM on / without redirect.",
+    "Layout DASHBOARD_ROLES = FINANCE + center_manager — Dashboard nav link shown only to roles with a useful dashboard; correctly hidden for center_staff/viewer/reporting_authority/center_partner/manager."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter28_center_manager_dashboard.py"
+  ],
+  "success_rate": {
+    "backend": "100% (17/17)",
+    "frontend": "100% (12/12)"
+  },
+  "test_credentials": "admin@finance.app / Admin@123 (per /app/memory/test_credentials.md). Per-run test users created with TEST_iter28_* prefix.",
+  "seed_data_creation": "Per test run, creates: 1 center + 3 staff with attendance (2 present, 1 absent today), 1 other center with 1 staff, center_manager user assigned to center, center_manager user with empty assignments, center_staff user. All prefixed TEST_iter28_*_<RUN>.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter-28 fully verified. test_iter28_center_manager_dashboard.py covers center-ops endpoint shape, role-scoping (admin all centers, CM only assigned, empty case), correct counts (3 staff / 2 present / 1 absent → 66.7%), finance-gate regression (CM 403 on summary/transactions/batches/batch-payments/tds-register/milestone-income/fooding-income/settlement) and iter-24/26/27 smoke. UI confirmed: CM lands on / with center-manager-dashboard, kpi tiles render real values, sidebar hides finance items; admin still gets financial dashboard; center_staff still redirects to /check-in.",
+  "ui_verification": {
+    "center_manager_landing": "PASS - lands on / with [data-testid='center-manager-dashboard'] rendered",
+    "kpi_tiles_present": "PASS - kpi-staff-total/present/absent/my-pending/leaves/regs/batches/assets all rendered",
+    "kpi_values_correct": "PASS - staff=3, present=2 (66.7%), absent=1",
+    "cm_sidebar_correct": "PASS - Dashboard visible; Transactions/Programs/Reports/TDS Register hidden",
+    "center_staff_redirect": "PASS - lands on /check-in, no Dashboard nav",
+    "admin_financial_dashboard": "PASS - admin lands on / with financial KPIs (Total Investment/Income/Expense/Net Profit), Dashboard+Transactions nav visible, no center-manager-dashboard"
+  }
+}

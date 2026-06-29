@@ -25,11 +25,21 @@ import PendingApprovals from "@/pages/PendingApprovals";
 import LoginHistory from "@/pages/LoginHistory";
 import AssetManagement from "@/pages/AssetManagement";
 import EmployeeTransfers from "@/pages/EmployeeTransfers";
+import CenterManagerDashboard from "@/pages/CenterManagerDashboard";
+import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
 function Shell({ children }) {
   return <Layout>{children}</Layout>;
+}
+
+// Renders the appropriate "/" landing page based on user role.
+// Finance roles → financial Dashboard. center_manager → operational CenterManagerDashboard.
+function RoleHome() {
+  const { user } = useAuth();
+  if (user?.role === "center_manager") return <CenterManagerDashboard />;
+  return <Dashboard />;
 }
 
 function App() {
@@ -41,7 +51,7 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
-            <Route path="/" element={<ProtectedRoute requireFinance><Shell><Dashboard /></Shell></ProtectedRoute>} />
+            <Route path="/" element={<ProtectedRoute requireFinance><Shell><RoleHome /></Shell></ProtectedRoute>} />
             <Route path="/companies" element={<ProtectedRoute><Shell><Entities etype="company" /></Shell></ProtectedRoute>} />
             <Route path="/partners" element={<ProtectedRoute><Shell><Entities etype="partner" /></Shell></ProtectedRoute>} />
             <Route path="/centers" element={<ProtectedRoute><Shell><Entities etype="center" /></Shell></ProtectedRoute>} />

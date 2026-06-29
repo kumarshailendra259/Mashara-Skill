@@ -6,9 +6,14 @@ import { useAuth } from "@/context/AuthContext";
 // Must mirror FINANCE_VISIBLE_ROLES in backend/server.py.
 const FINANCE_VISIBLE_ROLES = ["admin", "partner", "senior_manager", "hr", "accountant"];
 
+// Roles that DO see a dashboard at `/` (but a different, operational one — no financial data).
+// Used by App.js to route `/` to the right component.
+const OPS_DASHBOARD_ROLES = ["center_manager"];
+
 // Where to send a non-finance user instead of the financial dashboard.
+// Note: center_manager NOW lands on `/` (an operational dashboard auto-renders for that role)
+// so they're NOT in this map any more.
 const LANDING_FOR_ROLE = {
-  center_manager:      "/hrms",
   manager:             "/hrms",
   center_staff:        "/check-in",
   viewer:              "/pending-approvals",
@@ -27,6 +32,8 @@ export default function ProtectedRoute({ children, requireFinance = false }) {
   }
   if (!user) return <Navigate to="/login" replace />;
   if (requireFinance && !FINANCE_VISIBLE_ROLES.includes(user.role)) {
+    // Operational roles (center_manager) get to stay on / — App.js will render the ops dashboard.
+    if (OPS_DASHBOARD_ROLES.includes(user.role)) return children;
     return <Navigate to={LANDING_FOR_ROLE[user.role] || "/hrms"} replace />;
   }
   return children;
