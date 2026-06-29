@@ -28,6 +28,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 10 — Center Manager Operations Dashboard (Done, Mar 2026):
+- **Center Manager ab `/` par apna Operations Dashboard dekhta hai** — pehle wahan se redirect ho jata tha
+- New backend endpoint `GET /api/dashboard/center-ops` — center-scoped operational KPIs (NO finance fields):
+  - Staff total, today's attendance (present/absent/%), pending leaves & regularisations
+  - Active batches count, total assets, upcoming holidays
+  - "My Pending Approvals" badge (counts requests where this user is the next approver)
+  - Recent leave activity table + list of managed centers
+- App.js `RoleHome` dispatcher: `/` route picks Dashboard vs CenterManagerDashboard based on role
+- ProtectedRoute: `OPS_DASHBOARD_ROLES = ['center_manager']` — gets to stay on / despite `requireFinance` flag
+- Layout sidebar: Dashboard link visible to finance roles + center_manager only (not to viewers/center_staff/etc.)
+- **Finance gating still strict**: center_manager 403s on /dashboard/summary, /transactions, /batches, /reports, etc.
+
 ### Phase 9 — Partner Center-Based Visibility (Done, Mar 2026):
 - **Partner-role users now scoped to their mapped centers** across dashboard, transactions, settlement, milestone-income, fooding-income, batches, batch-payments
 - Mapping auto-derived from 3 sources: `batches.partner_ids`, `centers.partner_id`, and approved transactions where the partner has center-level history

@@ -2252,8 +2252,12 @@ async def center_ops_dashboard(user=Depends(get_current_user)):
 
     if not cids:
         return {
-            "as_of": today, "center_ids": [], "kpi": {}, "upcoming_holidays": [],
-            "my_pending_approvals": 0, "recent_leaves": [], "my_centers": [],
+            "as_of": today, "center_ids": [],
+            "kpi": {
+                "staff_total": 0, "attendance_present": 0, "attendance_absent": 0, "attendance_pct": 0,
+                "leaves_pending": 0, "regularisations_pending": 0, "batches_active": 0, "asset_total": 0,
+            },
+            "upcoming_holidays": [], "my_pending_approvals": 0, "recent_leaves": [], "my_centers": [],
         }
 
     cscope = {"center_id": {"$in": cids}}
