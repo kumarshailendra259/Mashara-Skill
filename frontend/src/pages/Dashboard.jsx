@@ -27,7 +27,7 @@ export default function Dashboard() {
   const { user } = useAuth();
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [settlement, setSettlement] = useState(null);
-  const showSettlement = ["partner", "admin", "manager", "accountant"].includes(user?.role);
+  const showSettlement = ["partner", "admin", "manager", "senior_manager", "accountant", "hr"].includes(user?.role);
   const [filters, setFilters] = useState({
     company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "",
   });

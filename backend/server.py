@@ -2185,7 +2185,7 @@ class SettlementRecordIn(BaseModel):
     from_partner_id: str   # the partner who PAID
     to_partner_id: str     # the partner who RECEIVED
     amount: float = Field(gt=0)
-    date: str              # YYYY-MM-DD — acts as the cutoff date for that center
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")  # YYYY-MM-DD — acts as the cutoff date
     note: Optional[str] = None
 
 
@@ -2277,10 +2277,10 @@ async def settlement_history(
 
 @api.delete("/dashboard/settlement/record/{sid}", status_code=204)
 async def delete_settlement_record(sid: str, user=Depends(require_finance_visible)):
-    """Undo a recorded settlement (admin / senior_manager / accountant only)."""
+    """Undo a recorded settlement (admin / senior_manager / manager / accountant only)."""
     role = user.get("role")
     if role not in ("admin", "senior_manager", "manager", "accountant"):
-        raise HTTPException(status_code=403, detail="Only admin/accountant can delete settlement records")
+        raise HTTPException(status_code=403, detail="Only admin/senior_manager/manager/accountant can delete settlement records")
     res = await db.partner_settlements.delete_one({"id": sid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Settlement record not found")
