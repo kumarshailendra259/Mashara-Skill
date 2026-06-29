@@ -1993,6 +1993,41 @@ async def fooding_income_summary(
     }
 
 
+async def _latest_settlement_for_center(cid: str) -> Optional[dict]:
+    """Return the most-recent partner_settlements record for a center (or None)."""
+    doc = await db.partner_settlements.find_one(
+        {"center_id": cid},
+        sort=[("date", -1), ("created_at", -1)],
+    )
+    if not doc:
+        return None
+    doc.pop("_id", None)
+    return doc
+
+
+def _aggregate_partners_for_center(rows: list, p_name: dict) -> list:
+    """Group raw txn aggregation rows into per-partner totals and add fair-share fields."""
+    agg: dict = {}
+    for r in rows:
+        pid = r["_id"]["pid"]
+        agg.setdefault(pid, {
+            "id": pid, "name": p_name.get(pid, "Unknown"),
+            "investment": 0, "income": 0, "expense": 0,
+        })
+        agg[pid][r["_id"]["type"]] += r["total"]
+    partners = list(agg.values())
+    for p in partners:
+        p["net_contribution"] = p["investment"] + p["expense"] - p["income"]
+        p["profit_share"] = p["income"] - p["expense"]
+    total_contrib = sum(p["net_contribution"] for p in partners)
+    n = len(partners) or 1
+    fair_share = total_contrib / n
+    for p in partners:
+        p["fair_share"] = round(fair_share, 2)
+        p["adjustment"] = round(fair_share - p["net_contribution"], 2)
+    return partners, total_contrib, fair_share, n
+
+
 @api.get("/dashboard/settlement")
 async def settlement_view(
     user=Depends(require_finance_visible),
@@ -2000,46 +2035,43 @@ async def settlement_view(
     partner_id: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    after_date: Optional[str] = None,
+    include_history: Optional[bool] = False,
 ):
     """Co-partner settlement view for a center.
 
-    - partner role: scoped to centers where the logged-in partner has activity (own_partner_id derived from assigned_partner_id).
+    Cutoff Logic:
+      • The latest recorded settlement for each center is treated as a "cutoff" — only
+        transactions strictly AFTER `settled_till` are counted, so balances naturally
+        reset to 0 once partners pay each other.
+      • An explicit `after_date` query parameter overrides the auto cutoff.
+      • Pass `include_history=true` to additionally receive the FULL (pre-cutoff)
+        balances under each center as `lifetime` — used by the frontend "View Settled
+        History" toggle.
+
+    - partner role: scoped to centers where the logged-in partner is mapped.
     - admin/manager/accountant: can pass any center_id (or partner_id) to inspect.
 
     Returns list of centers; for each center, list of partners with their investment/income/expense
-    plus fair-share (equal split) adjustment: how much each partner should pay to / receive from
-    the group to balance NET CONTRIBUTION (= investment + expense - income).
+    plus fair-share (equal split) adjustment.
+    Each center entry also carries `settled_till` (date) and `last_settlement` (record) when applicable.
     """
     role = user.get("role")
     own_partner_id = user.get("assigned_partner_id") if role == "partner" else partner_id
-
-    # Build base match — only approved entries count
-    base: dict = {"status": "approved"}
-    if start or end:
-        rng: dict = {}
-        if start:
-            rng["$gte"] = start
-        if end:
-            rng["$lte"] = end
-        base["date"] = rng
 
     # Find which centers to include
     center_ids: list[str] = []
     if center_id:
         center_ids = [center_id]
     elif role == "partner" and own_partner_id:
-        # Restrict to centers where THIS partner is mapped (via batches / centers.partner_id).
-        # Previously we used "any txn with partner_id == own" which leaked co-partner data
-        # for other centers. Now: settlement shows ONLY the partner's own centers.
         center_ids = await _centers_for_partner(own_partner_id)
     elif own_partner_id:
-        # Non-partner caller passed a partner_id filter — pull the centers via batches too.
         center_ids = await _centers_for_partner(own_partner_id)
     else:
         # admin without filter: all centers that have any partner transaction
         center_ids = await db.transactions.distinct(
             "center_id",
-            {**base, "partner_id": {"$ne": None}, "center_id": {"$ne": None}},
+            {"status": "approved", "partner_id": {"$ne": None}, "center_id": {"$ne": None}},
         )
 
     # Fetch entity name lookups
@@ -2048,49 +2080,211 @@ async def settlement_view(
 
     out_centers = []
     for cid in center_ids:
-        # Aggregate per partner inside this center
+        # Resolve cutoff for this center — query param wins, else latest recorded settlement.
+        last_settlement = await _latest_settlement_for_center(cid)
+        cutoff = after_date or (last_settlement.get("date") if last_settlement else None)
+
+        # Build the date window for CURRENT (post-cutoff) view
+        cur_match: dict = {"status": "approved", "center_id": cid, "partner_id": {"$ne": None}}
+        date_filter: dict = {}
+        if cutoff:
+            date_filter["$gt"] = cutoff
+        if start:
+            # If user-supplied start is later than cutoff, use it; otherwise keep cutoff
+            if not cutoff or start > cutoff:
+                date_filter["$gte"] = start
+                date_filter.pop("$gt", None)
+        if end:
+            date_filter["$lte"] = end
+        if date_filter:
+            cur_match["date"] = date_filter
+
         pipe = [
-            {"$match": {**base, "center_id": cid, "partner_id": {"$ne": None}}},
+            {"$match": cur_match},
             {"$group": {"_id": {"pid": "$partner_id", "type": "$type"}, "total": {"$sum": "$amount"}}},
         ]
         rows = await db.transactions.aggregate(pipe).to_list(5000)
-        if not rows:
+
+        # Lifetime (pre-cutoff) numbers — for the "View Settled History" toggle
+        lifetime_block = None
+        if include_history:
+            life_match: dict = {"status": "approved", "center_id": cid, "partner_id": {"$ne": None}}
+            life_date: dict = {}
+            if start:
+                life_date["$gte"] = start
+            if end:
+                life_date["$lte"] = end
+            if life_date:
+                life_match["date"] = life_date
+            life_rows = await db.transactions.aggregate([
+                {"$match": life_match},
+                {"$group": {"_id": {"pid": "$partner_id", "type": "$type"}, "total": {"$sum": "$amount"}}},
+            ]).to_list(5000)
+            if life_rows:
+                life_partner_ids = list({r["_id"]["pid"] for r in life_rows})
+                life_pdocs = await db.partners.find(
+                    {"id": {"$in": life_partner_ids}}, {"_id": 0, "id": 1, "name": 1},
+                ).to_list(1000)
+                life_p_name = {p["id"]: p["name"] for p in life_pdocs}
+                l_partners, l_total, l_fair, l_n = _aggregate_partners_for_center(life_rows, life_p_name)
+                lifetime_block = {
+                    "total_contribution": round(l_total, 2),
+                    "fair_share_each": round(l_fair, 2),
+                    "partner_count": l_n,
+                    "partners": sorted(l_partners, key=lambda x: x["adjustment"]),
+                }
+
+        if not rows and not lifetime_block:
+            # No activity at all — skip this center
             continue
-        partner_ids = list({r["_id"]["pid"] for r in rows})
-        p_docs = await db.partners.find({"id": {"$in": partner_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
+
+        # Resolve partner names (across both current and lifetime)
+        pids_needed = list({r["_id"]["pid"] for r in rows})
+        if not pids_needed and lifetime_block:
+            # No post-cutoff activity yet, but render an "all settled" stub so UI can show the
+            # cutoff banner and history toggle.
+            out_centers.append({
+                "center_id": cid,
+                "center_name": center_name.get(cid, "Unknown"),
+                "total_contribution": 0,
+                "fair_share_each": 0,
+                "partner_count": 0,
+                "partners": [],
+                "settled_till": cutoff,
+                "last_settlement": last_settlement,
+                "lifetime": lifetime_block,
+            })
+            continue
+        p_docs = await db.partners.find({"id": {"$in": pids_needed}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
         p_name = {p["id"]: p["name"] for p in p_docs}
 
-        agg: dict = {}
-        for r in rows:
-            pid = r["_id"]["pid"]
-            agg.setdefault(pid, {"id": pid, "name": p_name.get(pid, "Unknown"),
-                                 "investment": 0, "income": 0, "expense": 0})
-            agg[pid][r["_id"]["type"]] += r["total"]
+        partners, total_contrib, fair_share, n = _aggregate_partners_for_center(rows, p_name)
 
-        partners = list(agg.values())
-        # Net contribution per partner = investment + expense - income (money they put into the venture)
-        for p in partners:
-            p["net_contribution"] = p["investment"] + p["expense"] - p["income"]
-            p["profit_share"] = p["income"] - p["expense"]  # individual P&L
-        total_contrib = sum(p["net_contribution"] for p in partners)
-        n = len(partners) or 1
-        fair_share = total_contrib / n
-        for p in partners:
-            # adjustment > 0 ⇒ this partner needs to PAY this amount to balance
-            # adjustment < 0 ⇒ this partner should RECEIVE this amount
-            p["fair_share"] = round(fair_share, 2)
-            p["adjustment"] = round(fair_share - p["net_contribution"], 2)
-
-        out_centers.append({
+        entry = {
             "center_id": cid,
             "center_name": center_name.get(cid, "Unknown"),
             "total_contribution": round(total_contrib, 2),
             "fair_share_each": round(fair_share, 2),
             "partner_count": n,
             "partners": sorted(partners, key=lambda x: x["adjustment"]),
-        })
+        }
+        if cutoff:
+            entry["settled_till"] = cutoff
+        if last_settlement:
+            entry["last_settlement"] = last_settlement
+        if lifetime_block:
+            entry["lifetime"] = lifetime_block
+        out_centers.append(entry)
 
     return {"centers": sorted(out_centers, key=lambda x: x["center_name"])}
+
+
+# ---------- Settlement Record (Partner-to-Partner payment) ----------
+class SettlementRecordIn(BaseModel):
+    center_id: str
+    from_partner_id: str   # the partner who PAID
+    to_partner_id: str     # the partner who RECEIVED
+    amount: float = Field(gt=0)
+    date: str              # YYYY-MM-DD — acts as the cutoff date for that center
+    note: Optional[str] = None
+
+
+@api.post("/dashboard/settlement/record", status_code=201)
+async def record_settlement(
+    payload: SettlementRecordIn,
+    user=Depends(require_finance_visible),
+):
+    """Record a partner-to-partner settlement payment.
+
+    Permissions:
+      • admin / senior_manager / manager / accountant — can record for any center.
+      • partner — can ONLY record settlements for centers they are mapped to, and must
+        be one of the two parties (either payer or receiver).
+    """
+    role = user.get("role")
+    if payload.from_partner_id == payload.to_partner_id:
+        raise HTTPException(status_code=400, detail="Payer and receiver cannot be the same partner")
+
+    # Validate center exists
+    center = await db.centers.find_one({"id": payload.center_id}, {"_id": 0, "id": 1, "name": 1})
+    if not center:
+        raise HTTPException(status_code=404, detail="Center not found")
+
+    # Partner-role enforcement
+    if role == "partner":
+        own_pid = user.get("assigned_partner_id")
+        if not own_pid or own_pid not in (payload.from_partner_id, payload.to_partner_id):
+            raise HTTPException(status_code=403, detail="Partners can only record settlements they are part of")
+        own_centers = await _centers_for_partner(own_pid)
+        if payload.center_id not in own_centers:
+            raise HTTPException(status_code=403, detail="Center not mapped to your partner profile")
+
+    # Validate both partners exist
+    p_docs = await db.partners.find(
+        {"id": {"$in": [payload.from_partner_id, payload.to_partner_id]}},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(2)
+    p_map = {p["id"]: p["name"] for p in p_docs}
+    if payload.from_partner_id not in p_map or payload.to_partner_id not in p_map:
+        raise HTTPException(status_code=404, detail="One or both partners not found")
+
+    rec = {
+        "id": str(uuid.uuid4()),
+        "center_id": payload.center_id,
+        "center_name": center.get("name"),
+        "from_partner_id": payload.from_partner_id,
+        "from_partner_name": p_map[payload.from_partner_id],
+        "to_partner_id": payload.to_partner_id,
+        "to_partner_name": p_map[payload.to_partner_id],
+        "amount": round(float(payload.amount), 2),
+        "date": payload.date,
+        "note": payload.note,
+        "recorded_by": user["id"],
+        "recorded_by_name": user.get("name"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.partner_settlements.insert_one(rec)
+    rec.pop("_id", None)
+    return rec
+
+
+@api.get("/dashboard/settlement/history")
+async def settlement_history(
+    center_id: Optional[str] = None,
+    user=Depends(require_finance_visible),
+):
+    """List previously-recorded partner settlements.
+
+    Scope rules:
+      • partner — restricted to centers mapped to their partner profile.
+      • others — can pass `center_id` to filter, or omit to get every settlement.
+    """
+    role = user.get("role")
+    q: dict = {}
+    if center_id:
+        q["center_id"] = center_id
+    if role == "partner":
+        own_pid = user.get("assigned_partner_id")
+        own_centers = await _centers_for_partner(own_pid) if own_pid else []
+        if not own_centers:
+            return {"records": []}
+        if center_id and center_id not in own_centers:
+            raise HTTPException(status_code=403, detail="Center not mapped to your partner profile")
+        q["center_id"] = {"$in": own_centers} if not center_id else center_id
+    docs = await db.partner_settlements.find(q, {"_id": 0}).sort("date", -1).to_list(500)
+    return {"records": docs}
+
+
+@api.delete("/dashboard/settlement/record/{sid}", status_code=204)
+async def delete_settlement_record(sid: str, user=Depends(require_finance_visible)):
+    """Undo a recorded settlement (admin / senior_manager / accountant only)."""
+    role = user.get("role")
+    if role not in ("admin", "senior_manager", "manager", "accountant"):
+        raise HTTPException(status_code=403, detail="Only admin/accountant can delete settlement records")
+    res = await db.partner_settlements.delete_one({"id": sid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Settlement record not found")
+    return None
 
 
 

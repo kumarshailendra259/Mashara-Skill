@@ -1,0 +1,48 @@
+{
+  "summary": "iter-29 Partner Settlement Record & Cutoff Logic - both backend (16/16 pytest) and frontend (full E2E: history toggle, settle modal, submit, settled-till badge, undo button) PASSED. Cutoff filter (date strictly AFTER settlement.date) verified: far-future date 2099-12-31 resets current contribution to 0 while lifetime stays full. Permission gates work: center_manager/center_staff/viewer get 403; partner role cannot DELETE.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter29_settlement_record.py",
+    "/app/test_reports/pytest/iter29_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py settlement_view: cutoff comparison uses string YYYY-MM-DD '$gt' on `date` field — relies on stored dates being YYYY-MM-DD strings of equal length. Confirmed by passing tests, but if a txn ever stores DD-MM-YYYY or includes time, the lexical compare breaks. Consider asserting date format on insert.",
+    "settlement_view: when include_history=false AND all txns <= cutoff, the center is dropped entirely from the response (no stub). This is intentional but means the badge/toggle UI won't render until include_history=true. Dashboard.jsx already passes include_history=true everywhere — fine.",
+    "delete_settlement_record allow-list includes 'manager' in the role check string ('admin/senior_manager/manager/accountant') but the comment/error says 'admin/accountant only'. Either tighten the role check or fix the error message for clarity.",
+    "record_settlement: no validation that `date` is YYYY-MM-DD format — a malformed string would silently break the cutoff filter. Add a Pydantic validator or use `date` type.",
+    "SettlementSection.jsx canRecord includes 'manager' & 'partner' but Dashboard.jsx showSettlement excludes 'senior_manager' and 'hr' even though they are FINANCE_VISIBLE — minor inconsistency. Confirm intent: should senior_manager see settlement? Currently they get the GET (200) but no UI.",
+    "Frontend useEffect fetches /api/dashboard/settlement/history per center inside Promise.all on every toggle — fine for ~70 centers, may need pagination/aggregation if scale grows.",
+    "Undo button: uses native window.confirm() — consider replacing with shadcn AlertDialog for design consistency.",
+    "Recharts width(-1)/height(-1) console warnings (pre-existing, not introduced by this iteration)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter29_settlement_record.py"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16)",
+    "frontend": "100% (full E2E flow verified)"
+  },
+  "test_credentials": "admin@finance.app / Admin@123 (per /app/memory/test_credentials.md). Per-run test users created with TEST_iter29_* prefix.",
+  "seed_data_creation": "Per backend test run: 1 center (TEST_iter29_C_*) + 2 partners (P1/P2) + 4 approved txns (P1 net=60k, P2 net=15k, total=75k, fair=37500). Auto cleanup of settlement records on teardown. UI E2E test created its own TEST_iter29UI_* center and cleaned up after.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter-29 fully verified. test_iter29_settlement_record.py covers: POST /record (success, same-partner 400, missing center 404, missing partner 404), GET /settlement?include_history=true (settled_till + last_settlement embed + lifetime block with full pre-cutoff totals, current_total <= lifetime_total), far-future cutoff (2099-12-31 -> 0 partners while lifetime preserved), GET /history sorted desc by date, DELETE /record/{id} (204 + cutoff removed restoring 75000 total, 404 for unknown id), permission gates for viewer/center_manager/center_staff on both GET settlement and POST record (all 403), partner role forbidden from DELETE (403). UI flow verified end-to-end: 37 settle-btn-* present, modal opens with pre-filled amount=abs(adjustment) and today's date, dropdown filters to negative-adjustment receivers, submit creates record + closes modal + refreshes section showing 'Settled till YYYY-MM-DD' green badge, history toggle reveals 'Lifetime totals' + 'Past settlements' tables for all 66 centers (admin sees Undo button with data-testid='undo-settlement-{id}').",
+  "ui_verification": {
+    "history_toggle": "PASS - reveals Lifetime + Past settlements tables for all centers (66 blocks)",
+    "settle_modal_opens": "PASS - data-testid='settle-dialog' visible, to/amount/date/note fields rendered",
+    "settle_pre_fill": "PASS - amount=abs(adjustment) (e.g., 4000 for p2 with adj=+4000), date=today (2026-06-29)",
+    "settle_to_partner_dropdown": "PASS - filtered to negative-adjustment partners with 'to receive ₹X' hint",
+    "settle_submit_e2e": "PASS - submit closes modal, settlement section refreshes, 'Settled till 2026-06-29' green badge appears on the target center",
+    "history_undo_button": "PASS - data-testid='undo-settlement-{record_id}' renders for admin in Past Settlements table",
+    "data_testids_present": "PASS - settlement-section, toggle-settled-history, settlement-center-{cid}, settle-btn-{cid}-{pid}, settle-dialog, settle-to-partner, settle-amount, settle-date, settle-note, settle-submit, undo-settlement-{id}, history-{cid} all confirmed in DOM"
+  }
+}
