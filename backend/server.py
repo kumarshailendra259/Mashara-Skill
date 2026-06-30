@@ -3808,7 +3808,8 @@ async def list_pending_approvals(user=Depends(get_current_user)):
         for t in pending_txns:
             if t["id"] in seen_txn_ids:
                 continue
-            if await _can_partner_approve(user, t):
+            allowed, _reason = await _can_partner_approve(user, t)
+            if allowed:
                 out.append({
                     "request_type": "transaction",
                     "request_id": t["id"],

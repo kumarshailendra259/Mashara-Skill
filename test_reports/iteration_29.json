@@ -1,0 +1,29 @@
+{
+  "summary": "Re-ran /app/backend/tests/test_iter30_partner_center_routing.py after the truthy-tuple fix at server.py:3811. All 10/10 tests now PASS, including the two previously failing tests (test_pending_txn_visible_to_PA_only and test_PB_with_fake_C1_history_still_blocked). Verified the patch correctly unpacks (allowed, _reason) from _can_partner_approve before gating partner_cross visibility.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter30_partner_center_routing.py",
+    "/app/test_reports/pytest/iter30_rerun.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Fix at server.py:3811 is correct — explicitly unpacks (allowed, _reason) tuple from _can_partner_approve. Recommend adding a type annotation/docstring on _can_partner_approve to prevent regression where future callers treat the tuple as a single bool.",
+    "Consider adding a unit-level invariant: any callsite of _can_partner_approve must unpack two values; could be enforced with a mypy check or a thin wrapper helper is_partner_allowed() returning only the bool for boolean-context use."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "test_credentials": "admin@finance.app / Admin@123 (used by test fixtures to seed partners/centers/transactions)",
+  "seed_data_creation": "Test file auto-creates TEST_iter30_*_<run>@finance.app users (PA, PB, HR, centers C1/C2, transactions) and cleans up after the run via existing fixtures.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-30 partner-role approval isolation is fully green (10/10). server.py:3811 now correctly handles the (bool, reason) tuple from _can_partner_approve. No further action needed on this scope.",
+  "rca of the issue": "Previous failure RCA: _can_partner_approve was refactored to return a (bool, reason_str) tuple, but the caller at server.py:3811 used `if await _can_partner_approve(...)` which evaluates the non-empty tuple as truthy regardless of the bool value — causing PB to see C1 transactions and bypassing the cross-approve hard gate. Mitigation (applied): explicitly unpack `allowed, _reason = await _can_partner_approve(user, t); if allowed:`. Re-test confirms isolation restored."
+}
