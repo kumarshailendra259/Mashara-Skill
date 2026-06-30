@@ -1,0 +1,37 @@
+{
+  "summary": "iter-30 partner-role approval center isolation: 8/10 tests PASSED. Hard center-mapping gate works on the ACT endpoint (POST /api/approvals/act correctly 403s for unmapped partners) and on the CHAIN resolver (PA sees C1 txn, PB doesn't via chain). FOUND 1 BUG: /api/approvals/pending listing endpoint at line 3811 incorrectly treats _can_partner_approve()'s (bool, reason) tuple as truthy — so PB still sees C1 txns in their pending inbox via the partner_cross path even though the act endpoint blocks them. Notification fanout, asset_purchase isolation, empty-center isolation, center_partner role filter, HR global routing, and no-center fallback ALL pass.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/approvals/pending",
+        "issue": "server.py:3811 — `if await _can_partner_approve(user, t):` — _can_partner_approve returns a tuple (bool, reason); a tuple is truthy regardless of bool value, so the hard center-mapping gate is BYPASSED for the listing endpoint. Partners assigned to other centers SEE the request in their pending inbox (violating user's primary requirement) even though they cannot act on it. Other call sites (lines 1581, 1623, 1656) correctly unpack the tuple.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter30_partner_center_routing.py",
+    "/app/test_reports/pytest/iter30_results.xml"
+  ],
+  "action_items": [
+    "Fix server.py line 3811: change `if await _can_partner_approve(user, t):` to `allowed, _reason = await _can_partner_approve(user, t); if allowed:` — matches the pattern at lines 1581/1623/1656. After fix, all 10 iter-30 tests should pass.",
+    "Consider adding a unit test that calls _can_partner_approve and asserts the return shape is a 2-tuple (bool, str) — would have caught this at line 3811."
+  ],
+  "critical_code_review_comments": [
+    "server.py:3811 — _can_partner_approve return type inconsistency (bool vs (bool, reason)) is a footgun. Recommend changing the function to return just bool (and store reason on the user via a side-channel, or only log it) — or rename to _can_partner_approve_with_reason and add a thin _can_partner_approve wrapper that returns only the bool.",
+    "Empty `assigned_center_ids` partners now silently receive ZERO partner-role chain requests. This is documented as desired behaviour by the user. Recommend adding a UI banner / admin warning when a partner-role user has no assigned centers (so admins notice the configuration drift), since otherwise pending requests can dead-end unnoticed.",
+    "_resolve_step_user_ids returns [] for an admin step on a request whose center_id is not mapped to any admin — admin role is global so it should not include the assigned_center_ids filter. Confirmed correct in current code (only partner/center_partner are filtered).",
+    "/api/approvals/pending iterates ALL pending transactions (limit 2000) for every partner request — at scale, consider pre-filtering by `partner_id $in [<approver_pids>] OR center_id $in [user.assigned_center_ids]`.",
+    "The fake-history seed test (TestCrossApproveGate) shares the same root cause as the first failure (line 3811 truthy tuple) — once 3811 is fixed, this test will also pass."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter30_partner_center_routing.py"],
+  "success_rate": {"backend": "80% (8/10)"},
+  "test_credentials": "admin@finance.app / Admin@123. Per-run users created with TEST_iter30_*_<run>@finance.app prefix, mongo-direct cleanup on teardown.",
+  "seed_data_creation": "2 centers (C1/C2), 2 partner entities (PA/PB), 1 project, 5 users (PA partner@C1, PB partner@C2, PEMPTY partner with no centers, HR global, MGR manager for creating pending txns), 3 approval chains (transaction@C1 partner, asset_purchase@C1 partner, transaction@C2 hr). All cleaned up post-run via motor direct delete by run-suffix regex.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter-30 has ONE remaining bug: server.py:3811 truthy-tuple. After fix, rerun test_iter30_partner_center_routing.py — expect 10/10. The two currently-failing tests (test_pending_txn_visible_to_PA_only's PB-not-seeing assertion, and test_PB_with_fake_C1_history_still_blocked) both fail on the same /api/approvals/pending partner_cross path. The ACT endpoint, chain resolver, notification fanout, asset_purchase chain, HR global routing, center_partner role filtering, and empty-center isolation are all already verified working.",
+  "rca of the issue": "RCA: Python's `if await _can_partner_approve(user, t):` evaluates the returned tuple (False, 'reason') as truthy because non-empty tuples are truthy regardless of their elements. Reproduction: 1) PB (partner-role, assigned_center_ids=[c2]) logs in. 2) Manager creates pending txn at center c1, partner_id=p_a_ent. 3) PB hits GET /api/approvals/pending — the partner_cross block at 3804-3823 iterates all pending txns and calls _can_partner_approve which correctly returns (False, 'You are not mapped to this transaction\\'s center in User Management'); but the `if` treats the tuple as truthy and appends the txn. PB sees C1 txn in inbox with via='partner_cross'. Mitigation: unpack the tuple — `allowed, _ = await _can_partner_approve(user, t); if allowed:`. Patch is 1 line; pattern already exists at server.py:1581/1623/1656."
+}

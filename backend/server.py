@@ -976,7 +976,11 @@ async def _shares_project_or_center(approver_pid: str, owner_pid: str,
 async def _can_partner_approve(user: dict, txn: dict) -> tuple[bool, str]:
     """Returns (allowed, reason). True if user (partner role) can cross-approve this txn.
 
-    Allowed when ANY of these are true:
+    HARD GATE (per User Management mapping): the approver's `assigned_center_ids` MUST
+    contain the txn's center_id. Partners assigned to a different center never see or
+    act on this txn, even if they share a project history or are paired with the owner.
+
+    After the gate, the user qualifies if ANY of these are true:
       • Peer user under SAME partner entity (different user_id, same assigned_partner_id)
       • Custom pairing in `partner_associations` between approver_pid and owner_pid
       • Shares the same project_id OR center_id with the txn's partner
@@ -991,6 +995,12 @@ async def _can_partner_approve(user: dict, txn: dict) -> tuple[bool, str]:
     owner_pid = txn.get("partner_id")
     if not owner_pid:
         return (False, "Transaction has no partner attached")
+    # Hard center-mapping gate — must be enforced regardless of other associations.
+    txn_cid = txn.get("center_id")
+    if txn_cid:
+        assigned = user.get("assigned_center_ids") or []
+        if txn_cid not in assigned:
+            return (False, "You are not mapped to this transaction's center in User Management")
     # Block creator-self only (NOT same-partner — peers under one partner entity should approve each other)
     if txn.get("created_by") == user["id"]:
         return (False, "You cannot approve a transaction you created")
@@ -3270,7 +3280,19 @@ async def _resolve_step_user_ids(step: dict, request_doc: dict) -> List[str]:
     kind = step.get("kind")
     value = step.get("value", "")
     if kind == "role":
-        users = await db.users.find({"role": value}, {"_id": 0, "id": 1}).to_list(2000)
+        q: dict = {"role": value}
+        # Center-isolation: partner / center_partner approvers must be MAPPED to the request's
+        # center via User Management (assigned_center_ids). Without this, every partner in the
+        # system would receive every transaction/leave/asset request — leaking other centers'
+        # workflow to unrelated partners. Other roles (admin, hr, accountant, …) are global.
+        if value in ("partner", "center_partner"):
+            cid = request_doc.get("center_id")
+            if cid:
+                q["assigned_center_ids"] = cid
+            else:
+                # No center on the request → fall back to global (admin-only scenarios).
+                pass
+        users = await db.users.find(q, {"_id": 0, "id": 1}).to_list(2000)
         return [u["id"] for u in users]
     if kind == "user":
         return [value] if value else []
