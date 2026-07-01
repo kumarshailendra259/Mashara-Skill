@@ -420,6 +420,69 @@ async def _centers_for_partner(partner_id: str) -> list:
     return list(centers)
 
 
+async def _derive_context_for_center(center_id: Optional[str]) -> dict:
+    """Return a best-effort `{company_id, partner_id, project_id}` for a center.
+
+    Used by auto-created transactions (reimbursements, payroll, asset purchases,
+    milestone recovery / assessment fees) so they aren't left with dangling `—`
+    in the transactions list.
+
+    Resolution order:
+      1. From the center's batches — company_id (most-common) + single-partner batches
+      2. Fallback to legacy `centers.partner_id`
+      3. Fallback to most-common company_id / partner_id across APPROVED transactions
+         that already exist at this center (bootstraps from historical manual entries).
+    """
+    if not center_id:
+        return {"company_id": None, "partner_id": None, "project_id": None}
+    company_id = None
+    partner_id = None
+    from collections import Counter
+    companies: Counter = Counter()
+    partners: set = set()
+    async for b in db.batches.find(
+        {"center_id": center_id},
+        {"_id": 0, "company_id": 1, "partner_ids": 1},
+    ):
+        if b.get("company_id"):
+            companies[b["company_id"]] += 1
+        for pid in (b.get("partner_ids") or []):
+            partners.add(pid)
+    if companies:
+        company_id = companies.most_common(1)[0][0]
+    if len(partners) == 1:
+        partner_id = next(iter(partners))
+    else:
+        c = await db.centers.find_one({"id": center_id}, {"_id": 0, "partner_id": 1, "company_id": 1})
+        if c and c.get("partner_id"):
+            partner_id = c["partner_id"]
+        # Center may also carry a direct company_id override (allowed via ConfigDict(extra=allow))
+        if not company_id and c and c.get("company_id"):
+            company_id = c["company_id"]
+
+    # Bootstrap from existing txn history when still unresolved
+    if not company_id:
+        rows = await db.transactions.aggregate([
+            {"$match": {"center_id": center_id, "company_id": {"$ne": None}}},
+            {"$group": {"_id": "$company_id", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": 1},
+        ]).to_list(1)
+        if rows:
+            company_id = rows[0]["_id"]
+    if not partner_id:
+        rows = await db.transactions.aggregate([
+            {"$match": {"center_id": center_id, "partner_id": {"$ne": None}}},
+            {"$group": {"_id": "$partner_id", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": 1},
+        ]).to_list(1)
+        if rows:
+            partner_id = rows[0]["_id"]
+
+    return {"company_id": company_id, "partner_id": partner_id, "project_id": None}
+
+
 async def _enrich_user_with_associations(user: dict) -> dict:
     """Mutates `user` to add `_associated_partner_ids` for partner-role users.
     Called inside endpoints that filter txns by scope so cross-partner approvals work."""
@@ -1335,6 +1398,15 @@ async def create_transaction(body: TransactionIn, user=Depends(require_role("adm
     doc["id"] = str(uuid.uuid4())
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # Auto-derive company_id / partner_id from the center when caller left them blank
+    # (e.g. Stock quick-add, income entries where the operator only picked a center).
+    # Ensures the transaction row shows the correct Company + Partner in the ledger UI.
+    if doc.get("center_id") and (not doc.get("company_id") or not doc.get("partner_id")):
+        ctx = await _derive_context_for_center(doc.get("center_id"))
+        if not doc.get("company_id"):
+            doc["company_id"] = ctx["company_id"]
+        if not doc.get("partner_id"):
+            doc["partner_id"] = ctx["partner_id"]
     if _can_auto_approve(user):
         doc["status"] = "approved"
         doc["approved_by"] = user["id"]
@@ -1464,6 +1536,39 @@ async def bulk_delete_transactions(body: BulkIds, _=Depends(require_role("admin"
         return {"deleted": 0}
     r = await db.transactions.delete_many({"id": {"$in": body.ids}})
     return {"deleted": r.deleted_count}
+
+
+@api.post("/transactions/backfill-company-partner")
+async def backfill_company_partner(user=Depends(require_role("admin"))):
+    """One-shot repair: for every transaction with a `center_id` but missing
+    `company_id` and/or `partner_id`, derive both from the center's batches
+    and update in-place. Returns counts. Idempotent — running twice is safe.
+
+    Fixes historical data where auto-created reimbursements, payroll salaries,
+    asset purchases, stock entries etc. left the company/partner columns as "—".
+    """
+    # Cache per-center lookups so we don't re-derive N times per center.
+    cache: dict[str, dict] = {}
+    updated = 0
+    scanned = 0
+    async for t in db.transactions.find(
+        {"center_id": {"$ne": None}, "$or": [{"company_id": None}, {"partner_id": None}]},
+        {"_id": 0, "id": 1, "center_id": 1, "company_id": 1, "partner_id": 1},
+    ):
+        scanned += 1
+        cid = t.get("center_id")
+        if cid not in cache:
+            cache[cid] = await _derive_context_for_center(cid)
+        ctx = cache[cid]
+        patch: dict = {}
+        if not t.get("company_id") and ctx["company_id"]:
+            patch["company_id"] = ctx["company_id"]
+        if not t.get("partner_id") and ctx["partner_id"]:
+            patch["partner_id"] = ctx["partner_id"]
+        if patch:
+            await db.transactions.update_one({"id": t["id"]}, {"$set": patch})
+            updated += 1
+    return {"scanned": scanned, "updated": updated, "distinct_centers": len(cache)}
 
 
 @api.post("/entities/{etype}/bulk-delete")
@@ -3608,13 +3713,15 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
         if body.request_type == "reimbursement":
             now = datetime.now(timezone.utc).isoformat()
             staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
+            center_ctx = await _derive_context_for_center((staff or {}).get("center_id"))
             txn = {
                 "id": str(uuid.uuid4()),
                 "type": "expense",
                 "amount": rec["amount"],
                 "date": rec["date"],
                 "description": f"Reimbursement: {(staff or {}).get('name','')} — {rec.get('description','')}".strip(),
-                "company_id": None, "partner_id": None,
+                "company_id": center_ctx["company_id"],
+                "partner_id": center_ctx["partner_id"],
                 "center_id": (staff or {}).get("center_id"),
                 "project_id": None,
                 "items": [], "attachments": rec.get("attachments") or [],
@@ -3665,13 +3772,15 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             await db.assets.insert_one(asset)
             txn = None
             if asset["purchase_amount"] > 0:
+                asset_ctx = await _derive_context_for_center(asset.get("center_id"))
                 txn = {
                     "id": str(uuid.uuid4()),
                     "type": "expense",
                     "amount": asset["purchase_amount"],
                     "date": asset["purchase_date"],
                     "description": f"Asset Purchase: {asset['name']}" + (f" (SN {asset['serial_no']})" if asset.get("serial_no") else ""),
-                    "company_id": None, "partner_id": None,
+                    "company_id": asset_ctx["company_id"],
+                    "partner_id": asset_ctx["partner_id"],
                     "center_id": asset.get("center_id"),
                     "project_id": None,
                     "items": [], "attachments": asset.get("attachments") or [],
@@ -4090,6 +4199,7 @@ async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant", "
         raise HTTPException(400, "Reimbursement must be accountant-approved before payment")
     now = datetime.now(timezone.utc).isoformat()
     staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
+    reimb_ctx = await _derive_context_for_center((staff or {}).get("center_id"))
     # Auto-create an expense transaction (approved) for ledger sync
     txn = {
         "id": str(uuid.uuid4()),
@@ -4097,7 +4207,8 @@ async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant", "
         "amount": rec["amount"],
         "date": rec["date"],
         "description": f"Reimbursement: {staff.get('name','') if staff else ''} — {rec.get('description','')}".strip(),
-        "company_id": None, "partner_id": None,
+        "company_id": reimb_ctx["company_id"],
+        "partner_id": reimb_ctx["partner_id"],
         "center_id": (staff or {}).get("center_id"),
         "project_id": None,
         "items": [], "attachments": rec.get("attachments") or [],
@@ -4748,13 +4859,15 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant",
         res.pop("_id", None)
         return res
     staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
+    payroll_ctx = await _derive_context_for_center((staff or {}).get("center_id"))
     txn = {
         "id": str(uuid.uuid4()),
         "type": "expense",
         "amount": rec["net"],
         "date": f"{rec['year']:04d}-{rec['month']:02d}-{rec['working_days']:02d}",
         "description": f"Salary: {staff.get('name','') if staff else ''} {rec['month']}/{rec['year']}",
-        "company_id": None, "partner_id": None,
+        "company_id": payroll_ctx["company_id"],
+        "partner_id": payroll_ctx["partner_id"],
         "center_id": (staff or {}).get("center_id"),
         "project_id": None,
         "items": [], "attachments": [],
@@ -5431,6 +5544,9 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
     # Candidate-failure recovery (2nd milestone): separate expense to claw back 1st-milestone
     recovery_amount = float(rec.get("recovery_amount") or 0)
     recovery_txn_id = None
+    # For non-income auto-txns tagged to this batch, tag with batch's company + first partner
+    # (if only one) so they don't dangle in the ledger.
+    batch_partner_id = partner_ids[0] if len(partner_ids) == 1 else None
     if recovery_amount > 0:
         rec_txn = {
             "id": str(uuid.uuid4()),
@@ -5438,8 +5554,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "amount": recovery_amount,
             "date": today,
             "description": f"Candidate-failure recovery (claw-back of 1st-milestone) on {description_base}",
-            "company_id": None,
-            "partner_id": None,
+            "company_id": company_id_resolved,
+            "partner_id": batch_partner_id,
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
             "items": [], "attachments": [],
@@ -5466,8 +5582,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "description": f"Assessment fee on {description_base} "
                            f"(₹{assessment_fee_per:,.2f} × {passed_n} passed)" if assessment_fee_per > 0
                            else f"Assessment fee on {description_base}",
-            "company_id": None,
-            "partner_id": None,
+            "company_id": company_id_resolved,
+            "partner_id": batch_partner_id,
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
             "items": [], "attachments": [],
@@ -5497,8 +5613,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
                 "amount": tds_amount,
                 "date": today,
                 "description": f"TDS {tds_percent}% deducted by department on {description_base} (taxable ₹{taxable:,.2f})",
-                "company_id": None,
-                "partner_id": None,
+                "company_id": company_id_resolved,
+                "partner_id": batch_partner_id,
                 "center_id": (batch or {}).get("center_id"),
                 "project_id": (batch or {}).get("project_id"),
                 "items": [], "attachments": [],

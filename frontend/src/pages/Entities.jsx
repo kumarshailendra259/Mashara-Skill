@@ -28,6 +28,7 @@ const EMPTY_FORM = {
   },
   center: {
     name: "", description: "", manager_name: "", email: "", mobile: "",
+    company_id: "", partner_id: "",
     address: "", city: "", state: "", pincode: "",
   },
   project: {
@@ -43,6 +44,9 @@ export default function Entities({ etype }) {
   const canDelete = user?.role === "admin";
   const [items, setItems] = useState([]);
   const [projectTypes, setProjectTypes] = useState([]);
+  // For center form — need companies + partners lists to populate the default dropdowns
+  const [companies, setCompanies] = useState([]);
+  const [partners, setPartners] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM[etype] || EMPTY_FORM.company);
@@ -63,6 +67,13 @@ export default function Entities({ etype }) {
     if (etype === "project") {
       api.get("/project-types").then((r) => setProjectTypes(r.data || [])).catch(() => {});
     }
+  }, [etype]);
+
+  // For center form — fetch companies + partners for the "default" dropdowns.
+  useEffect(() => {
+    if (etype !== "center") return;
+    api.get("/entities/company").then((r) => setCompanies(r.data || [])).catch(() => {});
+    api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
   }, [etype]);
 
   const openNew = () => { setEditing(null); setForm(EMPTY_FORM[etype]); setOpen(true); };
@@ -212,6 +223,26 @@ export default function Entities({ etype }) {
         <div className="col-span-2">
           <Label>Email <span className="overline text-[10px] text-[var(--muted)]">(becomes Center Manager&apos;s login ID — auto-generated password emailed)</span></Label>
           <Input type="email" value={form.email || ""} onChange={(e) => setForm({ ...form, email: e.target.value })} className="rounded-none" data-testid="entity-email" />
+        </div>
+        <div>
+          <Label>Default Company <span className="overline text-[10px] text-[var(--muted)]">(auto-tags all txns at this center)</span></Label>
+          <Select value={form.company_id || "__none"} onValueChange={(v) => setForm({ ...form, company_id: v === "__none" ? "" : v })}>
+            <SelectTrigger className="rounded-none" data-testid="entity-center-company"><SelectValue placeholder="— None —" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none">— None —</SelectItem>
+              {companies.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label>Default Partner <span className="overline text-[10px] text-[var(--muted)]">(single-partner centers only)</span></Label>
+          <Select value={form.partner_id || "__none"} onValueChange={(v) => setForm({ ...form, partner_id: v === "__none" ? "" : v })}>
+            <SelectTrigger className="rounded-none" data-testid="entity-center-partner"><SelectValue placeholder="— None —" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none">— None —</SelectItem>
+              {partners.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </div>
       </>}
 

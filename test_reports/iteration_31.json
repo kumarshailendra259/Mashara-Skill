@@ -1,0 +1,33 @@
+{
+  "summary": "iter-31 auto-derive company_id/partner_id on center-only transactions — ALL 9 backend tests passing on first run. Verified: (1) POST /api/transactions with only center_id derives company from center.company_id, (2) with batches, derives both company + partner, (3) caller-provided values preserved, (4) isolated center returns None without crash, (5) reimbursement legacy pay creates txn with correct company+partner, (6) payroll pay creates Salary: txn with correct tagging, (7) asset purchase final approve creates Asset Purchase: txn tagged, (8) backfill endpoint returns {scanned,updated,distinct_centers} and is idempotent (run-2 updated=0), (9) non-admin (hr) gets 403 on backfill. Also verified center form accepts company_id via PUT (ConfigDict extra='allow').",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter31_auto_derive_company_partner.py",
+    "/app/test_reports/pytest/iter31_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Backfill run on production DB: scanned=312 remaining dangling txns, updated=0 — a previous iteration already ran the backfill and resolved all resolvable centers. The remaining 312 belong to 76 distinct centers that have NO batches / NO legacy partner_id / NO center.company_id / NO txn history — so _derive_context_for_center correctly returns None for them (no false updates). If E1 wants those to be tagged, admin must manually set center.company_id + partner_id (frontend form now supports this via the new Default Company/Partner dropdowns).",
+    "server.py is now 6708 lines — consider modularising (transactions/approvals/payroll/reimb/assets each into own router file) in a future refactor.",
+    "_derive_context_for_center helper is well-factored, cached per-run in backfill loop, and safely handles missing center. Good defensive coding."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100%",
+    "frontend": "N/A (backend-only per request)"
+  },
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Created TEST_iter31_Co_/P_/C_/ISO_/Proj_/Staff_/batch_/Asset_/hr_ entities with unique RUN suffix; cleanup fixture bulk-deletes all via /api/entities/*/bulk-delete + /api/transactions/bulk-delete + /api/batches/bulk-delete after module teardown.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter-31 auto-derive logic is verified end-to-end for POST /transactions, reimbursement pay chain (legacy), payroll pay, asset-purchase final-approve. Chain-based flows (approvals/act on reimbursement) not directly tested — the legacy /reimbursements/{id}/pay path (which also uses _derive_context_for_center at line 4202) was used instead as it's simpler; the approval-chain branch at server.py:3716 uses the same helper so behaviour is equivalent. The backfill endpoint is safe/idempotent — running it repeatedly is a no-op. Milestone recovery / assessment_fee / TDS auto-derive callsites (lines ~5484, 5510, 5546) were NOT exercised end-to-end (would require a full batch lifecycle with milestones); relying on code-review that helper is applied consistently.",
+  "rca of the issue": "N/A — no issues found. Feature works as designed."
+}
