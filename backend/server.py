@@ -720,7 +720,7 @@ async def upload_offer_letter_template(
     Only ONE template per company is active at a time — uploading a new template
     for the same company deactivates the previous one.
     """
-    if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
+    if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(400, "Only .docx files are accepted")
     data = await file.read()
     if len(data) > 5 * 1024 * 1024:
@@ -2878,6 +2878,10 @@ class StaffIn(BaseModel):
     create_login: bool = False
     send_credentials_email: bool = True
     send_offer_letter: bool = True  # generate + email PDF offer letter (needs template + center's company)
+    # ---- Offer letter references (set by _generate_and_deliver_offer_letter) ----
+    offer_letter_url: Optional[str] = None
+    offer_letter_id: Optional[str] = None
+    offer_letter_generated_at: Optional[str] = None
 
 
 class StaffOut(StaffIn):
