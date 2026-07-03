@@ -530,7 +530,7 @@ def _can_auto_approve(user: dict) -> bool:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -692,6 +692,198 @@ async def view_file(
     except requests.HTTPError as e:
         raise HTTPException(502, f"Storage fetch failed: {e}")
     return Response(content=data, media_type=rec.get("content_type", ct))
+
+
+# ---------- Offer Letter Templates ----------
+class OfferLetterTemplateOut(BaseModel):
+    id: str
+    company_id: Optional[str] = None
+    company_name: Optional[str] = None
+    filename: str
+    file_path: str  # object-storage path to the source DOCX
+    uploaded_by: Optional[str] = None
+    uploaded_by_name: Optional[str] = None
+    uploaded_at: str
+    is_active: bool = True
+
+
+@api.post("/offer-letter-templates", response_model=OfferLetterTemplateOut, status_code=201)
+async def upload_offer_letter_template(
+    file: UploadFile = File(...),
+    company_id: Optional[str] = Query(None),
+    user=Depends(require_role("admin", "hr")),
+):
+    """Upload a `.docx` offer-letter template. Optionally scope to a company —
+    if a template is uploaded per company, `create_staff` will pick the template
+    matching the staff's center's Default Company automatically.
+
+    Only ONE template per company is active at a time — uploading a new template
+    for the same company deactivates the previous one.
+    """
+    if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
+        raise HTTPException(400, "Only .docx files are accepted")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Template too large (max 5MB)")
+    if company_id:
+        c = await db.companies.find_one({"id": company_id}, {"_id": 0, "name": 1})
+        if not c:
+            raise HTTPException(404, "Company not found")
+        company_name = c.get("name")
+    else:
+        company_name = None
+    tid = str(uuid.uuid4())
+    path = f"{APP_STORAGE_PREFIX}/offer-letter-templates/{tid}.docx"
+    try:
+        _put_object(path, data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage upload failed: {e}")
+    # Deactivate any existing templates for the same company
+    if company_id:
+        await db.offer_letter_templates.update_many(
+            {"company_id": company_id, "is_active": True},
+            {"$set": {"is_active": False}},
+        )
+    else:
+        # Global default template — deactivate previous global default
+        await db.offer_letter_templates.update_many(
+            {"company_id": None, "is_active": True},
+            {"$set": {"is_active": False}},
+        )
+    doc = {
+        "id": tid,
+        "company_id": company_id,
+        "company_name": company_name,
+        "filename": file.filename,
+        "file_path": path,
+        "uploaded_by": user["id"],
+        "uploaded_by_name": user.get("name") or user.get("email"),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_active": True,
+    }
+    await db.offer_letter_templates.insert_one(doc)
+    return OfferLetterTemplateOut(**doc)
+
+
+@api.get("/offer-letter-templates", response_model=List[OfferLetterTemplateOut])
+async def list_offer_letter_templates(_=Depends(require_role("admin", "hr", "manager"))):
+    docs = await db.offer_letter_templates.find({}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    return [OfferLetterTemplateOut(**d) for d in docs]
+
+
+@api.delete("/offer-letter-templates/{tid}", status_code=204)
+async def delete_offer_letter_template(tid: str, _=Depends(require_role("admin"))):
+    r = await db.offer_letter_templates.delete_one({"id": tid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Template not found")
+    return None
+
+
+async def _resolve_offer_letter_template(company_id: Optional[str]) -> Optional[dict]:
+    """Return the active template for the given company_id, falling back to the
+    global default (`company_id: None`)."""
+    if company_id:
+        tpl = await db.offer_letter_templates.find_one(
+            {"company_id": company_id, "is_active": True}, {"_id": 0},
+        )
+        if tpl:
+            return tpl
+    return await db.offer_letter_templates.find_one(
+        {"company_id": None, "is_active": True}, {"_id": 0},
+    )
+
+
+async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
+                                             login_password: Optional[str]) -> dict:
+    """Render the offer-letter PDF for a staff record, upload to storage, mail
+    to the staff, and persist the reference. Returns an audit dict.
+
+    Called from `create_staff` (when `send_offer_letter=True`) and from the
+    manual /staff/{sid}/send-offer-letter regenerate endpoint.
+    """
+    from offer_letter import render_offer_letter, send_offer_letter_email
+    result = {"generated": False, "emailed": False, "reason": None,
+              "pdf_path": None, "letter_id": None}
+    if not login_email:
+        result["reason"] = "staff_has_no_email"
+        return result
+    # Resolve center → company via the same auto-derive logic used for txns
+    ctx = await _derive_context_for_center(staff.get("center_id"))
+    company_id = ctx.get("company_id")
+    company = await db.companies.find_one({"id": company_id}, {"_id": 0}) if company_id else None
+    center = await db.centers.find_one({"id": staff.get("center_id")}, {"_id": 0}) if staff.get("center_id") else None
+    tpl = await _resolve_offer_letter_template(company_id)
+    if not tpl:
+        result["reason"] = "no_template_uploaded"
+        return result
+    # Load the template bytes
+    try:
+        template_bytes, _ = _get_object(tpl["file_path"])
+    except Exception as e:
+        result["reason"] = f"template_fetch_failed: {str(e)[:120]}"
+        return result
+    # Render → PDF bytes
+    try:
+        pdf_bytes = render_offer_letter(
+            template_bytes=template_bytes, staff=staff, company=company or {},
+            center=center, login_email=login_email, login_password=login_password,
+        )
+    except Exception as e:
+        logger.exception("Offer letter render failed for staff %s", staff.get("id"))
+        result["reason"] = f"render_failed: {str(e)[:200]}"
+        return result
+    # Upload PDF to object storage
+    letter_id = str(uuid.uuid4())
+    pdf_path = f"{APP_STORAGE_PREFIX}/offer-letters/{letter_id}.pdf"
+    try:
+        _put_object(pdf_path, pdf_bytes, "application/pdf")
+    except Exception as e:
+        result["reason"] = f"upload_failed: {str(e)[:120]}"
+        return result
+    # Persist ledger row
+    letter_doc = {
+        "id": letter_id,
+        "staff_id": staff.get("id"),
+        "staff_name": staff.get("name"),
+        "staff_email": login_email,
+        "company_id": company_id,
+        "company_name": (company or {}).get("name"),
+        "center_id": staff.get("center_id"),
+        "template_id": tpl["id"],
+        "pdf_path": pdf_path,
+        "filename": f"OfferLetter_{(staff.get('name') or 'staff').replace(' ', '_')}.pdf",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.offer_letters.insert_one(letter_doc)
+    # Update staff record with the latest offer letter reference
+    await db.staff.update_one(
+        {"id": staff.get("id")},
+        {"$set": {
+            "offer_letter_url": pdf_path,
+            "offer_letter_id": letter_id,
+            "offer_letter_generated_at": letter_doc["generated_at"],
+        }},
+    )
+    result["generated"] = True
+    result["pdf_path"] = pdf_path
+    result["letter_id"] = letter_id
+    # Email delivery
+    mail = await send_offer_letter_email(
+        to_email=login_email, name=staff.get("name") or login_email.split("@")[0],
+        pdf_bytes=pdf_bytes, filename=letter_doc["filename"],
+        company_name=(company or {}).get("name") or "Mashara Skills and Creative Learning Pvt Ltd",
+    )
+    result["emailed"] = bool(mail.get("sent"))
+    if not mail.get("sent"):
+        result["reason"] = f"email_failed: {mail.get('reason','unknown')}"
+        await db.offer_letters.update_one(
+            {"id": letter_id}, {"$set": {"email_error": mail.get("reason")}},
+        )
+    else:
+        await db.offer_letters.update_one(
+            {"id": letter_id}, {"$set": {"email_id": mail.get("id"), "emailed_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    return result
 
 
 # ---------- Auth Routes ----------
@@ -2685,6 +2877,7 @@ class StaffIn(BaseModel):
     # ---- Login auto-provisioning toggles (used only on create_staff) ----
     create_login: bool = False
     send_credentials_email: bool = True
+    send_offer_letter: bool = True  # generate + email PDF offer letter (needs template + center's company)
 
 
 class StaffOut(StaffIn):
@@ -2862,12 +3055,14 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
     # --- Optional auto-provisioning a user login + credentials email ---
     create_login = bool(doc.pop("create_login", False))
     send_creds = bool(doc.pop("send_credentials_email", True))
+    send_offer = bool(doc.pop("send_offer_letter", True))
     # Normalise contact fields (KEEP them on staff doc; do not pop)
     login_email = (doc.get("email") or "").strip().lower() or None
     mobile = (doc.get("mobile") or "").strip() or None
     doc["email"] = login_email
     doc["mobile"] = mobile
     email_result = None
+    generated_password: Optional[str] = None
     if create_login:
         if not login_email:
             raise HTTPException(400, "email is required when create_login=true")
@@ -2878,6 +3073,7 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
         else:
             from email_utils import generate_password, send_credentials_email
             new_password = generate_password(12)
+            generated_password = new_password
             user_doc = {
                 "id": str(uuid.uuid4()),
                 "name": doc.get("name") or login_email,
@@ -2905,9 +3101,25 @@ async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manage
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     await db.staff.insert_one(doc)
+    # Offer-letter generation (fire-and-log; never blocks staff creation).
+    offer_letter_result = None
+    if send_offer and login_email:
+        try:
+            offer_letter_result = await _generate_and_deliver_offer_letter(
+                staff=doc, login_email=login_email, login_password=generated_password,
+            )
+        except Exception as e:
+            logger.exception("Offer letter generation error for staff %s", doc.get("id"))
+            offer_letter_result = {"generated": False, "emailed": False, "reason": str(e)[:200]}
+        # Reload the staff doc so the response carries the offer_letter_* fields
+        refreshed = await db.staff.find_one({"id": doc["id"]}, {"_id": 0})
+        if refreshed:
+            doc = refreshed
     out = StaffOut(**{k: v for k, v in doc.items() if k in StaffOut.model_fields}).model_dump()
     if email_result is not None:
         out["email_status"] = email_result
+    if offer_letter_result is not None:
+        out["offer_letter_status"] = offer_letter_result
     return out
 
 
@@ -2978,6 +3190,78 @@ async def unverify_staff_bank(sid: str, _=Depends(require_role("admin", "hr"))):
         "bank_verified": False, "bank_verified_at": None, "bank_verified_by": None,
     }})
     return {"ok": True}
+
+
+@api.post("/staff/{sid}/send-offer-letter")
+async def resend_offer_letter(sid: str, user=Depends(require_role("admin", "hr"))):
+    """Regenerate the offer letter PDF for an existing staff and re-email it.
+
+    If the staff has no linked user account yet, one will be auto-created and
+    the freshly generated password will be embedded in the letter.
+    """
+    staff = await db.staff.find_one({"id": sid}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+    login_email = (staff.get("email") or "").strip().lower()
+    if not login_email:
+        raise HTTPException(400, "Staff has no email — cannot send offer letter")
+    # If no user account, auto-create one so the letter carries valid credentials.
+    login_password: Optional[str] = None
+    if not staff.get("user_id"):
+        existing_user = await db.users.find_one({"email": login_email}, {"_id": 0})
+        if existing_user:
+            await db.staff.update_one({"id": sid}, {"$set": {"user_id": existing_user["id"]}})
+            staff["user_id"] = existing_user["id"]
+        else:
+            from email_utils import generate_password
+            login_password = generate_password(12)
+            new_user = {
+                "id": str(uuid.uuid4()),
+                "name": staff.get("name") or login_email,
+                "email": login_email,
+                "password_hash": hash_password(login_password),
+                "role": "center_staff",
+                "mobile": staff.get("mobile"),
+                "assigned_center_ids": [staff.get("center_id")] if staff.get("center_id") else [],
+                "assigned_partner_id": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await db.users.insert_one(new_user)
+            await db.staff.update_one({"id": sid}, {"$set": {"user_id": new_user["id"]}})
+            staff["user_id"] = new_user["id"]
+    result = await _generate_and_deliver_offer_letter(
+        staff=staff, login_email=login_email, login_password=login_password,
+    )
+    return result
+
+
+@api.get("/offer-letters", response_model=List[dict])
+async def list_offer_letters(
+    staff_id: Optional[str] = None,
+    _=Depends(require_role("admin", "hr", "manager")),
+):
+    q: dict = {}
+    if staff_id:
+        q["staff_id"] = staff_id
+    docs = await db.offer_letters.find(q, {"_id": 0}).sort("generated_at", -1).to_list(500)
+    return docs
+
+
+@api.get("/offer-letters/{lid}/download")
+async def download_offer_letter(lid: str, user=Depends(require_role("admin", "hr", "manager"))):
+    """Download an offer-letter PDF. Streams the object-storage blob directly."""
+    rec = await db.offer_letters.find_one({"id": lid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Offer letter not found")
+    try:
+        data, _ct = _get_object(rec["pdf_path"])
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage fetch failed: {e}")
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{rec.get("filename","offer-letter.pdf")}"'},
+    )
 
 
 # -------- Staff Documents --------

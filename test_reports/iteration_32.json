@@ -1,0 +1,37 @@
+{
+  "summary": "iter-32 offer-letter generation (DOCX template → LibreOffice PDF → Resend email). 22/23 backend tests PASSED. Verified: (1) multipart .docx upload (global + per-company) with 400 on non-.docx and 413 on >5MB, (2) uploading a 2nd template for the same scope deactivates the prior one (both per-company AND global), (3) list is sorted uploaded_at desc, (4) role gating — hr can upload+list, manager can list but NOT upload (403), center_staff/center_manager/viewer/partner get 403 on GET+POST, only admin can DELETE (hr/manager 403, admin 204), (5) POST /api/staff with send_offer_letter=true + create_login=true returns offer_letter_status{generated:true, letter_id, pdf_path, emailed:bool}, (6) GET /api/offer-letters?staff_id=X returns the letter row(s) sorted desc with email_id/email_error metadata, (7) GET /api/offer-letters/{lid}/download returns application/pdf bytes starting with %PDF- and Content-Disposition header, (8) rendered PDF contains staff_name / designation / login_email / login_password / company_name / today's date and has NO raw {{placeholder}} leaks, (9) no-template scenario returns generated:false, reason='no_template_uploaded' (staff still created), (10) POST /api/staff/{sid}/send-offer-letter regenerates (new letter_id) and is forbidden for center_staff, (11) global-template fallback works for centers without company_id.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/staff",
+        "issue": "response_model=List[StaffOut] silently strips offer_letter_url, offer_letter_id, offer_letter_generated_at from the JSON — the fields ARE persisted in MongoDB (verified via direct query) but Pydantic filters them out because StaffOut/StaffIn don't declare them. Result: frontend cannot see the generated PDF reference via the staff list. Fix: add these three Optional[str]=None fields to StaffIn (or StaffOut), or add a dedicated GET /api/staff/{id} endpoint that returns the raw doc. Also, POST /api/staff builds `out = StaffOut(**{k:v for k,v in doc.items() if k in StaffOut.model_fields}).model_dump()` on line 3118 — so the create response also omits these fields (offer_letter_status IS attached separately after the filter, which is why our POST assertion passed)."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter32_offer_letters.py",
+    "/app/test_reports/pytest/iter32_results.xml"
+  ],
+  "action_items": [
+    "Add offer_letter_url, offer_letter_id, offer_letter_generated_at (all Optional[str]=None) to StaffIn (or a new StaffOut) so GET /api/staff exposes them. This is required by the problem statement ('GET /api/staff/{id} returns fields offer_letter_url, offer_letter_id, offer_letter_generated_at')."
+  ],
+  "critical_code_review_comments": [
+    "offer_letter.py is well-factored (~215 lines): docxtpl rendering, LibreOffice subprocess with 90s timeout, base64-embedded Resend attachment, defensive number-to-words util. No async issues, no ObjectId leaks.",
+    "server.py:_generate_and_deliver_offer_letter (line ~796) is fire-and-log — never blocks staff creation, catches all render/upload/email failures and returns a structured audit dict. Good defensive design.",
+    "Template upload logic correctly deactivates previous templates BEFORE inserting the new one (line 741-752). Uses is_active flag rather than deleting — good for audit trail.",
+    "The 'no_template_uploaded' path correctly short-circuits without a crash — staff record still created.",
+    "The .doc extension is also accepted in the upload check (line 723: '.docx', '.doc') but LibreOffice conversion targets .docx via docxtpl — if someone uploads legacy .doc, docxtpl.DocxTemplate will fail. Suggest tightening to '.docx' only.",
+    "server.py is now 6992 lines (up from 6708 in iter-31) — modularisation into routers is overdue; the offer_letter section (~200 lines) is a good candidate to split into a router file.",
+    "download_offer_letter returns `inline; filename=...` in Content-Disposition — inline forces browser preview. Consider adding `?download=1` query param to switch to `attachment; filename=...` for explicit downloads (nice-to-have)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "95.7% (22/23)", "frontend": "N/A (backend-only per request)"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Per-run RUN suffix (uuid4()[:6]) — TEST_iter32_Co_/Center_/Staff_/NoTpl_/ISO_ entities + iter32_<role>_<run>@testfin.dev registered users + TEST_iter32_*.docx templates. Cleanup fixture runs on module teardown (deletes templates via DELETE endpoint, centers/companies via bulk-delete). Residual staff/offer_letters/users cleaned up post-run via direct MongoDB delete_many (bulk-delete /api/entities/staff behavior needs verification — it left 3 docs behind).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Feature is functionally correct end-to-end (upload → generate → PDF conversion → object-storage upload → Resend email → download). Only gap is the missing surfacing of offer_letter_url/_id/_generated_at in GET /api/staff response. The PDF actually contains all placeholder substitutions (verified via pdftotext extraction). LibreOffice conversion takes ~2-4 seconds per staff on this box — use timeout>=60s on any staff-create request that generates a letter. Resend delivery: emailed=True in test runs (RESEND_API_KEY is set and sender domain hrd@masharaskills.com appears verified). Cleanup: the /api/entities/staff/bulk-delete endpoint appears to NOT delete the staff rows (3 remained after test run) — may want to investigate that separately (unrelated to offer-letter feature).",
+  "rca of the issue": "GET /api/staff missing offer_letter fields — root cause: FastAPI's response_model serialization drops fields not present in the Pydantic schema. StaffOut inherits from StaffIn which lists all staff attributes but NOT the three offer_letter_* fields set by _generate_and_deliver_offer_letter (via db.staff.update_one). Fix is a one-liner: add `offer_letter_url: Optional[str] = None`, `offer_letter_id: Optional[str] = None`, `offer_letter_generated_at: Optional[str] = None` to StaffIn (line ~2880) — they'll flow through StaffOut and both POST and GET responses."
+}

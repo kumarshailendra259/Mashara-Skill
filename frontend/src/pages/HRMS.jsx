@@ -13,7 +13,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -64,6 +64,7 @@ export default function HRMS() {
     emergency_contact_name: "", emergency_contact_mobile: "",
     bank_account_no: "", bank_name: "", ifsc: "", account_holder_name: "",
     create_login: false,
+    send_offer_letter: true,
   };
   const [staffForm, setStaffForm] = useState(emptyStaffForm);
   const [editingStaffId, setEditingStaffId] = useState(null);
@@ -379,6 +380,7 @@ export default function HRMS() {
       ifsc: s.ifsc || "",
       account_holder_name: s.account_holder_name || "",
       create_login: false,
+      send_offer_letter: true,
     });
     setOpenS(true);
   };
@@ -391,9 +393,21 @@ export default function HRMS() {
 
   const deleteStaff = async (s) => {
     if (!window.confirm(`Delete staff "${s.name}"? This cannot be undone.`)) return;
-    try {
-      await api.delete(`/staff/${s.id}`);
+    try {await api.delete(`/staff/${s.id}`);
       toast.success("Deleted");
+      loadAll();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const sendOfferLetter = async (s) => {
+    if (!s.email) { toast.error("Staff has no email — add one first"); return; }
+    if (!window.confirm(`Generate & email offer letter to ${s.name} (${s.email})?`)) return;
+    try {
+      const { data } = await api.post(`/staff/${s.id}/send-offer-letter`);
+      if (data?.generated && data?.emailed) toast.success("Offer letter generated + emailed as PDF");
+      else if (data?.generated && !data?.emailed) toast.warning(`Generated but email failed: ${data.reason || "unknown"}`);
+      else if (data?.reason === "no_template_uploaded") toast.error("No offer letter template — upload one under HR Settings → Offer Letters");
+      else toast.error(data?.reason || "Failed to generate offer letter");
       loadAll();
     } catch (e) { toast.error(formatError(e)); }
   };
@@ -422,6 +436,7 @@ export default function HRMS() {
         ifsc: staffForm.ifsc?.trim().toUpperCase() || null,
         account_holder_name: staffForm.account_holder_name?.trim() || null,
         create_login: !!staffForm.create_login,
+        send_offer_letter: !!staffForm.send_offer_letter,
       };
       if (editingStaffId) {
         await api.put(`/staff/${editingStaffId}`, payload);
@@ -443,6 +458,14 @@ export default function HRMS() {
         else toast.success("Staff saved · login created" + (es?.reason ? ` (email: ${es.reason})` : ""));
       } else {
         toast.success("Saved");
+      }
+      // Offer letter feedback
+      const ol = data?.offer_letter_status;
+      if (ol) {
+        if (ol.generated && ol.emailed) toast.success("Offer letter generated + emailed as PDF");
+        else if (ol.generated && !ol.emailed) toast.warning(`Offer letter generated but email failed: ${ol.reason || "unknown"}`);
+        else if (ol.reason === "no_template_uploaded") toast.info("No offer letter template — upload one under HR Settings → Offer Letters");
+        else if (ol.reason && ol.reason !== "staff_has_no_email") toast.warning(`Offer letter skipped: ${ol.reason}`);
       }
     } catch (e) { toast.error(formatError(e)); }
   };
@@ -738,7 +761,7 @@ export default function HRMS() {
 
                   {/* SECTION 5 — Login provisioning (only on Add, not Edit) */}
                   {!editingStaffId && (
-                    <div className="pt-4 border-t border-[var(--border)]">
+                    <div className="pt-4 border-t border-[var(--border)] space-y-3">
                       <label className="flex items-start gap-2 cursor-pointer" data-testid="create-login-toggle">
                         <input
                           type="checkbox"
@@ -749,6 +772,18 @@ export default function HRMS() {
                         <span className="text-sm">
                           <span className="font-medium">Create login &amp; email credentials</span>
                           <span className="block text-xs text-[var(--muted)] mt-0.5">A random password will be generated and emailed to the staff with their check-in link. Email above is used as login.</span>
+                        </span>
+                      </label>
+                      <label className="flex items-start gap-2 cursor-pointer" data-testid="send-offer-letter-toggle">
+                        <input
+                          type="checkbox"
+                          checked={!!staffForm.send_offer_letter}
+                          onChange={(e) => setStaffForm({ ...staffForm, send_offer_letter: e.target.checked })}
+                          className="mt-1"
+                        />
+                        <span className="text-sm">
+                          <span className="font-medium">Send offer letter (PDF)</span>
+                          <span className="block text-xs text-[var(--muted)] mt-0.5">Auto-generates the offer letter from the uploaded DOCX template (matched to the center&apos;s company), saves a PDF copy, and emails it to the staff. Skipped silently if no template is uploaded.</span>
                         </span>
                       </label>
                     </div>
@@ -802,6 +837,22 @@ export default function HRMS() {
                   {canManageStaff && (
                     <td className="p-3 text-right no-print">
                       <div className="flex justify-end gap-1">
+                        {s.offer_letter_id && (
+                          <Button
+                            size="sm" variant="outline"
+                            onClick={() => window.open(`${api.defaults.baseURL}/offer-letters/${s.offer_letter_id}/download`, "_blank")}
+                            className="rounded-none h-8 px-2"
+                            data-testid={`staff-offer-download-${s.id}`}
+                            title="Download last offer letter (PDF)"
+                          ><FileDown size={14} /></Button>
+                        )}
+                        <Button
+                          size="sm" variant="outline"
+                          onClick={() => sendOfferLetter(s)}
+                          className="rounded-none h-8 px-2"
+                          data-testid={`staff-offer-send-${s.id}`}
+                          title="Generate & email offer letter"
+                        ><Mail size={14} /></Button>
                         <Button size="sm" variant="outline" onClick={() => openEditStaff(s)} className="rounded-none h-8 px-2" data-testid={`staff-edit-${s.id}`} title="Edit"><Pencil size={14} /></Button>
                         {canDeleteStaff && (
                           <Button size="sm" variant="outline" onClick={() => deleteStaff(s)} className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" data-testid={`staff-delete-${s.id}`} title="Delete"><Trash2 size={14} /></Button>
