@@ -31,7 +31,14 @@ from docxtpl import DocxTemplate
 
 logger = logging.getLogger(__name__)
 
-_SOFFICE = shutil.which("soffice") or shutil.which("libreoffice")
+def _find_soffice() -> Optional[str]:
+    """Locate the LibreOffice binary. Called on every conversion attempt so a
+    later apt install becomes visible without restarting the app."""
+    return (shutil.which("soffice") or shutil.which("libreoffice")
+            or shutil.which("/usr/bin/soffice") or None)
+
+
+_SOFFICE = _find_soffice()
 
 
 def _inr(v) -> str:
@@ -123,30 +130,45 @@ def _build_context(staff: dict, company: dict, center: Optional[dict],
     }
 
 
-def _docx_to_pdf(docx_path: str, out_dir: str) -> str:
-    """Convert a DOCX file to PDF using headless LibreOffice. Returns the PDF path."""
-    if not _SOFFICE:
-        raise RuntimeError("LibreOffice (soffice) not installed on server")
-    proc = subprocess.run(
-        [_SOFFICE, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
-        capture_output=True, text=True, timeout=90,
-    )
+def _docx_to_pdf(docx_path: str, out_dir: str) -> Optional[str]:
+    """Convert a DOCX file to PDF using headless LibreOffice.
+
+    Returns the PDF path on success, or ``None`` when LibreOffice is unavailable
+    or conversion fails. Callers should fall back to shipping the DOCX itself.
+    """
+    soffice = _SOFFICE or _find_soffice()
+    if not soffice:
+        logger.warning("LibreOffice (soffice) not installed — offer letter will be delivered as .docx")
+        return None
+    try:
+        proc = subprocess.run(
+            [soffice, "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+            capture_output=True, text=True, timeout=90,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("LibreOffice PDF conversion timed out — falling back to DOCX")
+        return None
     if proc.returncode != 0:
-        raise RuntimeError(f"LibreOffice conversion failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        logger.error("LibreOffice conversion failed: %s", (proc.stderr or proc.stdout).strip()[:400])
+        return None
     base = os.path.splitext(os.path.basename(docx_path))[0]
     pdf_path = os.path.join(out_dir, base + ".pdf")
     if not os.path.exists(pdf_path):
-        raise RuntimeError(f"LibreOffice produced no PDF ({pdf_path})")
+        logger.error("LibreOffice produced no PDF at %s", pdf_path)
+        return None
     return pdf_path
 
 
 def render_offer_letter(template_bytes: bytes, staff: dict, company: dict,
                         center: Optional[dict], login_email: str,
-                        login_password: Optional[str]) -> bytes:
-    """Return the rendered offer-letter PDF as bytes.
+                        login_password: Optional[str]) -> tuple[bytes, str, str]:
+    """Return `(binary, mime_type, extension)` for the rendered offer letter.
 
-    ``template_bytes`` is the raw DOCX uploaded by the admin. ``login_password``
-    may be None when the user already existed (no fresh password to share).
+    - Prefer PDF (via LibreOffice) — letterhead, images, fonts stay pixel-perfect.
+    - Fallback to DOCX when LibreOffice is unavailable (production runtimes without
+      the ``libreoffice-writer`` package). The DOCX still carries the fully-rendered
+      placeholders + letterhead the admin uploaded — recipients can open in Word,
+      Google Docs, or any DOCX viewer.
     """
     ctx = _build_context(staff, company, center, login_email, login_password)
     with tempfile.TemporaryDirectory() as tmpd:
@@ -158,13 +180,24 @@ def render_offer_letter(template_bytes: bytes, staff: dict, company: dict,
         rendered = os.path.join(tmpd, "offer_letter.docx")
         tpl.save(rendered)
         pdf_path = _docx_to_pdf(rendered, tmpd)
-        with open(pdf_path, "rb") as f:
-            return f.read()
+        if pdf_path:
+            with open(pdf_path, "rb") as f:
+                return f.read(), "application/pdf", "pdf"
+        # DOCX fallback
+        with open(rendered, "rb") as f:
+            return (
+                f.read(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "docx",
+            )
 
 
-async def send_offer_letter_email(to_email: str, name: str, pdf_bytes: bytes,
-                                  filename: str, company_name: str) -> dict:
-    """Deliver the offer letter as a PDF attachment via Resend. Never raises."""
+async def send_offer_letter_email(to_email: str, name: str, letter_bytes: bytes,
+                                  filename: str, company_name: str,
+                                  content_type: str = "application/pdf") -> dict:
+    """Deliver the offer letter (PDF or DOCX fallback) as attachment via Resend.
+    Never raises — always returns ``{sent, id?, reason?}``.
+    """
     key = os.environ.get("RESEND_API_KEY", "").strip()
     if not key:
         return {"sent": False, "reason": "resend_not_configured"}
@@ -202,7 +235,8 @@ async def send_offer_letter_email(to_email: str, name: str, pdf_bytes: bytes,
         "html": html,
         "attachments": [{
             "filename": filename,
-            "content": base64.b64encode(pdf_bytes).decode("ascii"),
+            "content": base64.b64encode(letter_bytes).decode("ascii"),
+            "content_type": content_type,
         }],
     }
     try:

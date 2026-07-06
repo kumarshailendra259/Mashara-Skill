@@ -9,6 +9,7 @@ import io
 import re
 import csv
 import uuid
+import asyncio
 import logging
 import bcrypt
 import jwt
@@ -526,6 +527,44 @@ def _can_auto_approve(user: dict) -> bool:
 
 
 # ---------- Startup ----------
+async def _ensure_libreoffice_installed() -> None:
+    """Background best-effort install of libreoffice-writer + core.
+
+    Emergent's deploy image ships without LibreOffice, so offer letters would
+    otherwise always be delivered as .docx. This helper attempts a silent
+    `apt-get install` on first boot; it never raises and is safe to no-op on
+    systems without apt / root privileges. Once soffice becomes available,
+    `offer_letter._find_soffice()` picks it up on the next render call — no
+    restart needed.
+    """
+    import shutil as _shutil
+    if _shutil.which("soffice") or _shutil.which("libreoffice"):
+        return
+    if not _shutil.which("apt-get"):
+        logger.info("LibreOffice not present and apt-get unavailable — offer letters will be delivered as .docx")
+        return
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "apt-get", "install", "-y", "--no-install-recommends",
+            "libreoffice-writer", "libreoffice-core",
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.warning("LibreOffice apt install timed out — offer letters continue as .docx fallback")
+            return
+        if proc.returncode == 0 and (_shutil.which("soffice") or _shutil.which("libreoffice")):
+            logger.info("LibreOffice installed successfully — offer letters will now deliver as PDF")
+        else:
+            logger.warning("LibreOffice install exit=%s stderr=%s — offer letters continue as .docx fallback",
+                           proc.returncode, (stderr or b"")[:400].decode(errors="ignore"))
+    except Exception as e:
+        logger.info("LibreOffice auto-install skipped: %s — offer letters continue as .docx fallback", e)
+
+
 @app.on_event("startup")
 async def on_startup():
     await db.users.create_index("email", unique=True)
@@ -549,6 +588,13 @@ async def on_startup():
     # Leave allocation indices (seeder runs lazily on first GET /leave-types)
     await db.leave_types.create_index("code", unique=True)
     await db.leave_balances.create_index([("staff_id", 1), ("leave_type_id", 1), ("year", 1)], unique=True)
+
+    # Best-effort LibreOffice install for the offer-letter PDF pipeline. Runs
+    # in the background so it never blocks startup; when it finishes, offer
+    # letters will start delivering as PDF automatically. If apt isn't present
+    # or the install fails, the offer-letter service already falls back to
+    # emailing the rendered .docx instead — no user-facing failure either way.
+    asyncio.create_task(_ensure_libreoffice_installed())
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -822,9 +868,9 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
     except Exception as e:
         result["reason"] = f"template_fetch_failed: {str(e)[:120]}"
         return result
-    # Render → PDF bytes
+    # Render → PDF/DOCX bytes
     try:
-        pdf_bytes = render_offer_letter(
+        letter_bytes, content_type, ext = render_offer_letter(
             template_bytes=template_bytes, staff=staff, company=company or {},
             center=center, login_email=login_email, login_password=login_password,
         )
@@ -832,15 +878,16 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
         logger.exception("Offer letter render failed for staff %s", staff.get("id"))
         result["reason"] = f"render_failed: {str(e)[:200]}"
         return result
-    # Upload PDF to object storage
+    # Upload to object storage (extension reflects whether PDF or DOCX fallback)
     letter_id = str(uuid.uuid4())
-    pdf_path = f"{APP_STORAGE_PREFIX}/offer-letters/{letter_id}.pdf"
+    file_path = f"{APP_STORAGE_PREFIX}/offer-letters/{letter_id}.{ext}"
     try:
-        _put_object(pdf_path, pdf_bytes, "application/pdf")
+        _put_object(file_path, letter_bytes, content_type)
     except Exception as e:
         result["reason"] = f"upload_failed: {str(e)[:120]}"
         return result
     # Persist ledger row
+    safe_name = (staff.get('name') or 'staff').replace(' ', '_')
     letter_doc = {
         "id": letter_id,
         "staff_id": staff.get("id"),
@@ -850,8 +897,10 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
         "company_name": (company or {}).get("name"),
         "center_id": staff.get("center_id"),
         "template_id": tpl["id"],
-        "pdf_path": pdf_path,
-        "filename": f"OfferLetter_{(staff.get('name') or 'staff').replace(' ', '_')}.pdf",
+        "pdf_path": file_path,  # kept for backwards-compat; may be a .docx path now
+        "content_type": content_type,
+        "extension": ext,
+        "filename": f"OfferLetter_{safe_name}.{ext}",
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.offer_letters.insert_one(letter_doc)
@@ -859,19 +908,21 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
     await db.staff.update_one(
         {"id": staff.get("id")},
         {"$set": {
-            "offer_letter_url": pdf_path,
+            "offer_letter_url": file_path,
             "offer_letter_id": letter_id,
             "offer_letter_generated_at": letter_doc["generated_at"],
         }},
     )
     result["generated"] = True
-    result["pdf_path"] = pdf_path
+    result["pdf_path"] = file_path
     result["letter_id"] = letter_id
+    result["extension"] = ext
     # Email delivery
     mail = await send_offer_letter_email(
         to_email=login_email, name=staff.get("name") or login_email.split("@")[0],
-        pdf_bytes=pdf_bytes, filename=letter_doc["filename"],
+        letter_bytes=letter_bytes, filename=letter_doc["filename"],
         company_name=(company or {}).get("name") or "Mashara Skills and Creative Learning Pvt Ltd",
+        content_type=content_type,
     )
     result["emailed"] = bool(mail.get("sent"))
     if not mail.get("sent"):
@@ -3253,17 +3304,18 @@ async def list_offer_letters(
 
 @api.get("/offer-letters/{lid}/download")
 async def download_offer_letter(lid: str, user=Depends(require_role("admin", "hr", "manager"))):
-    """Download an offer-letter PDF. Streams the object-storage blob directly."""
+    """Download an offer letter (PDF or DOCX fallback). Streams from object storage."""
     rec = await db.offer_letters.find_one({"id": lid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Offer letter not found")
     try:
-        data, _ct = _get_object(rec["pdf_path"])
+        data, blob_ct = _get_object(rec["pdf_path"])
     except requests.HTTPError as e:
         raise HTTPException(502, f"Storage fetch failed: {e}")
+    media_type = rec.get("content_type") or blob_ct or "application/pdf"
     return Response(
         content=data,
-        media_type="application/pdf",
+        media_type=media_type,
         headers={"Content-Disposition": f'inline; filename="{rec.get("filename","offer-letter.pdf")}"'},
     )
 

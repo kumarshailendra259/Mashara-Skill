@@ -1,0 +1,44 @@
+{
+  "summary": "iter-33 offer-letter DOCX fallback hot-fix (production render_failed: LibreOffice not installed). 9/9 new iter-33 tests PASSED + 23/23 iter-32 regression PASSED (100% overall). Verified: (A) With soffice available on preview, staff-create still delivers PDF — offer_letter_status.extension=='pdf', pdf_path ends .pdf, /offer-letters/{lid}/download returns application/pdf, filename OfferLetter_Name.pdf, offer_letters MongoDB doc carries content_type='application/pdf' + extension='pdf'. (B) Forced DOCX fallback by monkeypatching offer_letter._SOFFICE=None + stubbing _find_soffice()=None → render_offer_letter returns (docx_bytes starting with PK zip magic, mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document', ext='docx'), _docx_to_pdf returns None cleanly (no exception). Fallback DOCX contains fully-rendered placeholders (staff_name, designation, company_name — no raw {{...}} left). (C) _ensure_libreoffice_installed exists as async function with zero params, returns near-instantly (<5s) when soffice already present, and silently no-ops when both soffice AND apt-get are missing (never raises). (D) _find_soffice() re-detects at call time — no restart needed after apt install. Preview environment has /usr/bin/soffice symlinked so PDF path exercised for real end-to-end.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/staff",
+        "issue": "Carry-over from iter-32: response_model=List[StaffOut] strips offer_letter_url/id/generated_at fields (fields ARE persisted in Mongo, just not surfaced through the Pydantic filter). NOT related to iter-33 fix. Add these fields to StaffIn/StaffOut."
+      },
+      {
+        "endpoint": "GET /api/offer-letters/{lid}/download",
+        "issue": "Content-Disposition always uses `inline; filename=...` (browser preview). Nice-to-have: honor an optional `?download=1` query to switch to `attachment; ...` for explicit downloads."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter33_offer_letter_docx_fallback.py",
+    "/app/backend/tests/test_iter32_offer_letters.py",
+    "/app/test_reports/pytest/iter33_results.xml",
+    "/app/test_reports/pytest/iter33_iter32_regression.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "offer_letter.render_offer_letter now returns a 3-tuple (bytes, mime, ext) — clean, backward-friendly change; server.py consumes it correctly at both call-sites (create_staff and /staff/{sid}/send-offer-letter regenerate).",
+    "offer_letter._docx_to_pdf now returns Optional[str] (was raising RuntimeError before). Fallback branch in render_offer_letter is exercised when None is returned — good defensive design that never blocks staff creation.",
+    "_find_soffice() is re-invoked on every render attempt via `_SOFFICE or _find_soffice()` — after a delayed apt install completes, subsequent letters transparently switch from DOCX to PDF without a restart. Nice.",
+    "_ensure_libreoffice_installed uses asyncio.create_subprocess_exec with a 180s timeout, DEBIAN_FRONTEND=noninteractive, --no-install-recommends — sensible flags. Wrapped in try/except so it never crashes startup. Idempotent: instant return if soffice already exists; skip if apt-get missing.",
+    "server.py:_generate_and_deliver_offer_letter (line 842) — pdf_path field name kept for backward-compat even when payload is .docx (file_path ends .docx). This is intentional (schema stability) but slightly misleading; documented via the inline comment 'may be a .docx path now'.",
+    "Download endpoint uses stored content_type over blob content-type — correct precedence; falls back to 'application/pdf' if both are missing. Content-Disposition uses stored letter_doc['filename'] which now correctly reflects .pdf or .docx suffix.",
+    "server.py is now 7048 lines (up from 6992 in iter-32) — modularisation strongly recommended; the offer-letter section (~250 lines) is a self-contained router candidate.",
+    "Startup handler still uses deprecated @app.on_event('startup') — FastAPI recommends lifespan events. Not a functional issue for iter-33 but flagged for a future refactor."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter33_offer_letter_docx_fallback.py (NEW — 9 tests, 4 classes)"
+  ],
+  "success_rate": {"backend": "100% (9/9 iter-33 + 23/23 iter-32 regression)", "frontend": "N/A (backend-only per request)"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Per-run RUN suffix (uuid4()[:6]) — TEST_iter33_Co_/Center_/PdfStaff_ + TEST_iter33_tpl_*.docx. Cleanup fixture on module teardown deletes template + calls bulk-delete on staff/centers/companies. LibreOffice binary NOT touched on filesystem (safe for concurrent runs). Preview /usr/bin/soffice remained intact.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The fix is fully validated. PDF path unchanged when LibreOffice present. DOCX fallback works via render_offer_letter returning the .docx bytes with correct mime — no exception, no user-facing failure. Startup task is safe (idempotent + best-effort). If future testing simulates a production deploy without LibreOffice, use monkeypatch on offer_letter._SOFFICE=None and offer_letter._find_soffice=lambda:None — do NOT rename /usr/bin/soffice at runtime because _find_soffice() re-detects at call time and would still find soffice via the other 'libreoffice' symlink. Also note: iter-32's carry-over minor bug — GET /api/staff still doesn't surface offer_letter_url/id/generated_at fields (Pydantic response_model filter). Unrelated to iter-33.",
+  "rca of the issue": "PRODUCTION BUG (finance.masharaskills.com): user saw toast 'render_failed: LibreOffice (soffice) not installed on server'. RCA: Emergent's deploy container image does not ship the `libreoffice-writer` package, so `subprocess.run([soffice, ...])` inside _docx_to_pdf raised FileNotFoundError → bubbled up as render_failed. FIX (iter-33): (1) _docx_to_pdf now returns Optional[str] and catches TimeoutExpired + non-zero exit → returns None instead of raising. (2) render_offer_letter checks the None and falls back to shipping the rendered .docx as the payload (still has letterhead + all placeholder substitutions, viewable in Word/Google Docs). (3) send_offer_letter_email accepts content_type so the Resend attachment carries the correct MIME. (4) Storage path + filename extension mirror the actual format (.docx vs .pdf). (5) Download endpoint reads stored content_type from Mongo doc so the browser gets the right MIME back. (6) _ensure_libreoffice_installed background task attempts a silent `apt-get install libreoffice-writer libreoffice-core` on first boot — never blocks, never raises. Once installed, _find_soffice() picks it up on the next call and future letters convert to PDF. VERIFIED: PDF path works when soffice present (23/23 iter-32 + 3/3 iter-33 PDF tests). DOCX fallback works when soffice absent (2/2 iter-33 fallback unit tests). Idempotency verified (3/3 iter-33 startup tests). Zero user-facing failures either way."
+}
