@@ -15,10 +15,12 @@ import PrintButton from "@/components/PrintButton";
 const TYPES = [
   { v: "reimbursement", label: "Reimbursement" },
   { v: "leave", label: "Leave" },
-  { v: "transaction", label: "Transaction / Payment" },
+  { v: "transaction", label: "Transaction" },
   { v: "asset_purchase", label: "Asset Purchase" },
   { v: "employee_transfer", label: "Employee Transfer" },
   { v: "regularisation", label: "Regularisation" },
+  { v: "quotation", label: "Quotation Request" },
+  { v: "payment", label: "Payment Request (against QRN)" },
 ];
 
 const KINDS = [

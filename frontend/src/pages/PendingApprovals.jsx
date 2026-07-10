@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -27,7 +27,10 @@ const TYPE_META = {
   asset_purchase:    { icon: Box,            label: "Asset Purchase",     color: "bg-emerald-50 text-emerald-700" },
   employee_transfer: { icon: UserCog,        label: "Employee Transfer",  color: "bg-amber-50 text-amber-700" },
   regularisation:    { icon: AlertCircle,    label: "Regularisation",     color: "bg-rose-50 text-rose-700" },
+  quotation:         { icon: FileSignature,  label: "Quotation",          color: "bg-indigo-50 text-indigo-700" },
+  payment:           { icon: IndianRupee,    label: "Payment",            color: "bg-teal-50 text-teal-700" },
 };
+const FALLBACK_META = { icon: Inbox, label: "Approval", color: "bg-gray-100 text-gray-700" };
 
 export default function PendingApprovals() {
   const nav = useNavigate();
@@ -101,6 +104,7 @@ export default function PendingApprovals() {
     else if (item.request_type === "asset_purchase") nav("/assets");
     else if (item.request_type === "employee_transfer") nav("/employee-transfers");
     else if (item.request_type === "regularisation") nav("/pending-approvals");
+    else if (item.request_type === "quotation" || item.request_type === "payment") nav("/quotations");
     else nav("/hrms");
   };
 
@@ -173,8 +177,8 @@ export default function PendingApprovals() {
       ) : (
         <div className="space-y-2">
           {filtered.map((item) => {
-            const meta = TYPE_META[item.request_type];
-            const Icon = meta?.icon || Inbox;
+            const meta = TYPE_META[item.request_type] || FALLBACK_META;
+            const Icon = meta.icon;
             return (
               <div
                 key={`${item.request_type}-${item.request_id}`}
@@ -184,7 +188,7 @@ export default function PendingApprovals() {
                 <div className={`${meta.color} p-2.5 rounded-none shrink-0`}><Icon size={18} /></div>
                 <div className="flex-1 min-w-[200px]">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="overline text-xs">{meta?.label}</span>
+                    <span className="overline text-xs">{meta.label}</span>
                     {item.via === "partner_cross" && (
                       <span className="bg-[var(--brand)] text-white text-[10px] px-1.5 py-0.5 num font-bold">PARTNER CROSS-APPROVAL</span>
                     )}
@@ -219,7 +223,7 @@ export default function PendingApprovals() {
         <DialogContent className="rounded-none">
           <DialogHeader>
             <DialogTitle className="font-heading">
-              {acting?.action === "approve" ? "Approve" : "Reject"} {TYPE_META[acting?.item?.request_type]?.label}
+              {acting?.action === "approve" ? "Approve" : "Reject"} {(TYPE_META[acting?.item?.request_type] || FALLBACK_META).label}
             </DialogTitle>
           </DialogHeader>
           {acting && (
