@@ -594,8 +594,17 @@ async def on_startup():
     # Leave allocation indices (seeder runs lazily on first GET /leave-types)
     await db.leave_types.create_index("code", unique=True)
     await db.leave_balances.create_index([("staff_id", 1), ("leave_type_id", 1), ("year", 1)], unique=True)
-    # Quotation / Payment indices — QRN is unique per center
-    await db.quotations.create_index([("qrn", 1)], unique=True, sparse=True)
+    # Quotation / Payment indices — QRN is unique per center (compound with center_id
+    # so two centers whose slug prefix happens to collide can each independently
+    # generate `PALOJORI-QRN-0001` without a duplicate-key error).
+    # Migration: drop legacy global-unique qrn_1 index if it exists (iter-34 first-cut).
+    try:
+        idx = await db.quotations.index_information()
+        if "qrn_1" in idx:
+            await db.quotations.drop_index("qrn_1")
+    except Exception:
+        pass
+    await db.quotations.create_index([("qrn", 1), ("center_id", 1)], unique=True, sparse=True)
     await db.quotations.create_index([("center_id", 1), ("status", 1)])
     await db.payments.create_index([("quotation_id", 1)])
     await db.payments.create_index([("center_id", 1), ("status", 1)])
