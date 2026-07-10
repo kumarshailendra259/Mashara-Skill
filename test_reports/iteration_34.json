@@ -1,0 +1,60 @@
+{
+  "summary": "iter-34 Quotation→QRN→Payment two-stage procurement workflow tested (backend only). 17/17 pytest cases PASSED after fixing TWO critical MongoDB schema bugs in server.py. Coverage: (a) default chain seeding for 'quotation' & 'payment' via GET /api/approval-chains; (b) POST /api/quotations happy-path + role gating (admin/center_staff-own OK; partner=403, viewer=403, center_staff-wrong-center=403); (c) approvals ×3 with request_type='quotation' — final approve stamps qrn matching ^[A-Z0-9]{1,8}-QRN-\\d{4}$, per-center counter increments (0001→0002); (d) rejection of quotation → status='rejected' with NO qrn; (e) POST /api/payments preconditions — 400 on pending quotation, 400 on 2nd payment for same quotation; (f) approvals ×3 with request_type='payment' → payment.status='paid', quotation.status='paid'+txn_id; auto-created transaction has type='expense'(or override), amount=actual_amount, center_id, source='quotation_payment', qrn/quotation_id/payment_id linked, description contains 'QRN <qrn>', company_id auto-derived; (g) txn_type_override on payment overrides quotation.category; (h) payment rejection reverts quotation status→'approved' and clears payment_id (so new payment can be raised); (i) role-scoped list visibility (center_staff sees own centers + own-created only); (j) fresh center starts counter at 0001; (k) 5 concurrent quotation creates produce unique QRNs after approve — atomic $inc verified.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/quotations",
+        "issue": "DuplicateKeyError on qrn:null — create_quotation set doc['qrn']=None but the `qrn_1` index is unique+sparse. MongoDB sparse indexes only skip *missing* fields, NOT explicit-null values. Second insert failed with `E11000 duplicate key: qrn: null`. Effect: only 1 pending quotation could exist DB-wide. FIXED by removing `doc['qrn']=None` (field left absent → sparse index correctly skips).",
+        "priority": "CRITICAL"
+      },
+      {
+        "endpoint": "POST /api/approvals/act (quotation final-approve)",
+        "issue": "DuplicateKeyError on qrn_counters.id:null — on_startup creates a generic `id` unique index on qrn_counters (line 578 of server.py), but `_next_qrn`'s $setOnInsert never sets `id`. First center's counter upsert saves id=null; the second center's counter upsert also tries id=null → 500. Effect: QRN stamping worked for exactly ONE center, then every subsequent NEW center's first quotation failed at final approve. FIXED by adding `id: str(uuid.uuid4())` to $setOnInsert in _next_qrn.",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/quotations (QRN prefix derivation)",
+        "issue": "MEDIUM — Design flaw: `_slug_center_prefix` truncates center name to first 8 alnum chars, but the `qrn_1` unique index is GLOBAL (not per-center). If two centers share the first 8 alphanumeric characters (e.g. `Palojori Deoghar` and `Palojori Sadar` both slug to `PALOJORI`), their per-center counters both start at 1 → both centers' first approved quotation would be `PALOJORI-QRN-0001` → DuplicateKeyError, HTTP 500 at final approval. The test surfaced this: centers named `TEST-iter34-CA-*` and `TEST-iter34-CB-*` both slug to `TESTITER`. Recommend either: (i) make the qrn unique index compound on (qrn, center_id), (ii) include a short center-id hash in the prefix, or (iii) retry with counter bump on DuplicateKeyError. Worked around in test by naming centers with distinct 8-alnum prefixes (`IT34AAA-*` vs `IT34BBB-*`)."
+      },
+      {
+        "endpoint": "DELETE /api/quotations/{qid}",
+        "issue": "Cleanup edge case: admin cannot delete a quotation with status='paid' (400 by design). But there's no admin bulk-delete for payments/quotations; test-artifact clean-up requires direct MongoDB access. Suggest exposing /api/payments/bulk-delete + /api/quotations/bulk-delete for admin."
+      }
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter34_quotation_payment.py",
+    "/app/test_reports/pytest/iter34_results.xml"
+  ],
+  "action_items": [
+    "Review the QRN prefix collision (MEDIUM) — two centers sharing first-8-alnum chars in name will 500 at final approval. Recommend compound unique index (qrn, center_id) or retry-on-collision in _next_qrn.",
+    "Consider surfacing bulk-delete endpoints for payments + quotations to help admin test-data cleanup.",
+    "Consider dropping the auto-created `id` unique index for qrn_counters (line 578 iterates through all collections including this one); alternatively `qrn_counters` should probably use `center_id` as its primary key without a separate uuid `id`."
+  ],
+  "critical_code_review_comments": [
+    "server.py:5253 create_quotation — used to write doc['qrn']=None, which broke uniqueness on the `qrn_1` sparse index (sparse ≠ ignore-null). Now correctly omits the field; the stamping logic in the approval branch uses $set to add it on final approve. Consider replacing sparse+unique with a partialFilterExpression `{qrn:{$type:'string'}}` for MongoDB clarity.",
+    "server.py:_next_qrn (line 5237) — the $setOnInsert now includes `id: str(uuid.uuid4())`. Without this, the generic `id` unique index on qrn_counters (from the mass-loop at line 578) caused every additional center's counter insert to collide on id=null. Independent bug from the qrn:null one — both were latent and would fire on the very second row.",
+    "server.py:_slug_center_prefix (line 5229) — max prefix length is 8 alnum chars. Two centers whose names collide on first 8 alnum chars will produce the same QRN prefix, and because the qrn index is DB-global, their counters will collide too (500 error). This isn't per-center-unique — recommend either (a) compound index (qrn, center_id) OR (b) a retry loop in _next_qrn that increments the counter until an unused QRN is found. See report.",
+    "server.py:on_startup mass-loop (line 578) auto-creates `id` unique index on 28+ collections including `qrn_counters`. qrn_counters doesn't need an `id` field at all — center_id is the natural key. Suggest removing `qrn_counters` from that tuple, or explicitly documenting the required `id` in _next_qrn's $setOnInsert.",
+    "server.py:approval_act payment branch (line 4239–4275) correctly auto-derives company_id/partner_id via _derive_context_for_center, tags the txn with qrn+quotation_id+payment_id, includes 'QRN <qrn>' in description, and cascades quotation→'paid' with matching txn_id. Behaviour verified end-to-end.",
+    "server.py:approval_act reject branch (line 4058–4063) correctly reverts quotation.status→'approved' and clears payment_id when a payment is rejected, allowing a fresh payment to be raised on the same quotation. Verified.",
+    "server.py:create_payment guards: rejects non-approved quotations (400), rejects 2nd payment on same quotation (400), and flips quotation.status→'payment_pending'. Idempotent and correct.",
+    "TransactionOut (line 275) now exposes qrn/quotation_id/payment_id — fields correctly surface through GET /api/transactions and the ledger.",
+    "DEFAULT_CHAINS seeding is idempotent and both 'quotation' (CM→SM→Admin) and 'payment' (SM→Admin→Accountant) chains are correctly active on GET /api/approval-chains.",
+    "server.py is now 7375 lines — modularisation strongly recommended; the Quotation/Payment section (~200 lines around line 5191) is a clean candidate for extraction to a `routers/procurement.py`."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (create_quotation: removed doc['qrn']=None; _next_qrn: added 'id' to $setOnInsert to prevent counter collision on generic id_1 unique index)",
+    "/app/backend/tests/test_iter34_quotation_payment.py (NEW — 17 tests across 7 classes)"
+  ],
+  "success_rate": {"backend": "100% (17/17 iter-34)", "frontend": "N/A (backend-only per request)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Per-run RUN suffix (uuid4()[:6]) — TEST_iter34_Co_* company, TEST_iter34_P_* partner, IT34AAA-* + IT34BBB-* centers (renamed to avoid QRN prefix collision), 3 users (center_staff/partner/viewer). Cleanup fixture bulk-deletes at module teardown; residual paid quotations + payments (which cannot be deleted via API since /payments has no bulk-delete) require direct MongoDB purge — done manually after the run.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Two backend bugs I fixed as part of testing (both in server.py): (1) create_quotation no longer writes doc['qrn']=None — required because the `qrn_1` sparse+unique index still indexes explicit-null values, so a 2nd pending quotation would 500. (2) _next_qrn's $setOnInsert now includes `id: str(uuid.uuid4())` — required because the on_startup mass-loop at line 578 creates a generic `id_1` unique index on qrn_counters. Both fixes are minimal + safe. There is STILL an outstanding MEDIUM bug: `_slug_center_prefix` caps at 8 alnum chars, and the qrn unique index is DB-global, so two centers sharing the first 8 alnum chars will collide at their first approved quotation. Main agent should decide between compound unique index or retry-on-collision. Test file: /app/backend/tests/test_iter34_quotation_payment.py — 17 tests, all pass. Cleanup fixture is best-effort (no bulk-delete API for payments); some paid quotations may remain in DB after runs — use direct mongo purge if needed.",
+  "rca of the issue": "TWO independent MongoDB schema bugs surfaced immediately on the 2nd operation each: (A) qrn:null duplicate — sparse-unique index on `quotations.qrn` DOES index docs with explicit null; write path materialised qrn=None on every pending insert → first insert OK, second insert 500. RCA: sparse ≠ ignore-null (sparse only skips MISSING fields). Fix: don't set the field. (B) qrn_counters.id:null duplicate — generic on_startup index loop (line 578) added `id_1` unique index to qrn_counters, but _next_qrn upsert didn't set id → first counter row inserted with id=null; second center's upsert tried id=null → E11000. Fix: add id: uuid() to $setOnInsert. Both bugs are gone in production traffic direction (the fixes are drop-in and don't require data migration; existing counters with id=null keep working, only new upserts get a proper id). Design-level residual concern (MEDIUM): global qrn unique index + 8-char alnum prefix from center name = brittle. Two centers with `Palojori Deoghar` and `Palojori Sadar` collide."
+}

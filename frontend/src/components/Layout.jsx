@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +22,7 @@ const navItems = [
   { to: "/programs", key: "programs", icon: Layers, financeOnly: true },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
   { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
+  { to: "/quotations", key: "quotations", icon: FileSignature, nonPartner: true },
   { to: "/stock", key: "stock", icon: Package },
   { to: "/assets", key: "assets", icon: Box },
   { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
@@ -106,6 +107,7 @@ export default function Layout({ children }) {
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
       if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
+      if (it.nonPartner && user?.role === "partner") return false;
       if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;
       return true;
     }),

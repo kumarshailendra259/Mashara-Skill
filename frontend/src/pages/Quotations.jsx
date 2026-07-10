@@ -1,0 +1,367 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { api, formatError } from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
+import { inr } from "@/lib/i18n";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
+} from "@/components/ui/dialog";
+import { toast } from "sonner";
+import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock } from "lucide-react";
+
+const STATUS_LABEL = {
+  pending: { text: "Awaiting Approval", cls: "bg-amber-50 text-amber-700 border-amber-200" },
+  approved: { text: "Approved · Awaiting Payment", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  payment_pending: { text: "Payment In Progress", cls: "bg-blue-50 text-blue-700 border-blue-200" },
+  paid: { text: "Paid · Txn Created", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  rejected: { text: "Rejected", cls: "bg-red-50 text-red-700 border-red-200" },
+};
+
+/**
+ * Quotation → QRN → Payment two-stage procurement workflow.
+ * All non-partner roles can raise a quotation for a center they are assigned to.
+ * On final approval a per-center QRN is stamped (e.g. PALOJORI-QRN-0042); the
+ * initiator can then raise a payment request against that QRN. Final payment
+ * approval auto-creates an EXPENSE transaction in that center's ledger.
+ */
+export default function Quotations() {
+  const { user } = useAuth();
+  const [quotations, setQuotations] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [centers, setCenters] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [openQ, setOpenQ] = useState(false);
+  const [openP, setOpenP] = useState(false);
+  const [payQuotation, setPayQuotation] = useState(null);
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  const isPartner = user?.role === "partner";
+
+  const emptyQ = {
+    center_id: "", category: "expense", description: "", vendor_name: "",
+    estimated_amount: "", expected_delivery_date: "", purpose: "",
+  };
+  const [qForm, setQForm] = useState(emptyQ);
+  const [pForm, setPForm] = useState({
+    actual_amount: "", payment_mode: "bank", payment_date: new Date().toISOString().slice(0, 10),
+    notes: "", txn_type_override: "",
+  });
+
+  const load = async () => {
+    try {
+      const [q, p, c] = await Promise.all([
+        api.get("/quotations"),
+        api.get("/payments"),
+        api.get("/entities/center"),
+      ]);
+      setQuotations(q.data || []);
+      setPayments(p.data || []);
+      setCenters(c.data || []);
+    } catch (e) {
+      toast.error(formatError(e));
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const filtered = useMemo(() => {
+    if (statusFilter === "all") return quotations;
+    return quotations.filter((q) => q.status === statusFilter);
+  }, [quotations, statusFilter]);
+
+  const submitQuotation = async () => {
+    if (!qForm.center_id || !qForm.description || !qForm.vendor_name || !qForm.estimated_amount) {
+      toast.error("Fill center, description, vendor and amount");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post("/quotations", {
+        ...qForm,
+        estimated_amount: parseFloat(qForm.estimated_amount),
+        expected_delivery_date: qForm.expected_delivery_date || null,
+      });
+      toast.success("Quotation raised — routing for approval");
+      setOpenQ(false);
+      setQForm(emptyQ);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const openPayment = (q) => {
+    setPayQuotation(q);
+    setPForm({
+      actual_amount: String(q.estimated_amount || ""),
+      payment_mode: "bank",
+      payment_date: new Date().toISOString().slice(0, 10),
+      notes: "",
+      txn_type_override: "",
+    });
+    setOpenP(true);
+  };
+
+  const submitPayment = async () => {
+    if (!pForm.actual_amount) { toast.error("Enter actual amount"); return; }
+    setBusy(true);
+    try {
+      await api.post("/payments", {
+        quotation_id: payQuotation.id,
+        actual_amount: parseFloat(pForm.actual_amount),
+        payment_mode: pForm.payment_mode || null,
+        payment_date: pForm.payment_date || null,
+        notes: pForm.notes || null,
+        txn_type_override: pForm.txn_type_override || null,
+      });
+      toast.success("Payment request raised — routing for approval");
+      setOpenP(false);
+      setPayQuotation(null);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const deleteQuotation = async (q) => {
+    if (!window.confirm(`Delete quotation "${q.description.slice(0, 40)}"?`)) return;
+    try {
+      await api.delete(`/quotations/${q.id}`);
+      toast.success("Deleted");
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const paymentFor = (qid) => payments.find((p) => p.quotation_id === qid);
+
+  return (
+    <div className="space-y-6" data-testid="quotations-page">
+      <div className="flex items-start justify-between flex-wrap gap-4">
+        <div>
+          <div className="overline">HRMS · PROCUREMENT</div>
+          <h1 className="font-heading font-bold text-3xl tracking-tight mt-1">Quotations & Payments</h1>
+          <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">
+            Raise a vendor quotation → get it approved (QRN stamped) → raise a payment request against the QRN
+            → final approval auto-creates the expense transaction in the center.
+          </p>
+        </div>
+        {!isPartner && (
+          <Button onClick={() => setOpenQ(true)} className="rounded-none brand-btn" data-testid="quotation-add-btn">
+            <Plus size={16} className="mr-2" /> New Quotation
+          </Button>
+        )}
+      </div>
+
+      {/* Filter */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <span className="overline">Filter by status:</span>
+        {["all", "pending", "approved", "payment_pending", "paid", "rejected"].map((s) => (
+          <button
+            key={s}
+            onClick={() => setStatusFilter(s)}
+            className={`text-xs px-3 py-1 border rounded-none transition ${statusFilter === s ? "bg-[var(--brand)] text-white border-[var(--brand)]" : "border-[var(--border)] hover:bg-gray-50"}`}
+            data-testid={`quotation-filter-${s}`}
+          >
+            {s === "all" ? "All" : STATUS_LABEL[s]?.text || s}
+          </button>
+        ))}
+      </div>
+
+      {/* Table */}
+      <div className="swiss-card p-0 overflow-hidden">
+        {filtered.length === 0 ? (
+          <div className="p-8 text-center text-sm text-[var(--muted)]">
+            No quotations {statusFilter !== "all" && `with status "${STATUS_LABEL[statusFilter]?.text || statusFilter}"`}.
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--border)] overline bg-gray-50">
+                <th className="text-left p-3">QRN</th>
+                <th className="text-left p-3">Center</th>
+                <th className="text-left p-3">Vendor · Description</th>
+                <th className="text-left p-3">Category</th>
+                <th className="text-right p-3">Est. Amount</th>
+                <th className="text-right p-3">Paid Amount</th>
+                <th className="text-left p-3">Status</th>
+                <th className="text-left p-3">Raised By</th>
+                <th className="text-right p-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((q) => {
+                const p = paymentFor(q.id);
+                const st = STATUS_LABEL[q.status] || { text: q.status, cls: "bg-gray-100 text-gray-600 border-gray-200" };
+                const canPay = q.status === "approved" && !q.payment_id && !isPartner;
+                const canDelete = user?.role === "admin" || (q.created_by === user?.id && q.status === "pending");
+                return (
+                  <tr key={q.id} className="border-b border-[var(--border)] last:border-0" data-testid={`quotation-row-${q.id}`}>
+                    <td className="p-3 num font-mono text-xs">{q.qrn || <span className="text-[var(--muted)]">—</span>}</td>
+                    <td className="p-3">{q.center_name || <span className="text-[var(--muted)]">—</span>}</td>
+                    <td className="p-3">
+                      <div className="font-medium">{q.vendor_name}</div>
+                      <div className="text-xs text-[var(--muted)] max-w-md truncate">{q.description}</div>
+                      {q.purpose && <div className="text-[10px] text-[var(--muted)] mt-1">Purpose: {q.purpose}</div>}
+                    </td>
+                    <td className="p-3 capitalize">{q.category}</td>
+                    <td className="p-3 num font-medium">{inr(q.estimated_amount)}</td>
+                    <td className="p-3 num">{p ? inr(p.actual_amount) : <span className="text-[var(--muted)]">—</span>}</td>
+                    <td className="p-3">
+                      <span className={`text-xs px-2 py-0.5 border ${st.cls}`}>{st.text}</span>
+                      <div className="text-[10px] text-[var(--muted)] mt-1">Lv {q.current_level ?? "—"}/{(q.chain_snapshot || []).length}</div>
+                    </td>
+                    <td className="p-3 text-xs">{q.created_by_name}<div className="text-[10px] text-[var(--muted)]">{(q.created_at || "").slice(0, 10)}</div></td>
+                    <td className="p-3 text-right">
+                      <div className="flex justify-end gap-1">
+                        {canPay && (
+                          <Button size="sm" variant="outline" className="rounded-none text-xs" onClick={() => openPayment(q)} data-testid={`quotation-pay-${q.id}`}>
+                            <IndianRupee size={12} className="mr-1" /> Raise Payment
+                          </Button>
+                        )}
+                        {canDelete && (
+                          <Button size="sm" variant="outline" className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" onClick={() => deleteQuotation(q)} data-testid={`quotation-delete-${q.id}`}>
+                            <Trash2 size={12} />
+                          </Button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Info banner */}
+      <div className="bg-blue-50 border border-blue-200 p-4 flex items-start gap-3 text-sm">
+        <Info size={18} className="text-blue-600 shrink-0 mt-0.5" />
+        <div>
+          <div className="font-semibold text-blue-900">How this works</div>
+          <ul className="text-blue-900/80 text-xs mt-1 space-y-1">
+            <li>1. Raise a quotation → routes through the <strong>Quotation approval chain</strong> (HR Settings → Approval Workflows).</li>
+            <li>2. Final approval stamps a per-center <strong>QRN</strong> (e.g. <code>PALOJORI-QRN-0042</code>).</li>
+            <li>3. You can then raise a Payment request against the QRN with the actual amount (editable).</li>
+            <li>4. Payment routes through the <strong>Payment approval chain</strong>; final approval auto-creates an approved <strong>Expense</strong> transaction in the center.</li>
+          </ul>
+        </div>
+      </div>
+
+      {/* New quotation dialog */}
+      <Dialog open={openQ} onOpenChange={setOpenQ}>
+        <DialogContent className="rounded-none max-w-2xl" data-testid="quotation-form">
+          <DialogHeader>
+            <DialogTitle>New Quotation Request</DialogTitle>
+            <DialogDescription>Vendor quotation with estimated amount — approval workflow will route this for sign-off.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2">
+              <Label className="overline">Center</Label>
+              <Select value={qForm.center_id || ""} onValueChange={(v) => setQForm({ ...qForm, center_id: v })}>
+                <SelectTrigger className="rounded-none" data-testid="q-center"><SelectValue placeholder="Select center" /></SelectTrigger>
+                <SelectContent>{centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="overline">Category</Label>
+              <Select value={qForm.category} onValueChange={(v) => setQForm({ ...qForm, category: v })}>
+                <SelectTrigger className="rounded-none" data-testid="q-category"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="expense">Expense</SelectItem>
+                  <SelectItem value="investment">Investment</SelectItem>
+                  <SelectItem value="asset">Asset</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="overline">Estimated Amount (₹)</Label>
+              <Input type="number" step="0.01" value={qForm.estimated_amount} onChange={(e) => setQForm({ ...qForm, estimated_amount: e.target.value })} className="rounded-none" data-testid="q-amount" />
+            </div>
+            <div className="col-span-2">
+              <Label className="overline">Vendor Name</Label>
+              <Input value={qForm.vendor_name} onChange={(e) => setQForm({ ...qForm, vendor_name: e.target.value })} className="rounded-none" data-testid="q-vendor" />
+            </div>
+            <div className="col-span-2">
+              <Label className="overline">Description of Item / Service</Label>
+              <Textarea rows={3} value={qForm.description} onChange={(e) => setQForm({ ...qForm, description: e.target.value })} className="rounded-none" data-testid="q-description" />
+            </div>
+            <div>
+              <Label className="overline">Expected Delivery Date</Label>
+              <Input type="date" value={qForm.expected_delivery_date} onChange={(e) => setQForm({ ...qForm, expected_delivery_date: e.target.value })} className="rounded-none" data-testid="q-delivery" />
+            </div>
+            <div>
+              <Label className="overline">Purpose / Justification</Label>
+              <Input value={qForm.purpose} onChange={(e) => setQForm({ ...qForm, purpose: e.target.value })} className="rounded-none" placeholder="Why is this needed?" data-testid="q-purpose" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-none" onClick={() => setOpenQ(false)}>Cancel</Button>
+            <Button onClick={submitQuotation} disabled={busy} className="rounded-none brand-btn" data-testid="q-submit">
+              {busy ? "Saving…" : "Raise Quotation"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Payment dialog */}
+      <Dialog open={openP} onOpenChange={(o) => { if (!o) { setOpenP(false); setPayQuotation(null); } }}>
+        <DialogContent className="rounded-none" data-testid="payment-form">
+          <DialogHeader>
+            <DialogTitle>Raise Payment Request</DialogTitle>
+            <DialogDescription>
+              Against QRN <strong className="font-mono">{payQuotation?.qrn}</strong> · {payQuotation?.vendor_name}
+            </DialogDescription>
+          </DialogHeader>
+          {payQuotation && (
+            <div className="space-y-3">
+              <div className="text-xs bg-gray-50 border border-[var(--border)] p-3 space-y-1">
+                <div><span className="overline mr-2">Center</span>{payQuotation.center_name}</div>
+                <div><span className="overline mr-2">Vendor</span>{payQuotation.vendor_name}</div>
+                <div><span className="overline mr-2">Est. Amount</span>{inr(payQuotation.estimated_amount)}</div>
+                <div><span className="overline mr-2">Description</span>{payQuotation.description}</div>
+              </div>
+              <div>
+                <Label className="overline">Actual Amount to Pay (₹)</Label>
+                <Input type="number" step="0.01" value={pForm.actual_amount} onChange={(e) => setPForm({ ...pForm, actual_amount: e.target.value })} className="rounded-none" data-testid="p-amount" />
+                <div className="text-[10px] text-[var(--muted)] mt-1">Editable — negotiated / discounted amount may differ from estimate.</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="overline">Payment Mode</Label>
+                  <Select value={pForm.payment_mode} onValueChange={(v) => setPForm({ ...pForm, payment_mode: v })}>
+                    <SelectTrigger className="rounded-none" data-testid="p-mode"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cash">Cash</SelectItem>
+                      <SelectItem value="bank">Bank Transfer</SelectItem>
+                      <SelectItem value="upi">UPI</SelectItem>
+                      <SelectItem value="cheque">Cheque</SelectItem>
+                      <SelectItem value="card">Card</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="overline">Payment Date</Label>
+                  <Input type="date" value={pForm.payment_date} onChange={(e) => setPForm({ ...pForm, payment_date: e.target.value })} className="rounded-none" data-testid="p-date" />
+                </div>
+              </div>
+              <div>
+                <Label className="overline">Notes (UTR / cheque no. / reference)</Label>
+                <Input value={pForm.notes} onChange={(e) => setPForm({ ...pForm, notes: e.target.value })} className="rounded-none" data-testid="p-notes" />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" className="rounded-none" onClick={() => { setOpenP(false); setPayQuotation(null); }}>Cancel</Button>
+            <Button onClick={submitPayment} disabled={busy} className="rounded-none brand-btn" data-testid="p-submit">
+              {busy ? "Saving…" : "Raise Payment Request"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

@@ -263,6 +263,10 @@ class TransactionIn(BaseModel):
     attachments: List[AttachmentRef] = Field(default_factory=list)
     source: Optional[str] = None        # e.g. "milestone" when auto-created from Programs
     milestone: Optional[str] = None     # "1st" | "2nd" | "3rd" when source == "milestone"
+    # Populated when the txn was auto-created from an approved payment against a quotation
+    qrn: Optional[str] = None
+    quotation_id: Optional[str] = None
+    payment_id: Optional[str] = None
 
 
 TxnStatus = Literal["pending", "approved", "rejected"]
@@ -289,7 +293,7 @@ class RejectIn(BaseModel):
 # ============================================================================
 # Approval Chains — configurable multi-level approval workflows
 # ============================================================================
-ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation"]
+ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment"]
 ApproverKind = Literal["role", "staff", "user", "reports_to"]
 
 # Central mapping from approval-type → backing collection. Used by /approvals/act, /approvals/pending,
@@ -302,6 +306,8 @@ APPROVAL_TYPE_COLL: dict = {
     "asset_purchase":    "asset_purchase_requests",
     "employee_transfer": "employee_transfers",
     "regularisation":    "regularisations",
+    "quotation":         "quotations",
+    "payment":           "payments",
 }
 
 
@@ -569,7 +575,7 @@ async def _ensure_libreoffice_installed() -> None:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -588,6 +594,12 @@ async def on_startup():
     # Leave allocation indices (seeder runs lazily on first GET /leave-types)
     await db.leave_types.create_index("code", unique=True)
     await db.leave_balances.create_index([("staff_id", 1), ("leave_type_id", 1), ("year", 1)], unique=True)
+    # Quotation / Payment indices — QRN is unique per center
+    await db.quotations.create_index([("qrn", 1)], unique=True, sparse=True)
+    await db.quotations.create_index([("center_id", 1), ("status", 1)])
+    await db.payments.create_index([("quotation_id", 1)])
+    await db.payments.create_index([("center_id", 1), ("status", 1)])
+    await db.qrn_counters.create_index("center_id", unique=True)
 
     # Best-effort LibreOffice install for the offer-letter PDF pipeline. Runs
     # in the background so it never blocks startup; when it finishes, offer
@@ -3667,6 +3679,26 @@ DEFAULT_CHAINS: List[dict] = [
             {"level": 1, "kind": "role", "value": "hr", "label": "HR / Admin", "optional": False},
         ],
     },
+    {
+        "name": "Quotation — Default (3 levels)",
+        "type": "quotation",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "center_manager", "label": "Center Manager (initiator)", "optional": True},
+            {"level": 2, "kind": "role", "value": "senior_manager", "label": "Senior Manager",            "optional": False},
+            {"level": 3, "kind": "role", "value": "admin",          "label": "Admin (Final)",             "optional": False},
+        ],
+    },
+    {
+        "name": "Payment — Default (3 levels; Accountant final)",
+        "type": "payment",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "senior_manager", "label": "Senior Manager",  "optional": False},
+            {"level": 2, "kind": "role", "value": "admin",          "label": "Admin",           "optional": False},
+            {"level": 3, "kind": "role", "value": "accountant",     "label": "Accountant (Final)", "optional": False},
+        ],
+    },
 ]
 
 
@@ -3838,6 +3870,8 @@ def _approval_link(req_type: str) -> str:
         "asset_purchase":    "/assets",
         "employee_transfer": "/employee-transfers",
         "regularisation":    "/pending-approvals",
+        "quotation":         "/quotations",
+        "payment":           "/quotations",
     }.get(req_type, "/pending-approvals")
 
 
@@ -4021,6 +4055,12 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             "rejected_at": datetime.now(timezone.utc).isoformat(),
         }
         await coll.update_one({"id": body.request_id}, {"$set": update})
+        # If a payment gets rejected, free up the quotation so a fresh payment can be raised.
+        if body.request_type == "payment" and rec.get("quotation_id"):
+            await db.quotations.update_one(
+                {"id": rec["quotation_id"]},
+                {"$set": {"payment_id": None, "status": "approved"}},
+            )
         # Notify creator
         if rec.get("created_by") and rec["created_by"] != user["id"]:
             await _notify(rec["created_by"],
@@ -4179,6 +4219,59 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "decided_by": user["id"],
                 "decided_at": now,
                 "decision_remarks": body.remarks or "",
+            }
+        elif body.request_type == "quotation":
+            # Final-approval: stamp a per-center QRN. Status → 'approved' (payment can now be raised).
+            now = datetime.now(timezone.utc).isoformat()
+            qrn = await _next_qrn(rec["center_id"])
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "qrn": qrn,
+                "approved_by": user["id"],
+                "approved_at": now,
+                "rejected_reason": None,
+            }
+        elif body.request_type == "payment":
+            # Final-approval: auto-create the offsetting ledger transaction in the center.
+            now = datetime.now(timezone.utc).isoformat()
+            ctx = await _derive_context_for_center(rec.get("center_id"))
+            txn_type = rec.get("category") or "expense"
+            pay_date = rec.get("payment_date") or now[:10]
+            desc = f"Payment · QRN {rec.get('qrn','')} · {rec.get('vendor_name','')} — {rec.get('description','')}".strip(" ·—")
+            txn = {
+                "id": str(uuid.uuid4()),
+                "type": txn_type,
+                "amount": float(rec["actual_amount"]),
+                "date": pay_date,
+                "description": desc,
+                "company_id": ctx["company_id"],
+                "partner_id": ctx["partner_id"],
+                "center_id": rec.get("center_id"),
+                "project_id": None,
+                "items": [], "attachments": rec.get("attachments") or [],
+                "source": "quotation_payment",
+                "quotation_id": rec.get("quotation_id"),
+                "payment_id": rec.get("id"),
+                "qrn": rec.get("qrn"),
+                "created_by": user["id"], "created_at": now,
+                "status": "approved", "approved_by": user["id"], "approved_at": now,
+                "rejected_reason": None,
+            }
+            await db.transactions.insert_one(txn)
+            # Reflect final state on both payment + quotation
+            await db.quotations.update_one(
+                {"id": rec.get("quotation_id")},
+                {"$set": {"status": "paid", "txn_id": txn["id"], "paid_at": now}},
+            )
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "paid",
+                "paid_at": now,
+                "paid_by": user["id"],
+                "txn_id": txn["id"],
             }
         else:  # transaction
             update = {
@@ -5092,6 +5185,241 @@ async def decide_regularisation(rid: str, decision: str = Query(..., pattern="^(
         await _notify(rec["created_by"], f"Your regularisation request for {rec['date']} was {decision}",
                       ntype=f"regularisation_{decision}", ref_id=rid, link="/check-in")
     return res
+
+
+# ============================================================================
+# Quotation → QRN → Payment workflow
+# ============================================================================
+# Two-stage procurement flow:
+#   Stage 1: Any non-partner role raises a QUOTATION with vendor+amount+attachments.
+#            Approval flows through the configured `quotation` chain (default 3 levels).
+#            On final approve, a per-center QRN (Quotation Request Number) is stamped:
+#            e.g. `PALOJORI-QRN-0042`. The QRN is unique per center.
+#   Stage 2: Once approved, the initiator (or admin/CM) raises a PAYMENT request that
+#            references the QRN. Actual amount is editable. Approval flows through the
+#            configured `payment` chain. On final approve, an approved EXPENSE
+#            transaction is auto-created in the center's ledger, tagged with the QRN,
+#            with company_id/partner_id auto-derived (Phase 13).
+QuotationCategory = Literal["expense", "investment", "asset"]
+
+
+class QuotationIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    center_id: str
+    category: QuotationCategory = "expense"
+    description: str
+    vendor_name: str
+    estimated_amount: float = Field(gt=0)
+    expected_delivery_date: Optional[str] = None
+    purpose: Optional[str] = None
+    attachments: List[str] = Field(default_factory=list)
+
+
+class PaymentIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    quotation_id: str
+    actual_amount: float = Field(gt=0)
+    payment_mode: Optional[str] = None       # cash | bank | upi | cheque | card
+    payment_date: Optional[str] = None       # YYYY-MM-DD; defaults to today at approval
+    txn_type_override: Optional[QuotationCategory] = None  # overrides quotation.category
+    notes: Optional[str] = None
+    attachments: List[str] = Field(default_factory=list)
+
+
+def _slug_center_prefix(name: str) -> str:
+    """Return an uppercase 8-char alnum prefix of the center name, used inside the QRN."""
+    if not name:
+        return "CENTER"
+    stripped = "".join(ch for ch in name.upper() if ch.isalnum())
+    return (stripped or "CENTER")[:8]
+
+
+async def _next_qrn(center_id: str) -> str:
+    """Atomically bump the per-center QRN counter and return the formatted QRN string."""
+    doc = await db.qrn_counters.find_one_and_update(
+        {"center_id": center_id},
+        {"$inc": {"counter": 1},
+         "$setOnInsert": {"center_id": center_id, "id": str(uuid.uuid4())}},
+        upsert=True, return_document=True,
+    )
+    counter = doc.get("counter") or 1
+    center = await db.centers.find_one({"id": center_id}, {"_id": 0, "name": 1})
+    prefix = _slug_center_prefix((center or {}).get("name") or "")
+    return f"{prefix}-QRN-{counter:04d}"
+
+
+QUOTATION_CREATORS = ("admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "center_staff")
+
+
+@api.post("/quotations")
+async def create_quotation(body: QuotationIn, user=Depends(get_current_user)):
+    """Any non-partner role can raise a quotation request for a center they belong to."""
+    if user.get("role") not in QUOTATION_CREATORS:
+        raise HTTPException(403, "Partners cannot raise quotations")
+    # Center-scope check for center_manager / center_staff
+    if user.get("role") in ("center_manager", "center_staff"):
+        assigned = user.get("assigned_center_ids") or []
+        if body.center_id not in assigned:
+            raise HTTPException(403, "You can only raise quotations for centers you are assigned to")
+    center = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
+    if not center:
+        raise HTTPException(404, "Center not found")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["status"] = "pending"
+    doc["center_name"] = center.get("name")
+    doc["created_by"] = user["id"]
+    doc["created_by_name"] = user.get("name") or user.get("email")
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # Do NOT materialise qrn=None here — the unique+sparse index on `qrn` still indexes
+    # explicit-null values (sparse only skips *missing* fields), so writing null would
+    # cause a duplicate-key error on the 2nd pending quotation. Leaving the field absent
+    # lets the sparse index correctly skip pre-approval docs. `$set` stamps it on final approve.
+    doc["payment_id"] = None
+    doc = await _attach_chain_to_request("quotation", doc)
+    await db.quotations.insert_one(doc)
+    # Notify first-step approvers
+    cur = await _current_step(doc)
+    if cur:
+        for uid in await _resolve_step_user_ids(cur, doc):
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"New quotation from {doc['created_by_name']} — {doc['vendor_name']} · ₹{doc['estimated_amount']:,.0f}",
+                              ntype="quotation_pending", ref_id=doc["id"], link="/quotations")
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/quotations")
+async def list_quotations(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    center_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    """List quotations. Role scope:
+      • admin/hr/senior_manager/accountant → see everything (with optional filters).
+      • center_manager/center_staff → see quotations at their assigned centers only.
+      • partner → see quotations at centers mapped to them.
+      • Everyone also sees quotations they personally raised.
+    """
+    q: dict = {}
+    if status_filter:
+        q["status"] = status_filter
+    if center_id:
+        q["center_id"] = center_id
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        assigned = user.get("assigned_center_ids") or []
+        q["$or"] = [{"center_id": {"$in": assigned}}, {"created_by": user["id"]}]
+    elif role == "partner":
+        own_pid = user.get("assigned_partner_id")
+        centers = await _centers_for_partner(own_pid) if own_pid else []
+        q["$or"] = [{"center_id": {"$in": centers}}, {"created_by": user["id"]}]
+    docs = await db.quotations.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+
+@api.get("/quotations/{qid}")
+async def get_quotation(qid: str, user=Depends(get_current_user)):
+    q = await db.quotations.find_one({"id": qid}, {"_id": 0})
+    if not q:
+        raise HTTPException(404, "Not found")
+    return q
+
+
+@api.delete("/quotations/{qid}")
+async def delete_quotation(qid: str, user=Depends(get_current_user)):
+    """Creator can delete their own PENDING quotation; admin can delete any non-paid quotation."""
+    q = await db.quotations.find_one({"id": qid}, {"_id": 0})
+    if not q:
+        raise HTTPException(404, "Not found")
+    role = user.get("role")
+    is_owner = q.get("created_by") == user["id"]
+    if not (role == "admin" or (is_owner and q.get("status") == "pending")):
+        raise HTTPException(403, "Cannot delete this quotation")
+    if q.get("status") == "paid":
+        raise HTTPException(400, "Cannot delete a quotation with a linked payment — undo the payment first")
+    await db.quotations.delete_one({"id": qid})
+    return {"ok": True}
+
+
+@api.post("/payments")
+async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
+    """Raise a payment request against an APPROVED quotation."""
+    if user.get("role") not in QUOTATION_CREATORS:
+        raise HTTPException(403, "Partners cannot raise payment requests")
+    q = await db.quotations.find_one({"id": body.quotation_id}, {"_id": 0})
+    if not q:
+        raise HTTPException(404, "Quotation not found")
+    if q.get("status") != "approved":
+        raise HTTPException(400, f"Quotation is not approved (status={q.get('status')})")
+    if q.get("payment_id"):
+        raise HTTPException(400, "A payment request already exists for this quotation")
+    if user.get("role") in ("center_manager", "center_staff"):
+        assigned = user.get("assigned_center_ids") or []
+        if q["center_id"] not in assigned:
+            raise HTTPException(403, "You can only raise payments for centers you are assigned to")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["quotation_id"] = q["id"]
+    doc["qrn"] = q.get("qrn")
+    doc["center_id"] = q["center_id"]
+    doc["center_name"] = q.get("center_name")
+    doc["category"] = doc.get("txn_type_override") or q.get("category") or "expense"
+    doc["description"] = q.get("description")
+    doc["vendor_name"] = q.get("vendor_name")
+    doc["status"] = "pending"
+    doc["created_by"] = user["id"]
+    doc["created_by_name"] = user.get("name") or user.get("email")
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["txn_id"] = None
+    doc = await _attach_chain_to_request("payment", doc)
+    await db.payments.insert_one(doc)
+    # Link back to quotation
+    await db.quotations.update_one({"id": q["id"]}, {"$set": {"payment_id": doc["id"], "status": "payment_pending"}})
+    cur = await _current_step(doc)
+    if cur:
+        for uid in await _resolve_step_user_ids(cur, doc):
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"Payment approval — QRN {doc.get('qrn')} · ₹{doc['actual_amount']:,.0f}",
+                              ntype="payment_pending", ref_id=doc["id"], link="/quotations")
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/payments")
+async def list_payments(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    center_id: Optional[str] = None,
+    quotation_id: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    q: dict = {}
+    if status_filter:
+        q["status"] = status_filter
+    if center_id:
+        q["center_id"] = center_id
+    if quotation_id:
+        q["quotation_id"] = quotation_id
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        assigned = user.get("assigned_center_ids") or []
+        q["$or"] = [{"center_id": {"$in": assigned}}, {"created_by": user["id"]}]
+    elif role == "partner":
+        own_pid = user.get("assigned_partner_id")
+        centers = await _centers_for_partner(own_pid) if own_pid else []
+        q["$or"] = [{"center_id": {"$in": centers}}, {"created_by": user["id"]}]
+    docs = await db.payments.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+
+@api.get("/payments/{pid}")
+async def get_payment(pid: str, user=Depends(get_current_user)):
+    p = await db.payments.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Not found")
+    return p
 
 
 # -------- Personal endpoints for mobile staff app --------
