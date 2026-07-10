@@ -13,7 +13,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock, Paperclip } from "lucide-react";
 
 const STATUS_LABEL = {
   pending: { text: "Awaiting Approval", cls: "bg-amber-50 text-amber-700 border-amber-200" },
@@ -46,12 +46,29 @@ export default function Quotations() {
   const emptyQ = {
     center_id: "", category: "expense", description: "", vendor_name: "",
     estimated_amount: "", expected_delivery_date: "", purpose: "",
+    attachments: [],
   };
   const [qForm, setQForm] = useState(emptyQ);
   const [pForm, setPForm] = useState({
     actual_amount: "", payment_mode: "bank", payment_date: new Date().toISOString().slice(0, 10),
-    notes: "", txn_type_override: "",
+    notes: "", txn_type_override: "", attachments: [],
   });
+  const [uploading, setUploading] = useState(false);
+
+  // Single reusable upload helper — pushes into either qForm.attachments or pForm.attachments.
+  const uploadAttachment = async (e, setter) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    setUploading(true);
+    try {
+      const fd = new FormData(); fd.append("file", f);
+      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setter((s) => ({ ...s, attachments: [...(s.attachments || []), data] }));
+      toast.success("File attached");
+    } catch (err) { toast.error(formatError(err)); }
+    finally { setUploading(false); e.target.value = ""; }
+  };
+  const removeAttachment = (id, setter) =>
+    setter((s) => ({ ...s, attachments: (s.attachments || []).filter((a) => a.id !== id) }));
 
   const load = async () => {
     try {
@@ -86,6 +103,7 @@ export default function Quotations() {
         ...qForm,
         estimated_amount: parseFloat(qForm.estimated_amount),
         expected_delivery_date: qForm.expected_delivery_date || null,
+        attachments: qForm.attachments || [],
       });
       toast.success("Quotation raised — routing for approval");
       setOpenQ(false);
@@ -103,6 +121,7 @@ export default function Quotations() {
       payment_date: new Date().toISOString().slice(0, 10),
       notes: "",
       txn_type_override: "",
+      attachments: [],
     });
     setOpenP(true);
   };
@@ -118,6 +137,7 @@ export default function Quotations() {
         payment_date: pForm.payment_date || null,
         notes: pForm.notes || null,
         txn_type_override: pForm.txn_type_override || null,
+        attachments: pForm.attachments || [],
       });
       toast.success("Payment request raised — routing for approval");
       setOpenP(false);
@@ -206,6 +226,24 @@ export default function Quotations() {
                       <div className="font-medium">{q.vendor_name}</div>
                       <div className="text-xs text-[var(--muted)] max-w-md truncate">{q.description}</div>
                       {q.purpose && <div className="text-[10px] text-[var(--muted)] mt-1">Purpose: {q.purpose}</div>}
+                      {(q.attachments || []).length > 0 && (
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          {q.attachments.map((a) => (
+                            <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-[var(--brand)] hover:underline inline-flex items-center gap-1 border border-[var(--border)] px-1.5 py-0.5" data-testid={`q-row-attach-${a.id}`}>
+                              <Paperclip size={10} /> {a.filename}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                      {p && (p.attachments || []).length > 0 && (
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          {p.attachments.map((a) => (
+                            <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-emerald-700 hover:underline inline-flex items-center gap-1 border border-emerald-200 bg-emerald-50 px-1.5 py-0.5">
+                              <Paperclip size={10} /> pay · {a.filename}
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 capitalize">{q.category}</td>
                     <td className="p-3 num font-medium">{inr(q.estimated_amount)}</td>
@@ -297,6 +335,28 @@ export default function Quotations() {
               <Label className="overline">Purpose / Justification</Label>
               <Input value={qForm.purpose} onChange={(e) => setQForm({ ...qForm, purpose: e.target.value })} className="rounded-none" placeholder="Why is this needed?" data-testid="q-purpose" />
             </div>
+            {/* Attachments — vendor quotation PDF/image */}
+            <div className="col-span-2 space-y-2">
+              <Label className="overline">Attachments (quotation PDF, vendor invoice, images)</Label>
+              <input
+                type="file" accept="*/*" onChange={(e) => uploadAttachment(e, setQForm)}
+                disabled={uploading}
+                className="block w-full text-sm border border-[var(--border)] rounded-none p-2 bg-white disabled:opacity-60"
+                data-testid="q-attach-input"
+              />
+              {(qForm.attachments || []).length > 0 && (
+                <div className="space-y-1">
+                  {qForm.attachments.map((a) => (
+                    <div key={a.id} className="flex items-center justify-between bg-gray-50 border border-[var(--border)] px-2 py-1 text-xs" data-testid={`q-attach-${a.id}`}>
+                      <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate flex items-center gap-2">
+                        <Paperclip size={12} /> {a.filename}
+                      </a>
+                      <button type="button" onClick={() => removeAttachment(a.id, setQForm)} className="text-red-600 hover:underline text-[10px]">Remove</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" className="rounded-none" onClick={() => setOpenQ(false)}>Cancel</Button>
@@ -351,6 +411,28 @@ export default function Quotations() {
               <div>
                 <Label className="overline">Notes (UTR / cheque no. / reference)</Label>
                 <Input value={pForm.notes} onChange={(e) => setPForm({ ...pForm, notes: e.target.value })} className="rounded-none" data-testid="p-notes" />
+              </div>
+              {/* Payment attachments — receipt, cheque photo, UTR screenshot */}
+              <div className="space-y-2">
+                <Label className="overline">Attachments (receipt, cheque photo, bank slip)</Label>
+                <input
+                  type="file" accept="*/*" onChange={(e) => uploadAttachment(e, setPForm)}
+                  disabled={uploading}
+                  className="block w-full text-sm border border-[var(--border)] rounded-none p-2 bg-white disabled:opacity-60"
+                  data-testid="p-attach-input"
+                />
+                {(pForm.attachments || []).length > 0 && (
+                  <div className="space-y-1">
+                    {pForm.attachments.map((a) => (
+                      <div key={a.id} className="flex items-center justify-between bg-gray-50 border border-[var(--border)] px-2 py-1 text-xs">
+                        <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate flex items-center gap-2">
+                          <Paperclip size={12} /> {a.filename}
+                        </a>
+                        <button type="button" onClick={() => removeAttachment(a.id, setPForm)} className="text-red-600 hover:underline text-[10px]">Remove</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

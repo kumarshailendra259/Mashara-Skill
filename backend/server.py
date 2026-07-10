@@ -5221,7 +5221,7 @@ class QuotationIn(BaseModel):
     estimated_amount: float = Field(gt=0)
     expected_delivery_date: Optional[str] = None
     purpose: Optional[str] = None
-    attachments: List[str] = Field(default_factory=list)
+    attachments: List[AttachmentRef] = Field(default_factory=list)
 
 
 class PaymentIn(BaseModel):
@@ -5232,7 +5232,7 @@ class PaymentIn(BaseModel):
     payment_date: Optional[str] = None       # YYYY-MM-DD; defaults to today at approval
     txn_type_override: Optional[QuotationCategory] = None  # overrides quotation.category
     notes: Optional[str] = None
-    attachments: List[str] = Field(default_factory=list)
+    attachments: List[AttachmentRef] = Field(default_factory=list)
 
 
 def _slug_center_prefix(name: str) -> str:
