@@ -35,6 +35,7 @@ export default function Quotations() {
   const [quotations, setQuotations] = useState([]);
   const [payments, setPayments] = useState([]);
   const [centers, setCenters] = useState([]);
+  const [vendors, setVendors] = useState([]);
   const [busy, setBusy] = useState(false);
   const [openQ, setOpenQ] = useState(false);
   const [openP, setOpenP] = useState(false);
@@ -44,7 +45,7 @@ export default function Quotations() {
   const isPartner = user?.role === "partner";
 
   const emptyQ = {
-    center_id: "", category: "expense", description: "", vendor_name: "",
+    center_id: "", category: "expense", description: "", vendor_name: "", vendor_id: "",
     estimated_amount: "", expected_delivery_date: "", purpose: "",
     attachments: [],
   };
@@ -72,14 +73,16 @@ export default function Quotations() {
 
   const load = async () => {
     try {
-      const [q, p, c] = await Promise.all([
+      const [q, p, c, v] = await Promise.all([
         api.get("/quotations"),
         api.get("/payments"),
         api.get("/entities/center"),
+        api.get("/vendors").catch(() => ({ data: [] })),
       ]);
       setQuotations(q.data || []);
       setPayments(p.data || []);
       setCenters(c.data || []);
+      setVendors(v.data || []);
     } catch (e) {
       toast.error(formatError(e));
     }
@@ -163,7 +166,7 @@ export default function Quotations() {
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
           <div className="overline">HRMS · PROCUREMENT</div>
-          <h1 className="font-heading font-bold text-3xl tracking-tight mt-1">Quotations & Payments</h1>
+          <h1 className="font-heading font-bold text-3xl tracking-tight mt-1">Payment Requests</h1>
           <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">
             Raise a vendor quotation → get it approved (QRN stamped) → raise a payment request against the QRN
             → final approval auto-creates the expense transaction in the center.
@@ -251,6 +254,20 @@ export default function Quotations() {
                     <td className="p-3">
                       <span className={`text-xs px-2 py-0.5 border ${st.cls}`}>{st.text}</span>
                       <div className="text-[10px] text-[var(--muted)] mt-1">Lv {q.current_level ?? "—"}/{(q.chain_snapshot || []).length}</div>
+                      {(q.pending_with && q.pending_with.length > 0) && (
+                        <div className="text-[10px] mt-1 text-amber-700" data-testid={`q-pending-with-${q.id}`}>
+                          ⏳ {q.current_step_label && <strong>{q.current_step_label}</strong>}
+                          {q.current_step_label && ": "}
+                          {q.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
+                          {q.pending_with.length > 2 && ` +${q.pending_with.length - 2}`}
+                        </div>
+                      )}
+                      {/* Payment sub-status */}
+                      {p && p.pending_with && p.pending_with.length > 0 && p.status !== "paid" && (
+                        <div className="text-[10px] mt-1 text-blue-700">
+                          💰 pay · {p.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 text-xs">{q.created_by_name}<div className="text-[10px] text-[var(--muted)]">{(q.created_at || "").slice(0, 10)}</div></td>
                     <td className="p-3 text-right">
@@ -320,8 +337,42 @@ export default function Quotations() {
               <Input type="number" step="0.01" value={qForm.estimated_amount} onChange={(e) => setQForm({ ...qForm, estimated_amount: e.target.value })} className="rounded-none" data-testid="q-amount" />
             </div>
             <div className="col-span-2">
-              <Label className="overline">Vendor Name</Label>
-              <Input value={qForm.vendor_name} onChange={(e) => setQForm({ ...qForm, vendor_name: e.target.value })} className="rounded-none" data-testid="q-vendor" />
+              <Label className="overline">Vendor</Label>
+              <Select
+                value={qForm.vendor_id || "__manual"}
+                onValueChange={(v) => {
+                  if (v === "__manual") { setQForm({ ...qForm, vendor_id: "", vendor_name: "" }); return; }
+                  const ven = vendors.find((x) => x.id === v);
+                  setQForm({ ...qForm, vendor_id: v, vendor_name: ven?.name || "" });
+                }}
+              >
+                <SelectTrigger className="rounded-none" data-testid="q-vendor-select"><SelectValue placeholder="Pick a vendor or type manually" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__manual">— Type manually below —</SelectItem>
+                  {vendors.filter((v) => v.active !== false).map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.name}{v.gst_number ? ` · GST ${v.gst_number}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <div className="mt-2">
+                <Input
+                  value={qForm.vendor_name}
+                  onChange={(e) => setQForm({ ...qForm, vendor_name: e.target.value, vendor_id: "" })}
+                  placeholder="Or type vendor name here"
+                  className="rounded-none" data-testid="q-vendor"
+                />
+                {qForm.vendor_id && (() => {
+                  const ven = vendors.find((x) => x.id === qForm.vendor_id);
+                  return ven ? (
+                    <div className="text-[10px] text-[var(--muted)] mt-1 space-y-0.5">
+                      {ven.contact_person && <div>Contact: {ven.contact_person} {ven.mobile && `· ${ven.mobile}`}</div>}
+                      {ven.bank_name && <div>Bank: {ven.bank_name} · A/c {ven.bank_account_no || "—"} · {ven.ifsc || "—"}</div>}
+                    </div>
+                  ) : null;
+                })()}
+              </div>
             </div>
             <div className="col-span-2">
               <Label className="overline">Description of Item / Service</Label>

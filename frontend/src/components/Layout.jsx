@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +23,7 @@ const navItems = [
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
   { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
   { to: "/quotations", key: "quotations", icon: FileSignature, nonPartner: true },
+  { to: "/vendors", key: "vendors", icon: Users2, nonPartner: true },
   { to: "/stock", key: "stock", icon: Package },
   { to: "/assets", key: "assets", icon: Box },
   { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },

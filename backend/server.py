@@ -575,7 +575,7 @@ async def _ensure_libreoffice_installed() -> None:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters", "vendors"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -3591,6 +3591,8 @@ async def list_leaves(
     if status:
         q["status"] = status
     docs = await db.leaves.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -3767,11 +3769,13 @@ async def _resolve_step_user_ids(step: dict, request_doc: dict) -> List[str]:
     value = step.get("value", "")
     if kind == "role":
         q: dict = {"role": value}
-        # Center-isolation: partner / center_partner approvers must be MAPPED to the request's
-        # center via User Management (assigned_center_ids). Without this, every partner in the
-        # system would receive every transaction/leave/asset request — leaking other centers'
-        # workflow to unrelated partners. Other roles (admin, hr, accountant, …) are global.
-        if value in ("partner", "center_partner"):
+        # Center-isolation: partner / center_partner / center_manager / center_staff
+        # approvers must be MAPPED to the request's center via User Management
+        # (assigned_center_ids). Without this, EVERY user of that role in the
+        # system would receive every request — leaking unrelated centers'
+        # workflow. Other roles (admin, hr, accountant, senior_manager, …)
+        # remain GLOBAL by design.
+        if value in ("partner", "center_partner", "center_manager", "center_staff"):
             cid = request_doc.get("center_id")
             if cid:
                 q["assigned_center_ids"] = cid
@@ -3835,6 +3839,39 @@ async def _attach_chain_to_request(req_type: str, request_doc: dict) -> dict:
     request_doc["chain_snapshot"] = steps
     request_doc["chain_history"] = []
     return request_doc
+
+
+async def _resolve_pending_approvers(request_doc: dict) -> List[dict]:
+    """Return the list of users who can act on the CURRENT step of the request.
+    Each entry: {id, name, email, role}. Used for creator-visible tracking so
+    they can see whose approval is holding up their submission."""
+    if request_doc.get("status") not in ("pending", "in_progress", "payment_pending"):
+        return []
+    step = await _current_step(request_doc)
+    if not step:
+        return []
+    uids = await _resolve_step_user_ids(step, request_doc)
+    if not uids:
+        return []
+    users = await db.users.find(
+        {"id": {"$in": uids}}, {"_id": 0, "id": 1, "name": 1, "email": 1, "role": 1},
+    ).to_list(200)
+    return users
+
+
+async def _enrich_with_approval_status(doc: dict) -> dict:
+    """Attach `pending_with` (list of approvers), `current_step_label`, and
+    `total_steps` fields to a request doc so the creator's UI can show
+    'Currently pending with: Rakesh Kumar (Senior Manager)'."""
+    if not doc:
+        return doc
+    step = await _current_step(doc)
+    doc["current_step_label"] = (step or {}).get("label") if step else None
+    doc["current_step_kind"] = (step or {}).get("kind") if step else None
+    doc["current_step_value"] = (step or {}).get("value") if step else None
+    doc["total_steps"] = len(doc.get("chain_snapshot") or [])
+    doc["pending_with"] = await _resolve_pending_approvers(doc)
+    return doc
 
 
 async def _current_step(request_doc: dict) -> Optional[dict]:
@@ -4379,6 +4416,32 @@ async def list_pending_approvals(user=Depends(get_current_user)):
     return out
 
 
+@api.get("/approvals/status/{request_type}/{request_id}")
+async def approval_status(request_type: str, request_id: str, user=Depends(get_current_user)):
+    """Return the LIVE approval tracking status for any request — current step
+    label, pending approvers (name+role), total steps, chain_history — so the
+    creator can see 'Pending with: Rakesh Kumar (Senior Manager)' in the UI.
+    """
+    if request_type not in APPROVAL_TYPE_COLL:
+        raise HTTPException(400, "Invalid request_type")
+    coll_name = APPROVAL_TYPE_COLL[request_type]
+    rec = await db[coll_name].find_one({"id": request_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    await _enrich_with_approval_status(rec)
+    return {
+        "request_type": request_type,
+        "request_id": request_id,
+        "status": rec.get("status"),
+        "current_level": rec.get("current_level"),
+        "current_step_label": rec.get("current_step_label"),
+        "total_steps": rec.get("total_steps"),
+        "pending_with": rec.get("pending_with") or [],
+        "chain_snapshot": rec.get("chain_snapshot") or [],
+        "chain_history": rec.get("chain_history") or [],
+    }
+
+
 @api.post("/approvals/{request_type}/{request_id}/nudge")
 async def nudge_approver(request_type: str, request_id: str, user=Depends(get_current_user)):
     """Send a polite reminder notification to the currently-pending approver(s).
@@ -4574,6 +4637,8 @@ async def list_reimbursements(
             clauses.append({"l1_approver_id": my_sid})
         q["$or"] = clauses
     docs = await db.reimbursements.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -5132,6 +5197,8 @@ async def list_regularisations(status: Optional[str] = None, user=Depends(get_cu
                         "chain_history": d.get("chain_history") or [],
                     }},
                 )
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -5197,6 +5264,118 @@ async def decide_regularisation(rid: str, decision: str = Query(..., pattern="^(
 
 
 # ============================================================================
+# Vendor Master
+# ============================================================================
+# Reusable vendor directory — GST, PAN, bank details, contact. Referenced by
+# quotations (vendor_id) so procurement analytics (Top-N vendors by spend)
+# can roll up spend without string-matching typo'd vendor names.
+class VendorIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    gst_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    contact_person: Optional[str] = None
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    bank_name: Optional[str] = None
+    ifsc: Optional[str] = None
+    account_holder_name: Optional[str] = None
+    notes: Optional[str] = None
+    active: bool = True
+
+
+@api.get("/vendors")
+async def list_vendors(user=Depends(get_current_user)):
+    """All logged-in users can browse the vendor directory (needed for the
+    dropdown in the Quotation form). Only admin/hr/manager/accountant can
+    mutate — enforced on write endpoints."""
+    docs = await db.vendors.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
+    return docs
+
+
+@api.get("/vendors/{vid}")
+async def get_vendor(vid: str, user=Depends(get_current_user)):
+    v = await db.vendors.find_one({"id": vid}, {"_id": 0})
+    if not v:
+        raise HTTPException(404, "Vendor not found")
+    return v
+
+
+@api.post("/vendors", status_code=201)
+async def create_vendor(body: VendorIn, user=Depends(require_role("admin", "hr", "manager", "senior_manager", "accountant"))):
+    if not (body.name or "").strip():
+        raise HTTPException(400, "Vendor name is required")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_by"] = user["id"]
+    doc["created_by_name"] = user.get("name") or user.get("email")
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.vendors.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.put("/vendors/{vid}")
+async def update_vendor(vid: str, body: VendorIn, user=Depends(require_role("admin", "hr", "manager", "senior_manager", "accountant"))):
+    v = await db.vendors.find_one({"id": vid}, {"_id": 0})
+    if not v:
+        raise HTTPException(404, "Vendor not found")
+    update = body.model_dump()
+    update["updated_by"] = user["id"]
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.vendors.update_one({"id": vid}, {"$set": update})
+    merged = {**v, **update}
+    merged.pop("_id", None)
+    return merged
+
+
+@api.delete("/vendors/{vid}", status_code=204)
+async def delete_vendor(vid: str, _=Depends(require_role("admin"))):
+    r = await db.vendors.delete_one({"id": vid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Vendor not found")
+    return None
+
+
+@api.get("/reports/top-vendors")
+async def top_vendors(
+    limit: int = 10,
+    days: Optional[int] = None,
+    user=Depends(require_finance_visible),
+):
+    """Aggregate spend per vendor from approved payments (which represent
+    real procurement outflows). Returns list sorted by total_spend desc.
+
+    ``days`` filters payments where created_at is within the last N days.
+    """
+    q: dict = {"status": "paid"}
+    if days and days > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        q["created_at"] = {"$gte": cutoff}
+    pipe = [
+        {"$match": q},
+        {"$group": {
+            "_id": {"vendor": "$vendor_name", "vendor_id": "$vendor_id"},
+            "total_spend": {"$sum": "$actual_amount"},
+            "invoice_count": {"$sum": 1},
+            "last_paid_at": {"$max": "$created_at"},
+        }},
+        {"$sort": {"total_spend": -1}},
+        {"$limit": int(limit)},
+    ]
+    rows = await db.payments.aggregate(pipe).to_list(int(limit))
+    return [{
+        "vendor_id": r["_id"].get("vendor_id"),
+        "vendor_name": r["_id"].get("vendor") or "Unknown",
+        "total_spend": round(r["total_spend"] or 0, 2),
+        "invoice_count": r["invoice_count"],
+        "last_paid_at": r["last_paid_at"],
+    } for r in rows]
+
+
+# ============================================================================
 # Quotation → QRN → Payment workflow
 # ============================================================================
 # Two-stage procurement flow:
@@ -5217,6 +5396,7 @@ class QuotationIn(BaseModel):
     center_id: str
     category: QuotationCategory = "expense"
     description: str
+    vendor_id: Optional[str] = None       # optional — auto-fills from Vendor Master
     vendor_name: str
     estimated_amount: float = Field(gt=0)
     expected_delivery_date: Optional[str] = None
@@ -5325,6 +5505,8 @@ async def list_quotations(
         centers = await _centers_for_partner(own_pid) if own_pid else []
         q["$or"] = [{"center_id": {"$in": centers}}, {"created_by": user["id"]}]
     docs = await db.quotations.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -5333,6 +5515,7 @@ async def get_quotation(qid: str, user=Depends(get_current_user)):
     q = await db.quotations.find_one({"id": qid}, {"_id": 0})
     if not q:
         raise HTTPException(404, "Not found")
+    await _enrich_with_approval_status(q)
     return q
 
 
@@ -5420,6 +5603,8 @@ async def list_payments(
         centers = await _centers_for_partner(own_pid) if own_pid else []
         q["$or"] = [{"center_id": {"$in": centers}}, {"created_by": user["id"]}]
     docs = await db.payments.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -5428,6 +5613,7 @@ async def get_payment(pid: str, user=Depends(get_current_user)):
     p = await db.payments.find_one({"id": pid}, {"_id": 0})
     if not p:
         raise HTTPException(404, "Not found")
+    await _enrich_with_approval_status(p)
     return p
 
 
@@ -6918,6 +7104,8 @@ async def list_asset_purchase_requests(
     if status:
         q["status"] = status
     docs = await db.asset_purchase_requests.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -7135,6 +7323,8 @@ async def list_employee_transfers(status: Optional[str] = None, user=Depends(get
     if status:
         q["status"] = status
     docs = await db.employee_transfers.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
