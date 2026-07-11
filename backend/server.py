@@ -21,8 +21,24 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Respons
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId as _BsonObjectId
 
 logger = logging.getLogger(__name__)
+
+
+def _json_safe(obj):
+    """Recursively convert Mongo ObjectId → str inside nested dict/list so the
+    doc is safely JSON-serialisable by FastAPI. Also strips top-level and any
+    nested `_id` keys. Idempotent for already-clean payloads."""
+    if isinstance(obj, _BsonObjectId):
+        return str(obj)
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items() if k != "_id"}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 # ---------- DB ----------
@@ -598,13 +614,26 @@ async def on_startup():
     # so two centers whose slug prefix happens to collide can each independently
     # generate `PALOJORI-QRN-0001` without a duplicate-key error).
     # Migration: drop legacy global-unique qrn_1 index if it exists (iter-34 first-cut).
+    # ALSO drop the earlier compound sparse index `qrn_1_center_id_1` — sparse on
+    # a compound index only skips when ALL indexed fields are missing, so with
+    # center_id always present, the sparse flag was inert and multiple pending
+    # quotations (all with qrn absent) collided on `{qrn:null, center_id:X}`.
+    # Replace it with a partial-filter unique index that ONLY enforces uniqueness
+    # once qrn has been stamped as a string on final approval.
     try:
         idx = await db.quotations.index_information()
         if "qrn_1" in idx:
             await db.quotations.drop_index("qrn_1")
+        if "qrn_1_center_id_1" in idx:
+            await db.quotations.drop_index("qrn_1_center_id_1")
     except Exception:
         pass
-    await db.quotations.create_index([("qrn", 1), ("center_id", 1)], unique=True, sparse=True)
+    await db.quotations.create_index(
+        [("qrn", 1), ("center_id", 1)],
+        unique=True,
+        partialFilterExpression={"qrn": {"$type": "string"}},
+        name="qrn_center_unique_when_stamped",
+    )
     await db.quotations.create_index([("center_id", 1), ("status", 1)])
     await db.payments.create_index([("quotation_id", 1)])
     await db.payments.create_index([("center_id", 1), ("status", 1)])
@@ -3836,7 +3865,7 @@ async def _attach_chain_to_request(req_type: str, request_doc: dict) -> dict:
     steps = sorted(chain["steps"], key=lambda s: s.get("level", 0))
     request_doc["chain_id"] = chain["id"]
     request_doc["current_level"] = 1
-    request_doc["chain_snapshot"] = steps
+    request_doc["chain_snapshot"] = _json_safe(steps)
     request_doc["chain_history"] = []
     return request_doc
 
@@ -3865,6 +3894,12 @@ async def _enrich_with_approval_status(doc: dict) -> dict:
     'Currently pending with: Rakesh Kumar (Senior Manager)'."""
     if not doc:
         return doc
+    # Sanitise any residual ObjectId that may have snuck into legacy docs
+    # (particularly nested inside chain_snapshot) so this doc is safe to return.
+    if "chain_snapshot" in doc:
+        doc["chain_snapshot"] = _json_safe(doc.get("chain_snapshot") or [])
+    if "chain_history" in doc:
+        doc["chain_history"] = _json_safe(doc.get("chain_history") or [])
     step = await _current_step(doc)
     doc["current_step_label"] = (step or {}).get("label") if step else None
     doc["current_step_kind"] = (step or {}).get("kind") if step else None
@@ -5314,7 +5349,7 @@ async def create_vendor(body: VendorIn, user=Depends(require_role("admin", "hr",
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     await db.vendors.insert_one(doc)
     doc.pop("_id", None)
-    return doc
+    return _json_safe(doc)
 
 
 @api.put("/vendors/{vid}")
@@ -5476,7 +5511,7 @@ async def create_quotation(body: QuotationIn, user=Depends(get_current_user)):
                               f"New quotation from {doc['created_by_name']} — {doc['vendor_name']} · ₹{doc['estimated_amount']:,.0f}",
                               ntype="quotation_pending", ref_id=doc["id"], link="/quotations")
     doc.pop("_id", None)
-    return doc
+    return _json_safe(doc)
 
 
 @api.get("/quotations")
@@ -5577,7 +5612,7 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
                               f"Payment approval — QRN {doc.get('qrn')} · ₹{doc['actual_amount']:,.0f}",
                               ntype="payment_pending", ref_id=doc["id"], link="/quotations")
     doc.pop("_id", None)
-    return doc
+    return _json_safe(doc)
 
 
 @api.get("/payments")
