@@ -4405,8 +4405,8 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "current_level": rec.get("current_level"),
                     "step_label": (step or {}).get("label"),
                     "summary": {
-                        "amount": rec.get("amount") or rec.get("est_amount"),
-                        "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date"),
+                        "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount"),
+                        "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
                         "description": (
                             rec.get("description")
                             or rec.get("reason")
@@ -4417,6 +4417,19 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                             or (f"Regularise {rec.get('attendance_status','present').upper()} on {rec.get('date','')}"
                                 if req_type == "regularisation" else None)
                         ),
+                        # Payment-only extras: give the approver full payee context inline so
+                        # they don't need to open a second screen to verify account details.
+                        "vendor_name": rec.get("vendor_name"),
+                        "qrn": rec.get("qrn"),
+                        "payment_mode": rec.get("payment_mode"),
+                        "payee_account_holder": rec.get("payee_account_holder"),
+                        "payee_account_no": rec.get("payee_account_no"),
+                        "payee_ifsc": rec.get("payee_ifsc"),
+                        "payee_bank_name": rec.get("payee_bank_name"),
+                        "payee_upi_id": rec.get("payee_upi_id"),
+                        "payee_proof_attachments": rec.get("payee_proof_attachments") or [],
+                        "attachments": rec.get("attachments") or [],
+                        "chain_history": rec.get("chain_history") or [],
                     },
                     "created_at": rec.get("created_at"),
                     "via": "chain",
@@ -5443,11 +5456,22 @@ class PaymentIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     quotation_id: str
     actual_amount: float = Field(gt=0)
-    payment_mode: Optional[str] = None       # cash | bank | upi | cheque | card
+    payment_mode: str = Field(..., description="cash | bank | upi | cheque | card")
     payment_date: Optional[str] = None       # YYYY-MM-DD; defaults to today at approval
     txn_type_override: Optional[QuotationCategory] = None  # overrides quotation.category
     notes: Optional[str] = None
+    # Payee details — mandatory for bank/upi/cheque so the approver knows exactly WHERE
+    # money will land. Cash/card modes skip these (validated in the endpoint).
+    payee_account_holder: Optional[str] = None
+    payee_account_no: Optional[str] = None
+    payee_ifsc: Optional[str] = None
+    payee_bank_name: Optional[str] = None
+    payee_upi_id: Optional[str] = None
+    # Regular payment supporting docs (invoice / receipt / bank slip).
     attachments: List[AttachmentRef] = Field(default_factory=list)
+    # Payee proof: cancelled cheque / QR screenshot / bank passbook — REQUIRED for
+    # bank/upi/cheque modes so Finance can cross-verify the account before releasing funds.
+    payee_proof_attachments: List[AttachmentRef] = Field(default_factory=list)
 
 
 def _slug_center_prefix(name: str) -> str:
@@ -5586,6 +5610,26 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
         assigned = user.get("assigned_center_ids") or []
         if q["center_id"] not in assigned:
             raise HTTPException(403, "You can only raise payments for centers you are assigned to")
+    # ---- Payee details validation ----
+    mode = (body.payment_mode or "").lower().strip()
+    if mode not in ("cash", "bank", "upi", "cheque", "card"):
+        raise HTTPException(400, "Invalid payment_mode — must be cash / bank / upi / cheque / card")
+    if mode in ("bank", "cheque"):
+        missing = [k for k, v in {
+            "Account Holder Name": body.payee_account_holder,
+            "Account Number": body.payee_account_no,
+            "IFSC Code": body.payee_ifsc,
+            "Bank Name": body.payee_bank_name,
+        }.items() if not (v or "").strip()]
+        if missing:
+            raise HTTPException(400, f"Bank / Cheque payment requires: {', '.join(missing)}")
+        if len(body.payee_proof_attachments or []) == 0:
+            raise HTTPException(400, "Please attach a cancelled cheque / bank passbook as proof for Bank/Cheque payment")
+    elif mode == "upi":
+        if not (body.payee_upi_id or "").strip():
+            raise HTTPException(400, "UPI payment requires a valid UPI ID")
+        if len(body.payee_proof_attachments or []) == 0:
+            raise HTTPException(400, "Please attach a UPI QR screenshot as proof for UPI payment")
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["quotation_id"] = q["id"]

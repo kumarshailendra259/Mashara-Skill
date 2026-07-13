@@ -53,23 +53,26 @@ export default function Quotations() {
   const [pForm, setPForm] = useState({
     actual_amount: "", payment_mode: "bank", payment_date: new Date().toISOString().slice(0, 10),
     notes: "", txn_type_override: "", attachments: [],
+    payee_account_holder: "", payee_account_no: "", payee_ifsc: "", payee_bank_name: "",
+    payee_upi_id: "", payee_proof_attachments: [],
   });
   const [uploading, setUploading] = useState(false);
 
   // Single reusable upload helper — pushes into either qForm.attachments or pForm.attachments.
-  const uploadAttachment = async (e, setter) => {
+  // `targetField` lets us route uploads into secondary lists like pForm.payee_proof_attachments.
+  const uploadAttachment = async (e, setter, targetField = "attachments") => {
     const f = e.target.files?.[0]; if (!f) return;
     setUploading(true);
     try {
       const fd = new FormData(); fd.append("file", f);
       const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
-      setter((s) => ({ ...s, attachments: [...(s.attachments || []), data] }));
+      setter((s) => ({ ...s, [targetField]: [...(s[targetField] || []), data] }));
       toast.success("File attached");
     } catch (err) { toast.error(formatError(err)); }
     finally { setUploading(false); e.target.value = ""; }
   };
-  const removeAttachment = (id, setter) =>
-    setter((s) => ({ ...s, attachments: (s.attachments || []).filter((a) => a.id !== id) }));
+  const removeAttachment = (id, setter, targetField = "attachments") =>
+    setter((s) => ({ ...s, [targetField]: (s[targetField] || []).filter((a) => a.id !== id) }));
 
   const load = async () => {
     try {
@@ -118,29 +121,63 @@ export default function Quotations() {
 
   const openPayment = (q) => {
     setPayQuotation(q);
+    // Auto-prefill payee details from Vendor master if a linked vendor has bank/UPI on record.
+    const v = q.vendor_id ? vendors.find((x) => x.id === q.vendor_id) : null;
     setPForm({
       actual_amount: String(q.estimated_amount || ""),
-      payment_mode: "bank",
+      payment_mode: v?.bank_account_no ? "bank" : "bank",
       payment_date: new Date().toISOString().slice(0, 10),
       notes: "",
       txn_type_override: "",
       attachments: [],
+      payee_account_holder: v?.account_holder_name || v?.name || "",
+      payee_account_no: v?.bank_account_no || "",
+      payee_ifsc: v?.ifsc || "",
+      payee_bank_name: v?.bank_name || "",
+      payee_upi_id: "",
+      payee_proof_attachments: [],
     });
     setOpenP(true);
   };
 
   const submitPayment = async () => {
     if (!pForm.actual_amount) { toast.error("Enter actual amount"); return; }
+    const mode = (pForm.payment_mode || "").toLowerCase();
+    // Client-side guard so users get instant feedback (backend also enforces).
+    if (mode === "bank" || mode === "cheque") {
+      if (!pForm.payee_account_holder?.trim() || !pForm.payee_account_no?.trim() || !pForm.payee_ifsc?.trim() || !pForm.payee_bank_name?.trim()) {
+        toast.error("Bank/Cheque payment ke liye Account Holder, Account No, IFSC aur Bank Name — sabhi mandatory hain");
+        return;
+      }
+      if ((pForm.payee_proof_attachments || []).length === 0) {
+        toast.error("Cancelled cheque ya bank passbook attach kariye (proof mandatory hai)");
+        return;
+      }
+    } else if (mode === "upi") {
+      if (!pForm.payee_upi_id?.trim()) {
+        toast.error("UPI ID enter kariye"); return;
+      }
+      if ((pForm.payee_proof_attachments || []).length === 0) {
+        toast.error("UPI QR screenshot attach kariye (proof mandatory hai)");
+        return;
+      }
+    }
     setBusy(true);
     try {
       await api.post("/payments", {
         quotation_id: payQuotation.id,
         actual_amount: parseFloat(pForm.actual_amount),
-        payment_mode: pForm.payment_mode || null,
+        payment_mode: pForm.payment_mode || "bank",
         payment_date: pForm.payment_date || null,
         notes: pForm.notes || null,
         txn_type_override: pForm.txn_type_override || null,
         attachments: pForm.attachments || [],
+        payee_account_holder: pForm.payee_account_holder || null,
+        payee_account_no: pForm.payee_account_no || null,
+        payee_ifsc: pForm.payee_ifsc || null,
+        payee_bank_name: pForm.payee_bank_name || null,
+        payee_upi_id: pForm.payee_upi_id || null,
+        payee_proof_attachments: pForm.payee_proof_attachments || [],
       });
       toast.success("Payment request raised — routing for approval");
       setOpenP(false);
@@ -247,6 +284,25 @@ export default function Quotations() {
                           ))}
                         </div>
                       )}
+                      {/* Payee details preview — auditable inline, no need to open a dialog */}
+                      {p && (p.payee_account_no || p.payee_upi_id) && (
+                        <div className="text-[10px] text-[var(--muted)] mt-1" data-testid={`q-payee-${q.id}`}>
+                          💳 <span className="uppercase font-semibold text-[var(--foreground)]">{p.payment_mode}</span>
+                          {p.payee_upi_id && <> · UPI <span className="font-mono">{p.payee_upi_id}</span></>}
+                          {p.payee_account_no && <>
+                            {" "}· {p.payee_bank_name || "Bank"} · A/c <span className="font-mono">****{String(p.payee_account_no).slice(-4)}</span> · IFSC <span className="font-mono">{p.payee_ifsc}</span>
+                          </>}
+                        </div>
+                      )}
+                      {p && (p.payee_proof_attachments || []).length > 0 && (
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          {p.payee_proof_attachments.map((a) => (
+                            <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-amber-800 hover:underline inline-flex items-center gap-1 border border-amber-300 bg-amber-50 px-1.5 py-0.5">
+                              <Paperclip size={10} /> proof · {a.filename}
+                            </a>
+                          ))}
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 capitalize">{q.category}</td>
                     <td className="p-3 num font-medium">{inr(q.estimated_amount)}</td>
@@ -262,10 +318,38 @@ export default function Quotations() {
                           {q.pending_with.length > 2 && ` +${q.pending_with.length - 2}`}
                         </div>
                       )}
+                      {/* Approval history: shows who approved / rejected and their remarks so
+                          the requester and downstream reviewers can trace the conditions
+                          under which each level signed off. */}
+                      {(q.chain_history || []).filter((h) => h.action !== "auto-skip").length > 0 && (
+                        <div className="mt-2 space-y-1 border-l-2 border-emerald-200 pl-2" data-testid={`q-history-${q.id}`}>
+                          {q.chain_history.filter((h) => h.action !== "auto-skip").map((h, i) => (
+                            <div key={i} className="text-[10px]">
+                              <span className={h.action === "reject" ? "text-red-700" : "text-emerald-700"}>
+                                {h.action === "reject" ? "✕" : "✓"} L{h.level} · {h.by_user_name || "system"}
+                              </span>
+                              {h.remarks && <span className="text-[var(--muted)]"> — &ldquo;{h.remarks}&rdquo;</span>}
+                              <span className="text-[var(--muted)]"> · {(h.at || "").slice(0, 10)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {/* Payment sub-status */}
                       {p && p.pending_with && p.pending_with.length > 0 && p.status !== "paid" && (
                         <div className="text-[10px] mt-1 text-blue-700">
                           💰 pay · {p.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
+                        </div>
+                      )}
+                      {p && (p.chain_history || []).filter((h) => h.action !== "auto-skip").length > 0 && (
+                        <div className="mt-1 space-y-1 border-l-2 border-blue-200 pl-2">
+                          {p.chain_history.filter((h) => h.action !== "auto-skip").map((h, i) => (
+                            <div key={`p-${i}`} className="text-[10px]">
+                              <span className={h.action === "reject" ? "text-red-700" : "text-blue-700"}>
+                                {h.action === "reject" ? "✕" : "✓"} pay·L{h.level} · {h.by_user_name || "system"}
+                              </span>
+                              {h.remarks && <span className="text-[var(--muted)]"> — &ldquo;{h.remarks}&rdquo;</span>}
+                            </div>
+                          ))}
                         </div>
                       )}
                     </td>
@@ -459,6 +543,69 @@ export default function Quotations() {
                   <Input type="date" value={pForm.payment_date} onChange={(e) => setPForm({ ...pForm, payment_date: e.target.value })} className="rounded-none" data-testid="p-date" />
                 </div>
               </div>
+
+              {/* Payee details — required for bank/cheque/upi so approver knows exactly where money will land */}
+              {(pForm.payment_mode === "bank" || pForm.payment_mode === "cheque") && (
+                <div className="border border-[var(--border)] bg-amber-50/40 p-3 space-y-3" data-testid="p-payee-bank">
+                  <div className="overline text-amber-900">Payee Bank Details (mandatory)</div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="overline">Account Holder Name *</Label>
+                      <Input value={pForm.payee_account_holder} onChange={(e) => setPForm({ ...pForm, payee_account_holder: e.target.value })} className="rounded-none" placeholder="As per bank records" data-testid="p-payee-holder" />
+                    </div>
+                    <div>
+                      <Label className="overline">Bank Name *</Label>
+                      <Input value={pForm.payee_bank_name} onChange={(e) => setPForm({ ...pForm, payee_bank_name: e.target.value })} className="rounded-none" placeholder="e.g. HDFC Bank" data-testid="p-payee-bank" />
+                    </div>
+                    <div>
+                      <Label className="overline">Account Number *</Label>
+                      <Input value={pForm.payee_account_no} onChange={(e) => setPForm({ ...pForm, payee_account_no: e.target.value })} className="rounded-none font-mono" data-testid="p-payee-acno" />
+                    </div>
+                    <div>
+                      <Label className="overline">IFSC Code *</Label>
+                      <Input value={pForm.payee_ifsc} onChange={(e) => setPForm({ ...pForm, payee_ifsc: e.target.value.toUpperCase() })} className="rounded-none font-mono uppercase" placeholder="HDFC0001234" data-testid="p-payee-ifsc" />
+                    </div>
+                  </div>
+                </div>
+              )}
+              {pForm.payment_mode === "upi" && (
+                <div className="border border-[var(--border)] bg-violet-50/40 p-3 space-y-3" data-testid="p-payee-upi">
+                  <div className="overline text-violet-900">UPI Details (mandatory)</div>
+                  <div>
+                    <Label className="overline">UPI ID *</Label>
+                    <Input value={pForm.payee_upi_id} onChange={(e) => setPForm({ ...pForm, payee_upi_id: e.target.value })} className="rounded-none" placeholder="name@bankupi" data-testid="p-payee-upi-id" />
+                    <div className="text-[10px] text-[var(--muted)] mt-1">Also attach a QR screenshot below for verification.</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Payee proof — cancelled cheque / QR / passbook. Only shown for bank/upi/cheque */}
+              {(pForm.payment_mode === "bank" || pForm.payment_mode === "cheque" || pForm.payment_mode === "upi") && (
+                <div className="space-y-2">
+                  <Label className="overline">
+                    {pForm.payment_mode === "upi" ? "UPI QR Screenshot *" : "Cancelled Cheque / Bank Passbook *"}
+                  </Label>
+                  <input
+                    type="file" accept="image/*,application/pdf" onChange={(e) => uploadAttachment(e, setPForm, "payee_proof_attachments")}
+                    disabled={uploading}
+                    className="block w-full text-sm border border-[var(--border)] rounded-none p-2 bg-white disabled:opacity-60"
+                    data-testid="p-payee-proof-input"
+                  />
+                  {(pForm.payee_proof_attachments || []).length > 0 && (
+                    <div className="space-y-1">
+                      {pForm.payee_proof_attachments.map((a) => (
+                        <div key={a.id} className="flex items-center justify-between bg-amber-50 border border-amber-200 px-2 py-1 text-xs">
+                          <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-amber-900 hover:underline truncate flex items-center gap-2">
+                            <Paperclip size={12} /> {a.filename}
+                          </a>
+                          <button type="button" onClick={() => removeAttachment(a.id, setPForm, "payee_proof_attachments")} className="text-red-600 hover:underline text-[10px]">Remove</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div>
                 <Label className="overline">Notes (UTR / cheque no. / reference)</Label>
                 <Input value={pForm.notes} onChange={(e) => setPForm({ ...pForm, notes: e.target.value })} className="rounded-none" data-testid="p-notes" />
