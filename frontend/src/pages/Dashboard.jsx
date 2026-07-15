@@ -19,6 +19,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleWidgets from "@/components/RoleWidgets";
 import SettlementSection from "@/components/SettlementSection";
 import UpcomingWidget from "@/components/UpcomingWidget";
+import TodayLiveWidget from "@/components/TodayLiveWidget";
 
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
 const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
@@ -179,7 +180,10 @@ export default function Dashboard() {
           )}
         </div>
         <div className={showSettlement ? "" : "lg:col-span-1"}>
-          <UpcomingWidget />
+          <div className="space-y-4">
+            <TodayLiveWidget />
+            <UpcomingWidget />
+          </div>
         </div>
       </div>
 

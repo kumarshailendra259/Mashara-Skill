@@ -118,26 +118,57 @@ export default function CheckIn() {
     );
   }
 
-  const today = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "short", day: "numeric" });
+  const now = new Date();
+  const today = now.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "short", day: "numeric" });
+  const hh = now.getHours();
+  const greeting = hh < 12 ? "Good Morning" : hh < 17 ? "Good Afternoon" : "Good Evening";
+  const wave = hh < 12 ? "☀️" : hh < 17 ? "👋" : "🌙";
 
   return (
     <div className="min-h-screen bg-[var(--bg)] pb-24" data-testid="checkin-page">
-      {/* Header */}
-      <div className="px-5 py-5 bg-[var(--brand)] text-white sticky top-0 z-10">
-        <div className="flex items-start justify-between">
+      {/* Blue gradient hero — matches the mockup with greeting, date+time,
+          location and a motivational quote on the right. Radial city silhouette
+          effect via a semi-transparent SVG overlay so the whole surface stays
+          reads-clean on any brand-blue shade. */}
+      <div className="relative overflow-hidden text-white bg-gradient-to-br from-[#2E64C7] via-[#1E4EAB] to-[#173B85] px-5 pt-6 pb-16 md:pb-20 lg:pb-24">
+        <div
+          className="absolute inset-0 opacity-10 pointer-events-none"
+          style={{
+            backgroundImage: "url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22600%22 height=%22200%22><g fill=%22white%22><rect x=%22450%22 y=%2260%22 width=%2220%22 height=%22140%22/><rect x=%22475%22 y=%2290%22 width=%2225%22 height=%22110%22/><rect x=%22505%22 y=%2245%22 width=%2222%22 height=%22155%22/><rect x=%22535%22 y=%2280%22 width=%2218%22 height=%22120%22/><rect x=%22560%22 y=%2255%22 width=%2225%22 height=%22145%22/></g></svg>')",
+            backgroundRepeat: "no-repeat", backgroundPosition: "right bottom",
+          }}
+        />
+        <div className="relative flex items-start justify-between max-w-6xl mx-auto">
           <div>
-            <div className="overline opacity-80">Mashara Skills · Staff App</div>
-            <h1 className="font-heading font-black text-2xl mt-1 leading-tight" data-testid="checkin-greeting">Hi, {summary?.staff?.name || user.name}</h1>
-            <p className="text-xs opacity-90 mt-1">{today}</p>
+            <div className="text-sm md:text-base opacity-90">{greeting},</div>
+            <h1 className="font-heading font-black text-2xl md:text-4xl mt-0.5 leading-tight flex items-center gap-2" data-testid="checkin-greeting">
+              {summary?.staff?.name || user.name} <span className="text-xl md:text-3xl">{wave}</span>
+            </h1>
+            <p className="text-xs md:text-sm opacity-90 mt-2 num" data-testid="checkin-datetime">
+              {today} · {now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+            </p>
+            <div className="text-xs opacity-80 mt-1 flex items-center gap-1">
+              <MapPin size={12} />
+              <span>{summary?.staff?.center_name || summary?.staff?.center_id?.slice(0, 8) || "—"}</span>
+            </div>
           </div>
-          <button onClick={() => logout()} className="opacity-80 hover:opacity-100 mt-1" title="Sign out" data-testid="checkin-logout">
+          <div className="hidden md:flex items-center gap-3">
+            <div className="text-right italic text-sm opacity-95 leading-tight">
+              &ldquo;Discipline today<br />Success tomorrow&rdquo;
+            </div>
+            <button onClick={() => logout()} className="opacity-80 hover:opacity-100 p-2 rounded-full bg-white/10 hover:bg-white/20" title="Sign out" data-testid="checkin-logout">
+              <LogOut size={18} />
+            </button>
+          </div>
+          <button onClick={() => logout()} className="md:hidden opacity-80 hover:opacity-100 mt-1" title="Sign out">
             <LogOut size={20} />
           </button>
         </div>
       </div>
 
-      {/* Tab content */}
-      <div className="p-4 max-w-md mx-auto">
+      {/* Tab content — pulls up over the hero so the top cards sit inside the
+          gradient area like the mockup. */}
+      <div className="p-4 max-w-6xl mx-auto -mt-12 md:-mt-16 relative z-[5]">
         {tab === "home" && <HomeTab summary={summary} reload={loadSummary} setTab={setTab} />}
         {tab === "attendance" && <AttendanceTab />}
         {tab === "leave" && <LeaveTab staffId={summary?.staff?.id} />}
@@ -179,99 +210,181 @@ function HomeTab({ summary, reload, setTab }) {
   const allHolidays = summary?.all_holidays || [];
   const leaveBalances = summary?.leave_balances || [];
   const [showAllHolidays, setShowAllHolidays] = useState(false);
+  const now = new Date();
+  const nowLabel = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const totalMonth = (stats.present || 0) + (stats.half || 0) + (stats.leave || 0) + (stats.absent || 0);
+  const attendancePct = totalMonth > 0 ? Math.round(((stats.present || 0) + (stats.half || 0) * 0.5) / totalMonth * 100) : 0;
 
   return (
     <div className="space-y-4">
-      {/* Status card */}
-      <div className="swiss-card p-4 border-l-4 border-[var(--brand)]" data-testid="home-status-card">
-        <div className="overline">Today&apos;s Status</div>
-        {!checkedIn ? (
-          <div className="mt-2">
-            <div className="font-heading font-bold text-lg">Not checked in</div>
-            <p className="text-sm text-[var(--muted)] mt-1">Tap below to mark your attendance.</p>
+      {/* Top row: Ready for Work + This Month Attendance stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Ready for Work — green tinted card with big Check In button */}
+        <div className="bg-gradient-to-br from-emerald-50 to-white border border-emerald-200 p-5 relative overflow-hidden" data-testid="ready-for-work">
+          <div className="absolute right-4 top-4 h-14 w-14 rounded-full bg-emerald-500 flex items-center justify-center shadow-lg">
+            <MapPin size={22} className="text-white" />
           </div>
-        ) : (
-          <div className="mt-2">
-            <div className="font-heading font-bold text-lg flex items-center gap-2">
-              <CheckCircle2 size={20} className="text-[var(--success)]" />
-              <span className="uppercase">{att?.status || "present"}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-3 mt-3 text-sm">
-              <div>
-                <div className="overline">Check In</div>
-                <div className="font-medium">{fmtDate(att?.check_in_at || att?.marked_at)}</div>
+          <div className="text-emerald-900 font-heading font-bold text-lg">
+            {checkedIn && checkedOut ? "Day Complete" : checkedIn ? "You're checked in" : "Ready for Work?"}
+          </div>
+          <div className="text-xs text-[var(--muted)] mt-1">
+            {checkedIn && !checkedOut ? "Punch out when your shift ends" : checkedIn && checkedOut ? "Great job today 👏" : "Mark your attendance and start your day"}
+          </div>
+          <div className="text-3xl font-heading font-black text-emerald-700 num mt-4">{nowLabel}</div>
+
+          <div className="mt-3">
+            {!checkedIn && (
+              <Button onClick={() => setTab("attendance")} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-none gap-2 h-12 text-base font-bold" data-testid="quick-check-in">
+                CHECK IN <LogInIcon size={18} />
+              </Button>
+            )}
+            {checkedIn && !checkedOut && (
+              <Button onClick={() => setTab("attendance")} className="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-none gap-2 h-12 text-base font-bold" data-testid="quick-check-out">
+                CHECK OUT <Clock size={18} />
+              </Button>
+            )}
+            {checkedIn && checkedOut && (
+              <div className="w-full h-12 flex items-center justify-center border border-emerald-300 bg-emerald-100 text-emerald-800 gap-2 font-bold">
+                <CheckCircle2 size={18} /> Both punches recorded
               </div>
-              <div>
-                <div className="overline">Check Out</div>
-                <div className="font-medium">{checkedOut ? fmtDate(att?.check_out_at) : "—"}</div>
+            )}
+          </div>
+          <div className="text-[10px] text-emerald-800/80 mt-2 flex items-center gap-1">
+            <CheckCircle2 size={11} /> Location will be captured
+          </div>
+        </div>
+
+        {/* This Month Attendance — 4 icon-cards + progress bar */}
+        <div className="md:col-span-2 swiss-card p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="overline font-heading font-bold">This Month Attendance</div>
+            <button onClick={() => setTab("attendance")} className="text-[10px] text-[var(--brand)] hover:underline font-bold" data-testid="view-att-details">View Details →</button>
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            <MonthStatCard iconBg="bg-emerald-100" iconColor="text-emerald-600" iconChar="✓" label="Present" value={stats.present || 0} testid="ms-present" />
+            <MonthStatCard iconBg="bg-amber-100" iconColor="text-amber-600" iconChar="◐" label="Half Day" value={stats.half || 0} testid="ms-half" />
+            <MonthStatCard iconBg="bg-blue-100" iconColor="text-blue-600" iconChar="✈" label="Leave" value={stats.leave || 0} testid="ms-leave" />
+            <MonthStatCard iconBg="bg-red-100" iconColor="text-red-600" iconChar="✕" label="Absent" value={stats.absent || 0} testid="ms-absent" />
+          </div>
+          <div className="mt-4">
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span className="overline">Attendance %</span>
+              <span className="font-heading font-bold text-lg text-[var(--brand)]">{attendancePct}%</span>
+            </div>
+            <div className="h-2 w-full bg-gray-100 overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all duration-500" style={{ width: `${attendancePct}%` }} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Today's check-in details — visible only after check-in */}
+      {checkedIn && (
+        <div className="swiss-card p-4 border-l-4 border-emerald-500" data-testid="home-status-card">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div>
+              <div className="overline text-xs">Check In</div>
+              <div className="font-medium num">{fmtDate(att?.check_in_at || att?.marked_at)}</div>
+            </div>
+            <div>
+              <div className="overline text-xs">Check Out</div>
+              <div className="font-medium num">{checkedOut ? fmtDate(att?.check_out_at) : <span className="text-amber-700">Pending</span>}</div>
+            </div>
+            <div>
+              <div className="overline text-xs">Status</div>
+              <div className="font-medium uppercase">
+                {checkedIn && checkedOut ? <span className="text-emerald-700">Present</span>
+                  : <span className="text-amber-700">Incomplete (needs check-out)</span>}
               </div>
             </div>
             {att?.latitude != null && (
-              <a href={`https://www.google.com/maps?q=${att.latitude},${att.longitude}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--brand)] hover:underline mt-3">
-                <MapPin size={12} /> View location
-              </a>
+              <div>
+                <div className="overline text-xs">Location</div>
+                <a href={`https://www.google.com/maps?q=${att.latitude},${att.longitude}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--brand)] hover:underline">
+                  <MapPin size={12} /> Open map
+                </a>
+              </div>
             )}
           </div>
-        )}
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          {!checkedIn && (
-            <Button onClick={() => setTab("attendance")} className="brand-btn rounded-none gap-2 col-span-2" data-testid="quick-check-in">
-              <LogInIcon size={16} /> Check In
-            </Button>
-          )}
-          {checkedIn && !checkedOut && (
-            <Button onClick={() => setTab("attendance")} variant="outline" className="rounded-none col-span-2 gap-2" data-testid="quick-check-out">
-              <Clock size={16} /> Check Out
-            </Button>
-          )}
         </div>
-      </div>
+      )}
 
-      {/* Month stats */}
-      <div className="swiss-card p-4">
-        <div className="overline">This Month</div>
-        <div className="grid grid-cols-4 gap-2 mt-3 text-center">
-          <Stat label="Present" value={stats.present || 0} color="text-[var(--success)]" />
-          <Stat label="Half" value={stats.half || 0} color="text-amber-600" />
-          <Stat label="Leave" value={stats.leave || 0} color="text-blue-600" />
-          <Stat label="Absent" value={stats.absent || 0} color="text-[var(--danger)]" />
-        </div>
-      </div>
-
-      {/* Pending counts */}
-      <div className="grid grid-cols-2 gap-3">
-        <QuickStat label="Pending Leaves" value={summary?.pending_counts?.leaves || 0} onClick={() => setTab("leave")} />
-        <QuickStat label="Pending Claims" value={summary?.pending_counts?.reimbursements || 0} onClick={() => setTab("reimburse")} />
-      </div>
-
-      {/* Leave Balances — current year, per leave type */}
-      <div className="swiss-card p-4" data-testid="leave-balances-card">
-        <div className="flex items-center justify-between">
-          <div className="overline flex items-center gap-2"><Wallet size={12} /> My Leave Balances · {new Date().getFullYear()}</div>
-          <button onClick={() => setTab("leave")} className="text-[10px] text-[var(--brand)] hover:underline font-bold">APPLY →</button>
-        </div>
-        {leaveBalances.length === 0 ? (
-          <div className="text-sm text-[var(--muted)] mt-2">No leave allocations yet. Ask HR to allocate your annual quota in <em>HR Settings → Leave Allocation</em>.</div>
-        ) : (
-          <div className="grid grid-cols-2 gap-2 mt-3">
-            {leaveBalances.map((b) => (
-              <div key={b.id} className="border border-[var(--border)] p-2" data-testid={`mob-bal-${b.leave_type_code}`}>
-                <div className="flex items-center justify-between">
-                  <span className={`inline-block px-1.5 py-0.5 text-[9px] font-bold border ${LEAVE_BADGE[b.leave_type_color] || LEAVE_BADGE.blue}`}>{b.leave_type_code}</span>
-                  <span className="text-[10px] text-[var(--muted)] truncate ml-1">{b.leave_type_name || ""}</span>
-                </div>
-                <div className="mt-1.5 flex items-end gap-1">
-                  <span className="text-2xl font-heading font-black value-positive num leading-none">{b.balance}</span>
-                  <span className="text-[10px] text-[var(--muted)] num pb-1">/ {b.allocated}</span>
-                </div>
-                <div className="text-[10px] text-[var(--muted)] num mt-0.5">Used: {b.used}</div>
+      {/* Row 2: Leave Balance + Pending stats on left, quick actions grid on right */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Leave Balance */}
+          <div className="swiss-card p-4" data-testid="leave-balances-card">
+            <div className="flex items-center justify-between mb-3">
+              <div className="overline flex items-center gap-2 font-heading font-bold"><Wallet size={12} /> Leave Balance</div>
+              <button onClick={() => setTab("leave")} className="text-[10px] text-[var(--brand)] hover:underline font-bold">View All</button>
+            </div>
+            {leaveBalances.length === 0 ? (
+              <div className="text-xs text-[var(--muted)] py-4">No allocations. Ask HR.</div>
+            ) : (
+              <div className="space-y-3">
+                {leaveBalances.slice(0, 2).map((b) => {
+                  const pct = b.allocated > 0 ? Math.round((b.balance / b.allocated) * 100) : 0;
+                  return (
+                    <div key={b.id} data-testid={`mob-bal-${b.leave_type_code}`}>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-medium">{b.leave_type_name || b.leave_type_code}</span>
+                        <span className="text-[10px] text-[var(--muted)]">Days Left</span>
+                      </div>
+                      <div className="flex items-end justify-between mt-1">
+                        <span className="text-2xl font-heading font-black text-emerald-700 num leading-none">{b.balance}</span>
+                        <span className="text-[10px] text-[var(--muted)]">/ {b.allocated}</span>
+                      </div>
+                      <div className="h-1.5 w-full bg-gray-100 mt-1 overflow-hidden">
+                        <div className={`h-full ${b.leave_type_color === "amber" ? "bg-amber-500" : b.leave_type_color === "green" ? "bg-emerald-500" : "bg-blue-500"}`} style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            ))}
+            )}
           </div>
-        )}
+
+          {/* Pending Requests */}
+          <div className="swiss-card p-4">
+            <div className="overline font-heading font-bold mb-3">Pending</div>
+            <button onClick={() => setTab("leave")} className="w-full flex items-center gap-3 p-3 border border-[var(--border)] hover:bg-gray-50 mb-2 text-left" data-testid="pending-leaves-card">
+              <div className="h-10 w-10 bg-blue-100 flex items-center justify-center">
+                <Plane size={18} className="text-blue-600" />
+              </div>
+              <div className="flex-1">
+                <div className="text-2xl font-heading font-black leading-none">{summary?.pending_counts?.leaves || 0}</div>
+                <div className="text-[10px] text-[var(--muted)] mt-0.5">Leave Requests</div>
+              </div>
+              <span className="text-[var(--muted)]">›</span>
+            </button>
+            <button onClick={() => setTab("reimburse")} className="w-full flex items-center gap-3 p-3 border border-[var(--border)] hover:bg-gray-50 text-left" data-testid="pending-claims-card">
+              <div className="h-10 w-10 bg-violet-100 flex items-center justify-center">
+                <Receipt size={18} className="text-violet-600" />
+              </div>
+              <div className="flex-1">
+                <div className="text-2xl font-heading font-black leading-none">{summary?.pending_counts?.reimbursements || 0}</div>
+                <div className="text-[10px] text-[var(--muted)] mt-0.5">Claims</div>
+              </div>
+              <span className="text-[var(--muted)]">›</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Quick actions grid on the right — 2x3 grid of icon buttons */}
+        <div className="swiss-card p-4">
+          <div className="overline font-heading font-bold mb-3">Quick Actions</div>
+          <div className="grid grid-cols-3 gap-2">
+            <QAction icon={<Plane size={16} className="text-emerald-600" />} bg="bg-emerald-50" label="Apply Leave" onClick={() => setTab("leave")} testid="qa-leave" />
+            <QAction icon={<Receipt size={16} className="text-amber-600" />} bg="bg-amber-50" label="Raise Claim" onClick={() => setTab("reimburse")} testid="qa-claim" />
+            <QAction icon={<CalendarDays size={16} className="text-blue-600" />} bg="bg-blue-50" label="Attendance" onClick={() => setTab("attendance")} testid="qa-att" />
+            <QAction icon={<Wallet size={16} className="text-violet-600" />} bg="bg-violet-50" label="Salary Slip" onClick={() => setTab("salary")} testid="qa-salary" />
+            <QAction icon={<Calendar size={16} className="text-pink-600" />} bg="bg-pink-50" label="Holidays" onClick={() => setShowAllHolidays(true)} testid="qa-holidays" />
+            <QAction icon={<AlertCircle size={16} className="text-red-600" />} bg="bg-red-50" label="Help" onClick={() => toast.info("Contact HR for help")} testid="qa-help" />
+          </div>
+        </div>
       </div>
 
-      {/* Holidays — upcoming + toggle to full year list */}
+      {/* Legacy holidays block re-purposed as "Upcoming Holidays" card */}
       <div className="swiss-card p-4">
         <div className="flex items-center justify-between">
           <div className="overline flex items-center gap-2"><Calendar size={12} /> Holidays · {new Date().getFullYear()}</div>
@@ -332,6 +445,23 @@ const QuickStat = ({ label, value, onClick }) => (
   <button onClick={onClick} className="swiss-card p-3 text-left hover:bg-gray-50">
     <div className="overline">{label}</div>
     <div className="text-2xl font-heading font-black mt-1">{value}</div>
+  </button>
+);
+
+// Mockup-styled attendance stat card — coloured icon square + big number + label.
+const MonthStatCard = ({ iconBg, iconColor, iconChar, label, value, testid }) => (
+  <div className="border border-[var(--border)] p-3 hover:bg-gray-50 transition-colors" data-testid={testid}>
+    <div className={`h-8 w-8 ${iconBg} ${iconColor} flex items-center justify-center text-lg font-bold`}>{iconChar}</div>
+    <div className="text-3xl font-heading font-black leading-none mt-2 num">{value}</div>
+    <div className="overline text-[10px] mt-0.5">{label}</div>
+  </div>
+);
+
+// Quick-action square button used in the mockup's 3-column grid.
+const QAction = ({ icon, bg, label, onClick, testid }) => (
+  <button onClick={onClick} className="flex flex-col items-center gap-1 p-2 hover:bg-gray-50 text-center" data-testid={testid}>
+    <div className={`h-10 w-10 ${bg} flex items-center justify-center`}>{icon}</div>
+    <span className="text-[10px] font-medium leading-tight">{label}</span>
   </button>
 );
 

@@ -3630,6 +3630,16 @@ async def list_attendance(
             rng["$lte"] = end
         q["date"] = rng
     docs = await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
+    # Attach `effective_status` so the UI can show "Incomplete" when a staff
+    # only punched in but never punched out — instead of misleading "Present".
+    for d in docs:
+        s = d.get("status")
+        if s == "present" and d.get("check_in_at") and not d.get("check_out_at"):
+            d["effective_status"] = "incomplete"
+        elif s == "present" and d.get("check_in_at") and d.get("check_out_at"):
+            d["effective_status"] = "present"
+        else:
+            d["effective_status"] = s or "absent"
     return docs
 
 
@@ -5196,7 +5206,13 @@ async def edit_payroll(pid: str, body: PayrollEditIn, user=Depends(require_role(
 
 
 @api.get("/payroll")
-async def list_payroll(month: Optional[int] = None, year: Optional[int] = None, _=Depends(get_current_user)):
+async def list_payroll(month: Optional[int] = None, year: Optional[int] = None,
+                       user=Depends(get_current_user)):
+    # Payroll rows are salary-sensitive: only admin/hr/accountant/senior_manager
+    # can see the whole roster. Staff (or any other role) must use `/payroll/my`
+    # which scopes to their own linked staff record.
+    if user.get("role") not in ("admin", "hr", "accountant", "senior_manager"):
+        raise HTTPException(403, "Only HR / Accounts / Admin can view the full payroll list. Use /payroll/my for your own salary.")
     q: dict = {}
     if month:
         q["month"] = month
@@ -5350,6 +5366,40 @@ async def delete_announcement(aid: str, _=Depends(require_role("admin", "hr"))):
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
     return {"ok": True}
+
+
+@api.get("/dashboard/today-live")
+async def dashboard_today_live(_=Depends(get_current_user)):
+    """Same-day pulse used on every dashboard: (a) staff on leave today,
+    (b) staff joining today. Both are cheap in-memory scans so no cache."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    # On leave today — either raw attendance marked leave, or an approved leave
+    # covering today. We deduplicate by staff_id.
+    on_leave: dict = {}
+    async for r in db.attendance.find(
+        {"date": today, "status": "leave"},
+        {"_id": 0, "staff_id": 1},
+    ):
+        on_leave[r["staff_id"]] = {"reason": "Marked leave"}
+    async for l in db.leaves.find(
+        {"status": "approved", "start_date": {"$lte": today}, "end_date": {"$gte": today}},
+        {"_id": 0, "staff_id": 1, "reason": 1, "leave_type_code": 1},
+    ):
+        on_leave.setdefault(l["staff_id"], {"reason": l.get("reason") or (l.get("leave_type_code") or "Approved leave")})
+    on_leave_list = []
+    if on_leave:
+        staff_docs = await db.staff.find(
+            {"id": {"$in": list(on_leave.keys())}},
+            {"_id": 0, "id": 1, "name": 1, "designation": 1, "employee_code": 1, "center_id": 1},
+        ).to_list(200)
+        for s in staff_docs:
+            on_leave_list.append({**s, "reason": on_leave[s["id"]]["reason"]})
+    # New joinees today
+    new_joinees = await db.staff.find(
+        {"joining_date": today},
+        {"_id": 0, "id": 1, "name": 1, "designation": 1, "employee_code": 1, "center_id": 1, "joining_date": 1},
+    ).to_list(50)
+    return {"date": today, "on_leave": on_leave_list, "new_joinees": new_joinees}
 
 
 @api.get("/dashboard/upcoming")
@@ -6235,8 +6285,14 @@ async def my_summary(user=Depends(get_current_user)):
     shift = None
     if staff.get("shift_id"):
         shift = await db.shifts.find_one({"id": staff["shift_id"]}, {"_id": 0})
+    # Resolve center_name once so the mobile header can render "Ranchi, Jharkhand"
+    # style locations without an extra roundtrip from the client.
+    center_name = None
+    if staff.get("center_id"):
+        c = await db.centers.find_one({"id": staff["center_id"]}, {"_id": 0, "name": 1})
+        center_name = (c or {}).get("name")
     return {
-        "staff": {k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name", "shift_id")},
+        "staff": {**{k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name", "shift_id")}, "center_name": center_name},
         "shift": shift,
         "today": today_row,
         "month_stats": month_stats,
