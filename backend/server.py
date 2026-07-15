@@ -372,6 +372,11 @@ class ApprovalActionIn(BaseModel):
     # auto-created transaction (and dashboard) can show it.
     paid_by_user_id: Optional[str] = None
     paid_by_name: Optional[str] = None
+    # Optional overrides for the auto-created transaction's dimensions so the
+    # approver can confirm/change center + partner attribution before releasing
+    # money. If left blank we derive from the request's linked center as before.
+    txn_center_id: Optional[str] = None
+    txn_partner_id: Optional[str] = None
 
 
 def _txn_scope_for_user(user: dict) -> dict:
@@ -4230,19 +4235,35 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
         if body.request_type in ("payment", "reimbursement"):
             if not (body.paid_by_name or "").strip():
                 raise HTTPException(400, "Please select who is making the payment (paid_by_name is required for final approval)")
+            if not (body.txn_center_id or "").strip():
+                raise HTTPException(400, "Please select the center for this payment (txn_center_id is required)")
+            # Resolve chosen center's company so the txn dimensions stay consistent.
+            _sel_center = await db.centers.find_one({"id": body.txn_center_id}, {"_id": 0, "name": 1, "company_id": 1})
+            if not _sel_center:
+                raise HTTPException(400, "Selected center not found")
         if body.request_type == "reimbursement":
             now = datetime.now(timezone.utc).isoformat()
             staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
-            center_ctx = await _derive_context_for_center((staff or {}).get("center_id"))
+            # Prefer the approver-picked center/partner; fall back to the staff's
+            # linked center for backward compatibility with old chains.
+            eff_center_id = body.txn_center_id or (staff or {}).get("center_id")
+            eff_partner_id = body.txn_partner_id
+            eff_company_id = (_sel_center or {}).get("company_id") if body.txn_center_id else None
+            if eff_partner_id is None or eff_company_id is None:
+                center_ctx = await _derive_context_for_center(eff_center_id)
+                if eff_partner_id is None:
+                    eff_partner_id = center_ctx["partner_id"]
+                if eff_company_id is None:
+                    eff_company_id = center_ctx["company_id"]
             txn = {
                 "id": str(uuid.uuid4()),
                 "type": "expense",
                 "amount": rec["amount"],
                 "date": rec["date"],
                 "description": f"Reimbursement: {(staff or {}).get('name','')} — {rec.get('description','')}".strip(),
-                "company_id": center_ctx["company_id"],
-                "partner_id": center_ctx["partner_id"],
-                "center_id": (staff or {}).get("center_id"),
+                "company_id": eff_company_id,
+                "partner_id": eff_partner_id,
+                "center_id": eff_center_id,
                 "project_id": None,
                 "items": [], "attachments": rec.get("attachments") or [],
                 "source": "reimbursement",
@@ -4382,7 +4403,19 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
         elif body.request_type == "payment":
             # Final-approval: auto-create the offsetting ledger transaction in the center.
             now = datetime.now(timezone.utc).isoformat()
-            ctx = await _derive_context_for_center(rec.get("center_id"))
+            # Use approver-picked center + partner (mandatory above) so the dashboard
+            # aggregations reflect exactly what the accountant confirmed.
+            eff_center_id = body.txn_center_id or rec.get("center_id")
+            eff_partner_id = body.txn_partner_id
+            eff_company_id = (_sel_center or {}).get("company_id") if body.txn_center_id else None
+            if eff_partner_id is None or eff_company_id is None:
+                ctx = await _derive_context_for_center(eff_center_id)
+                if eff_partner_id is None:
+                    eff_partner_id = ctx["partner_id"]
+                if eff_company_id is None:
+                    eff_company_id = ctx["company_id"]
+            # Also refresh center_name if the approver switched centers
+            eff_center_name = (_sel_center or {}).get("name") if body.txn_center_id else rec.get("center_name")
             txn_type = rec.get("category") or "expense"
             pay_date = rec.get("payment_date") or now[:10]
             desc = f"Payment · QRN {rec.get('qrn','')} · {rec.get('vendor_name','')} — {rec.get('description','')}".strip(" ·—")
@@ -4392,9 +4425,9 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "amount": float(rec["actual_amount"]),
                 "date": pay_date,
                 "description": desc,
-                "company_id": ctx["company_id"],
-                "partner_id": ctx["partner_id"],
-                "center_id": rec.get("center_id"),
+                "company_id": eff_company_id,
+                "partner_id": eff_partner_id,
+                "center_id": eff_center_id,
                 "project_id": None,
                 "items": [], "attachments": rec.get("attachments") or [],
                 "source": "quotation_payment",
@@ -4413,7 +4446,8 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             # Reflect final state on both payment + quotation
             await db.quotations.update_one(
                 {"id": rec.get("quotation_id")},
-                {"$set": {"status": "paid", "txn_id": txn["id"], "paid_at": now}},
+                {"$set": {"status": "paid", "txn_id": txn["id"], "paid_at": now,
+                          "center_id": eff_center_id, "center_name": eff_center_name}},
             )
             update = {
                 "current_level": 0,
@@ -4423,6 +4457,9 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "paid_by": user["id"],
                 "paid_by_user_id": body.paid_by_user_id,
                 "paid_by_name": body.paid_by_name,
+                "center_id": eff_center_id,
+                "center_name": eff_center_name,
+                "partner_id_at_pay": eff_partner_id,
                 "txn_id": txn["id"],
             }
         else:  # transaction
@@ -4510,6 +4547,9 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                         "payee_proof_attachments": rec.get("payee_proof_attachments") or [],
                         "attachments": rec.get("attachments") or [],
                         "chain_history": rec.get("chain_history") or [],
+                        # Pre-fill hints for Center / Partner dropdowns on final approval
+                        "center_id": rec.get("center_id"),
+                        "center_name": rec.get("center_name"),
                     },
                     "created_at": rec.get("created_at"),
                     "via": "chain",

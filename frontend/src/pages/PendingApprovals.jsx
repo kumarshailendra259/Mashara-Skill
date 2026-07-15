@@ -43,6 +43,12 @@ export default function PendingApprovals() {
   // time an accountant opens the approve dialog for a payment/reimbursement.
   const [payers, setPayers] = useState([]);
   const [paidByUserId, setPaidByUserId] = useState("");
+  // Center + Partner attribution — captured at final approval so the auto-
+  // created transaction reflects the correct dashboard dimensions.
+  const [centers, setCenters] = useState([]);
+  const [partners, setPartners] = useState([]);
+  const [txnCenterId, setTxnCenterId] = useState("");
+  const [txnPartnerId, setTxnPartnerId] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -52,7 +58,14 @@ export default function PendingApprovals() {
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // Pre-fetch centers/partners/payers so the final-approval dialog opens
+    // with dropdowns already populated (no perceived lag when Accountant clicks Approve).
+    api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
+    api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
+    api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
+  }, []);
 
   const filtered = useMemo(
     () => filterType === "all" ? items : items.filter((i) => i.request_type === filterType),
@@ -74,11 +87,19 @@ export default function PendingApprovals() {
     setActing({ item, action });
     setRemarks("");
     setPaidByUserId("");
+    setTxnCenterId(item?.summary?.center_id || "");
+    setTxnPartnerId("");
     // Only ask "Paid By" on the FINAL step of a payment or reimbursement approval.
     if (action === "approve" && item.is_final_step && (item.request_type === "payment" || item.request_type === "reimbursement")) {
       // Lazy fetch — cache once loaded so subsequent dialogs stay snappy.
       if (payers.length === 0) {
         api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
+      }
+      if (centers.length === 0) {
+        api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
+      }
+      if (partners.length === 0) {
+        api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
       }
     }
   };
@@ -96,6 +117,10 @@ export default function PendingApprovals() {
     }
     if (needsPaidBy && !paidByUserId) {
       toast.error("Please select who is making the payment (Paid By is mandatory)");
+      return;
+    }
+    if (needsPaidBy && !txnCenterId) {
+      toast.error("Please select the Center for this payment");
       return;
     }
     const { item, action } = acting;
@@ -118,6 +143,8 @@ export default function PendingApprovals() {
           action, remarks,
           paid_by_user_id: needsPaidBy ? paidByUserId : null,
           paid_by_name: needsPaidBy ? (payer?.name || "") : null,
+          txn_center_id: needsPaidBy ? txnCenterId : null,
+          txn_partner_id: needsPaidBy ? (txnPartnerId || null) : null,
         });
       }
       const verb = action === "approve" ? "Approved" : (action === "reject" ? "Rejected" : "Sent back");
@@ -334,21 +361,56 @@ export default function PendingApprovals() {
 
               {/* Paid By — final step of payment / reimbursement only */}
               {needsPaidBy && (
-                <div className="border border-emerald-300 bg-emerald-50/60 p-3 space-y-2" data-testid="paid-by-block">
-                  <div className="overline font-bold text-emerald-900">Paid By (who is releasing the money) *</div>
-                  <select
-                    value={paidByUserId}
-                    onChange={(e) => setPaidByUserId(e.target.value)}
-                    className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
-                    data-testid="paid-by-select"
-                  >
-                    <option value="">— Select payer —</option>
-                    {payers.map((p) => (
-                      <option key={p.id} value={p.id}>{p.name} ({p.role})</option>
-                    ))}
-                  </select>
+                <div className="border border-emerald-300 bg-emerald-50/60 p-3 space-y-3" data-testid="paid-by-block">
+                  <div className="overline font-bold text-emerald-900">Payment attribution (mandatory)</div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Center *</div>
+                      <select
+                        value={txnCenterId}
+                        onChange={(e) => setTxnCenterId(e.target.value)}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="txn-center-select"
+                      >
+                        <option value="">— Select center —</option>
+                        {centers.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Partner (optional)</div>
+                      <select
+                        value={txnPartnerId}
+                        onChange={(e) => setTxnPartnerId(e.target.value)}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="txn-partner-select"
+                      >
+                        <option value="">— Auto-derive from center —</option>
+                        {partners.map((p) => (
+                          <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-[10px] uppercase text-emerald-900 mb-1">Paid By (who is releasing the money) *</div>
+                    <select
+                      value={paidByUserId}
+                      onChange={(e) => setPaidByUserId(e.target.value)}
+                      className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                      data-testid="paid-by-select"
+                    >
+                      <option value="">— Select payer —</option>
+                      {payers.map((p) => (
+                        <option key={p.id} value={p.id}>{p.name} ({p.role})</option>
+                      ))}
+                    </select>
+                  </div>
                   <div className="text-[10px] text-emerald-900/80">
-                    Ye naam auto-created transaction pe stamp ho jayega — dashboard aur reports mein &ldquo;paid by&rdquo; se filter kar sakenge.
+                    Center, Partner aur Paid By — teenon auto-created transaction pe stamp ho jayenge, jisse Dashboard mein sahi center/partner filter ke saath update dikhega.
                   </div>
                 </div>
               )}
