@@ -12,6 +12,7 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
   DropdownMenuItem, DropdownMenuSeparator, DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import AnnouncementBanner from "@/components/AnnouncementBanner";
 
 const navItems = [
   { to: "/", key: "dashboard", icon: LayoutDashboard, end: true, dashboardRoles: true },
@@ -240,6 +241,8 @@ export default function Layout({ children }) {
             </DropdownMenu>
           </div>
         </header>
+
+        <AnnouncementBanner />
 
         <main className="flex-1 overflow-auto p-4 md:p-6 bg-[var(--bg)]" data-testid="main-content">
           {children}

@@ -801,6 +801,7 @@ export default function HRMS() {
                   <input type="checkbox" checked={allStaffSelected} onChange={toggleAllStaff} disabled={staffIds.length === 0} className="cursor-pointer" data-testid="select-all-staff" />
                 </th>
               )}
+              <th className="text-left p-3">Emp Code</th>
               <th className="text-left p-3">Name</th>
               <th className="text-left p-3">Designation</th>
               <th className="text-left p-3">Email</th>
@@ -810,13 +811,14 @@ export default function HRMS() {
               <th className="text-right p-3">Per-Day</th>
               {canManageStaff && <th className="text-right p-3 no-print">Actions</th>}
             </tr></thead><tbody>
-              {staff.length === 0 ? <tr><td colSpan={(canManageStaff ? 8 : 7) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
+              {staff.length === 0 ? <tr><td colSpan={(canManageStaff ? 9 : 8) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
                 <tr key={s.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${s.is_active === false ? "opacity-50" : ""}`}>
                   {isAdmin && (
                     <td className="p-3">
                       <input type="checkbox" checked={selectedStaff.has(s.id)} onChange={() => toggleStaff(s.id)} className="cursor-pointer" data-testid={`select-staff-${s.id}`} />
                     </td>
                   )}
+                  <td className="p-3 font-mono text-xs text-[var(--brand)]" data-testid={`staff-empcode-${s.id}`}>{s.employee_code || "—"}</td>
                   <td className="p-3 font-medium">
                     {s.name}
                     {s.is_active === false && <span className="ml-2 text-xs text-[var(--muted)]">(archived)</span>}
@@ -921,16 +923,45 @@ export default function HRMS() {
                 <th className="text-left p-3">Date</th>
                 <th className="text-left p-3">Staff</th>
                 <th className="text-left p-3">Status</th>
+                <th className="text-left p-3">Punch In</th>
+                <th className="text-left p-3">Punch Out</th>
+                <th className="text-left p-3">Hours</th>
                 <th className="text-left p-3">Source</th>
                 <th className="text-left p-3">Location</th>
                 <th className="text-left p-3">Selfie</th>
               </tr></thead>
               <tbody>
-                {attRecent.length === 0 ? <tr><td colSpan={6} className="text-center py-8 overline">No records</td></tr> : attRecent.map((a) => (
+                {attRecent.length === 0 ? <tr><td colSpan={9} className="text-center py-8 overline">No records</td></tr> : attRecent.map((a) => {
+                  // Format "HH:mm" from an ISO timestamp in the user's locale.
+                  const fmtTime = (iso) => {
+                    if (!iso) return "—";
+                    try {
+                      const d = new Date(iso);
+                      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+                    } catch { return "—"; }
+                  };
+                  // Hours worked between check-in and check-out (or now if still punched in today).
+                  let hoursLabel = "—";
+                  if (a.check_in_at) {
+                    const start = new Date(a.check_in_at);
+                    const end = a.check_out_at ? new Date(a.check_out_at) : null;
+                    if (end && end > start) {
+                      const mins = Math.round((end - start) / 60000);
+                      const h = Math.floor(mins / 60);
+                      const m = mins % 60;
+                      hoursLabel = `${h}h ${m}m`;
+                    } else if (!end) {
+                      hoursLabel = "In progress";
+                    }
+                  }
+                  return (
                   <tr key={a.id || `${a.staff_id}-${a.date}`} className="border-b border-[var(--border)] hover:bg-gray-50">
                     <td className="p-3 num">{a.date}</td>
                     <td className="p-3">{sName(a.staff_id)}</td>
                     <td className="p-3"><span className="overline">{a.status}</span></td>
+                    <td className="p-3 num text-xs" data-testid={`att-in-${a.id || a.staff_id}`}>{fmtTime(a.check_in_at)}</td>
+                    <td className="p-3 num text-xs" data-testid={`att-out-${a.id || a.staff_id}`}>{fmtTime(a.check_out_at)}</td>
+                    <td className="p-3 num text-xs font-semibold text-[var(--brand)]" data-testid={`att-hours-${a.id || a.staff_id}`}>{hoursLabel}</td>
                     <td className="p-3 overline text-xs">{a.marked_via || "—"}</td>
                     <td className="p-3">
                       {a.latitude != null && a.longitude != null ? (
@@ -947,7 +978,8 @@ export default function HRMS() {
                       ) : <span className="text-[var(--muted)] text-xs">—</span>}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

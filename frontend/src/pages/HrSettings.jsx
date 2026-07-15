@@ -11,7 +11,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Trash2, Pencil, Check, X, MapPin, Calendar, Clock, AlertCircle, Wallet, FileText } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, X, MapPin, Calendar, Clock, AlertCircle, Wallet, FileText, Megaphone } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import LeaveAllocationTab from "@/components/LeaveAllocationTab";
 import MapPicker from "@/components/MapPicker";
@@ -39,6 +39,7 @@ export default function HrSettings() {
       <Tabs defaultValue="holidays">
         <TabsList className="rounded-none">
           <TabsTrigger value="holidays" data-testid="tab-holidays"><Calendar size={14} className="mr-2" /> Holidays</TabsTrigger>
+          <TabsTrigger value="announcements" data-testid="tab-announcements"><Megaphone size={14} className="mr-2" /> Announcements</TabsTrigger>
           <TabsTrigger value="leave_allocation" data-testid="tab-leave-allocation"><Wallet size={14} className="mr-2" /> Leave Allocation</TabsTrigger>
           <TabsTrigger value="geofences" data-testid="tab-geofences"><MapPin size={14} className="mr-2" /> Geofences</TabsTrigger>
           <TabsTrigger value="shifts" data-testid="tab-shifts"><Clock size={14} className="mr-2" /> Shifts</TabsTrigger>
@@ -46,6 +47,7 @@ export default function HrSettings() {
         </TabsList>
 
         <TabsContent value="holidays" className="mt-4"><HolidaysTab /></TabsContent>
+        <TabsContent value="announcements" className="mt-4"><AnnouncementsTab canEdit={canEdit} /></TabsContent>
         <TabsContent value="leave_allocation" className="mt-4"><LeaveAllocationTab /></TabsContent>
         <TabsContent value="geofences" className="mt-4"><GeofencesTab /></TabsContent>
         <TabsContent value="shifts" className="mt-4"><ShiftsTab /></TabsContent>
@@ -292,6 +294,121 @@ function ShiftsTab() {
             </tr>
           ))}
         </tbody></table></div>
+    </div>
+  );
+}
+
+
+// ---------------- Announcements tab ----------------
+function AnnouncementsTab({ canEdit }) {
+  const [items, setItems] = useState([]);
+  const [form, setForm] = useState({ title: "", body: "", priority: "info", expires_at: "" });
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const { data } = await api.get("/announcements/active");
+      setItems(data || []);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    if (!form.title.trim() || !form.body.trim()) {
+      toast.error("Title aur body dono zaruri hain");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post("/announcements", {
+        title: form.title.trim(),
+        body: form.body.trim(),
+        priority: form.priority,
+        expires_at: form.expires_at ? new Date(form.expires_at).toISOString() : null,
+      });
+      toast.success("Announcement broadcast — sabhi dashboards pe blink hoga");
+      setForm({ title: "", body: "", priority: "info", expires_at: "" });
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (a) => {
+    if (!window.confirm(`Delete announcement "${a.title}"?`)) return;
+    try { await api.delete(`/announcements/${a.id}`); load(); toast.success("Deleted"); }
+    catch (e) { toast.error(formatError(e)); }
+  };
+
+  return (
+    <div className="space-y-4">
+      {canEdit && (
+        <div className="swiss-card p-4 space-y-3">
+          <div className="overline font-heading font-bold">New Announcement</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <Label className="overline">Title *</Label>
+              <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="e.g. Diwali holiday schedule" className="rounded-none" data-testid="ann-title" />
+            </div>
+            <div>
+              <Label className="overline">Priority</Label>
+              <Select value={form.priority} onValueChange={(v) => setForm({ ...form, priority: v })}>
+                <SelectTrigger className="rounded-none" data-testid="ann-priority"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="info">Info (blue)</SelectItem>
+                  <SelectItem value="important">Important (amber)</SelectItem>
+                  <SelectItem value="urgent">Urgent (red)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-2">
+              <Label className="overline">Body *</Label>
+              <Textarea rows={3} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} placeholder="Full message that will show on every dashboard until dismissed" className="rounded-none" data-testid="ann-body" />
+            </div>
+            <div>
+              <Label className="overline">Expires at (optional)</Label>
+              <Input type="date" value={form.expires_at} onChange={(e) => setForm({ ...form, expires_at: e.target.value })} className="rounded-none" data-testid="ann-expires" />
+              <div className="text-[10px] text-[var(--muted)] mt-1">Blank rahe toh forever active rahega jab tak manual delete na ho.</div>
+            </div>
+            <div className="flex items-end">
+              <Button onClick={create} disabled={busy} className="brand-btn rounded-none gap-1" data-testid="ann-create">
+                <Megaphone size={14} /> {busy ? "Broadcasting…" : "Broadcast Announcement"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="swiss-card p-0 overflow-hidden">
+        <div className="px-4 pt-4 overline">Active announcements ({items.length})</div>
+        {items.length === 0 ? (
+          <div className="p-8 text-center overline text-sm">No active announcements</div>
+        ) : (
+          <ul className="divide-y divide-[var(--border)]">
+            {items.map((a) => {
+              const priCls = a.priority === "urgent" ? "bg-red-50 text-red-800 border-red-200"
+                : a.priority === "important" ? "bg-amber-50 text-amber-800 border-amber-200"
+                : "bg-blue-50 text-blue-800 border-blue-200";
+              return (
+              <li key={a.id} className="px-4 py-3 flex items-start gap-3">
+                <span className={`text-[10px] font-bold uppercase border px-1.5 py-0.5 ${priCls}`}>{a.priority}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium">{a.title}</div>
+                  <div className="text-xs text-[var(--muted)] mt-0.5">{a.body}</div>
+                  <div className="text-[10px] overline mt-1">
+                    by {a.created_by_name} · {new Date(a.created_at).toLocaleString()}
+                    {a.expires_at && <> · expires {new Date(a.expires_at).toLocaleDateString()}</>}
+                    · <span className="text-emerald-700">{(a.read_by || []).length} read</span>
+                  </div>
+                </div>
+                {canEdit && (
+                  <Button size="sm" variant="outline" onClick={() => remove(a)} className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" data-testid={`ann-delete-${a.id}`}><Trash2 size={14} /></Button>
+                )}
+              </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

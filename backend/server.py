@@ -606,7 +606,7 @@ async def _ensure_libreoffice_installed() -> None:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters", "vendors"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters", "vendors", "announcements"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -2980,6 +2980,9 @@ class StaffIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
     designation: str
+    # Auto-generated on create if left blank — human-readable staff code like
+    # "EMP-2026-0001" used on offer letter, ID card, payslip etc.
+    employee_code: Optional[str] = None
     reports_to_id: Optional[str] = None
     monthly_salary: float = Field(ge=0, default=0)
     per_day_rate: float = Field(ge=0, default=0)
@@ -3185,6 +3188,26 @@ async def list_staff(user=Depends(get_current_user)):
 @api.post("/staff")
 async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manager", "hr"))):
     doc = body.model_dump()
+    # Auto-generate a unique Employee Code if the admin didn't set one. Format:
+    # "EMP-YYYY-NNNN" (year-scoped 4-digit sequence). Increment inside a filter
+    # on existing codes for the current year to avoid a collision hot spot on
+    # concurrent adds.
+    if not (doc.get("employee_code") or "").strip():
+        year = datetime.now(timezone.utc).year
+        prefix = f"EMP-{year}-"
+        # Latest existing code for this year; parse the last 4 digits.
+        latest = await db.staff.find_one(
+            {"employee_code": {"$regex": f"^{prefix}\\d+$"}},
+            {"_id": 0, "employee_code": 1},
+            sort=[("employee_code", -1)],
+        )
+        next_seq = 1
+        if latest and latest.get("employee_code"):
+            try:
+                next_seq = int(latest["employee_code"].split("-")[-1]) + 1
+            except (ValueError, IndexError):
+                next_seq = 1
+        doc["employee_code"] = f"{prefix}{next_seq:04d}"
     # Only admin can assign the reports_to chain (approval hierarchy)
     if user.get("role") != "admin":
         doc["reports_to_id"] = None
@@ -5277,6 +5300,103 @@ async def delete_holiday(hid: str, _=Depends(require_role("admin", "hr"))):
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
     return {"ok": True}
+
+
+# -------- Announcements (HR broadcast) --------
+class AnnouncementIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    title: str = Field(min_length=2)
+    body: str = Field(min_length=2)
+    priority: Literal["info", "important", "urgent"] = "info"
+    expires_at: Optional[str] = None  # ISO date/datetime; expired items dropped from the active feed
+
+
+@api.get("/announcements/active")
+async def list_active_announcements(user=Depends(get_current_user)):
+    """Active (non-expired) announcements. Each item includes a `read` flag so
+    the frontend can decide whether to keep the blinking indicator on."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    q: dict = {"$or": [{"expires_at": None}, {"expires_at": {"$exists": False}}, {"expires_at": {"$gt": now_iso}}]}
+    docs = await db.announcements.find(q, {"_id": 0}).sort("created_at", -1).to_list(50)
+    for d in docs:
+        d["read"] = user["id"] in (d.get("read_by") or [])
+    return docs
+
+
+@api.post("/announcements")
+async def create_announcement(body: AnnouncementIn, user=Depends(require_role("admin", "hr"))):
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["created_by"] = user["id"]
+    doc["created_by_name"] = user.get("name") or user.get("email")
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    doc["read_by"] = []
+    await db.announcements.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/announcements/{aid}/read")
+async def mark_announcement_read(aid: str, user=Depends(get_current_user)):
+    r = await db.announcements.update_one({"id": aid}, {"$addToSet": {"read_by": user["id"]}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.delete("/announcements/{aid}")
+async def delete_announcement(aid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.announcements.delete_one({"id": aid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.get("/dashboard/upcoming")
+async def dashboard_upcoming(days: int = 15, _=Depends(get_current_user)):
+    """Combined upcoming feed for every dashboard: birthdays (from staff.date_of_birth)
+    + holidays within `days` days. Birthdays are calendar-day aware (compares only
+    month-day so the query works across year boundaries)."""
+    today = datetime.now(timezone.utc).date()
+    end = today.fromordinal(today.toordinal() + max(days, 1))
+    # Upcoming holidays — simple date range on ISO date strings
+    holidays = await db.holidays.find(
+        {"date": {"$gte": today.isoformat(), "$lte": end.isoformat()}},
+        {"_id": 0},
+    ).sort("date", 1).to_list(50)
+    # Upcoming birthdays — need to compare only MM-DD, wrap-around year
+    all_staff = await db.staff.find(
+        {"date_of_birth": {"$exists": True, "$nin": [None, ""]}},
+        {"_id": 0, "id": 1, "name": 1, "designation": 1, "date_of_birth": 1, "center_id": 1},
+    ).to_list(2000)
+    upcoming_birthdays = []
+    for s in all_staff:
+        try:
+            dob = datetime.fromisoformat(s["date_of_birth"]).date()
+        except (ValueError, TypeError):
+            continue
+        # Next birthday in current or next year
+        try:
+            nxt = dob.replace(year=today.year)
+        except ValueError:
+            # Feb-29 in non-leap year → shift to Mar-1 so the alert still fires
+            nxt = dob.replace(year=today.year, day=28)
+        if nxt < today:
+            try:
+                nxt = dob.replace(year=today.year + 1)
+            except ValueError:
+                nxt = dob.replace(year=today.year + 1, day=28)
+        days_away = (nxt - today).days
+        if 0 <= days_away <= days:
+            upcoming_birthdays.append({
+                "staff_id": s["id"], "name": s["name"],
+                "designation": s.get("designation"),
+                "date": nxt.isoformat(),
+                "days_away": days_away,
+                "turning_age": nxt.year - dob.year,
+            })
+    upcoming_birthdays.sort(key=lambda x: x["days_away"])
+    return {"birthdays": upcoming_birthdays[:20], "holidays": holidays}
 
 
 # -------- Geofences --------

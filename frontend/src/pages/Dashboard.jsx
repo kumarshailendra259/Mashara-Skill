@@ -18,6 +18,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleWidgets from "@/components/RoleWidgets";
 import SettlementSection from "@/components/SettlementSection";
+import UpcomingWidget from "@/components/UpcomingWidget";
 
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
 const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
@@ -168,10 +169,19 @@ export default function Dashboard() {
       {/* Company vs Partner — separated charts */}
       <CompanyPartnerCharts entities={entities} baseFilters={filters} />
 
-      {/* Partner Settlement */}
-      {showSettlement && (
-        <SettlementSection settlement={settlement} onSettled={refreshSettlement} />
-      )}
+      {/* Upcoming birthdays & holidays + Partner Settlement in a two-column grid.
+          The widget sits alongside settlement so admins get people-focused
+          reminders next to their finance summary without a whole extra row. */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className={showSettlement ? "lg:col-span-2" : "lg:col-span-3"}>
+          {showSettlement && (
+            <SettlementSection settlement={settlement} onSettled={refreshSettlement} />
+          )}
+        </div>
+        <div className={showSettlement ? "" : "lg:col-span-1"}>
+          <UpcomingWidget />
+        </div>
+      </div>
 
       {/* Breakdown */}
       <div className="swiss-card p-5" data-testid="breakdown-section">
