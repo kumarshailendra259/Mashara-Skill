@@ -6255,6 +6255,8 @@ async def my_summary(user=Depends(get_current_user)):
         eff = _effective_status(r)
         counts[eff] = counts.get(eff, 0) + 1
     month_stats = {**counts, "total_days": len(month_rows)}
+    # Build day-keyed attendance map for the mini calendar (day "01" → "present").
+    month_attendance_by_day = {r["date"][-2:]: _effective_status(r) for r in month_rows}
     # Decorate today's row with effective status
     if today_row:
         today_row["effective_status"] = _effective_status(today_row)
@@ -6296,6 +6298,7 @@ async def my_summary(user=Depends(get_current_user)):
         "shift": shift,
         "today": today_row,
         "month_stats": month_stats,
+        "month_attendance_by_day": month_attendance_by_day,
         "pending_counts": {"leaves": pending_leaves, "reimbursements": pending_reimb, "regularisations": pending_reg},
         "upcoming_holidays": upcoming,
         "all_holidays": all_holidays,

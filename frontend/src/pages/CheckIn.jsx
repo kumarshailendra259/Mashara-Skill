@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import {
   Camera, MapPin, CheckCircle2, LogOut, RefreshCw, Home, CalendarDays, Plane,
   Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle, Trash2,
+  Bell, ChevronLeft, ChevronRight, Megaphone,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import {
@@ -25,6 +26,17 @@ const STATUS_OPTIONS = [
 
 const TABS = [
   { v: "home", label: "Home", icon: Home },
+  { v: "attendance", label: "Attendance", icon: CalendarDays },
+  { v: "leave", label: "Leave", icon: Plane },
+  { v: "reimburse", label: "Claims", icon: Receipt },
+  { v: "salary", label: "Salary", icon: Wallet },
+];
+
+// Desktop sidebar entries — includes items that only make sense on wider screens
+// (My Team, Reports, Notifications, Settings). Mobile keeps the compact bottom
+// tab bar so we don't overwhelm small screens.
+const SIDEBAR_ITEMS = [
+  { v: "home", label: "Dashboard", icon: Home },
   { v: "attendance", label: "Attendance", icon: CalendarDays },
   { v: "leave", label: "Leave", icon: Plane },
   { v: "reimburse", label: "Claims", icon: Receipt },
@@ -125,12 +137,62 @@ export default function CheckIn() {
   const wave = hh < 12 ? "☀️" : hh < 17 ? "👋" : "🌙";
 
   return (
-    <div className="min-h-screen bg-[var(--bg)] pb-24" data-testid="checkin-page">
+    <div className="min-h-screen bg-[var(--bg)] pb-24 md:pb-0 md:flex" data-testid="checkin-page">
+      {/* Desktop sidebar — only visible on lg+ (mobile falls back to bottom tab bar) */}
+      <aside className="hidden md:flex md:w-60 lg:w-64 shrink-0 flex-col bg-white border-r border-[var(--border)] min-h-screen sticky top-0">
+        <div className="px-5 py-5 border-b border-[var(--border)] flex items-center gap-3">
+          <div className="h-9 w-9 bg-[var(--brand)] text-white flex items-center justify-center font-heading font-black text-lg">M</div>
+          <div>
+            <div className="font-heading font-black text-sm leading-tight">MASHARA SKILLS</div>
+            <div className="overline text-[9px]">STAFF APP</div>
+          </div>
+        </div>
+        <nav className="flex-1 py-4">
+          {SIDEBAR_ITEMS.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.v;
+            return (
+              <button
+                key={t.v}
+                onClick={() => setTab(t.v)}
+                className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${active ? "bg-blue-50 text-[var(--brand)] border-l-4 border-[var(--brand)] font-bold" : "text-[var(--muted)] hover:bg-gray-50 border-l-4 border-transparent"}`}
+                data-testid={`sidebar-${t.v}`}
+              >
+                <Icon size={16} strokeWidth={active ? 2.5 : 1.8} />
+                <span>{t.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+        {/* Mobile app QR — static placeholder card matching the mockup */}
+        <div className="mx-4 mb-4 border border-[var(--border)] bg-blue-50/50 p-3 text-center">
+          <div className="text-[10px] font-bold text-[var(--brand)]">Mashara Skills Mobile App</div>
+          <div className="text-[9px] text-[var(--muted)] mt-0.5">Scan to download our mobile app</div>
+          <div className="mt-2 mx-auto w-20 h-20 bg-white border border-[var(--border)] flex items-center justify-center">
+            {/* Inline SVG QR-code approximation — replace with real QR when app is published */}
+            <svg viewBox="0 0 40 40" className="w-16 h-16">
+              <rect x="2" y="2" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" />
+              <rect x="28" y="2" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" />
+              <rect x="2" y="28" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" />
+              <rect x="14" y="14" width="4" height="4" fill="currentColor" />
+              <rect x="22" y="14" width="4" height="4" fill="currentColor" />
+              <rect x="14" y="22" width="4" height="4" fill="currentColor" />
+              <rect x="22" y="22" width="4" height="4" fill="currentColor" />
+            </svg>
+          </div>
+        </div>
+        <div className="px-5 py-3 border-t border-[var(--border)] text-[10px] text-[var(--muted)]">
+          © {new Date().getFullYear()} Mashara Skills<br />All rights reserved
+        </div>
+      </aside>
+
+      {/* Main content column */}
+      <div className="flex-1 min-w-0">
       {/* Blue gradient hero — matches the mockup with greeting, date+time,
           location and a motivational quote on the right. Radial city silhouette
           effect via a semi-transparent SVG overlay so the whole surface stays
           reads-clean on any brand-blue shade. */}
-      <div className="relative overflow-hidden text-white bg-gradient-to-br from-[#2E64C7] via-[#1E4EAB] to-[#173B85] px-5 pt-6 pb-16 md:pb-20 lg:pb-24">
+      <div className="relative overflow-hidden text-white bg-gradient-to-br from-[#2E64C7] via-[#1E4EAB] to-[#173B85] px-5 pt-5 pb-16 md:pb-20 lg:pb-24">
         <div
           className="absolute inset-0 opacity-10 pointer-events-none"
           style={{
@@ -138,7 +200,30 @@ export default function CheckIn() {
             backgroundRepeat: "no-repeat", backgroundPosition: "right bottom",
           }}
         />
-        <div className="relative flex items-start justify-between max-w-6xl mx-auto">
+        {/* Top row: mobile logo + right-side actions (bell + avatar) */}
+        <div className="relative flex items-center justify-between mb-3">
+          <div className="md:hidden flex items-center gap-2">
+            <div className="h-7 w-7 bg-white/20 flex items-center justify-center font-black">M</div>
+            <span className="font-heading font-black text-sm">MASHARA SKILLS</span>
+          </div>
+          <div className="hidden md:block" />
+          <div className="flex items-center gap-3">
+            <button className="relative opacity-90 hover:opacity-100" title="Notifications" data-testid="header-bell">
+              <Bell size={18} />
+              <span className="absolute -top-1.5 -right-1.5 h-4 w-4 bg-red-500 text-white text-[9px] rounded-full flex items-center justify-center font-bold">3</span>
+            </button>
+            <div className="hidden md:flex items-center gap-2 bg-white/10 px-2 py-1 rounded-full">
+              <div className="h-6 w-6 rounded-full bg-white/20 flex items-center justify-center text-xs font-bold">
+                {(summary?.staff?.name || user.name || "U").slice(0, 1)}
+              </div>
+              <span className="text-sm">{summary?.staff?.name || user.name}</span>
+            </div>
+            <button onClick={() => logout()} className="opacity-90 hover:opacity-100" title="Sign out" data-testid="checkin-logout">
+              <LogOut size={18} />
+            </button>
+          </div>
+        </div>
+        <div className="relative flex items-start justify-between max-w-6xl">
           <div>
             <div className="text-sm md:text-base opacity-90">{greeting},</div>
             <h1 className="font-heading font-black text-2xl md:text-4xl mt-0.5 leading-tight flex items-center gap-2" data-testid="checkin-greeting">
@@ -152,32 +237,27 @@ export default function CheckIn() {
               <span>{summary?.staff?.center_name || summary?.staff?.center_id?.slice(0, 8) || "—"}</span>
             </div>
           </div>
-          <div className="hidden md:flex items-center gap-3">
+          <div className="hidden md:flex items-center">
             <div className="text-right italic text-sm opacity-95 leading-tight">
               &ldquo;Discipline today<br />Success tomorrow&rdquo;
             </div>
-            <button onClick={() => logout()} className="opacity-80 hover:opacity-100 p-2 rounded-full bg-white/10 hover:bg-white/20" title="Sign out" data-testid="checkin-logout">
-              <LogOut size={18} />
-            </button>
           </div>
-          <button onClick={() => logout()} className="md:hidden opacity-80 hover:opacity-100 mt-1" title="Sign out">
-            <LogOut size={20} />
-          </button>
         </div>
       </div>
 
       {/* Tab content — pulls up over the hero so the top cards sit inside the
           gradient area like the mockup. */}
-      <div className="p-4 max-w-6xl mx-auto -mt-12 md:-mt-16 relative z-[5]">
+      <div className="p-4 md:p-6 max-w-none -mt-12 md:-mt-16 relative z-[5]">
         {tab === "home" && <HomeTab summary={summary} reload={loadSummary} setTab={setTab} />}
         {tab === "attendance" && <AttendanceTab />}
         {tab === "leave" && <LeaveTab staffId={summary?.staff?.id} />}
         {tab === "reimburse" && <ReimburseTab staffId={summary?.staff?.id} />}
         {tab === "salary" && <SalaryTab />}
       </div>
+      </div>
 
-      {/* Bottom tab bar */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-[var(--border)] flex justify-around py-2 shadow-lg z-10" data-testid="checkin-tabbar">
+      {/* Bottom tab bar — mobile only */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-[var(--border)] flex justify-around py-2 shadow-lg z-10" data-testid="checkin-tabbar">
         {TABS.map((t) => {
           const Icon = t.icon;
           const active = tab === t.v;
@@ -384,6 +464,20 @@ function HomeTab({ summary, reload, setTab }) {
         </div>
       </div>
 
+      {/* Row 3: Calendar + Today's Timeline + Monthly Overview donut */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <MiniCalendar summary={summary} />
+        <TodayTimeline att={att} />
+        <MonthlyOverviewDonut stats={stats} totalMonth={totalMonth} />
+      </div>
+
+      {/* Row 4: Weekly bar chart + Notifications + News & Announcements */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <WeeklyAttendanceBars />
+        <NotificationsCard setTab={setTab} />
+        <NewsAnnouncementsCard />
+      </div>
+
       {/* Legacy holidays block re-purposed as "Upcoming Holidays" card */}
       <div className="swiss-card p-4">
         <div className="flex items-center justify-between">
@@ -440,6 +534,286 @@ const Stat = ({ label, value, color = "" }) => (
     <div className="overline text-[9px]">{label}</div>
   </div>
 );
+
+// -------- MOCKUP: mini calendar with attendance-coloured dots --------
+function MiniCalendar({ summary }) {
+  const now = new Date();
+  const [month, setMonth] = useState(now.getMonth());
+  const [year, setYear] = useState(now.getFullYear());
+  const first = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const startDay = first.getDay(); // 0 = Sun
+  const monthName = first.toLocaleString(undefined, { month: "long" });
+  const statusByDay = summary?.month_attendance_by_day || {};
+  const todayN = (year === now.getFullYear() && month === now.getMonth()) ? now.getDate() : null;
+
+  const cells = [];
+  for (let i = 0; i < startDay; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const cellCls = (d) => {
+    if (!d) return "";
+    const st = statusByDay[String(d).padStart(2, "0")];
+    if (d === todayN) return "bg-[var(--brand)] text-white font-bold";
+    if (st === "present") return "bg-emerald-100 text-emerald-800";
+    if (st === "half") return "bg-amber-100 text-amber-800";
+    if (st === "leave") return "bg-blue-100 text-blue-800";
+    if (st === "absent") return "bg-red-100 text-red-800";
+    return "hover:bg-gray-50 text-[var(--foreground)]";
+  };
+
+  return (
+    <div className="swiss-card p-4" data-testid="mini-calendar">
+      <div className="flex items-center justify-between mb-3">
+        <div className="font-heading font-bold text-sm">{monthName} {year}</div>
+        <div className="flex gap-1">
+          <button onClick={() => { const m = month - 1; if (m < 0) { setMonth(11); setYear(y => y - 1); } else setMonth(m); }} className="p-1 hover:bg-gray-100"><ChevronLeft size={14} /></button>
+          <button onClick={() => { const m = month + 1; if (m > 11) { setMonth(0); setYear(y => y + 1); } else setMonth(m); }} className="p-1 hover:bg-gray-100"><ChevronRight size={14} /></button>
+        </div>
+      </div>
+      <div className="grid grid-cols-7 gap-0.5 text-[10px] text-center overline mb-1 text-[var(--muted)]">
+        {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => <div key={d}>{d}</div>)}
+      </div>
+      <div className="grid grid-cols-7 gap-0.5">
+        {cells.map((d, i) => (
+          <div key={i} className={`aspect-square flex items-center justify-center text-xs ${cellCls(d)}`}>{d || ""}</div>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-2 mt-3 text-[9px]">
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-emerald-400" /> Present</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-amber-400" /> Half</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-blue-400" /> Leave</span>
+        <span className="inline-flex items-center gap-1"><span className="w-2 h-2 bg-red-400" /> Absent</span>
+      </div>
+    </div>
+  );
+}
+
+// -------- MOCKUP: today's timeline of punch events --------
+function TodayTimeline({ att }) {
+  const fmt = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); } catch { return "—"; }
+  };
+  // Compose the four punch events. Lunch break is derived if we can't detect one — we display
+  // a neutral placeholder so the timeline layout stays consistent for staff without lunch tracking.
+  const events = [
+    { key: "in", label: "Check In", time: fmt(att?.check_in_at || att?.marked_at), status: att?.check_in_at ? "On Time" : "Pending", statusCls: att?.check_in_at ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-gray-50 border-[var(--border)] text-[var(--muted)]", dot: att?.check_in_at ? "bg-emerald-500" : "bg-gray-300" },
+    { key: "lunch", label: "Lunch Break", time: "01:00 PM", status: att?.check_in_at ? "45 mins" : "—", statusCls: "bg-amber-50 border-amber-200 text-amber-800", dot: "bg-amber-500" },
+    { key: "resume", label: "Resume Work", time: "01:45 PM", status: att?.check_in_at ? "Back" : "—", statusCls: "bg-blue-50 border-blue-200 text-blue-800", dot: "bg-blue-500" },
+    { key: "out", label: "Check Out", time: fmt(att?.check_out_at), status: att?.check_out_at ? "Done" : "Pending", statusCls: att?.check_out_at ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-gray-50 border-[var(--border)] text-[var(--muted)]", dot: att?.check_out_at ? "bg-emerald-500" : "bg-gray-300" },
+  ];
+  return (
+    <div className="swiss-card p-4" data-testid="today-timeline">
+      <div className="font-heading font-bold text-sm mb-3">Today&apos;s Timeline</div>
+      <div className="relative pl-4">
+        {/* vertical connector line */}
+        <div className="absolute left-1.5 top-2 bottom-2 w-0.5 bg-gray-200" />
+        <div className="space-y-4">
+          {events.map((e) => (
+            <div key={e.key} className="flex items-center gap-3 relative">
+              <span className={`h-3 w-3 rounded-full ${e.dot} absolute -left-4 ring-2 ring-white`} />
+              <div className="flex-1 flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-medium">{e.label}</div>
+                  <div className="text-[10px] text-[var(--muted)] num">{e.time}</div>
+                </div>
+                <span className={`text-[10px] px-2 py-0.5 border ${e.statusCls}`}>{e.status}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// -------- MOCKUP: monthly overview donut with % breakdown --------
+function MonthlyOverviewDonut({ stats, totalMonth }) {
+  const p = stats.present || 0, h = stats.half || 0, l = stats.leave || 0, a = stats.absent || 0;
+  const total = Math.max(totalMonth, 1);
+  const segs = [
+    { key: "p", val: p / total, color: "#10b981", label: "Present" },
+    { key: "h", val: h / total, color: "#f59e0b", label: "Half Day" },
+    { key: "l", val: l / total, color: "#3b82f6", label: "Leave" },
+    { key: "a", val: a / total, color: "#ef4444", label: "Absent" },
+  ];
+  // Convert each fraction into stroke-dasharray positions on a circle of circumference 2πr.
+  const R = 30, C = 2 * Math.PI * R;
+  let accum = 0;
+  const paths = segs.map((s) => {
+    const len = s.val * C;
+    const el = <circle key={s.key} cx="40" cy="40" r={R} fill="none" stroke={s.color} strokeWidth="12" strokeDasharray={`${len} ${C - len}`} strokeDashoffset={-accum} transform="rotate(-90 40 40)" />;
+    accum += len;
+    return el;
+  });
+  const pct = Math.round((p / total) * 100);
+  return (
+    <div className="swiss-card p-4 flex flex-col" data-testid="monthly-overview">
+      <div className="font-heading font-bold text-sm mb-3">Monthly Overview</div>
+      <div className="flex items-center gap-4">
+        <div className="relative shrink-0">
+          <svg width="80" height="80" viewBox="0 0 80 80">
+            <circle cx="40" cy="40" r={R} fill="none" stroke="#f1f5f9" strokeWidth="12" />
+            {paths}
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <div className="text-lg font-heading font-black leading-none">{pct}%</div>
+            <div className="text-[9px] text-[var(--muted)]">Present</div>
+          </div>
+        </div>
+        <div className="flex-1 space-y-1.5 text-xs">
+          {segs.map((s) => (
+            <div key={s.key} className="flex items-center justify-between">
+              <span className="inline-flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full" style={{ background: s.color }} />
+                {s.label}
+              </span>
+              <span className="num font-semibold">{Math.round(s.val * 100)}%</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// -------- MOCKUP: attendance overview (this week bar chart) --------
+function WeeklyAttendanceBars() {
+  const [rows, setRows] = useState([]);
+  useEffect(() => {
+    (async () => {
+      // Fetch last 7 days of my attendance for the bar chart
+      const end = new Date();
+      const start = new Date(); start.setDate(start.getDate() - 6);
+      try {
+        const iso = (d) => d.toISOString().slice(0, 10);
+        const { data } = await api.get(`/attendance/my?start=${iso(start)}&end=${iso(end)}`);
+        setRows(data || []);
+      } catch { /* keep empty */ }
+    })();
+  }, []);
+  const days = Array.from({ length: 7 }).map((_, i) => {
+    const d = new Date(); d.setDate(d.getDate() - (6 - i));
+    return d;
+  });
+  const byDate = Object.fromEntries((rows || []).map((r) => [r.date, r]));
+  const dayLabel = (d) => d.toLocaleDateString(undefined, { weekday: "short" });
+  const hours = (r) => {
+    if (!r?.check_in_at) return 0;
+    const s = new Date(r.check_in_at);
+    const e = r.check_out_at ? new Date(r.check_out_at) : new Date();
+    return Math.max(0, (e - s) / (1000 * 60 * 60));
+  };
+  const dayHours = days.map((d) => hours(byDate[d.toISOString().slice(0, 10)]));
+  const maxH = Math.max(9, ...dayHours);
+  return (
+    <div className="swiss-card p-4" data-testid="weekly-bars">
+      <div className="font-heading font-bold text-sm mb-3">Attendance Overview · This Week</div>
+      <div className="flex items-end gap-2 h-32">
+        {days.map((d, i) => {
+          const h = dayHours[i];
+          const pct = Math.round((h / maxH) * 100);
+          const hh = Math.floor(h), mm = Math.round((h - hh) * 60);
+          return (
+            <div key={i} className="flex-1 flex flex-col items-center gap-1">
+              <div className="text-[9px] text-[var(--muted)] num h-3">{h > 0 ? `${hh}h ${mm}m` : ""}</div>
+              <div className="w-full bg-gray-100 h-24 flex flex-col justify-end">
+                <div className="bg-gradient-to-t from-[var(--brand)] to-blue-400 transition-all" style={{ height: `${pct}%` }} />
+              </div>
+              <div className="text-[10px] font-medium">{dayLabel(d)}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// -------- MOCKUP: notifications side panel --------
+function NotificationsCard({ setTab }) {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get("/notifications?limit=6");
+        // `/notifications` returns { items, unread } — normalise here.
+        const list = Array.isArray(data) ? data : (data?.items || []);
+        setItems(list);
+      } catch { /* keep empty */ }
+    })();
+  }, []);
+  const unread = items.filter((n) => !n.read).length;
+  const markAll = async () => {
+    try { await api.patch("/notifications/mark-all-read"); setItems(items.map((n) => ({ ...n, read: true }))); } catch { /* no-op */ }
+  };
+  return (
+    <div className="swiss-card p-4" data-testid="notifications-card">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className="font-heading font-bold text-sm">Notifications</div>
+          {unread > 0 && <span className="text-[9px] bg-red-500 text-white px-1.5 py-0.5 rounded-full font-bold">{unread}</span>}
+        </div>
+        {items.length > 0 && (
+          <button onClick={markAll} className="text-[10px] text-[var(--brand)] hover:underline font-bold">Mark all as read</button>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <div className="text-xs text-[var(--muted)] py-4 text-center">No notifications</div>
+      ) : (
+        <div className="space-y-2 max-h-48 overflow-y-auto">
+          {items.slice(0, 5).map((n) => (
+            <div key={n.id} className={`text-xs p-2 border-l-2 ${n.read ? "border-gray-200 bg-gray-50 opacity-70" : "border-[var(--brand)] bg-blue-50"}`}>
+              <div className="line-clamp-2">{n.message || n.title}</div>
+              <div className="text-[10px] text-[var(--muted)] mt-0.5">
+                {n.created_at ? new Date(n.created_at).toLocaleString([], { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// -------- MOCKUP: news & announcements card --------
+function NewsAnnouncementsCard() {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get("/announcements/active");
+        setItems(data || []);
+      } catch { /* keep empty */ }
+    })();
+  }, []);
+  return (
+    <div className="swiss-card p-4" data-testid="news-card">
+      <div className="flex items-center gap-2 mb-3">
+        <Megaphone size={14} className="text-[var(--brand)]" />
+        <div className="font-heading font-bold text-sm">News &amp; Announcements</div>
+      </div>
+      {items.length === 0 ? (
+        <div className="text-xs text-[var(--muted)] py-4 text-center">No active announcements</div>
+      ) : (
+        <div className="space-y-2 max-h-48 overflow-y-auto">
+          {items.slice(0, 4).map((a) => {
+            const cls = a.priority === "urgent" ? "border-red-300 bg-red-50 text-red-900"
+              : a.priority === "important" ? "border-amber-300 bg-amber-50 text-amber-900"
+              : "border-blue-300 bg-blue-50 text-blue-900";
+            return (
+              <div key={a.id} className={`text-xs p-2 border-l-2 ${cls}`}>
+                <div className="font-medium">{a.title}</div>
+                <div className="line-clamp-2 mt-0.5 opacity-80">{a.body}</div>
+                <div className="text-[10px] opacity-70 mt-0.5">— {a.created_by_name}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 const QuickStat = ({ label, value, onClick }) => (
   <button onClick={onClick} className="swiss-card p-3 text-left hover:bg-gray-50">
