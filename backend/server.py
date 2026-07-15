@@ -348,10 +348,15 @@ class ApprovalChainIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
     type: ApprovalType
-    # Center-scoped chain: if set, ONLY requests on this center route through it.
-    # Multiple active chains allowed per type AS LONG AS each has a distinct center_id.
-    # A chain with center_id=None is the global default fallback for centers without a specific chain.
+    # Center-scoped chain: if `center_ids` is a non-empty list, ONLY requests on
+    # those centers route through it (chain gets reused across centers so admins
+    # don't have to duplicate identical approval matrices).
+    # `center_id` is kept for backward compatibility with older clients that only
+    # know how to send a single center — server merges it into `center_ids`.
+    # A chain with an empty `center_ids` list AND no `center_id` is the global
+    # default fallback for centers without a specific chain.
     center_id: Optional[str] = None
+    center_ids: List[str] = Field(default_factory=list)
     steps: List[ApprovalStep] = Field(default_factory=list)
     active: bool = True
 
@@ -3785,17 +3790,32 @@ async def _seed_default_chains():
 
 async def _find_active_chain(req_type: str, center_id: Optional[str] = None) -> Optional[dict]:
     """Find the most-specific active chain for this request type.
-    - First look for an active chain matching (type, center_id)
-    - Fall back to active chain with center_id=None (global default)
+    - Look for an active chain that lists `center_id` in `center_ids` (new
+      multi-center schema) OR has `center_id == center_id` (legacy single-center
+      docs kept for backward compatibility).
+    - Fall back to an active chain with no center scope (global default).
     """
     if center_id:
         specific = await db.approval_chains.find_one(
-            {"type": req_type, "active": True, "center_id": center_id}, {"_id": 0},
+            {
+                "type": req_type, "active": True,
+                "$or": [
+                    {"center_ids": center_id},
+                    {"center_id": center_id},
+                ],
+            },
+            {"_id": 0},
         )
         if specific:
             return specific
     return await db.approval_chains.find_one(
-        {"type": req_type, "active": True, "$or": [{"center_id": None}, {"center_id": {"$exists": False}}]},
+        {
+            "type": req_type, "active": True,
+            "$and": [
+                {"$or": [{"center_id": None}, {"center_id": {"$exists": False}}]},
+                {"$or": [{"center_ids": {"$size": 0}}, {"center_ids": {"$exists": False}}]},
+            ],
+        },
         {"_id": 0},
     )
 
@@ -4080,18 +4100,35 @@ async def create_approval_chain(body: ApprovalChainIn, user=Depends(require_role
     # Per-step value validation: 'staff' / 'user' / 'role' MUST have a non-empty value,
     # otherwise the chain silently dead-ends at that level and the request never reaches an approver.
     await _validate_chain_steps(sorted_steps)
-    # If activated, deactivate other chains of same (type, center_id) to keep one active per scope.
-    # Chains for different centers (or one center vs global) can coexist as active.
+    # Normalise center scope: merge legacy `center_id` into `center_ids` list,
+    # dedupe, and clear the legacy field so downstream lookups only need to
+    # inspect one shape.
+    _cids = list(doc.get("center_ids") or [])
+    if doc.get("center_id") and doc["center_id"] not in _cids:
+        _cids.append(doc["center_id"])
+    doc["center_ids"] = _cids
+    doc["center_id"] = None  # legacy field cleared once merged
+    # If activated, deactivate other active chains of the same type whose center
+    # scope overlaps — that way each center still resolves to exactly ONE chain.
     if doc.get("active"):
-        await db.approval_chains.update_many(
-            {"type": doc["type"], "active": True,
-             "center_id": doc.get("center_id")},
-            {"$set": {"active": False}},
-        )
+        overlap_filter: dict = {"type": doc["type"], "active": True}
+        if _cids:
+            overlap_filter["$or"] = [
+                {"center_ids": {"$in": _cids}},
+                {"center_id": {"$in": _cids}},
+            ]
+        else:
+            # A global (no-center) chain replaces any other active global chain.
+            overlap_filter["$and"] = [
+                {"$or": [{"center_ids": {"$size": 0}}, {"center_ids": {"$exists": False}}]},
+                {"$or": [{"center_id": None}, {"center_id": {"$exists": False}}]},
+            ]
+        await db.approval_chains.update_many(overlap_filter, {"$set": {"active": False}})
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     doc["created_by"] = user["id"]
     await db.approval_chains.insert_one(doc)
+    doc.pop("_id", None)
     return doc
 
 
@@ -4105,12 +4142,24 @@ async def update_approval_chain(cid: str, body: ApprovalChainIn, _=Depends(requi
         s["level"] = i
     update["steps"] = sorted_steps
     await _validate_chain_steps(sorted_steps)
+    _cids = list(update.get("center_ids") or [])
+    if update.get("center_id") and update["center_id"] not in _cids:
+        _cids.append(update["center_id"])
+    update["center_ids"] = _cids
+    update["center_id"] = None
     if update.get("active"):
-        await db.approval_chains.update_many(
-            {"type": update["type"], "active": True, "center_id": update.get("center_id"),
-             "id": {"$ne": cid}},
-            {"$set": {"active": False}},
-        )
+        overlap_filter: dict = {"type": update["type"], "active": True, "id": {"$ne": cid}}
+        if _cids:
+            overlap_filter["$or"] = [
+                {"center_ids": {"$in": _cids}},
+                {"center_id": {"$in": _cids}},
+            ]
+        else:
+            overlap_filter["$and"] = [
+                {"$or": [{"center_ids": {"$size": 0}}, {"center_ids": {"$exists": False}}]},
+                {"$or": [{"center_id": None}, {"center_id": {"$exists": False}}]},
+            ]
+        await db.approval_chains.update_many(overlap_filter, {"$set": {"active": False}})
     res = await db.approval_chains.find_one_and_update(
         {"id": cid}, {"$set": update}, return_document=True,
     )
@@ -5387,6 +5436,8 @@ async def my_regularisations(user=Depends(get_current_user)):
                         "chain_history": d.get("chain_history") or [],
                     }},
                 )
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
@@ -5988,12 +6039,17 @@ async def get_payment(pid: str, user=Depends(get_current_user)):
 @api.get("/leaves/my")
 async def my_leaves(user=Depends(get_current_user)):
     docs = await db.leaves.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 
 @api.get("/reimbursements/my")
 async def my_reimbursements(user=Depends(get_current_user)):
     docs = await db.reimbursements.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # Enrich with pending_with + step label so the requester sees exactly who to nudge.
+    for d in docs:
+        await _enrich_with_approval_status(d)
     return docs
 
 

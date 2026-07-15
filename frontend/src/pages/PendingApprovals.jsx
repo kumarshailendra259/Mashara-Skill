@@ -328,18 +328,23 @@ export default function PendingApprovals() {
                       </div>
                     </div>
                   )}
-                  {(acting.item.summary?.attachments || []).length > 0 && (
-                    <div className="border-t border-amber-200 pt-2">
-                      <div className="text-[10px] uppercase text-amber-900 font-bold mb-1">Other attachments</div>
-                      <div className="flex flex-wrap gap-1">
-                        {acting.item.summary.attachments.map((a) => (
-                          <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-amber-900 hover:underline inline-flex items-center gap-1 border border-amber-200 bg-white px-1.5 py-0.5">
-                            📎 {a.filename}
-                          </a>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                </div>
+              )}
+
+              {/* Supporting attachments — visible for EVERY request type so the
+                  approver can review bills / receipts / photos before deciding.
+                  Previously this was tucked inside the payment-only block and
+                  reimbursement approvers couldn't see the raiser's uploaded bill. */}
+              {(acting.item.summary?.attachments || []).length > 0 && (
+                <div className="border border-blue-200 bg-blue-50/30 p-3 text-xs" data-testid="approval-attachments-block">
+                  <div className="overline font-bold text-blue-900 mb-1">Attachments ({acting.item.summary.attachments.length})</div>
+                  <div className="flex flex-wrap gap-1">
+                    {acting.item.summary.attachments.map((a) => (
+                      <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-blue-900 hover:underline inline-flex items-center gap-1 border border-blue-200 bg-white px-1.5 py-0.5">
+                        📎 {a.filename}
+                      </a>
+                    ))}
+                  </div>
                 </div>
               )}
 

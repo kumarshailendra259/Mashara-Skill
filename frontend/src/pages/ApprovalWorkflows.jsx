@@ -47,7 +47,7 @@ export default function ApprovalWorkflows() {
 
   const [open, setOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState({ name: "", type: "reimbursement", center_id: "", steps: [emptyStep()], active: true });
+  const [form, setForm] = useState({ name: "", type: "reimbursement", center_ids: [], steps: [emptyStep()], active: true });
 
   const load = async () => {
     try {
@@ -68,16 +68,20 @@ export default function ApprovalWorkflows() {
 
   const openCreate = () => {
     setEditingId(null);
-    setForm({ name: "", type: "reimbursement", center_id: "", steps: [emptyStep()], active: true });
+    setForm({ name: "", type: "reimbursement", center_ids: [], steps: [emptyStep()], active: true });
     setOpen(true);
   };
 
   const openEdit = (c) => {
     setEditingId(c.id);
+    // Legacy single-center chains carry `center_id`; merge into `center_ids` for the UI.
+    const mergedIds = Array.isArray(c.center_ids) && c.center_ids.length > 0
+      ? c.center_ids
+      : (c.center_id ? [c.center_id] : []);
     setForm({
       name: c.name,
       type: c.type,
-      center_id: c.center_id || "",
+      center_ids: mergedIds,
       active: !!c.active,
       steps: (c.steps || []).map((s) => ({ ...s })),
     });
@@ -92,7 +96,7 @@ export default function ApprovalWorkflows() {
         name: form.name,
         type: form.type,
         active: !!form.active,
-        center_id: form.center_id || null,
+        center_ids: form.center_ids || [],
         steps: form.steps.map((s, i) => ({
           level: i + 1,
           kind: s.kind,
@@ -117,7 +121,10 @@ export default function ApprovalWorkflows() {
 
   const toggleActive = async (c) => {
     try {
-      await api.put(`/approval-chains/${c.id}`, { name: c.name, type: c.type, center_id: c.center_id || null, steps: c.steps, active: !c.active });
+      const cids = Array.isArray(c.center_ids) && c.center_ids.length > 0
+        ? c.center_ids
+        : (c.center_id ? [c.center_id] : []);
+      await api.put(`/approval-chains/${c.id}`, { name: c.name, type: c.type, center_ids: cids, steps: c.steps, active: !c.active });
       load();
     } catch (e) { toast.error(formatError(e)); }
   };
@@ -211,23 +218,48 @@ export default function ApprovalWorkflows() {
                         <SelectContent>{TYPES.map((t) => <SelectItem key={t.v} value={t.v}>{t.label}</SelectItem>)}</SelectContent>
                       </Select>
                     </div>
-                    <div><Label>Center</Label>
-                      <Select
-                        value={form.center_id || CENTER_NONE}
-                        onValueChange={(v) => setForm({ ...form, center_id: v === CENTER_NONE ? "" : v })}
-                      >
-                        <SelectTrigger className="rounded-none" data-testid="chain-center"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={CENTER_NONE}>All Centers (Global Default)</SelectItem>
-                          {centersList.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                      <div className="text-[10px] text-[var(--muted)] mt-1">Requests on this center route through these approvers. Leave blank for global fallback.</div>
+                    <div className="col-span-2"><Label>Centers <span className="text-[var(--muted)] text-[10px] normal-case">(select one or more — leave empty for global fallback)</span></Label>
+                      <div className="border border-[var(--border)] rounded-none bg-white p-2 max-h-40 overflow-y-auto space-y-1" data-testid="chain-centers">
+                        <label className="flex items-center gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={(form.center_ids || []).length === 0}
+                            onChange={(e) => { if (e.target.checked) setForm({ ...form, center_ids: [] }); }}
+                            data-testid="chain-center-global"
+                          />
+                          <span className="font-medium text-[var(--brand)]">All Centers (Global Default)</span>
+                        </label>
+                        <div className="border-t border-[var(--border)] my-1" />
+                        {centersList.map((c) => {
+                          const checked = (form.center_ids || []).includes(c.id);
+                          return (
+                            <label key={c.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-[var(--background)] px-1">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => setForm((f) => ({
+                                  ...f,
+                                  center_ids: checked
+                                    ? f.center_ids.filter((x) => x !== c.id)
+                                    : [...(f.center_ids || []), c.id],
+                                }))}
+                                data-testid={`chain-center-${c.id}`}
+                              />
+                              <span>{c.name}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <div className="text-[10px] text-[var(--muted)] mt-1">
+                        {(form.center_ids || []).length === 0
+                          ? "Chain will apply as GLOBAL fallback for centers without a specific chain."
+                          : `Chain will apply to ${form.center_ids.length} center(s) only.`}
+                      </div>
                     </div>
                     <div className="col-span-2 flex items-end">
                       <label className="flex items-center gap-2 text-sm">
                         <input type="checkbox" checked={!!form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} data-testid="chain-active" />
-                        <span><span className="font-medium">Active</span> <span className="text-[var(--muted)]">— one active chain per (type + center)</span></span>
+                        <span><span className="font-medium">Active</span> <span className="text-[var(--muted)]">— one active chain per center (multiple centers can share one chain)</span></span>
                       </label>
                     </div>
                   </div>
@@ -301,7 +333,15 @@ export default function ApprovalWorkflows() {
           ) : (
             <div className="grid md:grid-cols-2 gap-3">
               {chainsByType(t.v).map((c) => {
-                const centerName = c.center_id ? (centersList.find((x) => x.id === c.center_id)?.name || "Unknown center") : null;
+                // Merge new `center_ids` with legacy `center_id` for display so
+                // freshly-migrated chains that still store a single value keep
+                // rendering correctly.
+                const cids = Array.isArray(c.center_ids) && c.center_ids.length > 0
+                  ? c.center_ids
+                  : (c.center_id ? [c.center_id] : []);
+                const centerNames = cids
+                  .map((cid) => centersList.find((x) => x.id === cid)?.name || "Unknown")
+                  .filter(Boolean);
                 return (
                 <div key={c.id} className={`swiss-card p-4 ${c.active ? "border-l-4 border-[var(--brand)]" : "opacity-70"}`} data-testid={`chain-card-${c.id}`}>
                   <div className="flex items-start justify-between gap-2 mb-3">
@@ -312,7 +352,11 @@ export default function ApprovalWorkflows() {
                       <div className="text-xs text-[var(--muted)] mt-0.5">
                         {c.steps?.length || 0} steps · {c.active ? <span className="text-[var(--success)] font-medium">Active</span> : <span>Inactive</span>}
                         {" · "}
-                        {centerName ? <span className="font-medium text-[var(--brand)]">Center: {centerName}</span> : <span>All Centers (Global)</span>}
+                        {centerNames.length === 0
+                          ? <span>All Centers (Global)</span>
+                          : centerNames.length === 1
+                            ? <span className="font-medium text-[var(--brand)]">Center: {centerNames[0]}</span>
+                            : <span className="font-medium text-[var(--brand)]" title={centerNames.join(", ")}>{centerNames.length} centers: {centerNames.slice(0, 2).join(", ")}{centerNames.length > 2 ? `, +${centerNames.length - 2}` : ""}</span>}
                       </div>
                     </div>
                     {canEdit && (

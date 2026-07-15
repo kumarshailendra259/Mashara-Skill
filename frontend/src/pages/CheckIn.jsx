@@ -791,6 +791,15 @@ function ReimburseTab({ staffId }) {
                     <div className="font-medium">{inr(r.amount)} <span className="text-xs text-[var(--muted)] font-normal">· {r.category || "—"}</span></div>
                     <div className="text-xs text-[var(--muted)] mt-0.5">{new Date(r.date).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" })}</div>
                     {r.description && <div className="text-xs mt-1">{r.description}</div>}
+                    {(r.attachments || []).length > 0 && (
+                      <div className="text-[10px] text-blue-700 mt-1">📎 {r.attachments.length} attachment(s)</div>
+                    )}
+                    {r.current_level > 0 && (r.pending_with || []).length > 0 && (
+                      <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`claim-pending-${r.id}`}>
+                        ⏳ Pending with <strong>{r.current_step_label}</strong> — {r.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
+                        {r.pending_with.length > 2 && ` +${r.pending_with.length - 2}`}
+                      </div>
+                    )}
                     {r.current_level > 0 && r.chain_snapshot?.length && (
                       <button onClick={() => setTrackId(r.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-claim-${r.id}`}>
                         Track approval · Level {r.current_level} of {r.chain_snapshot.length} →
