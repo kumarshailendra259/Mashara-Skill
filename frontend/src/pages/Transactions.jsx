@@ -401,6 +401,22 @@ export default function Transactions() {
                     )}
                     <span className="truncate">{it.description}</span>
                   </div>
+                  {/* Payment-request link + payer name — auto-populated when
+                      transaction was created from a Payment Request final approval */}
+                  {(it.qrn || it.paid_by_name) && (
+                    <div className="mt-1 flex items-center gap-2 flex-wrap text-[10px]">
+                      {it.qrn && (
+                        <span className="inline-flex items-center gap-1 border border-blue-200 bg-blue-50 text-blue-800 px-1.5 py-0.5 font-mono" data-testid={`txn-qrn-${it.id}`}>
+                          QRN {it.qrn}
+                        </span>
+                      )}
+                      {it.paid_by_name && (
+                        <span className="inline-flex items-center gap-1 border border-emerald-200 bg-emerald-50 text-emerald-800 px-1.5 py-0.5" data-testid={`txn-paidby-${it.id}`}>
+                          ✓ Paid by <strong className="ml-0.5">{it.paid_by_name}</strong>
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td className="p-3">
                   <span className={`inline-block px-2 py-0.5 text-xs border ${

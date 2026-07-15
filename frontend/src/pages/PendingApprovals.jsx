@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -37,8 +37,12 @@ export default function PendingApprovals() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState("all");
-  const [acting, setActing] = useState(null);  // { item, action: "approve" | "reject" }
+  const [acting, setActing] = useState(null);  // { item, action: "approve" | "reject" | "send_back" }
   const [remarks, setRemarks] = useState("");
+  // Payer roster (accountants, admins, cashiers…). Lazily fetched the first
+  // time an accountant opens the approve dialog for a payment/reimbursement.
+  const [payers, setPayers] = useState([]);
+  const [paidByUserId, setPaidByUserId] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -69,7 +73,20 @@ export default function PendingApprovals() {
   const openAct = (item, action) => {
     setActing({ item, action });
     setRemarks("");
+    setPaidByUserId("");
+    // Only ask "Paid By" on the FINAL step of a payment or reimbursement approval.
+    if (action === "approve" && item.is_final_step && (item.request_type === "payment" || item.request_type === "reimbursement")) {
+      // Lazy fetch — cache once loaded so subsequent dialogs stay snappy.
+      if (payers.length === 0) {
+        api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
+      }
+    }
   };
+
+  const needsPaidBy = !!(
+    acting && acting.action === "approve" && acting.item.is_final_step &&
+    (acting.item.request_type === "payment" || acting.item.request_type === "reimbursement")
+  );
 
   const confirmAct = async () => {
     if (!acting) return;
@@ -77,23 +94,34 @@ export default function PendingApprovals() {
       toast.error("Remarks required (min 3 chars)");
       return;
     }
+    if (needsPaidBy && !paidByUserId) {
+      toast.error("Please select who is making the payment (Paid By is mandatory)");
+      return;
+    }
     const { item, action } = acting;
+    const payer = payers.find((p) => p.id === paidByUserId);
     try {
       if (item.request_type === "transaction" && item.via === "partner_cross") {
         if (action === "approve") {
           await api.post(`/transactions/${item.request_id}/partner-approve`, { remarks });
-        } else {
+        } else if (action === "reject") {
           // Partner cross-rejection uses dedicated endpoint with same eligibility check
           await api.post(`/transactions/${item.request_id}/partner-reject`, { remarks });
+        } else {
+          toast.error("Send-back is not supported for partner cross-approval");
+          return;
         }
       } else {
         // Chain-based: transactions / leaves / reimbursements all dispatch through /approvals/act
         await api.post(`/approvals/act`, {
           request_type: item.request_type, request_id: item.request_id,
           action, remarks,
+          paid_by_user_id: needsPaidBy ? paidByUserId : null,
+          paid_by_name: needsPaidBy ? (payer?.name || "") : null,
         });
       }
-      toast.success(`${action === "approve" ? "Approved" : "Rejected"} successfully`);
+      const verb = action === "approve" ? "Approved" : (action === "reject" ? "Rejected" : "Sent back");
+      toast.success(`${verb} successfully`);
       setActing(null);
       load();
     } catch (e) { toast.error(formatError(e)); }
@@ -208,6 +236,11 @@ export default function PendingApprovals() {
                   <Button size="sm" onClick={() => openAct(item, "approve")} className="brand-btn rounded-none h-8 gap-1" data-testid={`btn-approve-${item.request_id}`}>
                     <Check size={12} /> Approve
                   </Button>
+                  {(item.request_type === "quotation" || item.request_type === "payment") && (
+                    <Button variant="outline" size="sm" onClick={() => openAct(item, "send_back")} className="rounded-none h-8 gap-1 text-amber-800 border-amber-300 hover:bg-amber-50" data-testid={`btn-sendback-${item.request_id}`}>
+                      <Undo2 size={12} /> Send Back
+                    </Button>
+                  )}
                   <Button variant="outline" size="sm" onClick={() => openAct(item, "reject")} className="rounded-none h-8 gap-1 hover:text-[var(--danger)] hover:border-[var(--danger)]" data-testid={`btn-reject-${item.request_id}`}>
                     <X size={12} /> Reject
                   </Button>
@@ -223,7 +256,7 @@ export default function PendingApprovals() {
         <DialogContent className="rounded-none">
           <DialogHeader>
             <DialogTitle className="font-heading">
-              {acting?.action === "approve" ? "Approve" : "Reject"} {(TYPE_META[acting?.item?.request_type] || FALLBACK_META).label}
+              {acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")} {(TYPE_META[acting?.item?.request_type] || FALLBACK_META).label}
             </DialogTitle>
           </DialogHeader>
           {acting && (
@@ -299,14 +332,45 @@ export default function PendingApprovals() {
                 </div>
               )}
 
+              {/* Paid By — final step of payment / reimbursement only */}
+              {needsPaidBy && (
+                <div className="border border-emerald-300 bg-emerald-50/60 p-3 space-y-2" data-testid="paid-by-block">
+                  <div className="overline font-bold text-emerald-900">Paid By (who is releasing the money) *</div>
+                  <select
+                    value={paidByUserId}
+                    onChange={(e) => setPaidByUserId(e.target.value)}
+                    className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                    data-testid="paid-by-select"
+                  >
+                    <option value="">— Select payer —</option>
+                    {payers.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name} ({p.role})</option>
+                    ))}
+                  </select>
+                  <div className="text-[10px] text-emerald-900/80">
+                    Ye naam auto-created transaction pe stamp ho jayega — dashboard aur reports mein &ldquo;paid by&rdquo; se filter kar sakenge.
+                  </div>
+                </div>
+              )}
+
               <div>
                 <div className="overline text-xs mb-1">
                   Remarks <span className="text-[var(--danger)]">*</span>
-                  <span className="text-[var(--muted)] ml-1 normal-case">(min 3 chars, mandatory — kis shart pe approve/reject kiya)</span>
+                  <span className="text-[var(--muted)] ml-1 normal-case">
+                    {acting.action === "send_back"
+                      ? "(min 3 chars — kya change karna hai raiser ko batayein)"
+                      : "(min 3 chars, mandatory — kis shart pe approve/reject kiya)"}
+                  </span>
                 </div>
                 <Textarea
                   rows={3} value={remarks} onChange={(e) => setRemarks(e.target.value)}
-                  placeholder={acting.action === "approve" ? "e.g. Verified bank details & invoice — approved" : "e.g. Missing cancelled cheque — please attach and resubmit"}
+                  placeholder={
+                    acting.action === "approve"
+                      ? "e.g. Verified bank details & invoice — approved"
+                      : (acting.action === "reject"
+                          ? "e.g. Missing cancelled cheque — please attach and resubmit"
+                          : "e.g. Amount galat hai, invoice se match kariye aur dobara submit karein")
+                  }
                   className="rounded-none" data-testid="approval-remarks"
                 />
               </div>
@@ -316,11 +380,19 @@ export default function PendingApprovals() {
             <Button variant="outline" onClick={() => setActing(null)} className="rounded-none">Cancel</Button>
             <Button
               onClick={confirmAct}
-              className={`rounded-none gap-1 ${acting?.action === "approve" ? "brand-btn" : "bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90"}`}
+              className={`rounded-none gap-1 ${
+                acting?.action === "approve"
+                  ? "brand-btn"
+                  : (acting?.action === "reject"
+                      ? "bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90"
+                      : "bg-amber-600 text-white hover:bg-amber-700")
+              }`}
               data-testid="confirm-act"
             >
-              {acting?.action === "approve" ? <Check size={14} /> : <X size={14} />}
-              Confirm {acting?.action === "approve" ? "Approve" : "Reject"}
+              {acting?.action === "approve" && <Check size={14} />}
+              {acting?.action === "reject" && <X size={14} />}
+              {acting?.action === "send_back" && <Undo2 size={14} />}
+              Confirm {acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")}
             </Button>
           </DialogFooter>
         </DialogContent>

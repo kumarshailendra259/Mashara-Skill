@@ -13,7 +13,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock, Paperclip } from "lucide-react";
+import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock, Paperclip, Undo2, Pencil } from "lucide-react";
 
 const STATUS_LABEL = {
   pending: { text: "Awaiting Approval", cls: "bg-amber-50 text-amber-700 border-amber-200" },
@@ -21,6 +21,8 @@ const STATUS_LABEL = {
   payment_pending: { text: "Payment In Progress", cls: "bg-blue-50 text-blue-700 border-blue-200" },
   paid: { text: "Paid · Txn Created", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" },
   rejected: { text: "Rejected", cls: "bg-red-50 text-red-700 border-red-200" },
+  sent_back: { text: "Sent Back · Edits Required", cls: "bg-amber-50 text-amber-800 border-amber-300" },
+  payment_sent_back: { text: "Payment Sent Back", cls: "bg-amber-50 text-amber-800 border-amber-300" },
 };
 
 /**
@@ -41,6 +43,11 @@ export default function Quotations() {
   const [openP, setOpenP] = useState(false);
   const [payQuotation, setPayQuotation] = useState(null);
   const [statusFilter, setStatusFilter] = useState("all");
+  // Resubmit state — used when the raiser is fixing a sent-back quotation OR
+  // sent-back payment. `resubmitMode` differentiates the two so the same dialog
+  // reuses the correct field set and endpoint.
+  const [resubmitMode, setResubmitMode] = useState(null); // "quotation" | "payment"
+  const [editNote, setEditNote] = useState("");
 
   const isPartner = user?.role === "partner";
 
@@ -103,17 +110,37 @@ export default function Quotations() {
       toast.error("Fill center, description, vendor and amount");
       return;
     }
+    if (resubmitMode === "quotation" && (!editNote.trim() || editNote.trim().length < 3)) {
+      toast.error("Edit note (kya change kiya as per remarks) required — min 3 chars");
+      return;
+    }
     setBusy(true);
     try {
-      await api.post("/quotations", {
-        ...qForm,
-        estimated_amount: parseFloat(qForm.estimated_amount),
-        expected_delivery_date: qForm.expected_delivery_date || null,
-        attachments: qForm.attachments || [],
-      });
-      toast.success("Quotation raised — routing for approval");
+      if (resubmitMode === "quotation" && qForm._resubmit_id) {
+        await api.post(`/quotations/${qForm._resubmit_id}/resubmit`, {
+          description: qForm.description,
+          vendor_id: qForm.vendor_id || null,
+          vendor_name: qForm.vendor_name,
+          estimated_amount: parseFloat(qForm.estimated_amount),
+          expected_delivery_date: qForm.expected_delivery_date || null,
+          purpose: qForm.purpose || null,
+          attachments: qForm.attachments || [],
+          edit_note: editNote.trim(),
+        });
+        toast.success("Quotation resubmitted — re-entering approval chain");
+      } else {
+        await api.post("/quotations", {
+          ...qForm,
+          estimated_amount: parseFloat(qForm.estimated_amount),
+          expected_delivery_date: qForm.expected_delivery_date || null,
+          attachments: qForm.attachments || [],
+        });
+        toast.success("Quotation raised — routing for approval");
+      }
       setOpenQ(false);
       setQForm(emptyQ);
+      setResubmitMode(null);
+      setEditNote("");
       load();
     } catch (e) { toast.error(formatError(e)); }
     finally { setBusy(false); }
@@ -164,24 +191,49 @@ export default function Quotations() {
     }
     setBusy(true);
     try {
-      await api.post("/payments", {
-        quotation_id: payQuotation.id,
-        actual_amount: parseFloat(pForm.actual_amount),
-        payment_mode: pForm.payment_mode || "bank",
-        payment_date: pForm.payment_date || null,
-        notes: pForm.notes || null,
-        txn_type_override: pForm.txn_type_override || null,
-        attachments: pForm.attachments || [],
-        payee_account_holder: pForm.payee_account_holder || null,
-        payee_account_no: pForm.payee_account_no || null,
-        payee_ifsc: pForm.payee_ifsc || null,
-        payee_bank_name: pForm.payee_bank_name || null,
-        payee_upi_id: pForm.payee_upi_id || null,
-        payee_proof_attachments: pForm.payee_proof_attachments || [],
-      });
-      toast.success("Payment request raised — routing for approval");
+      if (resubmitMode === "payment" && pForm._resubmit_id) {
+        if (!editNote.trim() || editNote.trim().length < 3) {
+          toast.error("Edit note required — min 3 chars");
+          setBusy(false); return;
+        }
+        await api.post(`/payments/${pForm._resubmit_id}/resubmit`, {
+          actual_amount: parseFloat(pForm.actual_amount),
+          payment_mode: pForm.payment_mode || "bank",
+          payment_date: pForm.payment_date || null,
+          notes: pForm.notes || null,
+          txn_type_override: pForm.txn_type_override || null,
+          attachments: pForm.attachments || [],
+          payee_account_holder: pForm.payee_account_holder || null,
+          payee_account_no: pForm.payee_account_no || null,
+          payee_ifsc: pForm.payee_ifsc || null,
+          payee_bank_name: pForm.payee_bank_name || null,
+          payee_upi_id: pForm.payee_upi_id || null,
+          payee_proof_attachments: pForm.payee_proof_attachments || [],
+          edit_note: editNote.trim(),
+        });
+        toast.success("Payment resubmitted — re-entering approval chain");
+      } else {
+        await api.post("/payments", {
+          quotation_id: payQuotation.id,
+          actual_amount: parseFloat(pForm.actual_amount),
+          payment_mode: pForm.payment_mode || "bank",
+          payment_date: pForm.payment_date || null,
+          notes: pForm.notes || null,
+          txn_type_override: pForm.txn_type_override || null,
+          attachments: pForm.attachments || [],
+          payee_account_holder: pForm.payee_account_holder || null,
+          payee_account_no: pForm.payee_account_no || null,
+          payee_ifsc: pForm.payee_ifsc || null,
+          payee_bank_name: pForm.payee_bank_name || null,
+          payee_upi_id: pForm.payee_upi_id || null,
+          payee_proof_attachments: pForm.payee_proof_attachments || [],
+        });
+        toast.success("Payment request raised — routing for approval");
+      }
       setOpenP(false);
       setPayQuotation(null);
+      setResubmitMode(null);
+      setEditNote("");
       load();
     } catch (e) { toast.error(formatError(e)); }
     finally { setBusy(false); }
@@ -194,6 +246,45 @@ export default function Quotations() {
       toast.success("Deleted");
       load();
     } catch (e) { toast.error(formatError(e)); }
+  };
+
+  // ---- Resubmit handlers ----
+  // Reuses the New Quotation dialog for editing a sent-back quotation and the
+  // Raise Payment dialog for a sent-back payment. `resubmitMode` decides which
+  // endpoint the Submit button hits.
+  const openResubmitQuotation = (q) => {
+    setQForm({
+      center_id: q.center_id, category: q.category || "expense",
+      description: q.description || "", vendor_name: q.vendor_name || "",
+      vendor_id: q.vendor_id || "", estimated_amount: String(q.estimated_amount || ""),
+      expected_delivery_date: q.expected_delivery_date || "",
+      purpose: q.purpose || "", attachments: q.attachments || [],
+      _resubmit_id: q.id,
+    });
+    setResubmitMode("quotation");
+    setEditNote("");
+    setOpenQ(true);
+  };
+  const openResubmitPayment = (q, p) => {
+    setPayQuotation(q);
+    setPForm({
+      actual_amount: String(p.actual_amount || q.estimated_amount || ""),
+      payment_mode: p.payment_mode || "bank",
+      payment_date: p.payment_date || new Date().toISOString().slice(0, 10),
+      notes: p.notes || "",
+      txn_type_override: p.txn_type_override || "",
+      attachments: p.attachments || [],
+      payee_account_holder: p.payee_account_holder || "",
+      payee_account_no: p.payee_account_no || "",
+      payee_ifsc: p.payee_ifsc || "",
+      payee_bank_name: p.payee_bank_name || "",
+      payee_upi_id: p.payee_upi_id || "",
+      payee_proof_attachments: p.payee_proof_attachments || [],
+      _resubmit_id: p.id,
+    });
+    setResubmitMode("payment");
+    setEditNote("");
+    setOpenP(true);
   };
 
   const paymentFor = (qid) => payments.find((p) => p.quotation_id === qid);
@@ -219,7 +310,7 @@ export default function Quotations() {
       {/* Filter */}
       <div className="flex flex-wrap gap-2 items-center">
         <span className="overline">Filter by status:</span>
-        {["all", "pending", "approved", "payment_pending", "paid", "rejected"].map((s) => (
+        {["all", "pending", "sent_back", "approved", "payment_pending", "paid", "rejected"].map((s) => (
           <button
             key={s}
             onClick={() => setStatusFilter(s)}
@@ -266,6 +357,16 @@ export default function Quotations() {
                       <div className="font-medium">{q.vendor_name}</div>
                       <div className="text-xs text-[var(--muted)] max-w-md truncate">{q.description}</div>
                       {q.purpose && <div className="text-[10px] text-[var(--muted)] mt-1">Purpose: {q.purpose}</div>}
+                      {q.status === "sent_back" && q.sent_back_reason && (
+                        <div className="text-[10px] text-amber-900 bg-amber-50 border border-amber-300 px-2 py-1 mt-1" data-testid={`q-sentback-${q.id}`}>
+                          ↩ Sent back by {q.sent_back_by_name || "Approver"}: &ldquo;{q.sent_back_reason}&rdquo;
+                        </div>
+                      )}
+                      {p && p.status === "sent_back" && p.sent_back_reason && (
+                        <div className="text-[10px] text-amber-900 bg-amber-50 border border-amber-300 px-2 py-1 mt-1" data-testid={`p-sentback-${p.id}`}>
+                          ↩ Payment sent back by {p.sent_back_by_name || "Approver"}: &ldquo;{p.sent_back_reason}&rdquo;
+                        </div>
+                      )}
                       {(q.attachments || []).length > 0 && (
                         <div className="flex items-center gap-2 mt-1 flex-wrap">
                           {q.attachments.map((a) => (
@@ -292,6 +393,11 @@ export default function Quotations() {
                           {p.payee_account_no && <>
                             {" "}· {p.payee_bank_name || "Bank"} · A/c <span className="font-mono">****{String(p.payee_account_no).slice(-4)}</span> · IFSC <span className="font-mono">{p.payee_ifsc}</span>
                           </>}
+                        </div>
+                      )}
+                      {p && p.paid_by_name && (
+                        <div className="text-[10px] text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 mt-1 inline-block" data-testid={`q-paidby-${q.id}`}>
+                          ✓ Paid by <strong>{p.paid_by_name}</strong>{p.paid_at && <> · {String(p.paid_at).slice(0, 10)}</>}
                         </div>
                       )}
                       {p && (p.payee_proof_attachments || []).length > 0 && (
@@ -323,15 +429,19 @@ export default function Quotations() {
                           under which each level signed off. */}
                       {(q.chain_history || []).filter((h) => h.action !== "auto-skip").length > 0 && (
                         <div className="mt-2 space-y-1 border-l-2 border-emerald-200 pl-2" data-testid={`q-history-${q.id}`}>
-                          {q.chain_history.filter((h) => h.action !== "auto-skip").map((h, i) => (
-                            <div key={i} className="text-[10px]">
-                              <span className={h.action === "reject" ? "text-red-700" : "text-emerald-700"}>
-                                {h.action === "reject" ? "✕" : "✓"} L{h.level} · {h.by_user_name || "system"}
-                              </span>
-                              {h.remarks && <span className="text-[var(--muted)]"> — &ldquo;{h.remarks}&rdquo;</span>}
-                              <span className="text-[var(--muted)]"> · {(h.at || "").slice(0, 10)}</span>
-                            </div>
-                          ))}
+                          {q.chain_history.filter((h) => h.action !== "auto-skip").map((h, i) => {
+                            const sym = h.action === "reject" ? "✕" : (h.action === "send_back" ? "↩" : (h.action === "resubmit" ? "↻" : "✓"));
+                            const cls = h.action === "reject" ? "text-red-700" : (h.action === "send_back" ? "text-amber-800" : (h.action === "resubmit" ? "text-blue-700" : "text-emerald-700"));
+                            return (
+                              <div key={i} className="text-[10px]">
+                                <span className={cls}>
+                                  {sym} {h.action === "resubmit" ? "Resubmit" : `L${h.level}`} · {h.by_user_name || "system"}
+                                </span>
+                                {h.remarks && <span className="text-[var(--muted)]"> — &ldquo;{h.remarks}&rdquo;</span>}
+                                <span className="text-[var(--muted)]"> · {(h.at || "").slice(0, 10)}</span>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                       {/* Payment sub-status */}
@@ -342,14 +452,18 @@ export default function Quotations() {
                       )}
                       {p && (p.chain_history || []).filter((h) => h.action !== "auto-skip").length > 0 && (
                         <div className="mt-1 space-y-1 border-l-2 border-blue-200 pl-2">
-                          {p.chain_history.filter((h) => h.action !== "auto-skip").map((h, i) => (
-                            <div key={`p-${i}`} className="text-[10px]">
-                              <span className={h.action === "reject" ? "text-red-700" : "text-blue-700"}>
-                                {h.action === "reject" ? "✕" : "✓"} pay·L{h.level} · {h.by_user_name || "system"}
-                              </span>
-                              {h.remarks && <span className="text-[var(--muted)]"> — &ldquo;{h.remarks}&rdquo;</span>}
-                            </div>
-                          ))}
+                          {p.chain_history.filter((h) => h.action !== "auto-skip").map((h, i) => {
+                            const sym = h.action === "reject" ? "✕" : (h.action === "send_back" ? "↩" : (h.action === "resubmit" ? "↻" : "✓"));
+                            const cls = h.action === "reject" ? "text-red-700" : (h.action === "send_back" ? "text-amber-800" : (h.action === "resubmit" ? "text-blue-700" : "text-blue-700"));
+                            return (
+                              <div key={`p-${i}`} className="text-[10px]">
+                                <span className={cls}>
+                                  {sym} {h.action === "resubmit" ? "Resubmit" : `pay·L${h.level}`} · {h.by_user_name || "system"}
+                                </span>
+                                {h.remarks && <span className="text-[var(--muted)]"> — &ldquo;{h.remarks}&rdquo;</span>}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </td>
@@ -359,6 +473,16 @@ export default function Quotations() {
                         {canPay && (
                           <Button size="sm" variant="outline" className="rounded-none text-xs" onClick={() => openPayment(q)} data-testid={`quotation-pay-${q.id}`}>
                             <IndianRupee size={12} className="mr-1" /> Raise Payment
+                          </Button>
+                        )}
+                        {q.status === "sent_back" && (q.created_by === user?.id || user?.role === "admin") && (
+                          <Button size="sm" variant="outline" className="rounded-none text-xs text-amber-800 border-amber-300 hover:bg-amber-50" onClick={() => openResubmitQuotation(q)} data-testid={`quotation-resubmit-${q.id}`}>
+                            <Undo2 size={12} className="mr-1" /> Edit &amp; Resubmit
+                          </Button>
+                        )}
+                        {p && p.status === "sent_back" && (p.created_by === user?.id || user?.role === "admin") && (
+                          <Button size="sm" variant="outline" className="rounded-none text-xs text-amber-800 border-amber-300 hover:bg-amber-50" onClick={() => openResubmitPayment(q, p)} data-testid={`payment-resubmit-${p.id}`}>
+                            <Pencil size={12} className="mr-1" /> Edit Payment &amp; Resubmit
                           </Button>
                         )}
                         {canDelete && (
@@ -391,11 +515,15 @@ export default function Quotations() {
       </div>
 
       {/* New quotation dialog */}
-      <Dialog open={openQ} onOpenChange={setOpenQ}>
+      <Dialog open={openQ} onOpenChange={(o) => { if (!o) { setOpenQ(false); setResubmitMode(null); setEditNote(""); } }}>
         <DialogContent className="rounded-none max-w-2xl" data-testid="quotation-form">
           <DialogHeader>
-            <DialogTitle>New Quotation Request</DialogTitle>
-            <DialogDescription>Vendor quotation with estimated amount — approval workflow will route this for sign-off.</DialogDescription>
+            <DialogTitle>{resubmitMode === "quotation" ? "Edit & Resubmit Quotation" : "New Quotation Request"}</DialogTitle>
+            <DialogDescription>
+              {resubmitMode === "quotation"
+                ? "Approver ne request send-back ki hai. Fields update kariye aur edit note ke saath dobara submit kariye — chain Level 1 se restart hoga."
+                : "Vendor quotation with estimated amount — approval workflow will route this for sign-off."}
+            </DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-3">
             <div className="col-span-2">
@@ -493,20 +621,26 @@ export default function Quotations() {
               )}
             </div>
           </div>
+          {resubmitMode === "quotation" && (
+            <div className="border border-amber-300 bg-amber-50/60 p-3 mt-3">
+              <Label className="overline text-amber-900">Edit note (mandatory) — kya change kiya as per remarks *</Label>
+              <Textarea rows={2} value={editNote} onChange={(e) => setEditNote(e.target.value)} className="rounded-none mt-1" placeholder="e.g. Amount corrected to ₹1,145 as per invoice; attached updated bill" data-testid="q-edit-note" />
+            </div>
+          )}
           <DialogFooter>
-            <Button variant="outline" className="rounded-none" onClick={() => setOpenQ(false)}>Cancel</Button>
+            <Button variant="outline" className="rounded-none" onClick={() => { setOpenQ(false); setResubmitMode(null); setEditNote(""); }}>Cancel</Button>
             <Button onClick={submitQuotation} disabled={busy} className="rounded-none brand-btn" data-testid="q-submit">
-              {busy ? "Saving…" : "Raise Quotation"}
+              {busy ? "Saving…" : (resubmitMode === "quotation" ? "Resubmit Quotation" : "Raise Quotation")}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Payment dialog */}
-      <Dialog open={openP} onOpenChange={(o) => { if (!o) { setOpenP(false); setPayQuotation(null); } }}>
+      <Dialog open={openP} onOpenChange={(o) => { if (!o) { setOpenP(false); setPayQuotation(null); setResubmitMode(null); setEditNote(""); } }}>
         <DialogContent className="rounded-none" data-testid="payment-form">
           <DialogHeader>
-            <DialogTitle>Raise Payment Request</DialogTitle>
+            <DialogTitle>{resubmitMode === "payment" ? "Edit & Resubmit Payment" : "Raise Payment Request"}</DialogTitle>
             <DialogDescription>
               Against QRN <strong className="font-mono">{payQuotation?.qrn}</strong> · {payQuotation?.vendor_name}
             </DialogDescription>
@@ -634,10 +768,16 @@ export default function Quotations() {
               </div>
             </div>
           )}
+          {resubmitMode === "payment" && (
+            <div className="border border-amber-300 bg-amber-50/60 p-3 mt-2">
+              <Label className="overline text-amber-900">Edit note (mandatory) — kya change kiya as per remarks *</Label>
+              <Textarea rows={2} value={editNote} onChange={(e) => setEditNote(e.target.value)} className="rounded-none mt-1" placeholder="e.g. Updated IFSC after cancelled cheque re-verified" data-testid="p-edit-note" />
+            </div>
+          )}
           <DialogFooter>
-            <Button variant="outline" className="rounded-none" onClick={() => { setOpenP(false); setPayQuotation(null); }}>Cancel</Button>
+            <Button variant="outline" className="rounded-none" onClick={() => { setOpenP(false); setPayQuotation(null); setResubmitMode(null); setEditNote(""); }}>Cancel</Button>
             <Button onClick={submitPayment} disabled={busy} className="rounded-none brand-btn" data-testid="p-submit">
-              {busy ? "Saving…" : "Raise Payment Request"}
+              {busy ? "Saving…" : (resubmitMode === "payment" ? "Resubmit Payment" : "Raise Payment Request")}
             </Button>
           </DialogFooter>
         </DialogContent>

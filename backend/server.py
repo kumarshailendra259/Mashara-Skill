@@ -365,8 +365,13 @@ class ApprovalChainOut(ApprovalChainIn):
 class ApprovalActionIn(BaseModel):
     request_type: ApprovalType
     request_id: str
-    action: Literal["approve", "reject"]
+    action: Literal["approve", "reject", "send_back"]
     remarks: str = Field(min_length=3, description="Mandatory note explaining the decision (min 3 chars)")
+    # Only required when the current step IS the FINAL step of a payment or
+    # reimbursement chain — captures WHO actually released the money so the
+    # auto-created transaction (and dashboard) can show it.
+    paid_by_user_id: Optional[str] = None
+    paid_by_name: Optional[str] = None
 
 
 def _txn_scope_for_user(user: dict) -> dict:
@@ -1081,6 +1086,22 @@ async def me(user=Depends(get_current_user)):
 async def list_users(_=Depends(require_role("admin", "hr"))):
     docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
     return [UserOut(**d) for d in docs]
+
+
+@api.get("/users/payers")
+async def list_payers(_=Depends(get_current_user)):
+    """Return the roster of users who can be selected as `paid_by` when
+    releasing money against a Payment Request / Reimbursement final approval.
+    Scoped to finance-adjacent roles: admin, hr, accountant, senior_manager,
+    manager, center_manager. Available to any authenticated user so the final
+    approver (often an Accountant) can populate the dropdown without needing
+    admin-list privileges."""
+    PAYER_ROLES = ("admin", "hr", "accountant", "senior_manager", "manager", "center_manager")
+    docs = await db.users.find(
+        {"role": {"$in": list(PAYER_ROLES)}, "active": {"$ne": False}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "role": 1},
+    ).sort("name", 1).to_list(500)
+    return docs
 
 
 @api.patch("/auth/users/{uid}", response_model=UserOut)
@@ -4150,6 +4171,39 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                           link=_approval_link(body.request_type))
         return {"ok": True, "status": "rejected"}
 
+    if body.action == "send_back":
+        # Send-back parks the request in a `sent_back` state so the creator can
+        # edit as per remarks and resubmit; approval chain will restart from Lv1
+        # via the resubmit endpoint. current_level=0 keeps it out of the pending
+        # inbox query (which filters current_level > 0) without marking finalised.
+        now = datetime.now(timezone.utc).isoformat()
+        history.append(_history_entry(cur_level, "send_back", user, body.remarks or ""))
+        update = {
+            "current_level": 0,
+            "chain_history": history,
+            "status": "sent_back",
+            "sent_back_reason": body.remarks or "",
+            "sent_back_at": now,
+            "sent_back_by": user["id"],
+            "sent_back_by_name": user.get("name") or user.get("email"),
+            "sent_back_from_level": cur_level,
+        }
+        await coll.update_one({"id": body.request_id}, {"$set": update})
+        # If a payment gets sent back, temporarily park the quotation status too so
+        # the creator can update payee details and resubmit; on resubmit the
+        # quotation flips back to 'payment_pending'.
+        if body.request_type == "payment" and rec.get("quotation_id"):
+            await db.quotations.update_one(
+                {"id": rec["quotation_id"]},
+                {"$set": {"status": "payment_sent_back"}},
+            )
+        if rec.get("created_by") and rec["created_by"] != user["id"]:
+            await _notify(rec["created_by"],
+                          f"Your {body.request_type} was sent back for edits: {body.remarks}",
+                          ntype=f"{body.request_type}_sent_back", ref_id=body.request_id,
+                          link=_approval_link(body.request_type))
+        return {"ok": True, "status": "sent_back"}
+
     # Approve flow
     history.append(_history_entry(cur_level, "approve", user, body.remarks or ""))
     # Determine next level (skipping optional steps with no resolvable approver)
@@ -4171,6 +4225,11 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
 
     if is_last:
         # Final approval — finalise per type
+        # For payments and reimbursements the approver MUST tell us who actually
+        # released the money so the auto-created transaction shows the payer.
+        if body.request_type in ("payment", "reimbursement"):
+            if not (body.paid_by_name or "").strip():
+                raise HTTPException(400, "Please select who is making the payment (paid_by_name is required for final approval)")
         if body.request_type == "reimbursement":
             now = datetime.now(timezone.utc).isoformat()
             staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
@@ -4186,6 +4245,10 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "center_id": (staff or {}).get("center_id"),
                 "project_id": None,
                 "items": [], "attachments": rec.get("attachments") or [],
+                "source": "reimbursement",
+                "reimbursement_id": rec.get("id"),
+                "paid_by_user_id": body.paid_by_user_id,
+                "paid_by_name": body.paid_by_name,
                 "created_by": user["id"], "created_at": now,
                 "status": "approved", "approved_by": user["id"], "approved_at": now,
                 "rejected_reason": None,
@@ -4197,6 +4260,8 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "status": "paid",
                 "paid_at": now,
                 "paid_by": user["id"],
+                "paid_by_user_id": body.paid_by_user_id,
+                "paid_by_name": body.paid_by_name,
                 "txn_id": txn["id"],
             }
         elif body.request_type == "leave":
@@ -4336,6 +4401,10 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "quotation_id": rec.get("quotation_id"),
                 "payment_id": rec.get("id"),
                 "qrn": rec.get("qrn"),
+                "payment_mode": rec.get("payment_mode"),
+                "vendor_name": rec.get("vendor_name"),
+                "paid_by_user_id": body.paid_by_user_id,
+                "paid_by_name": body.paid_by_name,
                 "created_by": user["id"], "created_at": now,
                 "status": "approved", "approved_by": user["id"], "approved_at": now,
                 "rejected_reason": None,
@@ -4352,6 +4421,8 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "status": "paid",
                 "paid_at": now,
                 "paid_by": user["id"],
+                "paid_by_user_id": body.paid_by_user_id,
+                "paid_by_name": body.paid_by_name,
                 "txn_id": txn["id"],
             }
         else:  # transaction
@@ -4399,11 +4470,20 @@ async def list_pending_approvals(user=Depends(get_current_user)):
         for rec in rows:
             if await _user_can_act_on_request(user, rec):
                 step = await _current_step(rec)
+                # Compute whether this step is the FINAL one so the UI knows to
+                # ask "Paid By" for payments/reimbursements.
+                snap = rec.get("chain_snapshot") or []
+                is_final_step = False
+                if snap:
+                    max_level = max((s.get("level", 0) for s in snap), default=0)
+                    is_final_step = (rec.get("current_level") == max_level)
                 out.append({
                     "request_type": req_type,
                     "request_id": rec["id"],
                     "current_level": rec.get("current_level"),
                     "step_label": (step or {}).get("label"),
+                    "is_final_step": is_final_step,
+                    "total_steps": len(snap),
                     "summary": {
                         "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount"),
                         "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
@@ -5594,23 +5674,76 @@ async def delete_quotation(qid: str, user=Depends(get_current_user)):
     return {"ok": True}
 
 
-@api.post("/payments")
-async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
-    """Raise a payment request against an APPROVED quotation."""
-    if user.get("role") not in QUOTATION_CREATORS:
-        raise HTTPException(403, "Partners cannot raise payment requests")
-    q = await db.quotations.find_one({"id": body.quotation_id}, {"_id": 0})
+class QuotationResubmitIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    description: Optional[str] = None
+    vendor_id: Optional[str] = None
+    vendor_name: Optional[str] = None
+    estimated_amount: Optional[float] = Field(default=None, gt=0)
+    expected_delivery_date: Optional[str] = None
+    purpose: Optional[str] = None
+    attachments: Optional[List[AttachmentRef]] = None
+    edit_note: str = Field(min_length=3, description="What changed as per the send-back remarks")
+
+
+@api.post("/quotations/{qid}/resubmit")
+async def resubmit_quotation(qid: str, body: QuotationResubmitIn, user=Depends(get_current_user)):
+    """Creator edits a SENT-BACK quotation as per the approver's remarks and
+    re-enters the approval chain from Level 1. Chain history is preserved so
+    reviewers can see the full trail (send-back + resubmit + subsequent decisions).
+    """
+    q = await db.quotations.find_one({"id": qid}, {"_id": 0})
     if not q:
         raise HTTPException(404, "Quotation not found")
-    if q.get("status") != "approved":
-        raise HTTPException(400, f"Quotation is not approved (status={q.get('status')})")
-    if q.get("payment_id"):
-        raise HTTPException(400, "A payment request already exists for this quotation")
-    if user.get("role") in ("center_manager", "center_staff"):
-        assigned = user.get("assigned_center_ids") or []
-        if q["center_id"] not in assigned:
-            raise HTTPException(403, "You can only raise payments for centers you are assigned to")
-    # ---- Payee details validation ----
+    if q.get("status") != "sent_back":
+        raise HTTPException(400, f"Only sent-back quotations can be resubmitted (status={q.get('status')})")
+    if q.get("created_by") != user["id"] and user.get("role") != "admin":
+        raise HTTPException(403, "Only the original raiser (or admin) can resubmit")
+    now = datetime.now(timezone.utc).isoformat()
+    update: dict = {}
+    for f in ("description", "vendor_id", "vendor_name", "expected_delivery_date", "purpose"):
+        v = getattr(body, f)
+        if v is not None:
+            update[f] = v
+    if body.estimated_amount is not None:
+        update["estimated_amount"] = float(body.estimated_amount)
+    if body.attachments is not None:
+        update["attachments"] = [a.model_dump() for a in body.attachments]
+    history = list(q.get("chain_history") or [])
+    history.append({
+        "level": 0, "action": "resubmit", "by_user_id": user["id"],
+        "by_user_name": user.get("name") or user.get("email"),
+        "at": now, "remarks": body.edit_note,
+    })
+    update.update({
+        "status": "pending",
+        "current_level": 1,
+        "chain_history": history,
+        "resubmitted_at": now,
+        "resubmitted_by": user["id"],
+        # Clear stale rejection/send-back stamps so the UI reflects a fresh cycle
+        "sent_back_reason": None, "sent_back_at": None, "sent_back_by": None,
+        "sent_back_by_name": None, "sent_back_from_level": None,
+        "rejected_reason": None, "rejected_at": None,
+    })
+    await db.quotations.update_one({"id": qid}, {"$set": update})
+    merged = {**q, **update}
+    # Notify Lv1 approvers again
+    cur = await _current_step(merged)
+    if cur:
+        for uid in await _resolve_step_user_ids(cur, merged):
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"Resubmitted quotation from {q.get('created_by_name')} — {merged.get('vendor_name')} · ₹{float(merged.get('estimated_amount', 0)):,.0f}",
+                              ntype="quotation_pending", ref_id=qid, link="/quotations")
+    merged.pop("_id", None)
+    return _json_safe(merged)
+
+
+def _validate_payment_payee(body: "PaymentIn") -> None:
+    """Enforce payee details/proof based on payment_mode. Raises HTTPException(400)
+    with a user-friendly message when required fields are missing so both the
+    create-payment and resubmit-payment paths share identical rules."""
     mode = (body.payment_mode or "").lower().strip()
     if mode not in ("cash", "bank", "upi", "cheque", "card"):
         raise HTTPException(400, "Invalid payment_mode — must be cash / bank / upi / cheque / card")
@@ -5630,6 +5763,25 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
             raise HTTPException(400, "UPI payment requires a valid UPI ID")
         if len(body.payee_proof_attachments or []) == 0:
             raise HTTPException(400, "Please attach a UPI QR screenshot as proof for UPI payment")
+
+
+@api.post("/payments")
+async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
+    """Raise a payment request against an APPROVED quotation."""
+    if user.get("role") not in QUOTATION_CREATORS:
+        raise HTTPException(403, "Partners cannot raise payment requests")
+    q = await db.quotations.find_one({"id": body.quotation_id}, {"_id": 0})
+    if not q:
+        raise HTTPException(404, "Quotation not found")
+    if q.get("status") != "approved":
+        raise HTTPException(400, f"Quotation is not approved (status={q.get('status')})")
+    if q.get("payment_id"):
+        raise HTTPException(400, "A payment request already exists for this quotation")
+    if user.get("role") in ("center_manager", "center_staff"):
+        assigned = user.get("assigned_center_ids") or []
+        if q["center_id"] not in assigned:
+            raise HTTPException(403, "You can only raise payments for centers you are assigned to")
+    _validate_payment_payee(body)
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["quotation_id"] = q["id"]
@@ -5657,6 +5809,102 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
                               ntype="payment_pending", ref_id=doc["id"], link="/quotations")
     doc.pop("_id", None)
     return _json_safe(doc)
+
+
+class PaymentResubmitIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    actual_amount: Optional[float] = Field(default=None, gt=0)
+    payment_mode: Optional[str] = None
+    payment_date: Optional[str] = None
+    txn_type_override: Optional[QuotationCategory] = None
+    notes: Optional[str] = None
+    payee_account_holder: Optional[str] = None
+    payee_account_no: Optional[str] = None
+    payee_ifsc: Optional[str] = None
+    payee_bank_name: Optional[str] = None
+    payee_upi_id: Optional[str] = None
+    attachments: Optional[List[AttachmentRef]] = None
+    payee_proof_attachments: Optional[List[AttachmentRef]] = None
+    edit_note: str = Field(min_length=3, description="What changed as per the send-back remarks")
+
+
+@api.post("/payments/{pid}/resubmit")
+async def resubmit_payment(pid: str, body: PaymentResubmitIn, user=Depends(get_current_user)):
+    """Creator edits a SENT-BACK payment as per approver remarks and re-enters
+    the approval chain from Level 1. Reuses `_validate_payment_payee` after
+    merging the incoming edits over the existing doc so payee rules stay
+    identical to the initial create-payment path."""
+    p = await db.payments.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Payment not found")
+    if p.get("status") != "sent_back":
+        raise HTTPException(400, f"Only sent-back payments can be resubmitted (status={p.get('status')})")
+    if p.get("created_by") != user["id"] and user.get("role") != "admin":
+        raise HTTPException(403, "Only the original raiser (or admin) can resubmit")
+    now = datetime.now(timezone.utc).isoformat()
+    # Apply the edits over a working copy so validation sees the FINAL state
+    merged = dict(p)
+    for f in ("payment_mode", "payment_date", "notes",
+              "payee_account_holder", "payee_account_no", "payee_ifsc",
+              "payee_bank_name", "payee_upi_id", "txn_type_override"):
+        v = getattr(body, f)
+        if v is not None:
+            merged[f] = v
+    if body.actual_amount is not None:
+        merged["actual_amount"] = float(body.actual_amount)
+    if body.attachments is not None:
+        merged["attachments"] = [a.model_dump() for a in body.attachments]
+    if body.payee_proof_attachments is not None:
+        merged["payee_proof_attachments"] = [a.model_dump() for a in body.payee_proof_attachments]
+    # Reuse the strict payee validation used by create_payment
+    class _V:  # lightweight shim satisfying the helper's attribute reads
+        pass
+    v = _V()
+    for f in ("payment_mode", "payee_account_holder", "payee_account_no",
+              "payee_ifsc", "payee_bank_name", "payee_upi_id"):
+        setattr(v, f, merged.get(f))
+    v.payee_proof_attachments = merged.get("payee_proof_attachments") or []
+    _validate_payment_payee(v)
+
+    history = list(p.get("chain_history") or [])
+    history.append({
+        "level": 0, "action": "resubmit", "by_user_id": user["id"],
+        "by_user_name": user.get("name") or user.get("email"),
+        "at": now, "remarks": body.edit_note,
+    })
+    update = {k: merged[k] for k in (
+        "payment_mode", "payment_date", "notes", "actual_amount",
+        "payee_account_holder", "payee_account_no", "payee_ifsc",
+        "payee_bank_name", "payee_upi_id", "attachments",
+        "payee_proof_attachments", "txn_type_override",
+    ) if k in merged}
+    update.update({
+        "status": "pending",
+        "current_level": 1,
+        "chain_history": history,
+        "resubmitted_at": now,
+        "resubmitted_by": user["id"],
+        "sent_back_reason": None, "sent_back_at": None, "sent_back_by": None,
+        "sent_back_by_name": None, "sent_back_from_level": None,
+        "rejected_reason": None, "rejected_at": None,
+    })
+    await db.payments.update_one({"id": pid}, {"$set": update})
+    # Flip the parent quotation back to 'payment_pending' now that the payment
+    # is re-entering the chain (it was parked at 'payment_sent_back').
+    if p.get("quotation_id"):
+        await db.quotations.update_one(
+            {"id": p["quotation_id"]}, {"$set": {"status": "payment_pending"}},
+        )
+    full = {**p, **update}
+    cur = await _current_step(full)
+    if cur:
+        for uid in await _resolve_step_user_ids(cur, full):
+            if uid != user["id"]:
+                await _notify(uid,
+                              f"Resubmitted payment — QRN {full.get('qrn')} · ₹{float(full.get('actual_amount', 0)):,.0f}",
+                              ntype="payment_pending", ref_id=pid, link="/quotations")
+    full.pop("_id", None)
+    return _json_safe(full)
 
 
 @api.get("/payments")
