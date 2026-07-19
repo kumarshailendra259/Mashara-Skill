@@ -563,6 +563,110 @@ def _can_auto_approve(user: dict) -> bool:
     return user.get("role") == "admin"
 
 
+# ---------------------------------------------------------------------------
+# Entity list scoping (Companies / Partners / Centers / Projects)
+# ---------------------------------------------------------------------------
+# Global-visibility roles: they see EVERY entity regardless of assignment.
+_ENTITY_FULL_ACCESS_ROLES = {"admin", "manager", "senior_manager", "hr", "accountant"}
+
+
+async def _visible_entity_ids(user: dict, etype: str):
+    """Return the set of entity IDs a given user is allowed to see for `etype`,
+    or `None` when the user has unrestricted visibility.
+
+    Scoping model:
+      * partner role → sees own partner + mapped centers + companies/projects that
+        appear in transactions or batches at those centers.
+      * center_manager / center_staff → sees own assigned centers + the partners /
+        companies / projects that transact at those centers.
+      * viewer / anyone else → sees nothing (empty set).
+
+    This keeps a partner's / staff's dropdowns and lists focused on the scope
+    they are actually associated with, hiding unrelated companies and centers.
+    """
+    role = user.get("role")
+    if role in _ENTITY_FULL_ACCESS_ROLES:
+        return None  # unrestricted
+
+    # ---- Determine the user's center + partner footprint --------------------
+    center_ids: set = set()
+    partner_ids: set = set()
+
+    if role in ("center_manager", "center_staff", "staff"):
+        center_ids.update(user.get("assigned_center_ids") or [])
+        # Partners that are mapped to those centers (via batches, legacy field
+        # centers.partner_id, or transaction history).
+        if center_ids:
+            async for b in db.batches.find(
+                {"center_id": {"$in": list(center_ids)}},
+                {"_id": 0, "partner_ids": 1},
+            ):
+                for pid in (b.get("partner_ids") or []):
+                    partner_ids.add(pid)
+            async for c in db.centers.find(
+                {"id": {"$in": list(center_ids)}},
+                {"_id": 0, "partner_id": 1},
+            ):
+                if c.get("partner_id"):
+                    partner_ids.add(c["partner_id"])
+            txn_pids = await db.transactions.distinct(
+                "partner_id",
+                {"center_id": {"$in": list(center_ids)}, "partner_id": {"$ne": None}},
+            )
+            partner_ids.update([p for p in txn_pids if p])
+
+    elif role == "partner":
+        own_pid = user.get("assigned_partner_id")
+        if own_pid:
+            partner_ids.add(own_pid)
+            mapped = await _centers_for_partner(own_pid)
+            center_ids.update(mapped or [])
+        # If a partner user was ever ALSO assigned specific centers directly, honour those too.
+        center_ids.update(user.get("assigned_center_ids") or [])
+
+    else:
+        # viewer / unknown → no visibility
+        return set()
+
+    # ---- Resolve visibility per entity type ---------------------------------
+    if etype == "center":
+        return center_ids
+
+    if etype == "partner":
+        return partner_ids
+
+    if etype in ("company", "project"):
+        target_field = "company_id" if etype == "company" else "project_id"
+        ids: set = set()
+        if center_ids:
+            # From batches at those centers
+            async for b in db.batches.find(
+                {"center_id": {"$in": list(center_ids)}, target_field: {"$ne": None}},
+                {"_id": 0, target_field: 1},
+            ):
+                v = b.get(target_field)
+                if v:
+                    ids.add(v)
+            # From txn history at those centers
+            txn_vals = await db.transactions.distinct(
+                target_field,
+                {"center_id": {"$in": list(center_ids)}, target_field: {"$ne": None}},
+            )
+            ids.update([v for v in txn_vals if v])
+        # Also include entities referenced in the partner's OWN transaction history
+        # (covers cases where the transaction wasn't linked to a center).
+        if role == "partner" and user.get("assigned_partner_id"):
+            txn_vals = await db.transactions.distinct(
+                target_field,
+                {"partner_id": user["assigned_partner_id"], target_field: {"$ne": None}},
+            )
+            ids.update([v for v in txn_vals if v])
+        return ids
+
+    # Unknown etype → default deny
+    return set()
+
+
 # ---------- Startup ----------
 async def _ensure_libreoffice_installed() -> None:
     """Background best-effort install of libreoffice-writer + core.
@@ -1510,9 +1614,15 @@ async def _auto_create_user_for_entity(etype: str, entity_doc: dict) -> Optional
 
 
 @api.get("/entities/{etype}", response_model=List[EntityOut])
-async def list_entities(etype: EntityType, _=Depends(get_current_user)):
+async def list_entities(etype: EntityType, user=Depends(get_current_user)):
     col = ENTITY_COLLECTION[etype]
-    docs = await db[col].find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    query: dict = {}
+    visible = await _visible_entity_ids(user, etype)
+    if visible is not None:
+        if not visible:
+            return []
+        query["id"] = {"$in": list(visible)}
+    docs = await db[col].find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return [EntityOut(**d) for d in docs]
 
 
