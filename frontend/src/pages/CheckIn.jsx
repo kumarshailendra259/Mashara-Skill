@@ -10,12 +10,15 @@ import { toast } from "sonner";
 import {
   Camera, MapPin, CheckCircle2, LogOut, RefreshCw, Home, CalendarDays, Plane,
   Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle, Trash2,
-  Bell, ChevronLeft, ChevronRight, Megaphone,
+  Bell, ChevronLeft, ChevronRight, Megaphone, Menu,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet, SheetContent,
+} from "@/components/ui/sheet";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 
 const STATUS_OPTIONS = [
@@ -50,6 +53,7 @@ export default function CheckIn() {
   const { user, loading, login, logout } = useAuth();
   const nav = useNavigate();
   const [tab, setTab] = useState("home");
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // Login state
   const [email, setEmail] = useState("");
@@ -138,6 +142,69 @@ export default function CheckIn() {
 
   return (
     <div className="min-h-screen bg-[var(--bg)] pb-24 md:pb-0 md:flex" data-testid="checkin-page">
+      {/* Mobile drawer — mirrors desktop sidebar so users can navigate + logout easily on phone */}
+      <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
+        <SheetContent side="left" className="p-0 w-72 max-w-[85vw] flex flex-col md:hidden" data-testid="checkin-mobile-drawer">
+          <div className="px-5 py-5 border-b border-[var(--border)] flex items-center gap-3">
+            <div className="h-9 w-9 bg-[var(--brand)] text-white flex items-center justify-center font-heading font-black text-lg">M</div>
+            <div>
+              <div className="font-heading font-black text-sm leading-tight">MASHARA SKILLS</div>
+              <div className="overline text-[9px]">STAFF APP</div>
+            </div>
+          </div>
+          {/* User summary card */}
+          <div className="px-5 py-3 border-b border-[var(--border)] bg-blue-50/40">
+            <div className="text-[10px] uppercase tracking-widest text-[var(--muted)]">Signed in as</div>
+            <div className="font-semibold text-sm mt-0.5 truncate">{summary?.staff?.name || user?.name || user?.email}</div>
+            <div className="text-[11px] text-[var(--muted)] truncate">{user?.email}</div>
+            {summary?.staff?.center_name && (
+              <div className="mt-1 text-[11px] text-[var(--brand)] flex items-center gap-1"><MapPin size={11} />{summary.staff.center_name}</div>
+            )}
+          </div>
+          <nav className="flex-1 py-3 overflow-y-auto">
+            {SIDEBAR_ITEMS.map((s) => {
+              const Icon = s.icon;
+              const active = tab === s.v;
+              return (
+                <button
+                  key={s.v}
+                  onClick={() => { setTab(s.v); setDrawerOpen(false); }}
+                  className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${active ? "bg-blue-50 text-[var(--brand)] border-l-4 border-[var(--brand)] font-bold" : "text-[var(--muted)] hover:bg-gray-50 border-l-4 border-transparent"}`}
+                  data-testid={`drawer-${s.v}`}
+                >
+                  <Icon size={16} strokeWidth={active ? 2.5 : 1.8} />
+                  <span>{s.label}</span>
+                </button>
+              );
+            })}
+            {/* Bridge to the main workspace for admins / managers / partners */}
+            {user?.role && !["staff", "center_staff"].includes(user.role) && (
+              <button
+                onClick={() => { setDrawerOpen(false); nav("/"); }}
+                className="w-full flex items-center gap-3 px-5 py-2.5 text-sm text-[var(--muted)] hover:bg-gray-50 border-l-4 border-transparent"
+                data-testid="drawer-goto-workspace"
+              >
+                <Home size={16} strokeWidth={1.8} />
+                <span>Go to Workspace</span>
+              </button>
+            )}
+          </nav>
+          <div className="border-t border-[var(--border)]">
+            <button
+              onClick={() => { setDrawerOpen(false); logout(); }}
+              className="w-full flex items-center gap-3 px-5 py-3 text-sm text-red-600 hover:bg-red-50 transition-colors"
+              data-testid="drawer-logout"
+            >
+              <LogOut size={16} strokeWidth={1.8} />
+              <span>Sign out</span>
+            </button>
+          </div>
+          <div className="px-5 py-3 border-t border-[var(--border)] text-[10px] text-[var(--muted)]">
+            © {new Date().getFullYear()} Mashara Skills · v1.0
+          </div>
+        </SheetContent>
+      </Sheet>
+
       {/* Desktop sidebar — only visible on lg+ (mobile falls back to bottom tab bar) */}
       <aside className="hidden md:flex md:w-60 lg:w-64 shrink-0 flex-col bg-white border-r border-[var(--border)] min-h-screen sticky top-0">
         <div className="px-5 py-5 border-b border-[var(--border)] flex items-center gap-3">
@@ -203,6 +270,15 @@ export default function CheckIn() {
         {/* Top row: mobile logo + right-side actions (bell + avatar) */}
         <div className="relative flex items-center justify-between mb-3">
           <div className="md:hidden flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              aria-label="Open menu"
+              data-testid="checkin-mobile-menu"
+              className="h-8 w-8 -ml-1 flex items-center justify-center bg-white/10 hover:bg-white/20 active:bg-white/30 transition-colors"
+            >
+              <Menu size={18} />
+            </button>
             <div className="h-7 w-7 bg-white/20 flex items-center justify-center font-black">M</div>
             <span className="font-heading font-black text-sm">MASHARA SKILLS</span>
           </div>
