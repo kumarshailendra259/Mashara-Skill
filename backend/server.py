@@ -3155,6 +3155,7 @@ class SelfCheckInIn(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     accuracy: Optional[float] = None
+    address: Optional[str] = None  # reverse-geocoded full address (with pincode) from client
     selfie_path: Optional[str] = None
     selfie_filename: Optional[str] = None
 
@@ -3164,6 +3165,7 @@ class CheckOutIn(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     accuracy: Optional[float] = None
+    address: Optional[str] = None  # reverse-geocoded full address (with pincode) from client
     selfie_path: Optional[str] = None
     selfie_filename: Optional[str] = None
 
@@ -3650,7 +3652,7 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
         "marked_by": user["id"],
         "check_in_at": now_iso,
     }
-    for k in ("status", "latitude", "longitude", "accuracy", "selfie_path", "selfie_filename"):
+    for k in ("status", "latitude", "longitude", "accuracy", "address", "selfie_path", "selfie_filename"):
         if k in body_dict:
             doc[k] = body_dict[k]
     new_id = str(uuid.uuid4())
@@ -3679,7 +3681,8 @@ async def self_check_out(body: CheckOutIn, user=Depends(get_current_user)):
     update = {"check_out_at": now_iso}
     body_dict = body.model_dump(exclude_none=True)
     for k, target in (("latitude", "check_out_latitude"), ("longitude", "check_out_longitude"),
-                      ("accuracy", "check_out_accuracy"), ("selfie_path", "check_out_selfie_path"),
+                      ("accuracy", "check_out_accuracy"), ("address", "check_out_address"),
+                      ("selfie_path", "check_out_selfie_path"),
                       ("selfie_filename", "check_out_selfie_filename")):
         if k in body_dict:
             update[target] = body_dict[k]

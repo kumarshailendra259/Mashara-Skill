@@ -87,35 +87,118 @@ export default function CheckIn() {
   // ---- Mobile login form ----
   if (!user || user === false) {
     return (
-      <div className="min-h-screen flex flex-col bg-[var(--bg)]" data-testid="checkin-login">
-        <div className="px-5 py-6 bg-[var(--brand)] text-white">
-          <div className="overline opacity-80">Mashara Skills · Staff App</div>
-          <h1 className="font-heading font-black text-2xl mt-1 leading-tight">Welcome</h1>
-          <p className="text-xs opacity-80 mt-1">Sign in with your staff account to access the mobile app.</p>
+      <div className="min-h-screen flex flex-col bg-[var(--bg)] relative overflow-hidden" data-testid="checkin-login">
+        {/* Immersive brand hero */}
+        <div
+          className="relative px-5 pt-8 pb-16 text-white overflow-hidden"
+          style={{
+            background:
+              "linear-gradient(135deg, #0b1f4d 0%, #1E3A8A 45%, #2E64C7 100%)",
+          }}
+        >
+          {/* Decorative blobs */}
+          <div className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-blue-400/25 blur-3xl pointer-events-none" aria-hidden />
+          <div className="absolute -bottom-32 -left-16 w-80 h-80 rounded-full bg-indigo-500/25 blur-3xl pointer-events-none" aria-hidden />
+          {/* City silhouette (SVG) */}
+          <div
+            className="absolute inset-0 opacity-10 pointer-events-none"
+            style={{
+              backgroundImage:
+                "url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22600%22 height=%22200%22><g fill=%22white%22><rect x=%22450%22 y=%2260%22 width=%2220%22 height=%22140%22/><rect x=%22475%22 y=%2290%22 width=%2225%22 height=%22110%22/><rect x=%22505%22 y=%2245%22 width=%2222%22 height=%22155%22/><rect x=%22535%22 y=%2280%22 width=%2218%22 height=%22120%22/><rect x=%22560%22 y=%2255%22 width=%2225%22 height=%22145%22/></g></svg>')",
+              backgroundRepeat: "no-repeat", backgroundPosition: "right bottom",
+            }}
+            aria-hidden
+          />
+          {/* Grid overlay */}
+          <div
+            className="absolute inset-0 opacity-[0.07] pointer-events-none"
+            style={{
+              backgroundImage:
+                "linear-gradient(rgba(255,255,255,0.35) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.35) 1px, transparent 1px)",
+              backgroundSize: "44px 44px",
+            }}
+            aria-hidden
+          />
+
+          <div className="relative flex items-center gap-3 mb-6">
+            <div className="h-11 w-11 bg-white text-[#0b1f4d] flex items-center justify-center font-heading font-black text-xl shadow-lg">M</div>
+            <div className="leading-tight">
+              <div className="font-heading font-black text-sm">MASHARA SKILLS</div>
+              <div className="text-[10px] uppercase tracking-[0.22em] text-white/70">Staff App</div>
+            </div>
+          </div>
+
+          <div className="relative">
+            <div className="text-[11px] uppercase tracking-[0.28em] text-white/70 mb-2">Welcome back</div>
+            <h1 className="font-heading font-black text-3xl leading-[1.1] tracking-tight">
+              Sign in to<br />
+              <span className="text-blue-300">start your shift.</span>
+            </h1>
+            <p className="text-xs opacity-80 mt-3 max-w-xs">
+              Mark attendance, apply leave, raise claims and view your salary — all in one place.
+            </p>
+          </div>
         </div>
-        <form onSubmit={doLogin} className="p-5 space-y-4 max-w-md w-full mx-auto">
-          <div className="space-y-2">
-            <Label className="overline">Email</Label>
-            <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="rounded-none h-12 text-base" autoFocus data-testid="checkin-email" />
+
+        {/* Card lifts up over hero */}
+        <form
+          onSubmit={doLogin}
+          className="relative -mt-10 px-5 pb-8 max-w-md w-full mx-auto"
+        >
+          <div className="bg-white shadow-2xl border border-gray-100 p-5 space-y-4">
+            <div className="space-y-2">
+              <Label className="overline">Email</Label>
+              <Input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} className="rounded-none h-12 text-base" autoFocus data-testid="checkin-email" />
+            </div>
+            <div className="space-y-2">
+              <Label className="overline">Password</Label>
+              <Input type="password" required value={pwd} onChange={(e) => setPwd(e.target.value)} className="rounded-none h-12 text-base" data-testid="checkin-password" />
+            </div>
+            <Button
+              type="submit"
+              disabled={busyLogin}
+              className="rounded-none w-full h-12 text-base font-bold tracking-wide text-white"
+              style={{ background: "linear-gradient(90deg, #2E64C7 0%, #1E3A8A 100%)" }}
+              data-testid="checkin-login-btn"
+            >
+              {busyLogin ? "Signing in…" : "Sign In"}
+            </Button>
+            <div className="flex items-center justify-between pt-1">
+              <button
+                type="button"
+                onClick={() => nav("/forgot-password", { state: { from: "/check-in" } })}
+                className="text-sm text-[var(--brand)] hover:underline font-medium"
+                data-testid="checkin-forgot-password"
+              >
+                Forgot password?
+              </button>
+              <button
+                type="button"
+                onClick={() => nav("/")}
+                className="text-sm text-[var(--muted)] hover:underline"
+              >
+                Open full portal →
+              </button>
+            </div>
           </div>
-          <div className="space-y-2">
-            <Label className="overline">Password</Label>
-            <Input type="password" required value={pwd} onChange={(e) => setPwd(e.target.value)} className="rounded-none h-12 text-base" data-testid="checkin-password" />
+
+          {/* Feature strip */}
+          <div className="grid grid-cols-3 gap-2 mt-5 text-center">
+            {[
+              { label: "Geo Check-in", icon: MapPin },
+              { label: "Leaves", icon: Plane },
+              { label: "Salary", icon: Wallet },
+            ].map((f) => (
+              <div key={f.label} className="bg-white/70 backdrop-blur border border-gray-100 p-2.5 flex flex-col items-center gap-1 shadow-sm">
+                <f.icon size={16} className="text-[var(--brand)]" />
+                <span className="text-[10px] font-medium text-[var(--ink)]">{f.label}</span>
+              </div>
+            ))}
           </div>
-          <Button type="submit" disabled={busyLogin} className="brand-btn rounded-none w-full h-12 text-base" data-testid="checkin-login-btn">
-            {busyLogin ? "Signing in…" : "Sign In"}
-          </Button>
-          <button
-            type="button"
-            onClick={() => nav("/forgot-password", { state: { from: "/check-in" } })}
-            className="block w-full text-center text-sm text-[var(--brand)] hover:underline"
-            data-testid="checkin-forgot-password"
-          >
-            Forgot password?
-          </button>
-          <button type="button" onClick={() => nav("/")} className="block w-full text-center text-sm text-[var(--muted)] hover:underline">
-            Open full portal →
-          </button>
+
+          <div className="text-center text-[10px] text-[var(--muted)] mt-6">
+            © {new Date().getFullYear()} Mashara Skills · Secure staff portal
+          </div>
         </form>
       </div>
     );
@@ -954,9 +1037,30 @@ function AttendanceTab() {
     setLocErr("");
     if (!navigator.geolocation) { setLocErr("Geolocation not supported"); return; }
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setCoords({ latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy });
+      async (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords;
+        setCoords({ latitude, longitude, accuracy, address: null, addressLoading: true });
         toast.success("Location captured");
+        // Reverse-geocode via OpenStreetMap Nominatim (free, no API key).
+        // Best-effort: if it fails we still keep the coordinates.
+        try {
+          const r = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
+            { headers: { "Accept-Language": "en" } },
+          );
+          if (r.ok) {
+            const j = await r.json();
+            const addr = j?.display_name || null;
+            const pincode = j?.address?.postcode || null;
+            setCoords((c) => c && c.latitude === latitude && c.longitude === longitude
+              ? { ...c, address: addr, pincode, addressLoading: false }
+              : c);
+          } else {
+            setCoords((c) => c ? { ...c, addressLoading: false } : c);
+          }
+        } catch {
+          setCoords((c) => c ? { ...c, addressLoading: false } : c);
+        }
       },
       (err) => { setLocErr(err.message || "Location denied"); toast.error(err.message || "Location permission denied"); },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
@@ -983,6 +1087,7 @@ function AttendanceTab() {
     try {
       await api.post("/attendance/self", {
         status, latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy,
+        address: coords.address || undefined,
         selfie_path: selfie.path, selfie_filename: selfie.filename,
       });
       toast.success("Checked in");
@@ -998,6 +1103,7 @@ function AttendanceTab() {
     try {
       await api.post("/attendance/checkout", {
         latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy,
+        address: coords.address || undefined,
         selfie_path: selfie?.path, selfie_filename: selfie?.filename,
       });
       toast.success("Checked out");
@@ -1030,7 +1136,33 @@ function AttendanceTab() {
                 {coords && <CheckCircle2 className="text-[var(--success)]" size={18} />}
               </div>
               {coords ? (
-                <div className="text-xs text-[var(--muted)] mt-1">{coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · ±{Math.round(coords.accuracy)}m</div>
+                <div className="mt-1 space-y-1">
+                  {coords.address ? (
+                    <div className="text-xs text-[var(--ink)] leading-snug break-words" data-testid="att-address">
+                      {coords.address}
+                      {coords.pincode && !coords.address.includes(coords.pincode) && (
+                        <span className="ml-1 font-medium">· PIN {coords.pincode}</span>
+                      )}
+                    </div>
+                  ) : coords.addressLoading ? (
+                    <div className="text-xs text-[var(--muted)] italic">Fetching full address…</div>
+                  ) : (
+                    <div className="text-xs text-[var(--muted)] italic">Address unavailable</div>
+                  )}
+                  <div className="text-[10px] text-[var(--muted)] num flex items-center gap-2">
+                    <span>{coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)}</span>
+                    <span>·</span>
+                    <span>±{Math.round(coords.accuracy)}m</span>
+                    <button
+                      type="button"
+                      onClick={captureLocation}
+                      className="ml-auto text-[var(--brand)] hover:underline"
+                      data-testid="att-refresh-loc"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                </div>
               ) : (
                 <Button size="sm" onClick={captureLocation} className="brand-btn rounded-none mt-2 w-full" data-testid="att-capture-loc">Get Location</Button>
               )}
