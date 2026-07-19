@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.masharaskills.attendance",
+      "sha256_cert_fingerprints": [
+        "59:06:A6:EF:B1:DF:AE:BF:48:A1:2C:EF:65:50:1A:2F:13:FB:BA:1B:27:39:F3:45:34:BB:50:36:39:C8:F1:48"
+      ]
+    }
+  }
+]
