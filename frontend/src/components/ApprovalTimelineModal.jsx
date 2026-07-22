@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Check, X, Bell } from "lucide-react";
 
@@ -69,7 +69,12 @@ export default function ApprovalTimelineModal({ type, requestId, onClose, canAct
   return (
     <Dialog open={!!requestId} onOpenChange={(o) => { if (!o) { onClose(); setActOpen(null); setRemarks(""); } }}>
       <DialogContent className="rounded-none max-w-md max-h-[90vh] overflow-y-auto">
-        <DialogHeader><DialogTitle className="font-heading">Approval Workflow</DialogTitle></DialogHeader>
+        <DialogHeader>
+          <DialogTitle className="font-heading">Approval Workflow</DialogTitle>
+          <DialogDescription className="text-xs">
+            Track the approval chain progress and history for this request.
+          </DialogDescription>
+        </DialogHeader>
         {loading || !data ? (
           <div className="overline text-center py-8 text-[var(--muted)]">Loading…</div>
         ) : (

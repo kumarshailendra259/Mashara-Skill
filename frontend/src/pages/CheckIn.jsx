@@ -1314,6 +1314,11 @@ function AttendanceTab() {
                             {r.pending_with.length > 2 && ` +${r.pending_with.length - 2}`}
                           </div>
                         )}
+                        {inFlight && (r.pending_with || []).length === 0 && (
+                          <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`reg-pending-${r.id}`}>
+                            ⏳ Pending at step: <strong>{r.current_step_label || `Level ${r.current_level}`}</strong> <span className="text-[var(--muted)] italic">(approver not resolved)</span>
+                          </div>
+                        )}
                         {hasChain ? (
                           <button
                             onClick={() => setRegTrackId(r.id)}
@@ -1476,6 +1481,11 @@ function LeaveTab({ staffId }) {
                         {l.pending_with.length > 2 && ` +${l.pending_with.length - 2}`}
                       </div>
                     )}
+                    {inFlight && (l.pending_with || []).length === 0 && (
+                      <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`leave-pending-${l.id}`}>
+                        ⏳ Pending at step: <strong>{l.current_step_label || `Level ${l.current_level}`}</strong> <span className="text-[var(--muted)] italic">(approver not resolved)</span>
+                      </div>
+                    )}
                     {hasChain ? (
                       <button onClick={() => setTrackId(l.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-leave-${l.id}`}>
                         Track approval {inFlight && `· Level ${l.current_level} of ${l.chain_snapshot.length}`} →
@@ -1596,6 +1606,11 @@ function ReimburseTab({ staffId }) {
                       <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`claim-pending-${r.id}`}>
                         ⏳ Pending with <strong>{r.current_step_label}</strong> — {r.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
                         {r.pending_with.length > 2 && ` +${r.pending_with.length - 2}`}
+                      </div>
+                    )}
+                    {inFlight && (r.pending_with || []).length === 0 && (
+                      <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`claim-pending-${r.id}`}>
+                        ⏳ Pending at step: <strong>{r.current_step_label || `Level ${r.current_level}`}</strong> <span className="text-[var(--muted)] italic">(approver not resolved)</span>
                       </div>
                     )}
                     {hasChain ? (

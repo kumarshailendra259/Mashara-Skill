@@ -28,6 +28,16 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 25 — Approval Tracking Visibility Fix on Staff App (Done, Jul 2026)
+- **Reported bug**: On `/check-in`, submitted Leave / Reimbursement / Regularisation rows showed only a `SUBMITTED` badge — no way to see the approval chain, current pending approver, or a Track button. The user couldn't tell where the request was stuck.
+- **Root cause**: (a) `GET /api/leaves/my` and `GET /api/reimbursements/my` did not run the lazy `_attach_chain_to_request` migration that `/api/regularisations/my` already did, so any request created before an approval chain was configured for the center kept `chain_snapshot=[]` forever. (b) Frontend gated the Track button on `current_level > 0 && chain_snapshot.length > 0`, so items without a snapshot never rendered any tracking UI.
+- **Fix**:
+  - Backend `/api/leaves/my`: lazy-attach chain for `pending` items missing snapshot; persist chain_id/current_level/chain_snapshot/chain_history back to Mongo.
+  - Backend `/api/reimbursements/my`: same lazy-attach for `pending / in_progress / submitted` status items.
+  - Frontend `CheckIn.jsx` (LeaveTab, ReimburseTab, AttendanceTab): switched to `hasChain = chain_snapshot.length > 0 || chain_history.length > 0` and added an italic fallback `Awaiting approval — no chain configured yet` when truly no chain exists. New per-request `My Regularisation Requests` list with Track buttons. `ApprovalTimelineModal` reused for `type=regularisation` too.
+  - Also: `Pending with` banner now has a graceful fallback showing the step *kind* (`Pending at step: Direct Manager (approver not resolved)`) when `pending_with` is empty. `ApprovalTimelineModal` gets a `DialogDescription` to silence a Radix a11y warning.
+- **Verified**: testing_agent iter-35 — 8/8 pytest cases pass, mobile UI verified end-to-end. Track button + timeline modal work for all 3 request types. No regression on manager Pending Approvals inbox.
+
 ### Phase 24 — My Team & Pending Approvals in Staff App (Done, Jul 2026)
 - **`/api/me/summary`** extended with `is_manager`, `team_size`, `is_approver` flags — the mobile Staff App uses them to conditionally show the two new menu entries.
 - **New endpoint `GET /api/staff/my-team`** returns each direct report's name, employee_code, designation, center, mobile, email + today's effective attendance status (`present` / `incomplete` / `absent` / `leave` / `half`). Salary + bank fields are stripped for privacy.

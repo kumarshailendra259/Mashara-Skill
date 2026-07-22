@@ -6350,7 +6350,7 @@ async def my_reimbursements(user=Depends(get_current_user)):
     # as `/leaves/my` above). Non-pending items keep their existing shape so
     # rejected/paid rows still surface their historic chain_history / snapshot.
     for d in docs:
-        if d.get("status") in ("pending", "in_progress") and not (d.get("chain_snapshot") or []):
+        if d.get("status") in ("pending", "in_progress", "submitted") and not (d.get("chain_snapshot") or []):
             await _attach_chain_to_request("reimbursement", d)
             if d.get("chain_id"):
                 await db.reimbursements.update_one(
