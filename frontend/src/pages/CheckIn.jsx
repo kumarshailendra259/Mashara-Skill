@@ -10,7 +10,7 @@ import { toast } from "sonner";
 import {
   Camera, MapPin, CheckCircle2, LogOut, RefreshCw, Home, CalendarDays, Plane,
   Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle, Trash2,
-  Bell, ChevronLeft, ChevronRight, Megaphone, Menu,
+  Bell, ChevronLeft, ChevronRight, Megaphone, Menu, Users, Inbox, XCircle, RotateCcw, Phone, Mail,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import {
@@ -33,6 +33,12 @@ const TABS = [
   { v: "leave", label: "Leave", icon: Plane },
   { v: "reimburse", label: "Claims", icon: Receipt },
   { v: "salary", label: "Salary", icon: Wallet },
+];
+
+// Manager-only extra tabs — shown when summary.is_manager or summary.is_approver
+const MANAGER_TABS = [
+  { v: "myteam", label: "My Team", icon: Users },
+  { v: "approvals", label: "Approvals", icon: Inbox },
 ];
 
 // Desktop sidebar entries — includes items that only make sense on wider screens
@@ -223,6 +229,19 @@ export default function CheckIn() {
   const greeting = hh < 12 ? "Good Morning" : hh < 17 ? "Good Afternoon" : "Good Evening";
   const wave = hh < 12 ? "☀️" : hh < 17 ? "👋" : "🌙";
 
+  // Show My Team / Pending Approvals menu entries only when relevant.
+  // - is_manager   → user has ≥1 direct report
+  // - is_approver  → user is configured in some approval_chain step (or is a manager)
+  const showManagerTabs = !!(summary?.is_manager || summary?.is_approver);
+  const sidebarEntries = showManagerTabs ? [...SIDEBAR_ITEMS, ...MANAGER_TABS] : SIDEBAR_ITEMS;
+  const bottomTabs = showManagerTabs
+    ? [
+        ...TABS.slice(0, 3),          // Home, Attendance, Leave
+        MANAGER_TABS[1],              // Approvals (higher priority than Claims/Salary for managers)
+        { v: "more", label: "More", icon: Menu, isMore: true },
+      ]
+    : TABS;
+
   return (
     <div className="min-h-screen bg-[var(--bg)] pb-24 md:pb-0 md:flex" data-testid="checkin-page">
       {/* Mobile drawer — mirrors desktop sidebar so users can navigate + logout easily on phone */}
@@ -245,7 +264,7 @@ export default function CheckIn() {
             )}
           </div>
           <nav className="flex-1 py-3 overflow-y-auto">
-            {SIDEBAR_ITEMS.map((s) => {
+            {sidebarEntries.map((s) => {
               const Icon = s.icon;
               const active = tab === s.v;
               return (
@@ -298,7 +317,7 @@ export default function CheckIn() {
           </div>
         </div>
         <nav className="flex-1 py-4">
-          {SIDEBAR_ITEMS.map((t) => {
+          {sidebarEntries.map((t) => {
             const Icon = t.icon;
             const active = tab === t.v;
             return (
@@ -412,18 +431,21 @@ export default function CheckIn() {
         {tab === "leave" && <LeaveTab staffId={summary?.staff?.id} />}
         {tab === "reimburse" && <ReimburseTab staffId={summary?.staff?.id} />}
         {tab === "salary" && <SalaryTab />}
+        {tab === "myteam" && <MyTeamTab />}
+        {tab === "approvals" && <PendingApprovalsTab />}
       </div>
       </div>
 
       {/* Bottom tab bar — mobile only */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-[var(--border)] flex justify-around py-2 shadow-lg z-10" data-testid="checkin-tabbar">
-        {TABS.map((t) => {
+        {bottomTabs.map((t) => {
           const Icon = t.icon;
           const active = tab === t.v;
+          const onClick = t.isMore ? () => setDrawerOpen(true) : () => setTab(t.v);
           return (
             <button
               key={t.v}
-              onClick={() => setTab(t.v)}
+              onClick={onClick}
               className={`flex flex-col items-center gap-0.5 px-3 py-1 ${active ? "text-[var(--brand)]" : "text-[var(--muted)]"}`}
               data-testid={`tab-${t.v}`}
             >
@@ -1729,5 +1751,330 @@ function SalaryTab() {
     </div>
   );
 }
+
+/* ============================================================
+   MY TEAM TAB — Direct reports of the logged-in staff (manager)
+   Shows name, employee code, designation, center, mobile,
+   today's attendance status + View Profile (no salary).
+   ============================================================ */
+function MyTeamTab() {
+  const [team, setTeam] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get("/staff/my-team");
+        setTeam(data?.team || []);
+      } catch (e) { toast.error(formatError(e)); }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  const badge = (s) => {
+    const map = {
+      present: "bg-green-100 text-green-700",
+      incomplete: "bg-amber-100 text-amber-700",
+      leave: "bg-blue-100 text-blue-700",
+      half: "bg-yellow-100 text-yellow-700",
+      absent: "bg-red-100 text-red-700",
+    };
+    return `text-[10px] font-bold uppercase px-2 py-0.5 tracking-wider ${map[s] || "bg-gray-100 text-gray-600"}`;
+  };
+
+  if (loading) return <div className="swiss-card p-6 text-center text-sm text-[var(--muted)]">Loading team…</div>;
+
+  if (team.length === 0) {
+    return (
+      <div className="swiss-card p-6 text-center" data-testid="myteam-empty">
+        <Users size={28} className="mx-auto text-[var(--muted)]" />
+        <div className="font-heading font-bold text-base mt-2">No Team Members</div>
+        <p className="text-sm text-[var(--muted)] mt-1">
+          You currently don&apos;t have any staff reporting to you.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3" data-testid="myteam-list">
+      <div className="flex items-center justify-between">
+        <h2 className="font-heading font-black text-xl tracking-tight">My Team</h2>
+        <div className="text-xs text-[var(--muted)]">{team.length} member{team.length !== 1 && "s"}</div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {team.map((m) => (
+          <div key={m.id} className="swiss-card p-4" data-testid={`myteam-row-${m.id}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-10 w-10 shrink-0 bg-[var(--brand)]/10 text-[var(--brand)] flex items-center justify-center font-heading font-black text-sm">
+                  {(m.name || "?").slice(0, 1).toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm truncate">{m.name}</div>
+                  <div className="text-[11px] text-[var(--muted)] truncate">{m.designation || "—"}</div>
+                </div>
+              </div>
+              <span className={badge(m.attendance_today)}>{m.attendance_today}</span>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+              <div><span className="text-[var(--muted)]">Emp Code</span><div className="font-medium">{m.employee_code || "—"}</div></div>
+              <div><span className="text-[var(--muted)]">Center</span><div className="font-medium truncate">{m.center_name || "—"}</div></div>
+              <div className="col-span-2 flex items-center gap-3 flex-wrap">
+                {m.mobile && (
+                  <a href={`tel:${m.mobile}`} className="flex items-center gap-1 text-[var(--brand)] hover:underline"><Phone size={12} />{m.mobile}</a>
+                )}
+                {m.email && (
+                  <a href={`mailto:${m.email}`} className="flex items-center gap-1 text-[var(--muted)] hover:underline truncate"><Mail size={12} />{m.email}</a>
+                )}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setSelected(m)}
+              className="rounded-none w-full mt-3 text-xs font-semibold"
+              data-testid={`myteam-view-${m.id}`}
+            >
+              View Profile
+            </Button>
+          </div>
+        ))}
+      </div>
+
+      {/* Profile modal — deliberately excludes salary. */}
+      <Dialog open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
+        <DialogContent className="rounded-none max-w-md" data-testid="myteam-profile-modal">
+          <DialogHeader>
+            <DialogTitle className="font-heading tracking-tight">{selected?.name}</DialogTitle>
+          </DialogHeader>
+          {selected && (
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center gap-3">
+                <div className="h-12 w-12 bg-[var(--brand)]/10 text-[var(--brand)] flex items-center justify-center font-heading font-black text-lg">
+                  {(selected.name || "?").slice(0, 1).toUpperCase()}
+                </div>
+                <div>
+                  <div className="font-semibold">{selected.name}</div>
+                  <div className="text-xs text-[var(--muted)]">{selected.designation || "—"} · {selected.employee_code || "—"}</div>
+                </div>
+                <span className={`ml-auto ${badge(selected.attendance_today)}`}>{selected.attendance_today}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div><span className="text-[var(--muted)]">Center</span><div className="font-medium">{selected.center_name || "—"}</div></div>
+                <div><span className="text-[var(--muted)]">Joining Date</span><div className="font-medium">{selected.joining_date || "—"}</div></div>
+                <div><span className="text-[var(--muted)]">Mobile</span><div className="font-medium">{selected.mobile || "—"}</div></div>
+                <div className="col-span-2"><span className="text-[var(--muted)]">Email</span><div className="font-medium break-all">{selected.email || "—"}</div></div>
+              </div>
+              {(selected.check_in_at || selected.check_out_at) && (
+                <div className="border-t border-[var(--border)] pt-2 text-xs">
+                  <div className="overline">Today</div>
+                  <div className="flex items-center gap-3 mt-1">
+                    <div><span className="text-[var(--muted)]">In</span> <span className="font-medium num">{selected.check_in_at ? new Date(selected.check_in_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "—"}</span></div>
+                    <div><span className="text-[var(--muted)]">Out</span> <span className="font-medium num">{selected.check_out_at ? new Date(selected.check_out_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "—"}</span></div>
+                  </div>
+                </div>
+              )}
+              <div className="text-[10px] text-[var(--muted)] italic pt-1">
+                Salary & bank details are hidden. Only HR / Admin can view compensation records.
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSelected(null)} className="rounded-none" data-testid="myteam-close">Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/* ============================================================
+   PENDING APPROVALS TAB — Requests where the logged-in user is
+   the configured approver for the current step of a workflow.
+   Supports Approve / Reject / Send Back with remarks.
+   ============================================================ */
+function PendingApprovalsTab() {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [action, setAction] = useState(null); // { row, action: 'approve'|'reject'|'send_back' }
+  const [remarks, setRemarks] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.get("/approvals/pending");
+      setRows(Array.isArray(data) ? data : (data?.items || []));
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const openAction = (row, act) => {
+    setAction({ row, action: act });
+    setRemarks("");
+  };
+
+  const submitAction = async () => {
+    if (!action) return;
+    if ((action.action === "reject" || action.action === "send_back") && !remarks.trim()) {
+      toast.error("Remarks are required"); return;
+    }
+    setSubmitting(true);
+    try {
+      await api.post("/approvals/act", {
+        request_type: action.row.request_type,
+        request_id: action.row.request_id,
+        action: action.action,
+        remarks: remarks.trim() || null,
+      });
+      toast.success(`Request ${action.action.replace("_", " ")}d`);
+      setAction(null); setRemarks("");
+      await load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setSubmitting(false); }
+  };
+
+  const typeLabel = (t) => ({
+    leave: "Leave",
+    reimbursement: "Reimbursement / Claim",
+    regularisation: "Attendance Regularisation",
+    quotation: "Quotation",
+    payment: "Payment Request",
+    asset_purchase: "Asset Purchase",
+    employee_transfer: "Employee Transfer",
+    tour: "Tour Request",
+    advance: "Advance",
+    expense: "Expense",
+    daily_report: "Daily Report",
+  })[t] || t;
+
+  if (loading) return <div className="swiss-card p-6 text-center text-sm text-[var(--muted)]">Loading pending approvals…</div>;
+
+  if (rows.length === 0) {
+    return (
+      <div className="swiss-card p-6 text-center" data-testid="approvals-empty">
+        <Inbox size={28} className="mx-auto text-[var(--muted)]" />
+        <div className="font-heading font-bold text-base mt-2">No Pending Approvals</div>
+        <p className="text-sm text-[var(--muted)] mt-1">
+          You&apos;re all caught up. Requests routed to you will appear here.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3" data-testid="approvals-list">
+      <div className="flex items-center justify-between">
+        <h2 className="font-heading font-black text-xl tracking-tight">Pending Approvals</h2>
+        <div className="text-xs text-[var(--muted)]">{rows.length} awaiting your action</div>
+      </div>
+      <div className="space-y-2.5">
+        {rows.map((r) => {
+          const summary = r.summary || {};
+          return (
+            <div key={`${r.request_type}-${r.request_id}`} className="swiss-card p-4" data-testid={`approval-row-${r.request_id}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[10px] uppercase tracking-widest text-[var(--brand)] font-bold">{typeLabel(r.request_type)}</div>
+                  <div className="font-semibold text-sm mt-0.5 truncate">
+                    {summary.description || "Approval request"}
+                  </div>
+                  <div className="text-[11px] text-[var(--muted)] mt-1 flex items-center gap-3 flex-wrap">
+                    {summary.amount != null && <span>₹ <span className="num font-medium">{inr(summary.amount).replace("₹", "").trim()}</span></span>}
+                    {summary.date && <span>Date: {summary.date}</span>}
+                    <span>Step {r.current_level}/{r.total_steps}</span>
+                    <span className="text-[var(--muted)]">· {r.step_label}</span>
+                  </div>
+                </div>
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 tracking-wider bg-amber-100 text-amber-700 shrink-0">Pending</span>
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => openAction(r, "approve")}
+                  className="flex-1 rounded-none bg-[var(--success)] text-white hover:bg-emerald-700"
+                  data-testid={`approve-${r.request_id}`}
+                >
+                  <CheckCircle2 size={14} className="mr-1" /> Approve
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openAction(r, "send_back")}
+                  className="flex-1 rounded-none"
+                  data-testid={`sendback-${r.request_id}`}
+                >
+                  <RotateCcw size={14} className="mr-1" /> Send Back
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => openAction(r, "reject")}
+                  className="flex-1 rounded-none text-red-600 border-red-200 hover:bg-red-50"
+                  data-testid={`reject-${r.request_id}`}
+                >
+                  <XCircle size={14} className="mr-1" /> Reject
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Action modal — Approve / Reject / Send Back */}
+      <Dialog open={!!action} onOpenChange={(o) => !o && setAction(null)}>
+        <DialogContent className="rounded-none max-w-md" data-testid="approvals-action-modal">
+          <DialogHeader>
+            <DialogTitle className="font-heading tracking-tight">
+              {action?.action === "approve" && "Approve request"}
+              {action?.action === "reject" && "Reject request"}
+              {action?.action === "send_back" && "Send back for edits"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            {action?.row?.summary?.description && (
+              <div className="text-xs bg-gray-50 border border-[var(--border)] p-2">
+                <div className="overline">{typeLabel(action.row.request_type)}</div>
+                <div className="font-medium mt-1">{action.row.summary.description}</div>
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label className="overline">
+                Remarks
+                {action?.action !== "approve" && <span className="text-[var(--danger)] ml-1">*</span>}
+              </Label>
+              <Textarea
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                placeholder={action?.action === "approve" ? "Optional note for the approval history" : "Reason for rejection / edits needed"}
+                rows={4}
+                className="rounded-none"
+                data-testid="approval-remarks"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAction(null)} className="rounded-none" data-testid="approval-cancel">Cancel</Button>
+            <Button
+              onClick={submitAction}
+              disabled={submitting || ((action?.action === "reject" || action?.action === "send_back") && !remarks.trim())}
+              className={`rounded-none text-white ${action?.action === "approve" ? "bg-[var(--success)] hover:bg-emerald-700" : action?.action === "reject" ? "bg-red-600 hover:bg-red-700" : "bg-[var(--brand)] hover:opacity-90"}`}
+              data-testid="approval-confirm"
+            >
+              {submitting ? "Submitting…" :
+                action?.action === "approve" ? "Approve" :
+                action?.action === "reject" ? "Reject" : "Send Back"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 
 /* ApprovalTimelineModal moved to /components/ApprovalTimelineModal.jsx for reuse */

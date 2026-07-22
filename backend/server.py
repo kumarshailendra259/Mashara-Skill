@@ -6406,6 +6406,24 @@ async def my_summary(user=Depends(get_current_user)):
     if staff.get("center_id"):
         c = await db.centers.find_one({"id": staff["center_id"]}, {"_id": 0, "name": 1})
         center_name = (c or {}).get("name")
+    # ------------------------------------------------------------------
+    # Manager/Approver flags — used by mobile Staff App to decide whether
+    # to show the "My Team" and "Pending Approvals" menu entries.
+    # ------------------------------------------------------------------
+    team_size = await db.staff.count_documents({"reports_to_id": staff["id"]})
+    is_manager = team_size > 0
+    # Cheap probe: is this user configured as an approver anywhere?
+    approver_configured = False
+    try:
+        approver_configured = bool(await db.approval_chains.find_one(
+            {"$or": [
+                {"steps.approver_ids": user["id"]},
+                {"steps.value": user["id"]},
+            ]},
+            {"_id": 1},
+        ))
+    except Exception:
+        approver_configured = False
     return {
         "staff": {**{k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name", "shift_id")}, "center_name": center_name},
         "shift": shift,
@@ -6416,7 +6434,64 @@ async def my_summary(user=Depends(get_current_user)):
         "upcoming_holidays": upcoming,
         "all_holidays": all_holidays,
         "leave_balances": leave_balances,
+        "is_manager": is_manager,
+        "team_size": team_size,
+        "is_approver": approver_configured or is_manager,
     }
+
+
+@api.get("/staff/my-team")
+async def my_team(user=Depends(get_current_user)):
+    """Return the list of staff records that report directly to the current user.
+    Salary fields are stripped out — the Staff App only surfaces contact/attendance.
+    Also augments each team member with today's attendance status.
+    """
+    me = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+    if not me:
+        return {"team": [], "team_size": 0}
+    rows = await db.staff.find(
+        {"reports_to_id": me["id"], "active": {"$ne": False}},
+        {"_id": 0, "monthly_salary": 0, "per_day_rate": 0,
+         "bank_account_no": 0, "ifsc": 0, "account_holder_name": 0,
+         "bank_name": 0, "bank_verified": 0, "bank_verified_at": 0, "bank_verified_by": 0,
+         "pan": 0, "aadhaar_last4": 0},
+    ).sort("name", 1).to_list(500)
+    # Resolve center names in one shot
+    cids = list({r.get("center_id") for r in rows if r.get("center_id")})
+    centers = {c["id"]: c.get("name")
+               for c in await db.centers.find({"id": {"$in": cids}}, {"_id": 0, "id": 1, "name": 1}).to_list(500)}
+    today = datetime.now(timezone.utc).date().isoformat()
+    att_rows = await db.attendance.find(
+        {"staff_id": {"$in": [r["id"] for r in rows]}, "date": today},
+        {"_id": 0, "staff_id": 1, "status": 1, "check_in_at": 1, "check_out_at": 1},
+    ).to_list(2000)
+    att_by = {a["staff_id"]: a for a in att_rows}
+    team = []
+    for r in rows:
+        a = att_by.get(r["id"]) or {}
+        if a.get("status") in ("absent", "leave", "half"):
+            eff = a["status"]
+        elif a.get("check_in_at") and a.get("check_out_at"):
+            eff = "present"
+        elif a.get("check_in_at"):
+            eff = "incomplete"
+        else:
+            eff = "absent"
+        team.append({
+            "id": r["id"],
+            "name": r.get("name"),
+            "employee_code": r.get("employee_code"),
+            "designation": r.get("designation"),
+            "center_id": r.get("center_id"),
+            "center_name": centers.get(r.get("center_id")) if r.get("center_id") else None,
+            "email": r.get("email"),
+            "mobile": r.get("mobile"),
+            "joining_date": r.get("joining_date"),
+            "attendance_today": eff,
+            "check_in_at": a.get("check_in_at"),
+            "check_out_at": a.get("check_out_at"),
+        })
+    return {"team": team, "team_size": len(team)}
 
 
 @api.patch("/payroll/{pid}/pay")
