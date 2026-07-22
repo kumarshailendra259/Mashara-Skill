@@ -1036,6 +1036,7 @@ function AttendanceTab() {
   const [uploadingSelfie, setUploadingSelfie] = useState(false);
   const [regOpen, setRegOpen] = useState(false);
   const [regForm, setRegForm] = useState({ date: "", status: "present", reason: "" });
+  const [regTrackId, setRegTrackId] = useState(null);
   const selfieRef = useRef(null);
 
   const load = async () => {
@@ -1290,6 +1291,53 @@ function AttendanceTab() {
             </div>
           );
         })()}
+        {/* My Regularisation Requests — per-item cards with Track approval */}
+        {myReg.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-[var(--border)]" data-testid="reg-list">
+            <div className="overline mb-2">My Regularisation Requests</div>
+            <ul className="divide-y divide-[var(--border)]">
+              {myReg.slice(0, 20).map((r) => {
+                const hasChain = (r.chain_snapshot || []).length > 0 || (r.chain_history || []).length > 0;
+                const inFlight = r.current_level > 0 && (r.chain_snapshot || []).length > 0;
+                return (
+                  <li key={r.id} className="py-2 text-sm" data-testid={`reg-row-${r.id}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium">
+                          {new Date(r.date).toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}
+                          <span className="text-xs text-[var(--muted)] font-normal"> · {r.attendance_status || r.status_requested}</span>
+                        </div>
+                        {r.reason && <div className="text-xs text-[var(--muted)] mt-0.5">{r.reason}</div>}
+                        {inFlight && (r.pending_with || []).length > 0 && (
+                          <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`reg-pending-${r.id}`}>
+                            ⏳ Pending with <strong>{r.current_step_label || `Level ${r.current_level}`}</strong> — {r.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
+                            {r.pending_with.length > 2 && ` +${r.pending_with.length - 2}`}
+                          </div>
+                        )}
+                        {hasChain ? (
+                          <button
+                            onClick={() => setRegTrackId(r.id)}
+                            className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline"
+                            data-testid={`track-reg-${r.id}`}
+                          >
+                            Track approval {inFlight && `· Level ${r.current_level} of ${r.chain_snapshot.length}`} →
+                          </button>
+                        ) : r.status === "pending" ? (
+                          <div className="text-[10px] text-[var(--muted)] mt-1 italic">Awaiting approval — no chain configured yet</div>
+                        ) : null}
+                      </div>
+                      <span className={`text-[10px] uppercase font-bold px-2 py-0.5 shrink-0 ${
+                        r.status === "approved" ? "bg-green-100 text-green-700" :
+                        r.status === "rejected" ? "bg-red-100 text-red-700" :
+                        "bg-amber-100 text-amber-700"
+                      }`}>{r.status}</span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
         {history.length === 0 ? (
           <div className="text-sm text-[var(--muted)] mt-2">No history yet.</div>
         ) : (
@@ -1318,6 +1366,7 @@ function AttendanceTab() {
           </ul>
         )}
       </div>
+      <ApprovalTimelineModal type="regularisation" requestId={regTrackId} onClose={() => setRegTrackId(null)} />
     </div>
   );
 }
@@ -1412,17 +1461,28 @@ function LeaveTab({ staffId }) {
           <div className="text-sm text-[var(--muted)] mt-2">No leave requests yet.</div>
         ) : (
           <ul className="mt-2 divide-y divide-[var(--border)]">
-            {list.map((l) => (
-              <li key={l.id} className="py-3 text-sm">
+            {list.map((l) => {
+              const hasChain = (l.chain_snapshot || []).length > 0 || (l.chain_history || []).length > 0;
+              const inFlight = l.current_level > 0 && (l.chain_snapshot || []).length > 0;
+              return (
+              <li key={l.id} className="py-3 text-sm" data-testid={`leave-row-${l.id}`}>
                 <div className="flex justify-between items-start">
                   <div className="flex-1">
                     <div className="font-medium">{new Date(l.start_date).toLocaleDateString(undefined, { day: "2-digit", month: "short" })} → {new Date(l.end_date).toLocaleDateString(undefined, { day: "2-digit", month: "short" })}</div>
                     {l.reason && <div className="text-xs text-[var(--muted)] mt-0.5">{l.reason}</div>}
-                    {l.current_level > 0 && l.chain_snapshot?.length && (
-                      <button onClick={() => setTrackId(l.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-leave-${l.id}`}>
-                        Track approval · Level {l.current_level} of {l.chain_snapshot.length} →
-                      </button>
+                    {inFlight && (l.pending_with || []).length > 0 && (
+                      <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`leave-pending-${l.id}`}>
+                        ⏳ Pending with <strong>{l.current_step_label || `Level ${l.current_level}`}</strong> — {l.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
+                        {l.pending_with.length > 2 && ` +${l.pending_with.length - 2}`}
+                      </div>
                     )}
+                    {hasChain ? (
+                      <button onClick={() => setTrackId(l.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-leave-${l.id}`}>
+                        Track approval {inFlight && `· Level ${l.current_level} of ${l.chain_snapshot.length}`} →
+                      </button>
+                    ) : l.status === "pending" ? (
+                      <div className="text-[10px] text-[var(--muted)] mt-1 italic">Awaiting approval — no chain configured yet</div>
+                    ) : null}
                   </div>
                   <span className={`text-xs uppercase font-bold px-2 py-1 ${
                     l.status === "approved" ? "bg-green-100 text-green-700" :
@@ -1431,7 +1491,8 @@ function LeaveTab({ staffId }) {
                   }`}>{l.status}</span>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>
@@ -1518,8 +1579,11 @@ function ReimburseTab({ staffId }) {
           <div className="text-sm text-[var(--muted)] mt-2">No claims yet.</div>
         ) : (
           <ul className="mt-2 divide-y divide-[var(--border)]">
-            {list.map((r) => (
-              <li key={r.id} className="py-3 text-sm">
+            {list.map((r) => {
+              const hasChain = (r.chain_snapshot || []).length > 0 || (r.chain_history || []).length > 0;
+              const inFlight = r.current_level > 0 && (r.chain_snapshot || []).length > 0;
+              return (
+              <li key={r.id} className="py-3 text-sm" data-testid={`claim-row-${r.id}`}>
                 <div className="flex justify-between items-start">
                   <div className="flex-1">
                     <div className="font-medium">{inr(r.amount)} <span className="text-xs text-[var(--muted)] font-normal">· {r.category || "—"}</span></div>
@@ -1528,17 +1592,19 @@ function ReimburseTab({ staffId }) {
                     {(r.attachments || []).length > 0 && (
                       <div className="text-[10px] text-blue-700 mt-1">📎 {r.attachments.length} attachment(s)</div>
                     )}
-                    {r.current_level > 0 && (r.pending_with || []).length > 0 && (
+                    {inFlight && (r.pending_with || []).length > 0 && (
                       <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`claim-pending-${r.id}`}>
                         ⏳ Pending with <strong>{r.current_step_label}</strong> — {r.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
                         {r.pending_with.length > 2 && ` +${r.pending_with.length - 2}`}
                       </div>
                     )}
-                    {r.current_level > 0 && r.chain_snapshot?.length && (
+                    {hasChain ? (
                       <button onClick={() => setTrackId(r.id)} className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline" data-testid={`track-claim-${r.id}`}>
-                        Track approval · Level {r.current_level} of {r.chain_snapshot.length} →
+                        Track approval {inFlight && `· Level ${r.current_level} of ${r.chain_snapshot.length}`} →
                       </button>
-                    )}
+                    ) : ["submitted", "pending"].includes(r.status) ? (
+                      <div className="text-[10px] text-[var(--muted)] mt-1 italic">Awaiting approval — no chain configured yet</div>
+                    ) : null}
                   </div>
                   <span className={`text-xs uppercase font-bold px-2 py-1 ${
                     r.status === "paid" ? "bg-green-100 text-green-700" :
@@ -1547,7 +1613,8 @@ function ReimburseTab({ staffId }) {
                   }`}>{r.status}</span>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </div>

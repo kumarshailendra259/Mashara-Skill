@@ -6322,6 +6322,22 @@ async def get_payment(pid: str, user=Depends(get_current_user)):
 @api.get("/leaves/my")
 async def my_leaves(user=Depends(get_current_user)):
     docs = await db.leaves.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # Lazy migration: older leaves submitted before an approval chain was configured
+    # may lack chain_snapshot. Re-run chain-attach so the requester can now see
+    # "pending with X" + track the approval progress in the Staff App.
+    for d in docs:
+        if d.get("status") == "pending" and not (d.get("chain_snapshot") or []):
+            await _attach_chain_to_request("leave", d)
+            if d.get("chain_id"):
+                await db.leaves.update_one(
+                    {"id": d["id"]},
+                    {"$set": {
+                        "chain_id": d.get("chain_id"),
+                        "current_level": d.get("current_level"),
+                        "chain_snapshot": d.get("chain_snapshot") or [],
+                        "chain_history": d.get("chain_history") or [],
+                    }},
+                )
     for d in docs:
         await _enrich_with_approval_status(d)
     return docs
@@ -6330,6 +6346,22 @@ async def my_leaves(user=Depends(get_current_user)):
 @api.get("/reimbursements/my")
 async def my_reimbursements(user=Depends(get_current_user)):
     docs = await db.reimbursements.find({"created_by": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    # Lazy migration for older reimbursements missing chain snapshot (same rationale
+    # as `/leaves/my` above). Non-pending items keep their existing shape so
+    # rejected/paid rows still surface their historic chain_history / snapshot.
+    for d in docs:
+        if d.get("status") in ("pending", "in_progress") and not (d.get("chain_snapshot") or []):
+            await _attach_chain_to_request("reimbursement", d)
+            if d.get("chain_id"):
+                await db.reimbursements.update_one(
+                    {"id": d["id"]},
+                    {"$set": {
+                        "chain_id": d.get("chain_id"),
+                        "current_level": d.get("current_level"),
+                        "chain_snapshot": d.get("chain_snapshot") or [],
+                        "chain_history": d.get("chain_history") or [],
+                    }},
+                )
     # Enrich with pending_with + step label so the requester sees exactly who to nudge.
     for d in docs:
         await _enrich_with_approval_status(d)

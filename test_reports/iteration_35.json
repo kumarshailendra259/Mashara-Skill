@@ -1,0 +1,47 @@
+{
+  "summary": "iter-35 Tracking visibility for submitted Leave/Reimbursement/Regularisation on Staff App (/check-in). Backend (8/8 pytest passed) + frontend UI tests (mobile viewport 390x844) both verify the fix works end-to-end. GET /api/leaves/my and /api/reimbursements/my now do lazy _attach_chain_to_request migration → the requester always sees chain_snapshot/chain_history/pending_with/current_step_label/total_steps populated for pending items. Frontend LeaveTab / ReimburseTab / AttendanceTab (regularisation list) each show `Track approval →` button + `Pending with <approver>` banner (when resolvable) or italic fallback 'Awaiting approval — no chain configured yet'. Approval timeline modal opens correctly for all three request types via GET /api/approvals/<type>/<id>/timeline. Regression on manager Pending Approvals inbox still works — 2 items visible (Attendance Regularisation + Reimbursement/Claim) with Approve/Send Back/Reject.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/reimbursements/my",
+        "issue": "For mgr2's own reimbursements, pending_with resolves to an EMPTY list because the Level-1 step is kind='direct_manager' but this staff record has no manager_id set. Result: the frontend `claim-pending-<id>` banner is legitimately hidden. Not a code bug — data-setup for the test manager. The `track-claim-<id>` button + modal still render correctly. Consider a UI fallback message like 'Pending with the assigned approver — approver not configured' when pending_with is empty but chain_snapshot is not."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "ApprovalTimelineModal",
+        "issues": ["Console warning: 'Missing `Description` or `aria-describedby={undefined}` for {DialogContent}'. Non-blocking accessibility polish — add DialogDescription (or aria-describedby) inside ApprovalTimelineModal.jsx DialogContent."]
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter35_tracking_visibility.py",
+    "/app/test_reports/pytest/iter35_results.xml"
+  ],
+  "action_items": [
+    "Add DialogDescription (or aria-describedby='' attribute) to ApprovalTimelineModal.jsx DialogContent to silence Radix a11y warning.",
+    "OPTIONAL: When pending_with is empty on a reimbursement/leave/regularisation with chain_snapshot present, surface the step *kind* (e.g. 'Direct Manager') as a fallback in the pending banner so the requester still knows who's blocking. Current UI hides the banner entirely which can look identical to 'no chain' visually."
+  ],
+  "critical_code_review_comments": [
+    "server.py:6323 my_leaves — lazy _attach_chain_to_request migration + $set of chain_id/current_level/chain_snapshot/chain_history is correct and idempotent (runs only when snapshot is empty). Verified.",
+    "server.py:6347 my_reimbursements — same lazy pattern, gated by status in ('pending','in_progress'). NOTE: newly created reimbursements have status='submitted' (see line ~4960 create_reimbursement) — however the initial POST already runs _attach_chain_to_request so the snapshot is present, so the gate is fine in practice. If ever a 'submitted' reimbursement ends up without chain_snapshot (partial migration), the lazy branch will NOT rescue it. Recommend adding 'submitted' to the status tuple to be safe.",
+    "CheckIn.jsx:1595 claim-pending banner conditional — requires (r.pending_with||[]).length>0. If pending_with is empty (unresolvable approver), banner is hidden, so the requester loses visibility of WHO is holding it up. Consider showing current_step_label as fallback (e.g. 'Pending at step: Direct Manager (not assigned)').",
+    "CheckIn.jsx:1465 (leave), 1583 (claim), 1300 (regularisation) — the hasChain logic `(chain_snapshot||[]).length>0 || (chain_history||[]).length>0` correctly renders Track button for both in-flight AND finalised items (rejected/paid). Good.",
+    "ApprovalTimelineModal.jsx — reusable component, correctly parameterised by `type` (leave/reimbursement/regularisation). Hits GET /api/approvals/<type>/<id>/timeline. Verified for all 3 types. Accessibility polish only (see above)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter35_tracking_visibility.py (NEW — 8 tests across 4 classes)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (all 3 tabs verified — leave/claim/regularisation Track buttons + modal work; regression Pending Approvals inbox works)"},
+  "test_credentials": "test_mgr2_e0e668@x.com / Mgr@12345 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Test created 3 new items via the test script (persisted in DB): 1× leave (Aug 1 2026, reason TEST_iter35 tracking <hex>), 1× reimbursement (₹500 Travel, TEST_iter35 approval tracking <hex>), 1× regularisation (Jul 1 2026, TEST_iter35 Forgot to punch <hex>). Also 1 leave was submitted via the UI form. No cleanup fixture — these are pending approval requests owned by mgr2; they can be cleaned up by admin later or will be auto-purged when mgr2's staff record is deleted.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "iter-35 tracking-visibility fix is verified end-to-end. Backend `_attach_chain_to_request` lazy migration works on both /leaves/my and /reimbursements/my (already worked on /regularisations/my). Frontend testids to remember: `track-leave-<id>`, `track-claim-<id>`, `track-reg-<id>`, `leave-pending-<id>`, `claim-pending-<id>`, `reg-pending-<id>`, `reg-list`, `reg-row-<id>`, `claim-row-<id>`. Mobile viewport 390x844 preferred. The manager `test_mgr2_e0e668@x.com` has no direct_manager set in staff, so their own reimbursement's pending_with list is empty — banner is hidden but Track button + modal still render. Ancillary a11y warning (aria-describedby missing on DialogContent) is minor and belongs to ApprovalTimelineModal.jsx.",
+  "rca of the issue": "Original bug: requesters couldn't see any approval tracking on submitted Leave/Reimbursement rows in the Staff App — only a 'SUBMITTED' status badge appeared with no Track button or Pending-with info. Root cause: (1) Backend /api/leaves/my and /api/reimbursements/my did NOT run _attach_chain_to_request on read, so any request submitted BEFORE the center had an approval-chain configured had chain_snapshot=[] permanently. (2) Frontend LeaveTab/ReimburseTab gated the Track button on `current_level>0 && chain_snapshot.length>0` which meant items without a snapshot never rendered ANY tracking UI (not even a fallback). Fix (implemented by main agent, verified here): backend lazy _attach_chain_to_request migration writes chain_snapshot back to Mongo on first /my read; frontend switched to `hasChain = chain_snapshot.length>0 || chain_history.length>0` and added italic fallback 'Awaiting approval — no chain configured yet' for the truly-no-chain case, so the requester now ALWAYS sees a tracking element. Verified: 8/8 backend tests pass; Leave, Claim, and Regularisation tabs all show Track approval → button + modal with L1—L4 chain steps; Pending Approvals regression works."
+}
