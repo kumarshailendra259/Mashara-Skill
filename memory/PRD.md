@@ -28,6 +28,33 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 26B — Full-Automatic HRMS, Phase B (Done, Jul 2026)
+**Salary Slip Template System:**
+- New backend module `/app/backend/salary_slip.py` — DOCX template rendering via `docxtpl` + PDF conversion via headless LibreOffice with DOCX fallback. Amount-to-words in Indian lakh/crore.
+- New endpoints:
+  - `POST /api/salary-slip-templates` — upload `.docx` (5MB cap), optionally scoped by `company_id`; global fallback if none configured for a company. Uploading a new template deactivates the old one.
+  - `GET /api/salary-slip-templates` — list (admin/hr/manager).
+  - `DELETE /api/salary-slip-templates/{tid}` — admin only.
+  - `POST /api/payroll/{pid}/generate-slip` — renders + stores slip (admin/hr/accountant).
+  - `PATCH /api/payroll/{pid}/release-slip?released=true|false` — HR toggles visibility to staff.
+  - `GET /api/payroll/{pid}/slip/download` — RBAC-gated: admin/hr/accountant bypass release check, staff can only download their own + only after release.
+- Frontend:
+  - `SalarySlipTemplatesTab.jsx` in HR Settings → new "Salary Slips" tab with upload form + 40+ placeholder reference + templates list.
+  - HRMS Payroll rows now have `slip-gen-<pid>` / `slip-dl-<pid>` / `slip-release-<pid>` action buttons.
+  - `/check-in` Salary tab shows a "Download HR Slip" link when `slip_released_at` is set on the row.
+
+**Historical Employment Filter (payroll_run):**
+- `payroll_run` rewritten to skip staff not employed in the target month AND prorate `working_days` for mid-month joiners / exits. New `staff.exit_date` and `staff.exit_reason` fields.
+- Example verified: Staff joining 2026-06-15 → June `working_days=16`; staff exiting 2026-07-15 → July `working_days=15 + is_partial_month=true`; August payroll skips them. Response includes `skipped_not_employed` count.
+
+**HRMS Pagination + Search:**
+- `GET /api/staff` and `GET /api/payroll` now accept `q`, `skip`, `limit` and emit `X-Total-Count` header (CORS-exposed).
+- HRMS Staff tab: `staff-search`, `staff-prev`, `staff-next` + "Showing N of M" text.
+- HRMS Payroll tab: `payroll-search`, `payroll-status-filter`, `payroll-prev`, `payroll-next`.
+- Staff Add/Edit dialog: new `Exit / Last Working Date` field (`staff-exit-date`).
+
+**Verified**: testing_agent iter-37 — **17/17 backend pytest passed** + full E2E. Payroll table now paginates through 1013 rows across 41 pages instead of loading in one shot.
+
 ### Phase 26A — Full-Automatic HRMS (SalaryBox-style), Phase A (Done, Jul 2026)
 - **New Salary Components** on payroll model: `overtime_pay`, `other_earnings`, `reimbursements_paid` (earnings) + `early_fine`, `advance`, `loan_deduction` (deductions). `_recalc_payroll` auto-updates gross/deductions/net. `PATCH /api/payroll/{pid}` allow-list expanded to include all new fields.
 - **HR Attendance Edit**: New `PATCH /api/attendance/{aid}` endpoint (roles: admin, hr, manager, center_manager) letting HR retro-edit status / punch-in / punch-out / remarks with an `edited_by` + `edited_at` audit trail. 404 for non-existent rows.
