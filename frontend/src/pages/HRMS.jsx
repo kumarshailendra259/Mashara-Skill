@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
@@ -13,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -43,6 +44,7 @@ function Stepper({ status }) {
 export default function HRMS() {
   const { t } = useLang();
   const { user } = useAuth();
+  const nav = useNavigate();
   const isAdmin = user?.role === "admin";
   const isAccountant = user?.role === "accountant";
 
@@ -96,6 +98,25 @@ export default function HRMS() {
       const skipped = res.headers.get("X-Rows-Skipped") || "?";
       toast.success(`CSV downloaded · ${written} rows (${skipped} skipped — no bank or zero net)`);
     } catch (e) { toast.error(`Download failed: ${e.message}`); }
+  };
+
+  // ---- Comprehensive HR reports (Phase A) ----
+  //  attendance   : per-day punch-in/out matrix
+  //  payroll      : full earnings + deductions + bank per staff
+  //  consolidated : one row per staff (attendance summary + payroll + bank)
+  const downloadHRReport = async (kind, m, y) => {
+    try {
+      const res = await api.get(`/reports/${kind}`, {
+        params: { month: m, year: y },
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(new Blob([res.data], { type: "text/csv" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `${kind}_${y}_${String(m).padStart(2, "0")}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`${kind.charAt(0).toUpperCase() + kind.slice(1)} report downloaded`);
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   // Print/download single payslip via browser
@@ -855,6 +876,13 @@ export default function HRMS() {
                           data-testid={`staff-offer-send-${s.id}`}
                           title="Generate & email offer letter"
                         ><Mail size={14} /></Button>
+                        <Button
+                          size="sm" variant="outline"
+                          onClick={() => nav(`/hrms/staff/${s.id}/salary`)}
+                          className="rounded-none h-8 px-2"
+                          data-testid={`staff-salary-${s.id}`}
+                          title="Open salary detail"
+                        ><User size={14} /></Button>
                         <Button size="sm" variant="outline" onClick={() => openEditStaff(s)} className="rounded-none h-8 px-2" data-testid={`staff-edit-${s.id}`} title="Edit"><Pencil size={14} /></Button>
                         {canDeleteStaff && (
                           <Button size="sm" variant="outline" onClick={() => deleteStaff(s)} className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" data-testid={`staff-delete-${s.id}`} title="Delete"><Trash2 size={14} /></Button>
@@ -1189,6 +1217,9 @@ export default function HRMS() {
               <div><Label className="overline">Year</Label><Input type="number" value={pYear} onChange={(e) => setPYear(+e.target.value)} className="rounded-none w-28" /></div>
               <Button onClick={runPayroll} className="brand-btn rounded-none" data-testid="run-payroll">Run Payroll</Button>
               <Button onClick={() => downloadBankCsv(pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="bank-csv-btn"><Download size={14} /> Bank Transfer CSV</Button>
+              <Button onClick={() => downloadHRReport("attendance", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-attendance-btn"><Download size={14} /> Attendance CSV</Button>
+              <Button onClick={() => downloadHRReport("payroll", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-payroll-btn"><Download size={14} /> Payroll CSV</Button>
+              <Button onClick={() => downloadHRReport("consolidated", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-consolidated-btn"><Download size={14} /> Consolidated CSV</Button>
             </div>
           )}
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
@@ -1215,6 +1246,9 @@ export default function HRMS() {
                   <td className="p-3"><span className={`inline-block px-2 py-0.5 text-xs border ${p.status === "paid" ? "border-[var(--success)] text-[var(--success)]" : "border-[var(--warning)] text-[#9a7a00]"}`}>{p.status}</span></td>
                   <td className="p-3 text-right no-print">
                     <div className="flex gap-1 justify-end">
+                      <Button size="sm" variant="outline" onClick={() => nav(`/hrms/staff/${p.staff_id}/salary?month=${p.month}&year=${p.year}`)} className="rounded-none h-8 px-2" title="Salary Detail" data-testid={`view-detail-${p.id}`}>
+                        <User size={14} />
+                      </Button>
                       <Button size="sm" variant="outline" onClick={() => printPayslip(p)} className="rounded-none h-8 px-2" title="Download payslip" data-testid={`payslip-pdf-${p.id}`}><FileText size={14} /></Button>
                       {p.status !== "paid" && canManageStaff && (
                         <Button size="sm" variant="outline" onClick={() => openEditPayroll(p)} className="rounded-none h-8 px-2" data-testid={`edit-payroll-${p.id}`} title="Edit"><Pencil size={14} /></Button>

@@ -12,6 +12,7 @@ import Transactions from "@/pages/Transactions";
 import Reports from "@/pages/Reports";
 import Users from "@/pages/Users";
 import HRMS from "@/pages/HRMS";
+import StaffSalaryDetail from "@/pages/StaffSalaryDetail";
 import Stock from "@/pages/Stock";
 import ApprovalLog from "@/pages/ApprovalLog";
 import ApprovalWorkflows from "@/pages/ApprovalWorkflows";
@@ -62,6 +63,7 @@ function App() {
             <Route path="/reports" element={<ProtectedRoute requireFinance><Shell><Reports /></Shell></ProtectedRoute>} />
             <Route path="/users" element={<ProtectedRoute><Shell><Users /></Shell></ProtectedRoute>} />
             <Route path="/hrms" element={<ProtectedRoute><Shell><HRMS /></Shell></ProtectedRoute>} />
+            <Route path="/hrms/staff/:sid/salary" element={<ProtectedRoute><Shell><StaffSalaryDetail /></Shell></ProtectedRoute>} />
             <Route path="/stock" element={<ProtectedRoute><Shell><Stock /></Shell></ProtectedRoute>} />
             <Route path="/approvals" element={<ProtectedRoute><Shell><ApprovalLog /></Shell></ProtectedRoute>} />
             <Route path="/approval-workflows" element={<ProtectedRoute><Shell><ApprovalWorkflows /></Shell></ProtectedRoute>} />

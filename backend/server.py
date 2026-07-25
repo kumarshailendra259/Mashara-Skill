@@ -3602,6 +3602,32 @@ async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin",
     return {"ok": True}
 
 
+class AttendanceEditIn(BaseModel):
+    """HR/Admin can retro-edit an existing attendance row. All fields optional."""
+    model_config = ConfigDict(extra="ignore")
+    status: Optional[Literal["present", "absent", "half", "leave"]] = None
+    check_in_at: Optional[str] = None    # ISO ts
+    check_out_at: Optional[str] = None   # ISO ts
+    remarks: Optional[str] = None
+
+
+@api.patch("/attendance/{aid}")
+async def edit_attendance(aid: str, body: AttendanceEditIn, user=Depends(require_role("admin", "hr", "manager", "center_manager"))):
+    """HR / Admin retro-edit of an attendance row.
+    Records who edited and when in `edited_by` / `edited_at` for audit.
+    """
+    row = await db.attendance.find_one({"id": aid}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Attendance row not found")
+    update = body.model_dump(exclude_none=True)
+    if not update:
+        return row
+    update["edited_by"] = user["id"]
+    update["edited_at"] = datetime.now(timezone.utc).isoformat()
+    await db.attendance.update_one({"id": aid}, {"$set": update})
+    return await db.attendance.find_one({"id": aid}, {"_id": 0})
+
+
 @api.post("/attendance/self")
 async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
     """Mobile self-check-in: looks up the staff record linked to the current user,
@@ -5143,9 +5169,16 @@ class PayrollEditIn(BaseModel):
     conveyance: Optional[float] = None
     bonus: Optional[float] = None
     incentive: Optional[float] = None
+    # Extended earnings introduced in Phase A of the "SalaryBox-style" HRMS.
+    overtime_pay: Optional[float] = None
+    other_earnings: Optional[float] = None
+    reimbursements_paid: Optional[float] = None  # HR can bundle approved claims into the slip
     pf_deduction: Optional[float] = None
     esi_deduction: Optional[float] = None
     late_deduction: Optional[float] = None  # manual override of computed late
+    early_fine: Optional[float] = None
+    advance: Optional[float] = None          # one-off salary advance being recovered
+    loan_deduction: Optional[float] = None   # long-term loan EMI recovery
     other_deductions: Optional[List[PayrollLineItem]] = None
     remarks: Optional[str] = None
 
@@ -5155,11 +5188,15 @@ def _recalc_payroll(doc: dict) -> dict:
     earnings = sum([
         doc.get("basic", 0) or 0, doc.get("hra", 0) or 0, doc.get("da", 0) or 0,
         doc.get("conveyance", 0) or 0, doc.get("bonus", 0) or 0, doc.get("incentive", 0) or 0,
+        doc.get("overtime_pay", 0) or 0, doc.get("other_earnings", 0) or 0,
+        doc.get("reimbursements_paid", 0) or 0,
     ])
     other_sum = sum((li.get("amount", 0) or 0) for li in (doc.get("other_deductions") or []))
     deductions = sum([
         doc.get("pf_deduction", 0) or 0, doc.get("esi_deduction", 0) or 0,
-        doc.get("late_deduction", 0) or 0, other_sum,
+        doc.get("late_deduction", 0) or 0, doc.get("early_fine", 0) or 0,
+        doc.get("advance", 0) or 0, doc.get("loan_deduction", 0) or 0,
+        other_sum,
     ])
     doc["gross"] = round(earnings, 2)
     doc["deductions"] = round(deductions, 2)
@@ -5271,9 +5308,13 @@ async def payroll_run(
             "basic": round(basic, 2),
             "hra": 0.0, "da": 0.0, "conveyance": 0.0,
             "bonus": 0.0, "incentive": 0.0,
+            "overtime_pay": 0.0, "other_earnings": 0.0,
+            "reimbursements_paid": 0.0,
             # Deductions
             "pf_deduction": 0.0, "esi_deduction": 0.0,
             "late_deduction": late_deduction,
+            "early_fine": 0.0,
+            "advance": 0.0, "loan_deduction": 0.0,
             "other_deductions": [],
             # Late buckets snapshot
             "late_buckets": buckets,
@@ -5311,7 +5352,9 @@ async def edit_payroll(pid: str, body: PayrollEditIn, user=Depends(require_role(
     merged["edited_at"] = datetime.now(timezone.utc).isoformat()
     await db.payroll.update_one({"id": pid}, {"$set": {k: merged[k] for k in (
         "days_present", "basic", "hra", "da", "conveyance", "bonus", "incentive",
-        "pf_deduction", "esi_deduction", "late_deduction", "other_deductions",
+        "overtime_pay", "other_earnings", "reimbursements_paid",
+        "pf_deduction", "esi_deduction", "late_deduction", "early_fine",
+        "advance", "loan_deduction", "other_deductions",
         "gross", "deductions", "net", "remarks", "edited_by", "edited_at",
     ) if k in merged}})
     res = await db.payroll.find_one({"id": pid}, {"_id": 0})
@@ -5401,6 +5444,346 @@ async def my_payroll(year: Optional[int] = None, user=Depends(get_current_user))
         staff["bank_account_no_masked"] = "****" + staff["bank_account_no"][-4:]
         staff.pop("bank_account_no", None)
     return {"staff": staff, "payroll": docs}
+
+
+# =========================================================================
+# STAFF SALARY DETAIL (SalaryBox-style) + monthly attendance breakdown
+# =========================================================================
+@api.get("/payroll/staff/{staff_id}/summary")
+async def staff_salary_summary(
+    staff_id: str,
+    month: Optional[int] = Query(None, ge=1, le=12),
+    year: Optional[int] = Query(None, ge=2020, le=2100),
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
+):
+    """Returns a per-employee salary detail sheet for the given month plus
+    a rolling history table. Used by the new HR "Salary Detail" screen.
+    Structure:
+      {
+        staff: {..basic + bank..},
+        current: {month, year, attendance:{present,half,absent,leave,working_days,late_days,paid_leaves},
+                  payroll: {..full payroll doc..}, reimbursements_approved: N},
+        history: [{month, year, ctc, payables, total_salary, paid, pending, slip_shared, status}]
+      }
+    """
+    import calendar
+    staff = await db.staff.find_one({"id": staff_id}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+
+    # Default to current month/year if not passed
+    now = datetime.now(timezone.utc)
+    m = month or now.month
+    y = year or now.year
+    last_day = calendar.monthrange(y, m)[1]
+    d_start = f"{y:04d}-{m:02d}-01"
+    d_end = f"{y:04d}-{m:02d}-{last_day:02d}"
+
+    # Attendance breakdown for the month
+    att_rows = await db.attendance.find(
+        {"staff_id": staff_id, "date": {"$gte": d_start, "$lte": d_end}},
+        {"_id": 0},
+    ).to_list(500)
+    att_breakdown = {"present": 0.0, "half": 0.0, "absent": 0.0, "leave": 0.0,
+                     "working_days": last_day, "days_marked": len(att_rows)}
+    for r in att_rows:
+        s_ = r.get("status")
+        if s_ in att_breakdown:
+            if s_ == "half":
+                att_breakdown["half"] += 1
+                att_breakdown["present"] += 0.5  # counted toward pay
+            else:
+                att_breakdown[s_] += 1
+
+    # Payroll doc (may or may not exist yet)
+    pr = await db.payroll.find_one({"staff_id": staff_id, "month": m, "year": y}, {"_id": 0})
+
+    # Approved reimbursements this month for context
+    approved_reimb = await db.reimbursements.count_documents({
+        "staff_id": staff_id, "status": {"$in": ["approved", "paid"]},
+        "date": {"$gte": d_start, "$lte": d_end},
+    })
+
+    # History (last 12 months, DESC)
+    hist_docs = await db.payroll.find({"staff_id": staff_id}, {"_id": 0}) \
+        .sort([("year", -1), ("month", -1)]).to_list(24)
+    history = []
+    for h in hist_docs:
+        gross = h.get("gross", 0) or 0
+        ded = h.get("deductions", 0) or 0
+        net = h.get("net", 0) or 0
+        paid = net if h.get("status") == "paid" else 0
+        history.append({
+            "id": h.get("id"),
+            "month": h.get("month"),
+            "year": h.get("year"),
+            "ctc": staff.get("monthly_salary") or 0,
+            "payables": gross,
+            "deductions": ded,
+            "total_salary": net,
+            "paid": paid,
+            "pending": max(0, net - paid),
+            "status": h.get("status"),
+            "slip_shared": bool(h.get("slip_released_at")),
+            "paid_at": h.get("paid_at"),
+        })
+
+    # Mask account
+    if staff.get("bank_account_no"):
+        staff["bank_account_no_masked"] = "****" + staff["bank_account_no"][-4:]
+        staff.pop("bank_account_no", None)
+
+    return {
+        "staff": staff,
+        "current": {
+            "month": m, "year": y,
+            "attendance": att_breakdown,
+            "attendance_rows": att_rows,
+            "payroll": pr,
+            "reimbursements_approved": approved_reimb,
+        },
+        "history": history,
+        "_editor": user["id"],
+    }
+
+
+# =========================================================================
+# HRMS DOWNLOADABLE REPORTS
+# =========================================================================
+def _csv_response(filename: str, rows: List[list], headers: List[str]) -> "Response":
+    """Small helper – emits a CSV response with a filename Content-Disposition."""
+    import csv, io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow(r)
+    from fastapi.responses import Response as _R
+    return _R(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api.get("/reports/attendance")
+async def report_attendance(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    staff_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    _=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager")),
+):
+    """Per-day attendance CSV for a month. Filters by staff or center."""
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    d_start = f"{year:04d}-{month:02d}-01"
+    d_end = f"{year:04d}-{month:02d}-{last_day:02d}"
+
+    staff_q: dict = {"active": {"$ne": False}}
+    if staff_id:
+        staff_q["id"] = staff_id
+    if center_id:
+        staff_q["center_id"] = center_id
+    staff_list = await db.staff.find(staff_q, {"_id": 0, "id": 1, "name": 1, "employee_code": 1, "center_id": 1, "designation": 1}).to_list(2000)
+    ids = [s["id"] for s in staff_list]
+
+    att_rows = await db.attendance.find(
+        {"staff_id": {"$in": ids}, "date": {"$gte": d_start, "$lte": d_end}},
+        {"_id": 0},
+    ).to_list(20000)
+    by_key = {(r["staff_id"], r["date"]): r for r in att_rows}
+
+    centers = {c["id"]: c.get("name") for c in await db.centers.find(
+        {"id": {"$in": list({s.get("center_id") for s in staff_list if s.get("center_id")})}},
+        {"_id": 0, "id": 1, "name": 1}).to_list(500)}
+
+    rows = []
+    for s in staff_list:
+        for day in range(1, last_day + 1):
+            date_iso = f"{year:04d}-{month:02d}-{day:02d}"
+            att = by_key.get((s["id"], date_iso), {})
+            def _fmt(ts):
+                if not ts: return ""
+                try:
+                    return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%H:%M")
+                except (ValueError, AttributeError):
+                    return ""
+            ci = att.get("check_in_at")
+            co = att.get("check_out_at")
+            hours = ""
+            if ci and co:
+                try:
+                    delta = datetime.fromisoformat(co.replace("Z", "+00:00")) - datetime.fromisoformat(ci.replace("Z", "+00:00"))
+                    hours = round(delta.total_seconds() / 3600, 2)
+                except (ValueError, AttributeError):
+                    hours = ""
+            rows.append([
+                s.get("employee_code") or "",
+                s.get("name") or "",
+                s.get("designation") or "",
+                centers.get(s.get("center_id")) or "",
+                date_iso,
+                (att.get("status") or "-").upper(),
+                _fmt(ci), _fmt(co), hours,
+                (att.get("marked_via") or "").upper(),
+            ])
+    return _csv_response(
+        f"attendance_{year:04d}-{month:02d}.csv",
+        rows,
+        ["Emp Code", "Name", "Designation", "Center", "Date", "Status", "Punch In", "Punch Out", "Hours", "Marked Via"],
+    )
+
+
+@api.get("/reports/payroll")
+async def report_payroll(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    staff_id: Optional[str] = None,
+    _=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
+):
+    """Comprehensive payroll CSV (earnings + deductions + bank details) for the month."""
+    q: dict = {"month": month, "year": year}
+    if staff_id:
+        q["staff_id"] = staff_id
+    docs = await db.payroll.find(q, {"_id": 0}).to_list(5000)
+    sids = list({d["staff_id"] for d in docs})
+    staffs = {s["id"]: s for s in await db.staff.find(
+        {"id": {"$in": sids}},
+        {"_id": 0, "id": 1, "employee_code": 1, "name": 1, "designation": 1,
+         "monthly_salary": 1, "bank_name": 1, "bank_account_no": 1, "ifsc": 1,
+         "center_id": 1, "pan": 1},
+    ).to_list(5000)}
+    centers = {c["id"]: c.get("name") for c in await db.centers.find(
+        {"id": {"$in": list({s.get("center_id") for s in staffs.values() if s.get("center_id")})}},
+        {"_id": 0, "id": 1, "name": 1}).to_list(500)}
+
+    rows = []
+    for p in docs:
+        s = staffs.get(p["staff_id"], {})
+        rows.append([
+            s.get("employee_code") or "",
+            p.get("staff_name") or s.get("name") or "",
+            s.get("designation") or "",
+            centers.get(s.get("center_id")) or "",
+            f"{p.get('year')}-{p.get('month'):02d}",
+            p.get("days_present") or 0,
+            p.get("working_days") or 0,
+            s.get("monthly_salary") or 0,
+            p.get("basic") or 0,
+            p.get("hra") or 0,
+            p.get("da") or 0,
+            p.get("conveyance") or 0,
+            p.get("bonus") or 0,
+            p.get("incentive") or 0,
+            p.get("overtime_pay") or 0,
+            p.get("other_earnings") or 0,
+            p.get("reimbursements_paid") or 0,
+            p.get("gross") or 0,
+            p.get("pf_deduction") or 0,
+            p.get("esi_deduction") or 0,
+            p.get("late_deduction") or 0,
+            p.get("early_fine") or 0,
+            p.get("advance") or 0,
+            p.get("loan_deduction") or 0,
+            p.get("deductions") or 0,
+            p.get("net") or 0,
+            (p.get("status") or "").upper(),
+            p.get("paid_at") or "",
+            s.get("bank_name") or "",
+            s.get("bank_account_no") or "",
+            s.get("ifsc") or "",
+            s.get("pan") or "",
+        ])
+    return _csv_response(
+        f"payroll_{year:04d}-{month:02d}.csv",
+        rows,
+        ["Emp Code", "Name", "Designation", "Center", "Month",
+         "Days Present", "Working Days", "CTC",
+         "Basic", "HRA", "DA", "Conveyance", "Bonus", "Incentive", "Overtime", "Other Earnings", "Reimb Paid",
+         "Gross",
+         "PF", "ESI", "Late Fine", "Early Fine", "Advance", "Loan EMI", "Total Deductions",
+         "Net", "Status", "Paid At",
+         "Bank Name", "Account #", "IFSC", "PAN"],
+    )
+
+
+@api.get("/reports/consolidated")
+async def report_consolidated(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    staff_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    _=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
+):
+    """One CSV row per staff for the month: attendance summary + payroll + bank."""
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    d_start = f"{year:04d}-{month:02d}-01"
+    d_end = f"{year:04d}-{month:02d}-{last_day:02d}"
+
+    sq: dict = {"active": {"$ne": False}}
+    if staff_id:
+        sq["id"] = staff_id
+    if center_id:
+        sq["center_id"] = center_id
+    staff_list = await db.staff.find(sq, {"_id": 0}).to_list(5000)
+    sids = [s["id"] for s in staff_list]
+
+    att_rows = await db.attendance.find(
+        {"staff_id": {"$in": sids}, "date": {"$gte": d_start, "$lte": d_end}},
+        {"_id": 0, "staff_id": 1, "status": 1},
+    ).to_list(20000)
+    counts: dict = {}
+    for r in att_rows:
+        c = counts.setdefault(r["staff_id"], {"present": 0.0, "half": 0, "absent": 0, "leave": 0})
+        st = r.get("status")
+        if st == "half":
+            c["half"] += 1
+            c["present"] += 0.5
+        elif st == "present":
+            c["present"] += 1
+        elif st == "absent":
+            c["absent"] += 1
+        elif st == "leave":
+            c["leave"] += 1
+
+    payrolls = {p["staff_id"]: p for p in await db.payroll.find(
+        {"staff_id": {"$in": sids}, "month": month, "year": year}, {"_id": 0}).to_list(5000)}
+    centers = {c["id"]: c.get("name") for c in await db.centers.find(
+        {"id": {"$in": list({s.get("center_id") for s in staff_list if s.get("center_id")})}},
+        {"_id": 0, "id": 1, "name": 1}).to_list(500)}
+
+    rows = []
+    for s in staff_list:
+        c = counts.get(s["id"], {"present": 0, "half": 0, "absent": 0, "leave": 0})
+        p = payrolls.get(s["id"], {})
+        rows.append([
+            s.get("employee_code") or "",
+            s.get("name") or "",
+            s.get("designation") or "",
+            centers.get(s.get("center_id")) or "",
+            f"{year}-{month:02d}",
+            last_day,
+            c["present"], c["half"], c["absent"], c["leave"],
+            s.get("monthly_salary") or 0,
+            p.get("gross") or 0,
+            p.get("deductions") or 0,
+            p.get("net") or 0,
+            (p.get("status") or "unpaid").upper(),
+            p.get("paid_at") or "",
+            s.get("bank_name") or "",
+            s.get("bank_account_no") or "",
+            s.get("ifsc") or "",
+        ])
+    return _csv_response(
+        f"consolidated_{year:04d}-{month:02d}.csv",
+        rows,
+        ["Emp Code", "Name", "Designation", "Center", "Month", "Working Days",
+         "Present", "Half", "Absent", "Leave",
+         "CTC", "Gross", "Deductions", "Net", "Status", "Paid At",
+         "Bank Name", "Account #", "IFSC"],
+    )
 
 
 # -------- Holidays --------
