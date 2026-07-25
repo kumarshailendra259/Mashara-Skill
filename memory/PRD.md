@@ -28,6 +28,19 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 26A — Full-Automatic HRMS (SalaryBox-style), Phase A (Done, Jul 2026)
+- **New Salary Components** on payroll model: `overtime_pay`, `other_earnings`, `reimbursements_paid` (earnings) + `early_fine`, `advance`, `loan_deduction` (deductions). `_recalc_payroll` auto-updates gross/deductions/net. `PATCH /api/payroll/{pid}` allow-list expanded to include all new fields.
+- **HR Attendance Edit**: New `PATCH /api/attendance/{aid}` endpoint (roles: admin, hr, manager, center_manager) letting HR retro-edit status / punch-in / punch-out / remarks with an `edited_by` + `edited_at` audit trail. 404 for non-existent rows.
+- **Employee Salary Detail Page** (`/hrms/staff/:sid/salary`): month + year selector, meta strip (CTC/Joining/Center/Bank masked), summary card with net + status + Finalize/Edit/Pay actions, attendance breakdown (Present/Half/Absent/Leave/Working Days/Marked), 3-column earnings vs deductions grid showing all 9 earnings + 6 deductions, per-day attendance rows table with per-row Edit button, and 12-month history table (CTC/Payables/Deductions/Net/Paid/Pending/Status/Slip).
+- **New Endpoint** `GET /api/payroll/staff/{sid}/summary?month=X&year=Y` — one-shot data for the detail page (admin/hr/accountant/senior_manager only).
+- **Downloadable Reports** (Admin/HR/Accountant/Senior Manager scoped):
+  - `GET /api/reports/attendance?month&year&staff_id?&center_id?` → per-day CSV (Emp Code, Name, Designation, Center, Date, Status, Punch In, Punch Out, Hours, Marked Via).
+  - `GET /api/reports/payroll?month&year&staff_id?` → full CSV (Basic, HRA, DA, Conveyance, Bonus, Incentive, Overtime, Other Earnings, Reimb Paid, Gross, PF, ESI, Late Fine, Early Fine, Advance, Loan EMI, Total Deductions, Net, Status, Paid At, Bank Name, Account #, IFSC, PAN).
+  - `GET /api/reports/consolidated?month&year&staff_id?&center_id?` → one row per staff (attendance summary + payroll + bank).
+  - Also surfaces as **3 buttons** on `/hrms` Payroll tab (Attendance / Payroll / Consolidated) alongside existing Bank Transfer CSV, plus a Reports strip on the Salary Detail page.
+- **HRMS Navigation**: `[data-testid=staff-salary-<id>]` icon on Staff rows + `[data-testid=view-detail-<id>]` on Payroll rows → open the new detail page.
+- **Verified**: testing_agent iter-36 → **12/12 backend pytest passed** + full frontend E2E (edit modal, CSV downloads, view-detail navigation). Regression on Check-in staff app clean.
+
 ### Phase 25 — Approval Tracking Visibility Fix on Staff App (Done, Jul 2026)
 - **Reported bug**: On `/check-in`, submitted Leave / Reimbursement / Regularisation rows showed only a `SUBMITTED` badge — no way to see the approval chain, current pending approver, or a Track button. The user couldn't tell where the request was stuck.
 - **Root cause**: (a) `GET /api/leaves/my` and `GET /api/reimbursements/my` did not run the lazy `_attach_chain_to_request` migration that `/api/regularisations/my` already did, so any request created before an approval chain was configured for the center kept `chain_snapshot=[]` forever. (b) Frontend gated the Track button on `current_level > 0 && chain_snapshot.length > 0`, so items without a snapshot never rendered any tracking UI.
