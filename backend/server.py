@@ -3097,6 +3097,8 @@ class StaffIn(BaseModel):
     monthly_salary: float = Field(ge=0, default=0)
     per_day_rate: float = Field(ge=0, default=0)
     joining_date: str = ""
+    exit_date: Optional[str] = None  # YYYY-MM-DD — last working day (resigned / terminated)
+    exit_reason: Optional[str] = None  # optional free-text reason on separation
     user_id: Optional[str] = None  # link to a User if they log in
     center_id: Optional[str] = None
     shift_id: Optional[str] = None  # link to Shift master for late/penalty rules
@@ -3288,13 +3290,49 @@ def _center_scope_q(user: dict) -> dict:
 
 
 @api.get("/staff", response_model=List[StaffOut])
-async def list_staff(user=Depends(get_current_user)):
-    q: dict = {}
+async def list_staff(
+    q: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 1000,
+    include_inactive: bool = True,
+    user=Depends(get_current_user),
+):
+    """List staff. Supports ?q=<search>, ?skip=, ?limit=.
+    Response includes header `X-Total-Count` for pagination UIs.
+    """
+    query: dict = {}
     role = user.get("role")
     if role in ("center_manager", "center_staff"):
-        q["center_id"] = {"$in": user.get("assigned_center_ids") or []}
-    docs = await db.staff.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
-    return [StaffOut(**d) for d in docs]
+        query["center_id"] = {"$in": user.get("assigned_center_ids") or []}
+    if not include_inactive:
+        query["active"] = {"$ne": False}
+    if q:
+        needle = q.strip()
+        if needle:
+            rx = {"$regex": needle, "$options": "i"}
+            query["$or"] = [
+                {"name": rx},
+                {"employee_code": rx},
+                {"designation": rx},
+                {"email": rx},
+                {"mobile": rx},
+            ]
+    total = await db.staff.count_documents(query)
+    cursor = db.staff.find(query, {"_id": 0}).sort("name", 1)
+    if skip:
+        cursor = cursor.skip(skip)
+    if limit:
+        cursor = cursor.limit(min(limit, 2000))
+    docs = await cursor.to_list(min(limit or 2000, 2000))
+    from fastapi import Response
+    # Emit total via response header so pagination UIs don't need a second call.
+    # Return the plain list body (matches historical response_model).
+    Response  # keep import used
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        content=[StaffOut(**d).model_dump() for d in docs],
+        headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"},
+    )
 
 
 @api.post("/staff")
@@ -5251,24 +5289,60 @@ async def payroll_run(
     year: int = Query(..., ge=2020, le=2100),
     _=Depends(require_role("admin", "accountant", "hr")),
 ):
-    """Generate payroll rows for all staff for the given month.
+    """Generate payroll rows for staff who were actually employed in the given month.
 
-    Late penalty (per user-defined formula):
+    Employment window filter (added Jul 2026):
+      * Skip staff who joined AFTER the month (joining_date > month-end).
+      * Skip staff who exited BEFORE the month (exit_date < month-start).
+      * For staff joining or exiting mid-month, `working_days` is set to the
+        intersection of their employment window with the calendar month, so
+        pro-rated basic pay reflects only the days they were actually on payroll.
+
+    Late penalty (existing rules unchanged):
       - <2h late  → minor: every 3 minor counts = 1 day deducted
       - 2h-6h     → half-day (0.5 day deducted)
       - ≥6h       → full-day (1 day deducted)
-      Final late_days = (minor // 3) + 0.5*half_day + 1.0*full_day
-      late_deduction = late_days × per_day_rate (or pro-rated monthly_salary/working_days)
     """
     import calendar
     last_day = calendar.monthrange(year, month)[1]
     start = f"{year:04d}-{month:02d}-01"
     end = f"{year:04d}-{month:02d}-{last_day:02d}"
 
-    staff_docs = await db.staff.find({}, {"_id": 0}).to_list(2000)
+    def _parse(d):
+        try:
+            return datetime.strptime(d, "%Y-%m-%d").date() if d else None
+        except (ValueError, TypeError):
+            return None
+    month_start_d = datetime.strptime(start, "%Y-%m-%d").date()
+    month_end_d = datetime.strptime(end, "%Y-%m-%d").date()
+
+    staff_docs = await db.staff.find({"active": {"$ne": False}}, {"_id": 0}).to_list(5000)
     created: list = []
+    skipped_not_employed = 0
     for s in staff_docs:
-        rows = await db.attendance.find({"staff_id": s["id"], "date": {"$gte": start, "$lte": end}}, {"_id": 0}).to_list(1000)
+        joining = _parse(s.get("joining_date"))
+        exit_dt = _parse(s.get("exit_date"))
+        # Skip staff not employed during any day of this month.
+        if joining and joining > month_end_d:
+            skipped_not_employed += 1
+            continue
+        if exit_dt and exit_dt < month_start_d:
+            skipped_not_employed += 1
+            continue
+        # Effective employment window inside the calendar month
+        eff_start = max(joining, month_start_d) if joining else month_start_d
+        eff_end = min(exit_dt, month_end_d) if exit_dt else month_end_d
+        working_days = (eff_end - eff_start).days + 1  # inclusive
+        if working_days <= 0:
+            skipped_not_employed += 1
+            continue
+        # Only count attendance rows within the effective window.
+        att_start = eff_start.isoformat()
+        att_end = eff_end.isoformat()
+        rows = await db.attendance.find(
+            {"staff_id": s["id"], "date": {"$gte": att_start, "$lte": att_end}},
+            {"_id": 0},
+        ).to_list(1000)
         days_present = 0.0
         for r in rows:
             st = r.get("status")
@@ -5282,13 +5356,13 @@ async def payroll_run(
             shift = await db.shifts.find_one({"id": s["shift_id"]}, {"_id": 0})
         buckets = _compute_late_buckets(rows, shift)
         late_days = (buckets["minor"] // 3) + 0.5 * buckets["half_day"] + 1.0 * buckets["full_day"]
-        per_day = s.get("per_day_rate", 0) or ((s.get("monthly_salary", 0) or 0) / last_day if last_day else 0)
+        per_day = s.get("per_day_rate", 0) or ((s.get("monthly_salary", 0) or 0) / working_days if working_days else 0)
         late_deduction = round(late_days * per_day, 2)
         # Base (basic only; HRA/DA/etc. start at 0 and HR can configure later)
         if s.get("per_day_rate", 0) and days_present > 0:
             basic = s["per_day_rate"] * days_present
         elif s.get("monthly_salary", 0) and days_present > 0:
-            basic = (s["monthly_salary"] or 0) * (days_present / last_day)
+            basic = (s["monthly_salary"] or 0) * (days_present / working_days)
         else:
             basic = 0
 
@@ -5301,7 +5375,9 @@ async def payroll_run(
             "staff_name": s.get("name"),
             "month": month, "year": year,
             "days_present": days_present,
-            "working_days": last_day,
+            "working_days": working_days,
+            "employment_window": {"start": att_start, "end": att_end},
+            "is_partial_month": working_days < last_day,
             "base_salary": s.get("monthly_salary", 0),
             "per_day_rate": s.get("per_day_rate", 0),
             # Earnings breakdown
@@ -5332,7 +5408,7 @@ async def payroll_run(
         await db.payroll.insert_one(doc)
         doc.pop("_id", None)
         created.append(doc)
-    return {"created": len(created), "rows": created}
+    return {"created": len(created), "skipped_not_employed": skipped_not_employed, "rows": created}
 
 
 @api.patch("/payroll/{pid}")
@@ -5362,20 +5438,44 @@ async def edit_payroll(pid: str, body: PayrollEditIn, user=Depends(require_role(
 
 
 @api.get("/payroll")
-async def list_payroll(month: Optional[int] = None, year: Optional[int] = None,
-                       user=Depends(get_current_user)):
+async def list_payroll(
+    month: Optional[int] = None, year: Optional[int] = None,
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 5000,
+    user=Depends(get_current_user),
+):
     # Payroll rows are salary-sensitive: only admin/hr/accountant/senior_manager
     # can see the whole roster. Staff (or any other role) must use `/payroll/my`
     # which scopes to their own linked staff record.
     if user.get("role") not in ("admin", "hr", "accountant", "senior_manager"):
         raise HTTPException(403, "Only HR / Accounts / Admin can view the full payroll list. Use /payroll/my for your own salary.")
-    q: dict = {}
+    query: dict = {}
     if month:
-        q["month"] = month
+        query["month"] = month
     if year:
-        q["year"] = year
-    docs = await db.payroll.find(q, {"_id": 0}).sort([("year", -1), ("month", -1)]).to_list(5000)
-    return docs
+        query["year"] = year
+    if status and status != "all":
+        query["status"] = status
+    if q:
+        needle = q.strip()
+        if needle:
+            rx = {"$regex": needle, "$options": "i"}
+            # Search by staff_name persisted on the payroll doc.
+            query["staff_name"] = rx
+    total = await db.payroll.count_documents(query)
+    cursor = db.payroll.find(query, {"_id": 0}).sort([("year", -1), ("month", -1), ("staff_name", 1)])
+    if skip:
+        cursor = cursor.skip(skip)
+    if limit:
+        cursor = cursor.limit(min(limit, 5000))
+    docs = await cursor.to_list(min(limit or 5000, 5000))
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        content=docs,
+        headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"},
+    )
 
 
 @api.get("/payroll/bank-csv")
@@ -5783,6 +5883,191 @@ async def report_consolidated(
          "Present", "Half", "Absent", "Leave",
          "CTC", "Gross", "Deductions", "Net", "Status", "Paid At",
          "Bank Name", "Account #", "IFSC"],
+    )
+
+
+# =========================================================================
+# SALARY SLIP TEMPLATES (Phase B) — upload / list / delete
+# =========================================================================
+@api.post("/salary-slip-templates", status_code=201)
+async def upload_salary_slip_template(
+    file: UploadFile = File(...),
+    company_id: Optional[str] = Query(None),
+    user=Depends(require_role("admin", "hr")),
+):
+    """Upload a `.docx` salary slip template. Optionally scope to a company —
+    generation will pick the template matching the staff's center's Default
+    Company (falling back to a global template if none per-company).
+
+    Only ONE template per company is active at a time — uploading a new
+    template for the same company deactivates the previous one.
+    """
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(400, "Only .docx files are accepted")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Template too large (max 5MB)")
+    if company_id:
+        c = await db.companies.find_one({"id": company_id}, {"_id": 0, "name": 1})
+        if not c:
+            raise HTTPException(404, "Company not found")
+        company_name = c.get("name")
+    else:
+        company_name = None
+    tid = str(uuid.uuid4())
+    path = f"{APP_STORAGE_PREFIX}/salary-slip-templates/{tid}.docx"
+    try:
+        _put_object(path, data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage upload failed: {e}")
+    # Deactivate any existing templates for the same company/scope.
+    scope_q = {"company_id": company_id, "is_active": True}
+    await db.salary_slip_templates.update_many(scope_q, {"$set": {"is_active": False}})
+    doc = {
+        "id": tid,
+        "company_id": company_id,
+        "company_name": company_name,
+        "filename": file.filename,
+        "file_path": path,
+        "uploaded_by": user["id"],
+        "uploaded_by_name": user.get("name") or user.get("email"),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_active": True,
+    }
+    await db.salary_slip_templates.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/salary-slip-templates")
+async def list_salary_slip_templates(_=Depends(require_role("admin", "hr", "manager"))):
+    docs = await db.salary_slip_templates.find({}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    return docs
+
+
+@api.delete("/salary-slip-templates/{tid}", status_code=204)
+async def delete_salary_slip_template(tid: str, _=Depends(require_role("admin"))):
+    r = await db.salary_slip_templates.delete_one({"id": tid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Template not found")
+    return None
+
+
+async def _resolve_salary_slip_template(company_id: Optional[str]) -> Optional[dict]:
+    """Return active salary slip template for the given company_id — falling
+    back to the global default (`company_id: None`)."""
+    if company_id:
+        tpl = await db.salary_slip_templates.find_one(
+            {"company_id": company_id, "is_active": True}, {"_id": 0},
+        )
+        if tpl:
+            return tpl
+    return await db.salary_slip_templates.find_one(
+        {"company_id": None, "is_active": True}, {"_id": 0},
+    )
+
+
+# =========================================================================
+# SALARY SLIP — generate, release, staff-facing download
+# =========================================================================
+@api.post("/payroll/{pid}/generate-slip")
+async def generate_slip(pid: str, user=Depends(require_role("admin", "hr", "accountant"))):
+    """Render the salary slip DOCX/PDF for the given payroll row and stash the
+    resulting object in storage. Does NOT release the slip to the staff — HR
+    must PATCH /release-slip after previewing the file.
+    """
+    from salary_slip import render_salary_slip
+    payroll = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not payroll:
+        raise HTTPException(404, "Payroll row not found")
+    staff = await db.staff.find_one({"id": payroll["staff_id"]}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found for this payroll row")
+    ctx = await _derive_context_for_center(staff.get("center_id"))
+    company = await db.companies.find_one({"id": ctx.get("company_id")}, {"_id": 0}) if ctx.get("company_id") else None
+    center = await db.centers.find_one({"id": staff.get("center_id")}, {"_id": 0}) if staff.get("center_id") else None
+    tpl = await _resolve_salary_slip_template(ctx.get("company_id"))
+    if not tpl:
+        raise HTTPException(400, "No salary slip template uploaded. Please upload a template first in HR Settings.")
+    try:
+        template_bytes, _ = _get_object(tpl["file_path"])
+    except Exception as e:
+        raise HTTPException(502, f"Template fetch failed: {str(e)[:200]}") from e
+    try:
+        slip_bytes, content_type, ext = render_salary_slip(
+            template_bytes=template_bytes, staff=staff, payroll=payroll,
+            company=company or {}, center=center,
+        )
+    except Exception as e:
+        logger.exception("Salary slip render failed for payroll %s", pid)
+        raise HTTPException(500, f"Slip render failed: {str(e)[:200]}") from e
+    slip_id = str(uuid.uuid4())
+    safe = (staff.get("name") or "staff").replace(" ", "_")
+    filename = f"SalarySlip_{safe}_{payroll['year']}_{payroll['month']:02d}.{ext}"
+    file_path = f"{APP_STORAGE_PREFIX}/salary-slips/{slip_id}.{ext}"
+    try:
+        _put_object(file_path, slip_bytes, content_type)
+    except Exception as e:
+        raise HTTPException(502, f"Slip upload failed: {str(e)[:200]}") from e
+    await db.payroll.update_one({"id": pid}, {"$set": {
+        "slip_id": slip_id,
+        "slip_path": file_path,
+        "slip_filename": filename,
+        "slip_content_type": content_type,
+        "slip_extension": ext,
+        "slip_generated_at": datetime.now(timezone.utc).isoformat(),
+        "slip_generated_by": user["id"],
+    }})
+    return {"ok": True, "slip_id": slip_id, "filename": filename, "extension": ext}
+
+
+@api.patch("/payroll/{pid}/release-slip")
+async def release_slip(pid: str, released: bool = Query(True), user=Depends(require_role("admin", "hr"))):
+    """Release (or un-release) an already-generated slip so the staff can see
+    it on their /check-in Salary tab.
+    """
+    payroll = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not payroll:
+        raise HTTPException(404, "Payroll row not found")
+    if released and not payroll.get("slip_id"):
+        raise HTTPException(400, "Generate the slip first before releasing")
+    update = (
+        {"slip_released_at": datetime.now(timezone.utc).isoformat(),
+         "slip_released_by": user["id"]}
+        if released else
+        {"slip_released_at": None, "slip_released_by": None}
+    )
+    await db.payroll.update_one({"id": pid}, {"$set": update})
+    return {"ok": True, "released": released}
+
+
+@api.get("/payroll/{pid}/slip/download")
+async def download_slip(pid: str, user=Depends(get_current_user)):
+    """Download the generated salary slip.
+    * admin/hr/accountant can download any slip after it's generated.
+    * staff can only download their OWN slip AFTER release.
+    """
+    from fastapi.responses import StreamingResponse
+    payroll = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not payroll or not payroll.get("slip_path"):
+        raise HTTPException(404, "Slip not generated yet")
+    role = user.get("role")
+    if role not in ("admin", "hr", "accountant", "senior_manager"):
+        # Staff visibility gate — must be their own AND released.
+        staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+        if not staff or staff["id"] != payroll.get("staff_id"):
+            raise HTTPException(403, "You can only download your own salary slip")
+        if not payroll.get("slip_released_at"):
+            raise HTTPException(403, "This slip has not been released by HR yet")
+    try:
+        data, ct = _get_object(payroll["slip_path"])
+    except Exception as e:
+        raise HTTPException(502, f"Slip fetch failed: {str(e)[:200]}") from e
+    import io as _io
+    return StreamingResponse(
+        _io.BytesIO(data),
+        media_type=payroll.get("slip_content_type") or ct or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{payroll.get("slip_filename") or f"slip_{pid}.pdf"}"'},
     )
 
 

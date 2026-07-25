@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -14,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -59,6 +59,7 @@ export default function HRMS() {
   const emptyStaffForm = {
     name: "", designation: "", reports_to_id: "",
     monthly_salary: 0, per_day_rate: 0, joining_date: "",
+    exit_date: "",  // last working day, blank = still active
     user_id: "", email: "", mobile: "",
     center_id: "", shift_id: "",
     date_of_birth: "", gender: "", address: "",
@@ -98,6 +99,32 @@ export default function HRMS() {
       const skipped = res.headers.get("X-Rows-Skipped") || "?";
       toast.success(`CSV downloaded · ${written} rows (${skipped} skipped — no bank or zero net)`);
     } catch (e) { toast.error(`Download failed: ${e.message}`); }
+  };
+
+  // ---- Salary Slip actions (Phase B) ----
+  const generateSlip = async (pid) => {
+    try {
+      await api.post(`/payroll/${pid}/generate-slip`);
+      toast.success("Salary slip generated");
+      await loadPayroll();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  const downloadSlip = async (pid, filename) => {
+    try {
+      const res = await api.get(`/payroll/${pid}/slip/download`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement("a");
+      a.href = url; a.download = filename || `salary_slip_${pid}.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  const releaseSlip = async (pid, released) => {
+    try {
+      await api.patch(`/payroll/${pid}/release-slip`, null, { params: { released } });
+      toast.success(released ? "Slip released — visible to employee" : "Slip un-released");
+      await loadPayroll();
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   // ---- Comprehensive HR reports (Phase A) ----
@@ -241,18 +268,57 @@ export default function HRMS() {
   const [leaveTypes, setLeaveTypes] = useState([]);
   const [myBalances, setMyBalances] = useState([]);
 
+  // Server-side search + pagination for the heavy tabs. Keeps HRMS snappy
+  // even with 500+ staff / thousands of payroll rows.
+  const PAGE = 25;
+  const [staffQ, setStaffQ] = useState("");
+  const [staffPage, setStaffPage] = useState(0);
+  const [staffTotal, setStaffTotal] = useState(0);
+  const [payrollQ, setPayrollQ] = useState("");
+  const [payrollStatus, setPayrollStatus] = useState("all");
+  const [payrollPage, setPayrollPage] = useState(0);
+  const [payrollTotal, setPayrollTotal] = useState(0);
+
   const canMarkAttendance = isAdmin || user?.role === "manager" || user?.role === "center_manager";
 
+  const loadStaff = useCallback(async () => {
+    try {
+      const res = await api.get("/staff", { params: { q: staffQ || undefined, skip: staffPage * PAGE, limit: PAGE } });
+      setStaff(res.data || []);
+      const total = res.headers?.["x-total-count"];
+      if (total != null) setStaffTotal(Number(total));
+    } catch { /* silent */ }
+  }, [staffQ, staffPage]);
+
+  const loadPayroll = useCallback(async () => {
+    try {
+      const params = { skip: payrollPage * PAGE, limit: PAGE };
+      if (payrollQ) params.q = payrollQ;
+      if (payrollStatus && payrollStatus !== "all") params.status = payrollStatus;
+      const res = await api.get("/payroll", { params });
+      setPayroll(res.data || []);
+      const total = res.headers?.["x-total-count"];
+      if (total != null) setPayrollTotal(Number(total));
+    } catch { /* silent */ }
+  }, [payrollQ, payrollPage, payrollStatus]);
+
   const loadAll = () => Promise.all([
-    api.get("/staff"), api.get("/reimbursements"), api.get("/payroll"), api.get("/leaves"),
-    api.get("/entities/center"), api.get("/shifts").catch(() => ({ data: [] })),
+    loadStaff(),
+    api.get("/reimbursements"),
+    loadPayroll(),
+    api.get("/leaves"),
+    api.get("/entities/center"),
+    api.get("/shifts").catch(() => ({ data: [] })),
     api.get("/leave-types").catch(() => ({ data: [] })),
-  ]).then(([s, r, p, lv, c, sh, lt]) => {
-    setStaff(s.data); setReimbs(r.data); setPayroll(p.data); setLeaves(lv.data);
+  ]).then(([, r, , lv, c, sh, lt]) => {
+    setReimbs(r.data); setLeaves(lv.data);
     setCenters(c.data); setShifts(sh.data); setLeaveTypes(lt.data);
   });
 
   useEffect(() => { loadAll(); }, []);
+  // Reload on filter/pagination change (debounced by simple state update).
+  useEffect(() => { loadStaff(); }, [loadStaff]);
+  useEffect(() => { loadPayroll(); }, [loadPayroll]);
 
   // Load attendance for selected date
   useEffect(() => {
@@ -384,6 +450,7 @@ export default function HRMS() {
       monthly_salary: s.monthly_salary || 0,
       per_day_rate: s.per_day_rate || 0,
       joining_date: s.joining_date || "",
+      exit_date: s.exit_date || "",
       user_id: s.user_id || "",
       email: s.email || "",
       mobile: s.mobile || "",
@@ -666,6 +733,25 @@ export default function HRMS() {
 
         {/* Staff */}
         <TabsContent value="staff" className="mt-4 space-y-4">
+          {/* Search + pagination header (server-side) */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Input
+                type="search"
+                placeholder="Search name / employee code / designation / email"
+                value={staffQ}
+                onChange={(e) => { setStaffQ(e.target.value); setStaffPage(0); }}
+                className="rounded-none w-72"
+                data-testid="staff-search"
+              />
+              <span className="text-xs text-[var(--muted)]">Showing {staff.length} of {staffTotal}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => setStaffPage((p) => Math.max(0, p - 1))} disabled={staffPage === 0} className="rounded-none" data-testid="staff-prev">Prev</Button>
+              <span className="text-xs">Page {staffPage + 1} / {Math.max(1, Math.ceil(staffTotal / PAGE))}</span>
+              <Button size="sm" variant="outline" onClick={() => setStaffPage((p) => p + 1)} disabled={(staffPage + 1) * PAGE >= staffTotal} className="rounded-none" data-testid="staff-next">Next</Button>
+            </div>
+          </div>
           {canManageStaff && (
             <div className="flex justify-end gap-2">
               {isAdmin && selectedStaff.size > 0 && (
@@ -695,6 +781,17 @@ export default function HRMS() {
                       <div><Label>Monthly Salary</Label><Input type="number" value={staffForm.monthly_salary} onChange={(e) => setStaffForm({ ...staffForm, monthly_salary: e.target.value })} className="rounded-none" /></div>
                       <div><Label>Per-Day Rate</Label><Input type="number" value={staffForm.per_day_rate} onChange={(e) => setStaffForm({ ...staffForm, per_day_rate: e.target.value })} className="rounded-none" /></div>
                       <div><Label>Joining Date</Label><Input type="date" value={staffForm.joining_date} onChange={(e) => setStaffForm({ ...staffForm, joining_date: e.target.value })} className="rounded-none" /></div>
+                      <div>
+                        <Label>Exit / Last Working Date <span className="overline text-[10px]">(if resigned)</span></Label>
+                        <Input
+                          type="date"
+                          value={staffForm.exit_date || ""}
+                          onChange={(e) => setStaffForm({ ...staffForm, exit_date: e.target.value })}
+                          className="rounded-none"
+                          data-testid="staff-exit-date"
+                        />
+                        <div className="text-[10px] text-[var(--muted)] mt-1">Set this to auto-exclude staff from payroll runs beyond their last working month.</div>
+                      </div>
                       <div><Label>Center / Location</Label>
                         <Select value={staffForm.center_id || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, center_id: v === "__none" ? "" : v })}>
                           <SelectTrigger className="rounded-none" data-testid="staff-center"><SelectValue placeholder="—" /></SelectTrigger>
@@ -1211,6 +1308,33 @@ export default function HRMS() {
 
         {/* Payroll */}
         <TabsContent value="payroll" className="mt-4 space-y-4">
+          {/* Search + status filter + pagination */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Input
+                type="search"
+                placeholder="Search staff name"
+                value={payrollQ}
+                onChange={(e) => { setPayrollQ(e.target.value); setPayrollPage(0); }}
+                className="rounded-none w-64"
+                data-testid="payroll-search"
+              />
+              <Select value={payrollStatus} onValueChange={(v) => { setPayrollStatus(v); setPayrollPage(0); }}>
+                <SelectTrigger className="rounded-none w-36" data-testid="payroll-status-filter"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All statuses</SelectItem>
+                  <SelectItem value="draft">Draft</SelectItem>
+                  <SelectItem value="paid">Paid</SelectItem>
+                </SelectContent>
+              </Select>
+              <span className="text-xs text-[var(--muted)]">Showing {payroll.length} of {payrollTotal}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => Math.max(0, p - 1))} disabled={payrollPage === 0} className="rounded-none" data-testid="payroll-prev">Prev</Button>
+              <span className="text-xs">Page {payrollPage + 1} / {Math.max(1, Math.ceil(payrollTotal / PAGE))}</span>
+              <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => p + 1)} disabled={(payrollPage + 1) * PAGE >= payrollTotal} className="rounded-none" data-testid="payroll-next">Next</Button>
+            </div>
+          </div>
           {(isAdmin || isAccountant) && (
             <div className="swiss-card p-4 flex items-end gap-3 flex-wrap">
               <div><Label className="overline">Month</Label><Input type="number" min={1} max={12} value={pMonth} onChange={(e) => setPMonth(+e.target.value)} className="rounded-none w-24" /></div>
@@ -1249,7 +1373,26 @@ export default function HRMS() {
                       <Button size="sm" variant="outline" onClick={() => nav(`/hrms/staff/${p.staff_id}/salary?month=${p.month}&year=${p.year}`)} className="rounded-none h-8 px-2" title="Salary Detail" data-testid={`view-detail-${p.id}`}>
                         <User size={14} />
                       </Button>
-                      <Button size="sm" variant="outline" onClick={() => printPayslip(p)} className="rounded-none h-8 px-2" title="Download payslip" data-testid={`payslip-pdf-${p.id}`}><FileText size={14} /></Button>
+                      <Button size="sm" variant="outline" onClick={() => printPayslip(p)} className="rounded-none h-8 px-2" title="Print payslip (local)" data-testid={`payslip-pdf-${p.id}`}><FileText size={14} /></Button>
+                      {/* Salary Slip actions (Phase B): Generate → Download → Release */}
+                      {(isAdmin || isAccountant || user?.role === "hr") && !p.slip_id && (
+                        <Button size="sm" variant="outline" onClick={() => generateSlip(p.id)} className="rounded-none h-8 px-2" title="Generate salary slip (DOCX/PDF)" data-testid={`slip-gen-${p.id}`}><Receipt size={14} /></Button>
+                      )}
+                      {p.slip_id && (
+                        <Button size="sm" variant="outline" onClick={() => downloadSlip(p.id, p.slip_filename)} className="rounded-none h-8 px-2" title="Download generated slip" data-testid={`slip-dl-${p.id}`}><FileDown size={14} /></Button>
+                      )}
+                      {p.slip_id && (isAdmin || user?.role === "hr") && (
+                        <Button
+                          size="sm"
+                          variant={p.slip_released_at ? "default" : "outline"}
+                          onClick={() => releaseSlip(p.id, !p.slip_released_at)}
+                          className={`rounded-none h-8 px-2 ${p.slip_released_at ? "brand-btn" : ""}`}
+                          title={p.slip_released_at ? "Un-release slip (hide from employee)" : "Release slip to employee"}
+                          data-testid={`slip-release-${p.id}`}
+                        >
+                          {p.slip_released_at ? "Released" : "Release"}
+                        </Button>
+                      )}
                       {p.status !== "paid" && canManageStaff && (
                         <Button size="sm" variant="outline" onClick={() => openEditPayroll(p)} className="rounded-none h-8 px-2" data-testid={`edit-payroll-${p.id}`} title="Edit"><Pencil size={14} /></Button>
                       )}

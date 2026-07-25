@@ -1,0 +1,40 @@
+{
+  "summary": "iter-37 Phase-B verification (Salary Slip templates + generate/release/download + payroll_run employment window filter + HRMS pagination/search + Staff.exit_date). Backend: 17/17 pytest passed. Frontend E2E: all new testids present and functional. HR Settings > Salary Slips tab renders upload form + placeholder reference + templates list (testids salary-slip-templates-tab, slip-tpl-company, slip-tpl-file, slip-tpl-upload). HRMS > Staff tab pagination (Page 1/n) + staff-search + staff-prev + staff-next verified — searching 'Boss' filtered rows correctly (24 hits). Add-Staff dialog exposes staff-exit-date field alongside joining date. HRMS > Payroll tab shows payroll-search / payroll-status-filter / payroll-prev / payroll-next + 25 slip-gen-<pid> action buttons on draft rows (1013 rows, 41 pages). Payroll employment-window filter tested end-to-end with 3 seeded staff — May excludes B, June has B with working_days=16, July has C with working_days=15+is_partial_month=true, August excludes C. Slip lifecycle: template upload → generate slip → admin download (200) → release (slip_released_at set) → un-release (200). /check-in Salary tab as manager renders Payslip History with Print links; slip-download-<rid> correctly hidden when slip_released_at not set on the row.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "HRMS Payroll tab", "issues": ["Auto-provisioned test staff period shows '12/2099' — pre-existing seed noise, not part of this iteration but noticeable in the payroll table."]},
+      {"screen": "Dashboard (pre-existing)", "issues": ["Recharts container width(-1)/height(-1) warnings on initial paint — pre-existing, unrelated to Phase B."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter37_phase_b_slips.py",
+    "/app/test_reports/pytest/iter37_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:5286 payroll_run — employment window filter is correct. joining_date > month_end -> skip; exit_date < month_start -> skip; effective window = [max(joining, month_start), min(exit, month_end)]; working_days = inclusive delta+1. is_partial_month=(working_days<last_day). Verified numerically: B joining 15-Jun → working_days=16; C exit 15-Jul → working_days=15. base salary is prorated as monthly_salary*(days_present/working_days), which is the correct math.",
+    "server.py:5892 upload_salary_slip_template — only .docx accepted, 5MB cap, deactivates prior active template scoped to same company_id. Global (company_id=null) and per-company templates coexist. _resolve_salary_slip_template prefers per-company then global — correct precedence.",
+    "server.py:5973 generate_slip — requires an active template (400 with helpful message), fetches template from storage, delegates to salary_slip.render_salary_slip which gracefully falls back to DOCX if LibreOffice unavailable — pdf/docx both accepted downstream. slip metadata (slip_id, slip_path, slip_filename, slip_content_type, slip_extension, slip_generated_at, slip_generated_by) persisted on payroll doc atomically. Good.",
+    "server.py:6024 release_slip — requires a generated slip before releasing (400 otherwise). Un-release clears slip_released_at + slip_released_by. Symmetric and idempotent.",
+    "server.py:6044 download_slip — RBAC gate: admin/hr/accountant/senior_manager bypass release check; other roles must be the staff owner AND slip_released_at set — 403 otherwise. Correct multi-tenant boundary.",
+    "server.py:3292 list_staff — q searches name/employee_code/designation/email/mobile (case-insensitive regex). X-Total-Count returned + Access-Control-Expose-Headers exposes it. Limit hard-capped at 2000 which prevents accidental full-collection scans.",
+    "server.py:5440 list_payroll — q searches persisted staff_name only (regex). This means if staff renames on the master, historical payroll rows won't match the new name until re-run. Consider joining to staff on staff_id for search — MINOR follow-up.",
+    "salary_slip.py:184 render_salary_slip — DocxTemplate render with silent-ignore; LibreOffice --headless PDF conversion in tempdir with 45s timeout + graceful fallback to DOCX. Amount-to-words uses Indian lakh/crore. Good.",
+    "SalarySlipTemplatesTab.jsx / HRMS.jsx / CheckIn.jsx — all required data-testids present and wired to endpoints (verified via UI). Add-Staff dialog exposes staff-exit-date beside joining-date. Payroll rows render slip-gen-<pid> on unreleased rows."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter37_phase_b_slips.py (NEW — 17 tests across 4 classes)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "100% (all Phase-B testids present and functional; pagination + search + slip lifecycle verified)"},
+  "test_credentials": "admin@finance.app / Admin@123 and test_mgr2_e0e668@x.com / Mgr@12345 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Uploaded two global salary-slip templates (global_slip.docx and global_slip_v2.docx — second one active). Created 3 test staff (TEST_ITER37_<hex>_A/_B/_C) with joining_date 2026-05-01 / 2026-06-15 / 2026-05-01 and C.exit_date=2026-07-15. Ran payroll_run for May/June/July/Aug 2026 — payroll rows persisted. Generated one salary slip on staff A's July 2026 row (LibreOffice available → PDF), then release-then-unrelease toggled slip_released_at.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Phase B fully verified. Test data present under TEST_ITER37_* staff — safe to leave for regression. New backend endpoints: POST/GET/DELETE /api/salary-slip-templates, POST /api/payroll/{pid}/generate-slip, PATCH /api/payroll/{pid}/release-slip?released=true|false, GET /api/payroll/{pid}/slip/download. payroll_run response now includes skipped_not_employed count and each row carries employment_window={start,end} + is_partial_month. list_staff and list_payroll now accept q/skip/limit and expose X-Total-Count (Access-Control-Expose-Headers already set). Frontend testids: salary-slip-templates-tab, slip-tpl-company, slip-tpl-file, slip-tpl-upload, slip-tpl-delete-<id>, staff-search, staff-prev, staff-next, staff-exit-date, payroll-search, payroll-status-filter, payroll-prev, payroll-next, slip-gen-<pid>, slip-dl-<pid>, slip-release-<pid>, slip-download-<rid>. Phase C (loans/advance master + cron auto-run) still pending."
+}

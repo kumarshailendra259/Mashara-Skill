@@ -11,11 +11,12 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Trash2, Pencil, Check, X, MapPin, Calendar, Clock, AlertCircle, Wallet, FileText, Megaphone } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, X, MapPin, Calendar, Clock, AlertCircle, Wallet, FileText, Megaphone, Receipt } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import LeaveAllocationTab from "@/components/LeaveAllocationTab";
 import MapPicker from "@/components/MapPicker";
 import OfferLetterTemplatesTab from "@/components/OfferLetterTemplatesTab";
+import SalarySlipTemplatesTab from "@/components/SalarySlipTemplatesTab";
 
 export default function HrSettings() {
   const { user } = useAuth();
@@ -44,6 +45,7 @@ export default function HrSettings() {
           <TabsTrigger value="geofences" data-testid="tab-geofences"><MapPin size={14} className="mr-2" /> Geofences</TabsTrigger>
           <TabsTrigger value="shifts" data-testid="tab-shifts"><Clock size={14} className="mr-2" /> Shifts</TabsTrigger>
           <TabsTrigger value="offer_letters" data-testid="tab-offer-letters"><FileText size={14} className="mr-2" /> Offer Letters</TabsTrigger>
+          <TabsTrigger value="salary_slips" data-testid="tab-salary-slips"><Receipt size={14} className="mr-2" /> Salary Slips</TabsTrigger>
         </TabsList>
 
         <TabsContent value="holidays" className="mt-4"><HolidaysTab /></TabsContent>
@@ -52,6 +54,7 @@ export default function HrSettings() {
         <TabsContent value="geofences" className="mt-4"><GeofencesTab /></TabsContent>
         <TabsContent value="shifts" className="mt-4"><ShiftsTab /></TabsContent>
         <TabsContent value="offer_letters" className="mt-4"><OfferLetterTemplatesTab /></TabsContent>
+        <TabsContent value="salary_slips" className="mt-4"><SalarySlipTemplatesTab /></TabsContent>
       </Tabs>
     </div>
   );

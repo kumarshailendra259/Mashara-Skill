@@ -1822,7 +1822,23 @@ function SalaryTab() {
                   <div className="text-right">
                     <div className="font-heading font-bold">{inr(r.net || 0)}</div>
                     <span className={`text-xs uppercase font-bold px-2 py-0.5 ${r.status === "paid" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
-                    <button onClick={() => printMobilePayslip(r, s)} className="block mt-1 text-[10px] text-[var(--brand)] hover:underline" data-testid={`payslip-pdf-mob-${r.id}`}>Download</button>
+                    <button onClick={() => printMobilePayslip(r, s)} className="block mt-1 text-[10px] text-[var(--brand)] hover:underline" data-testid={`payslip-pdf-mob-${r.id}`}>Print</button>
+                    {r.slip_released_at && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const res = await api.get(`/payroll/${r.id}/slip/download`, { responseType: "blob" });
+                            const url = URL.createObjectURL(new Blob([res.data]));
+                            const a = document.createElement("a");
+                            a.href = url; a.download = r.slip_filename || `salary_slip_${r.id}.pdf`;
+                            document.body.appendChild(a); a.click(); a.remove();
+                            URL.revokeObjectURL(url);
+                          } catch (e) { toast.error(formatError(e)); }
+                        }}
+                        className="block mt-0.5 text-[10px] font-bold text-[var(--brand)] hover:underline"
+                        data-testid={`slip-download-${r.id}`}
+                      >Download HR Slip</button>
+                    )}
                   </div>
                 </div>
               </li>
