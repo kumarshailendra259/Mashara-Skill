@@ -309,7 +309,7 @@ class RejectIn(BaseModel):
 # ============================================================================
 # Approval Chains — configurable multi-level approval workflows
 # ============================================================================
-ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment"]
+ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement"]
 ApproverKind = Literal["role", "staff", "user", "reports_to"]
 
 # Central mapping from approval-type → backing collection. Used by /approvals/act, /approvals/pending,
@@ -324,6 +324,8 @@ APPROVAL_TYPE_COLL: dict = {
     "regularisation":    "regularisations",
     "quotation":         "quotations",
     "payment":           "payments",
+    "advance_request":   "advance_requests",
+    "advance_settlement":"advance_settlements",
 }
 
 
@@ -4209,6 +4211,8 @@ def _approval_link(req_type: str) -> str:
         "regularisation":    "/pending-approvals",
         "quotation":         "/quotations",
         "payment":           "/quotations",
+        "advance_request":   "/advances",
+        "advance_settlement":"/advances",
     }.get(req_type, "/pending-approvals")
 
 
@@ -9049,7 +9053,306 @@ async def adjust_leave_balance(bid: str, body: LeaveBalanceAdjustIn, user=Depend
     return rec
 
 
-# ============================================================
+# =========================================================================
+# ADVANCE PAYMENT & ADJUSTMENT — Phase 1 (Advance Request → Approval → Release)
+# =========================================================================
+# Lifecycle: draft → pending (approvals) → approved → released → adjusting → settled
+#
+# Numbering scheme: ADV-YY-<counter> generated at submission time (per financial year).
+# Approval chain uses the existing approval_chains system (type="advance_request").
+# Release step is Finance-only and creates a linked transaction row automatically
+# so cash-flow / reports pick up the outflow like any other payment.
+
+class AdvanceRequestIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    center_id: Optional[str] = None
+    project_id: Optional[str] = None
+    company_id: Optional[str] = None
+    purpose: str = Field(min_length=2)
+    category: Optional[str] = None
+    amount: float = Field(gt=0)
+    required_till: Optional[str] = None  # YYYY-MM-DD due-back date
+    description: Optional[str] = None
+    attachments: Optional[List[AttachmentRef]] = None
+
+
+class AdvanceReleaseIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    payment_mode: Literal["bank", "upi", "cash", "cheque"] = "bank"
+    payment_date: Optional[str] = None  # YYYY-MM-DD
+    transaction_ref: Optional[str] = None
+    paid_amount: Optional[float] = Field(default=None, gt=0)  # defaults to approved amount
+    paid_by_user_id: Optional[str] = None
+    remarks: Optional[str] = None
+    attachments: Optional[List[AttachmentRef]] = None
+
+
+async def _next_advance_no() -> str:
+    """Generate ADV-YY-N sequential number based on financial year (Apr-Mar)."""
+    now = datetime.now(timezone.utc)
+    fy = now.year if now.month >= 4 else now.year - 1
+    prefix = f"ADV-{str(fy)[-2:]}-"
+    last = await db.advance_requests.find(
+        {"advance_no": {"$regex": f"^{prefix}"}}, {"_id": 0, "advance_no": 1},
+    ).sort("advance_no", -1).limit(1).to_list(1)
+    counter = 1
+    if last:
+        try:
+            counter = int(last[0]["advance_no"].split("-")[-1]) + 1
+        except (ValueError, IndexError):
+            counter = 1
+    return f"{prefix}{counter:04d}"
+
+
+async def _next_voucher_no() -> str:
+    now = datetime.now(timezone.utc)
+    fy = now.year if now.month >= 4 else now.year - 1
+    prefix = f"ADV-VCHR-{str(fy)[-2:]}-"
+    last = await db.advance_requests.find(
+        {"voucher_no": {"$regex": f"^{prefix}"}}, {"_id": 0, "voucher_no": 1},
+    ).sort("voucher_no", -1).limit(1).to_list(1)
+    counter = 1
+    if last and last[0].get("voucher_no"):
+        try:
+            counter = int(last[0]["voucher_no"].split("-")[-1]) + 1
+        except (ValueError, IndexError):
+            counter = 1
+    return f"{prefix}{counter:04d}"
+
+
+def _advance_scope_filter(user: dict) -> dict:
+    """Return a Mongo filter clause restricting which advance rows a user can see."""
+    role = user.get("role")
+    if role in ("admin", "hr", "accountant", "senior_manager", "manager"):
+        return {}
+    if role in ("center_manager", "center_staff"):
+        centers = user.get("assigned_center_ids") or []
+        return {"center_id": {"$in": centers}}
+    if role == "partner":
+        return {"partner_id": user.get("assigned_partner_id")}
+    # regular staff → only their own
+    return {"created_by": user["id"]}
+
+
+@api.post("/advance-requests", status_code=201)
+async def create_advance_request(body: AdvanceRequestIn, user=Depends(get_current_user)):
+    """Create a new Advance Request. Staff / center_manager / manager / admin / hr can raise one for themselves."""
+    doc = body.model_dump()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0}) or {}
+    doc.update({
+        "id": str(uuid.uuid4()),
+        "advance_no": await _next_advance_no(),
+        "date": now_iso[:10],
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("email"),
+        "employee_staff_id": staff.get("id"),
+        "employee_code": staff.get("employee_code"),
+        "employee_name": staff.get("name") or user.get("name") or user.get("email"),
+        "designation": staff.get("designation"),
+        "status": "pending",
+        "adjusted_amount": 0.0,
+        "balance_amount": 0.0,
+        "paid_amount": 0.0,
+        "released_at": None,
+        "released_by": None,
+        "voucher_no": None,
+        "created_at": now_iso,
+    })
+    # Attach approval chain — same helper reused, `type=advance_request` picks matching chain
+    doc = await _attach_chain_to_request("advance_request", doc)
+    await db.advance_requests.insert_one(doc)
+    doc.pop("_id", None)
+    # Notify first-step approvers
+    cur = await _current_step(doc)
+    if cur:
+        for uid in await _resolve_step_user_ids(cur, doc):
+            if uid != user["id"]:
+                await _notify(
+                    uid,
+                    f"Advance approval — {doc['advance_no']} · {doc['employee_name']} · ₹{doc['amount']:,.0f}",
+                    ntype="advance_pending", ref_id=doc["id"], link="/advances",
+                )
+    return _json_safe(doc)
+
+
+@api.get("/advance-requests")
+async def list_advance_requests(
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 200,
+    user=Depends(get_current_user),
+):
+    """List advance requests scoped by role.
+    Admin/HR/Accountant/Sr Mgr/Manager: everything.
+    center_manager/center_staff: only their assigned centers.
+    partner: their partner scope.
+    regular staff: their own requests only.
+    """
+    query: dict = _advance_scope_filter(user)
+    if status and status != "all":
+        query["status"] = status
+    if q:
+        needle = q.strip()
+        if needle:
+            rx = {"$regex": needle, "$options": "i"}
+            query["$or"] = [
+                {"advance_no": rx},
+                {"employee_name": rx},
+                {"employee_code": rx},
+                {"purpose": rx},
+                {"voucher_no": rx},
+            ]
+    total = await db.advance_requests.count_documents(query)
+    cursor = db.advance_requests.find(query, {"_id": 0}).sort("created_at", -1)
+    if skip:
+        cursor = cursor.skip(skip)
+    if limit:
+        cursor = cursor.limit(min(limit, 1000))
+    rows = await cursor.to_list(min(limit or 500, 1000))
+    for r in rows:
+        await _enrich_with_approval_status(r)
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        content=_json_safe(rows),
+        headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"},
+    )
+
+
+@api.get("/advance-requests/my")
+async def my_advance_requests(user=Depends(get_current_user)):
+    """Current user's own advance requests (Staff App)."""
+    rows = await db.advance_requests.find(
+        {"created_by": user["id"]}, {"_id": 0},
+    ).sort("created_at", -1).to_list(200)
+    for r in rows:
+        await _enrich_with_approval_status(r)
+    return _json_safe(rows)
+
+
+@api.get("/advance-requests/{aid}")
+async def get_advance_request(aid: str, user=Depends(get_current_user)):
+    row = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Advance request not found")
+    # Access check: owner, admin/hr/accountant/sr-mgr always; else must match scope filter.
+    if row.get("created_by") != user["id"] and user.get("role") not in ("admin", "hr", "accountant", "senior_manager", "manager"):
+        scope = _advance_scope_filter(user)
+        if scope and not all(row.get(k) in (v.get("$in", []) if isinstance(v, dict) else [v]) for k, v in scope.items()):
+            raise HTTPException(403, "You cannot view this advance request")
+    await _enrich_with_approval_status(row)
+    return _json_safe(row)
+
+
+@api.patch("/advance-requests/{aid}")
+async def edit_advance_request(aid: str, body: AdvanceRequestIn, user=Depends(get_current_user)):
+    """Requester can edit while status is draft or after a send_back."""
+    row = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Not found")
+    if row.get("created_by") != user["id"] and user.get("role") != "admin":
+        raise HTTPException(403, "Only the requester or admin can edit an advance")
+    if row.get("status") not in ("draft", "sent_back", "pending"):
+        raise HTTPException(400, f"Cannot edit an advance in status={row.get('status')}")
+    update = body.model_dump(exclude_unset=True)
+    update["edited_at"] = datetime.now(timezone.utc).isoformat()
+    update["edited_by"] = user["id"]
+    await db.advance_requests.update_one({"id": aid}, {"$set": update})
+    return await get_advance_request(aid, user)
+
+
+@api.post("/advance-requests/{aid}/release")
+async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require_role("admin", "accountant"))):
+    """Finance releases the approved advance:
+       - Sets status → 'released', assigns voucher number
+       - Creates a linked transaction row (expense / advance-out) so cash-flow dashboards
+         pick it up.
+    """
+    row = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Advance not found")
+    if row.get("status") != "approved":
+        raise HTTPException(400, f"Advance must be fully approved before release (status={row.get('status')})")
+    if row.get("released_at"):
+        raise HTTPException(400, "Advance already released")
+    voucher_no = await _next_voucher_no()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    paid_amount = body.paid_amount or row.get("amount") or 0
+    payer = None
+    if body.paid_by_user_id:
+        p = await db.users.find_one({"id": body.paid_by_user_id}, {"_id": 0, "name": 1, "email": 1})
+        payer = (p or {}).get("name") or (p or {}).get("email")
+    # Create a corresponding transaction for cash-flow visibility
+    txn_id = str(uuid.uuid4())
+    txn_doc = {
+        "id": txn_id,
+        "date": body.payment_date or now_iso[:10],
+        "type": "expense",
+        "category": "advance",
+        "amount": paid_amount,
+        "description": f"Advance {row['advance_no']} released to {row['employee_name']}",
+        "company_id": row.get("company_id"),
+        "center_id": row.get("center_id"),
+        "project_id": row.get("project_id"),
+        "partner_id": None,
+        "payment_mode": body.payment_mode,
+        "paid_by_user_id": body.paid_by_user_id,
+        "paid_by_name": payer,
+        "transaction_ref": body.transaction_ref,
+        "advance_request_id": row["id"],
+        "attachments": [a.model_dump() if hasattr(a, "model_dump") else a for a in (body.attachments or [])],
+        "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("email"),
+        "created_at": now_iso,
+        "status": "posted",
+    }
+    await db.transactions.insert_one(txn_doc)
+    await db.advance_requests.update_one({"id": aid}, {"$set": {
+        "status": "released",
+        "voucher_no": voucher_no,
+        "released_at": now_iso,
+        "released_by": user["id"],
+        "released_by_name": user.get("name") or user.get("email"),
+        "payment_mode": body.payment_mode,
+        "payment_date": body.payment_date or now_iso[:10],
+        "transaction_ref": body.transaction_ref,
+        "paid_amount": paid_amount,
+        "paid_by_user_id": body.paid_by_user_id,
+        "paid_by_name": payer,
+        "release_remarks": body.remarks,
+        "release_attachments": [a.model_dump() if hasattr(a, "model_dump") else a for a in (body.attachments or [])],
+        "linked_transaction_id": txn_id,
+        "balance_amount": paid_amount,   # initially = paid; will decrease as expenses adjust in Phase 2
+    }})
+    # Notify requester
+    await _notify(
+        row["created_by"],
+        f"Your advance {row['advance_no']} · ₹{paid_amount:,.0f} has been released",
+        ntype="advance_released", ref_id=row["id"], link="/advances",
+    )
+    updated = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    updated.pop("_id", None)
+    return _json_safe(updated)
+
+
+@api.delete("/advance-requests/{aid}", status_code=204)
+async def cancel_advance_request(aid: str, user=Depends(get_current_user)):
+    """Requester can withdraw a draft/pending advance; admin can withdraw anything not yet released."""
+    row = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Not found")
+    is_admin = user.get("role") == "admin"
+    if row.get("created_by") != user["id"] and not is_admin:
+        raise HTTPException(403, "Only the requester or admin can cancel")
+    if row.get("status") in ("released", "adjusting", "settled") and not is_admin:
+        raise HTTPException(400, f"Advance already {row.get('status')} — cannot cancel")
+    await db.advance_requests.update_one({"id": aid}, {"$set": {
+        "status": "cancelled",
+        "cancelled_at": datetime.now(timezone.utc).isoformat(),
+        "cancelled_by": user["id"],
+    }})
+    return None
 
 
 # ---------- Register router + CORS ----------
