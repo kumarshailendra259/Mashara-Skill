@@ -28,6 +28,30 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27 — Advance Payment & Adjustment Module, Phase 2 (Done, Jul 2026)
+**Expense Against Advance — link a released advance to a Payment Request so it offsets the balance:**
+- **New endpoint**: `GET /api/advance-requests/adjustable` — returns the caller's own advances that are `released` or `adjusting` with `balance_amount > 0`. Slim payload (id, advance_no, voucher_no, amount, paid_amount, adjusted_amount, balance_amount, purpose, released_at, status). Powers the Payment Request "Adjust against Advance" picker.
+- **`PaymentIn` model extended** with `advance_request_id: Optional[str]`. Special payment_mode `advance_adjustment` short-circuits `_validate_payment_payee` (no bank/UPI/cheque payee details required for advance-funded payments).
+- **`create_payment` validation**: 404 if advance not found, 403 if not owner, 400 if status not in {released, adjusting}, 400 if actual_amount > balance_amount.
+- **`resubmit_payment` guardrail**: re-validates linked advance is still adjustable and new actual_amount fits within balance.
+- **Final-approval branch** for payments (`/api/approvals/act`): `_is_adv_adjust_payment` gate skips `paid_by_name` + `txn_center_id` requirements when advance_request_id is set (auto-defaults from advance requester). On final approve:
+  - Creates the expense transaction tagged with `is_advance_adjustment=true`, `funded_by_advance_id`, `advance_no` so ledger/reports can net the outflow (advance was already an outflow at release time).
+  - Increments advance `adjusted_amount`, decrements `balance_amount`, appends to `adjustments[]` (payment_id, quotation_id, qrn, amount, at, vendor_name, txn_id).
+  - Flips advance status → `adjusting` (partial) or `settled` (balance ≤ 0.01, stamps `settled_at`).
+  - Notifies advance requester (`advance_adjusted` notification type).
+- **Frontend `Quotations.jsx`** — Raise Payment dialog now fetches adjustable advances on open. When any exist, shows an indigo "Adjust this payment against my open advance" checkbox (`p-advance-toggle`). Toggling: (a) sets payment_mode to `advance_adjustment`, (b) hides payee bank/UPI/cheque payee-detail sections, (c) shows a Select dropdown (`p-advance-select`) with each advance's balance + purpose, (d) live "After this payment" balance preview with red warning if amount exceeds balance, (e) informational "No fresh outflow will be created" indigo callout.
+- **Frontend `Advances.jsx`** — new `Adjusted` + `Balance` columns (data-testids `adv-adjusted-<id>` / `adv-balance-<id>`). "SETTLED" badge shown for settled rows. New `Adjusted / Balance` roll-up stat card at the top.
+- **Verified**: testing_agent iter-39 — **12/12 backend pytest passed** + full Playwright E2E on Quotations dialog + Advances columns. Happy-path (partial → settled), 403 on other-user advance, 400 on cancelled/settled advance, 400 on amount>balance, 400 on resubmit exceed, non-regression on standard bank/UPI/cheque payee validation — all green.
+
+### Phase 26C — Advance Payment & Adjustment Module, Phase 1 (Done, Jul 2026)
+- **Advance Request lifecycle**: draft → pending → approved → released → adjusting → settled (or cancelled). `ADV-YY-N` financial-year numbering.
+- New collections: `advance_requests` (with fields: advance_no, purpose, category, amount, required_till, adjusted_amount, balance_amount, paid_amount, voucher_no, released_at, status, adjustments[]).
+- Approval chain integration via `_attach_chain_to_request("advance_request", ...)`; default chain seeded (single-step admin).
+- **Endpoints**: `POST/GET/PATCH/DELETE /api/advance-requests`, `GET /api/advance-requests/my`, `POST /api/advance-requests/{aid}/release` (Finance-only; creates matching expense txn + voucher no. `ADV-VCHR-YY-N`).
+- **Frontend `Advances.jsx`**: List with pagination/status filter/search; Raise Advance dialog; Release dialog (Finance); Track modal for approval timeline; Cancel flow.
+
+## Implemented Features (Mar 2026)
+
 ### Phase 26B — Full-Automatic HRMS, Phase B (Done, Jul 2026)
 **Salary Slip Template System:**
 - New backend module `/app/backend/salary_slip.py` — DOCX template rendering via `docxtpl` + PDF conversion via headless LibreOffice with DOCX fallback. Amount-to-words in Indian lakh/crore.
@@ -302,6 +326,13 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Company selection in Batch dialog** + Dashboard Company/Partner separate charts
 
 ## Pending Backlog (Phased)
+
+### Phase 27 — Advance Module, Phase 3 (P1):
+- Auto-Adjustment math against payroll (monthly deduction of open balance)
+- Standalone Settlement Module — repay cash / write off / bulk-settle
+- Advance Ledger view (per employee, per center)
+- Dashboard widgets for Advances (open, overdue, top holders)
+- Reports / CSV exports & overdue alerts
 
 ### Phase 5 — Quick wins (P1):
 - Privacy Policy page (`/privacy.html`) for Play Store PWA submission
