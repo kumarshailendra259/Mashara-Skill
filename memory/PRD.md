@@ -28,7 +28,30 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
-### Phase 27 — Advance Payment & Adjustment Module, Phase 2 (Done, Jul 2026)
+### Phase 27B — Payment Voucher + Overdue Alerts (Done, Jul 2026)
+**Payment Voucher — auto-generated proof-of-payment PDF (trust document for vendors):**
+- New module `/app/backend/payment_voucher.py` — professional single-page A4 layout via ReportLab (no external template file needed). Layout: Company header (name + GST + PAN + Center), thick brand divider, big "PAYMENT VOUCHER" title, voucher meta strip (Voucher No, Date, QRN, Mode, Payment Ref, Category), Payee Details box (Vendor, Bank/UPI), highlighted Amount box (₹ + Indian lakh/crore formatting + words), Purpose section, Approval Chain table (Level · Approver · Action · Date · Remarks), signature footer (Prepared By / Approved By / Received By) + system-generated footer with Voucher No + Payment ID.
+- New collection `payment_vouchers` (id, voucher_no, payment_id, quotation_id, amount, vendor_name, qrn, center_id, company_id, file_path, content_type, generated_at, generated_by, emailed_to_vendor_at, emailed_to, emailed_by). Voucher number format `PV-YY-NNNN` per financial year.
+- Auto-generation: fires on FINAL approval of a Payment (in `/api/approvals/act`) — best-effort, exceptions logged but do NOT fail payment finalisation.
+- New endpoints:
+  - `GET /api/payments/{pid}/voucher/download` — streams PDF (application/pdf). Also LAZY-GENERATES for legacy paid payments that were finalised before this feature shipped (backfills the payment doc with voucher_id/voucher_no/voucher_path/voucher_generated_at).
+  - `POST /api/payments/{pid}/voucher/email` — role-gated (admin/accountant/hr/sr-mgr). Sends PDF as attachment via Resend + records `emailed_to_vendor_at` / `emailed_to` / `emailed_by`.
+  - `GET /api/payment-vouchers` — role-gated list with `q` search on voucher_no/vendor_name/qrn + `X-Total-Count` header.
+- New email util `send_email_with_attachment` in `/app/backend/email_utils.py` — generic Resend helper for PDF attachments.
+- **Frontend `Quotations.jsx`** — paid payment rows now show a green "Voucher" download button (`voucher-download-<pid>`) + email icon (`voucher-email-<pid>`) for finance roles. Email dialog (`voucher-email-modal`) with To/CC/Subject/Custom-Message fields.
+
+**Overdue Alerts — red banner + email nudge for advances past Required Till:**
+- Helper `_annotate_overdue(row)` — sets `is_overdue` + `days_overdue` on any advance row where status ∈ {released, adjusting} AND `required_till < today`. Applied on `list_advance_requests`, `my_advance_requests`, and single `get_advance_request` responses.
+- New endpoints:
+  - `GET /api/advance-requests/overdue` — role-scoped list of overdue advances.
+  - `POST /api/advance-requests/overdue/notify` — admin/finance can trigger; sends in-app notification (`advance_overdue` type) to each overdue-holder + best-effort Resend email. Returns `{ total_overdue, notified, skipped_no_email }`.
+- **Frontend `Advances.jsx`** — red left-border banner (`overdue-banner`) when overdue rows exist, with chip preview (`overdue-chip-<id>`), "📧 Send Reminders" button (`overdue-notify-btn`) for finance roles, and "Filter Overdue" toggle (`overdue-filter-toggle`). Rows carry a red highlight + "⚠ Xd overdue" badge (`adv-overdue-<id>`) + red Required Till text.
+
+**Pre-existing bug fix**: Advance release path was writing `status="posted"` which isn't in the `TransactionOut` Literal enum, causing `GET /api/transactions` to 500 for admin. Fixed to `status="approved"` + `source="advance_release"`; migrated 10 legacy `posted` rows in Mongo.
+
+**Verified**: testing_agent iter-40 — **10/10 backend pytest passed** + full Playwright E2E on overdue banner + voucher download/email dialog. GET /api/transactions now returns 200.
+
+### Phase 27A — Advance Payment & Adjustment Module, Phase 2 (Done, Jul 2026)
 **Expense Against Advance — link a released advance to a Payment Request so it offsets the balance:**
 - **New endpoint**: `GET /api/advance-requests/adjustable` — returns the caller's own advances that are `released` or `adjusting` with `balance_amount > 0`. Slim payload (id, advance_no, voucher_no, amount, paid_amount, adjusted_amount, balance_amount, purpose, released_at, status). Powers the Payment Request "Adjust against Advance" picker.
 - **`PaymentIn` model extended** with `advance_request_id: Optional[str]`. Special payment_mode `advance_adjustment` short-circuits `_validate_payment_payee` (no bank/UPI/cheque payee details required for advance-funded payments).
