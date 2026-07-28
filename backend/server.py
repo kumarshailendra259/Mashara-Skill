@@ -4782,6 +4782,23 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "partner_id_at_pay": eff_partner_id,
                 "txn_id": txn["id"],
             }
+            # Auto-generate Payment Voucher PDF (trust doc for the vendor).
+            # Best-effort: any error is logged but does NOT fail the payment finalisation.
+            try:
+                voucher = await _generate_payment_voucher(
+                    payment_doc={**rec, **update, "actual_amount": rec["actual_amount"]},
+                    quotation_id=rec.get("quotation_id"),
+                    company_id=eff_company_id, center_id=eff_center_id,
+                    txn_ref=body.paid_by_name and (rec.get("notes") or ""),
+                    generated_by=user,
+                )
+                if voucher:
+                    update["voucher_id"] = voucher["id"]
+                    update["voucher_no"] = voucher["voucher_no"]
+                    update["voucher_path"] = voucher["file_path"]
+                    update["voucher_generated_at"] = voucher["generated_at"]
+            except Exception as _voucher_err:  # noqa: BLE001
+                logger.exception("Payment voucher auto-generation failed for payment %s", rec.get("id"))
         else:  # transaction
             update = {
                 "current_level": 0,
@@ -9223,6 +9240,27 @@ def _advance_scope_filter(user: dict) -> dict:
     return {"created_by": user["id"]}
 
 
+def _annotate_overdue(row: dict) -> None:
+    """Attach `is_overdue` + `days_overdue` fields to an advance row (in place).
+    Considered overdue when status is released/adjusting, required_till is set, and
+    today > required_till."""
+    row["is_overdue"] = False
+    row["days_overdue"] = 0
+    if row.get("status") not in ("released", "adjusting"):
+        return
+    rt = row.get("required_till")
+    if not rt or len(rt) < 10:
+        return
+    try:
+        rt_date = datetime.strptime(rt[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return
+    today = datetime.now(timezone.utc).date()
+    if today > rt_date:
+        row["is_overdue"] = True
+        row["days_overdue"] = (today - rt_date).days
+
+
 @api.post("/advance-requests", status_code=201)
 async def create_advance_request(body: AdvanceRequestIn, user=Depends(get_current_user)):
     """Create a new Advance Request. Staff / center_manager / manager / admin / hr can raise one for themselves."""
@@ -9302,6 +9340,7 @@ async def list_advance_requests(
     rows = await cursor.to_list(min(limit or 500, 1000))
     for r in rows:
         await _enrich_with_approval_status(r)
+        _annotate_overdue(r)
     from starlette.responses import JSONResponse
     return JSONResponse(
         content=_json_safe(rows),
@@ -9317,7 +9356,90 @@ async def my_advance_requests(user=Depends(get_current_user)):
     ).sort("created_at", -1).to_list(200)
     for r in rows:
         await _enrich_with_approval_status(r)
+        _annotate_overdue(r)
     return _json_safe(rows)
+
+
+@api.get("/advance-requests/overdue")
+async def overdue_advance_requests(user=Depends(get_current_user)):
+    """List advances that are overdue (past required_till without settlement).
+    Scoped by role: staff → own; center_manager/staff → their centers; partner → own scope;
+    admin/hr/accountant/manager/sr-mgr → all.
+    Returns rows enriched with `days_overdue`.
+    """
+    today = datetime.now(timezone.utc).date().isoformat()
+    query = _advance_scope_filter(user)
+    query["status"] = {"$in": ["released", "adjusting"]}
+    query["required_till"] = {"$lt": today, "$ne": None}
+    rows = await db.advance_requests.find(query, {"_id": 0}).sort("required_till", 1).to_list(500)
+    for r in rows:
+        _annotate_overdue(r)
+    # only return truly-overdue ones
+    rows = [r for r in rows if r.get("is_overdue")]
+    return _json_safe(rows)
+
+
+@api.post("/advance-requests/overdue/notify")
+async def notify_overdue_holders(
+    user=Depends(require_role("admin", "accountant", "hr", "senior_manager", "manager")),
+):
+    """Send an email + in-app notification to every employee whose advance is
+    overdue past its `required_till`. Idempotent — repeat calls just re-nudge.
+    Returns { notified, skipped_no_email }.
+    """
+    from email_utils import send_email_with_attachment
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows = await db.advance_requests.find({
+        "status": {"$in": ["released", "adjusting"]},
+        "required_till": {"$lt": today, "$ne": None},
+    }, {"_id": 0}).sort("required_till", 1).to_list(1000)
+
+    notified = 0
+    skipped = 0
+    for r in rows:
+        _annotate_overdue(r)
+        if not r.get("is_overdue"):
+            continue
+        uid = r.get("created_by")
+        if not uid:
+            skipped += 1
+            continue
+        u = await db.users.find_one({"id": uid}, {"_id": 0, "email": 1, "name": 1})
+        emp_email = (u or {}).get("email")
+        # In-app notification (always)
+        await _notify(
+            uid,
+            f"Reminder: advance {r.get('advance_no')} is overdue by {r['days_overdue']} day(s). Balance ₹{r.get('balance_amount', 0):,.0f}",
+            ntype="advance_overdue", ref_id=r.get("id"), link="/advances",
+        )
+        # Email (best-effort)
+        if emp_email:
+            subject = f"Overdue Advance {r.get('advance_no')} — please settle"
+            html = (
+                f"<p>Namaste {(u or {}).get('name') or 'Team'},</p>"
+                f"<p>Aapka advance <b>{r.get('advance_no')}</b> ({r.get('purpose') or 'purpose'}) "
+                f"jiska Required Till <b>{r.get('required_till')}</b> tha, wo <b>{r['days_overdue']} din</b> se overdue hai.</p>"
+                f"<p>Balance outstanding: <b>₹{r.get('balance_amount', 0):,.2f}</b></p>"
+                f"<p>Please settle karein — either by raising expense against this advance (Adjust in Payment Request), or by depositing back to accounts.</p>"
+                f"<p>Regards,<br/>Accounts Team</p>"
+            )
+            # send_email_with_attachment supports None attachment via empty bytes trick — but keep it clean
+            # Reuse a minimal Resend send here.
+            try:
+                import resend
+                key = os.environ.get("RESEND_API_KEY", "").strip()
+                if key:
+                    resend.api_key = key
+                    sender = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev").strip() or "onboarding@resend.dev"
+                    await asyncio.to_thread(resend.Emails.send, {
+                        "from": sender, "to": [emp_email], "subject": subject, "html": html,
+                    })
+            except Exception:  # noqa: BLE001
+                pass
+            notified += 1
+        else:
+            skipped += 1
+    return {"total_overdue": len(rows), "notified": notified, "skipped_no_email": skipped}
 
 
 @api.get("/advance-requests/adjustable")
@@ -9358,6 +9480,7 @@ async def get_advance_request(aid: str, user=Depends(get_current_user)):
         if scope and not all(row.get(k) in (v.get("$in", []) if isinstance(v, dict) else [v]) for k, v in scope.items()):
             raise HTTPException(403, "You cannot view this advance request")
     await _enrich_with_approval_status(row)
+    _annotate_overdue(row)
     return _json_safe(row)
 
 
@@ -9421,7 +9544,10 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "created_by": user["id"],
         "created_by_name": user.get("name") or user.get("email"),
         "created_at": now_iso,
-        "status": "posted",
+        "status": "approved",
+        "approved_by": user["id"],
+        "approved_at": now_iso,
+        "source": "advance_release",
     }
     await db.transactions.insert_one(txn_doc)
     await db.advance_requests.update_one({"id": aid}, {"$set": {
@@ -9469,6 +9595,214 @@ async def cancel_advance_request(aid: str, user=Depends(get_current_user)):
         "cancelled_by": user["id"],
     }})
     return None
+
+
+# =========================================================================
+# PAYMENT VOUCHER — auto-generated proof of payment (PDF) for vendors
+# =========================================================================
+# Trigger: on final approval of a payment (in /api/approvals/act payment
+# branch). The voucher is stored in object storage and its metadata lives on
+# the payment doc itself (voucher_id / voucher_no / voucher_path) so the
+# frontend can offer download / email-to-vendor buttons.
+
+async def _next_voucher_pv_no() -> str:
+    """Return next PV-YY-NNNN voucher number for the current financial year."""
+    now = datetime.now(timezone.utc)
+    fy = now.year if now.month >= 4 else now.year - 1
+    prefix = f"PV-{str(fy)[-2:]}-"
+    last = await db.payment_vouchers.find(
+        {"voucher_no": {"$regex": f"^{prefix}"}}, {"_id": 0, "voucher_no": 1},
+    ).sort("voucher_no", -1).limit(1).to_list(1)
+    counter = 1
+    if last:
+        try:
+            counter = int(last[0]["voucher_no"].split("-")[-1]) + 1
+        except (ValueError, IndexError):
+            counter = 1
+    return f"{prefix}{counter:04d}"
+
+
+async def _generate_payment_voucher(
+    payment_doc: dict,
+    quotation_id: Optional[str],
+    company_id: Optional[str],
+    center_id: Optional[str],
+    txn_ref: Optional[str],
+    generated_by: dict,
+) -> Optional[dict]:
+    """Render + store a Payment Voucher PDF. Returns the persisted voucher doc
+    (id, voucher_no, file_path, generated_at) or None on failure.
+    """
+    from payment_voucher import (
+        build_payment_voucher_pdf, storage_path_for_voucher,
+    )
+    quotation = None
+    if quotation_id:
+        quotation = await db.quotations.find_one({"id": quotation_id}, {"_id": 0})
+    company = await db.companies.find_one({"id": company_id}, {"_id": 0}) if company_id else None
+    center = await db.centers.find_one({"id": center_id}, {"_id": 0}) if center_id else None
+    voucher_no = await _next_voucher_pv_no()
+    voucher_id = str(uuid.uuid4())
+    chain = payment_doc.get("chain_history") or []
+    pdf_bytes = build_payment_voucher_pdf(
+        payment=payment_doc, quotation=quotation, company=company,
+        center=center, voucher_no=voucher_no, approval_chain=chain,
+        txn_ref=txn_ref,
+    )
+    # Try object-storage first; fall back to local disk if unavailable.
+    file_path = f"{APP_STORAGE_PREFIX}/payment-vouchers/{voucher_id}.pdf"
+    try:
+        _put_object(file_path, pdf_bytes, "application/pdf")
+    except Exception:  # noqa: BLE001
+        file_path = storage_path_for_voucher(voucher_id, voucher_no)
+        with open(file_path, "wb") as fh:
+            fh.write(pdf_bytes)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    voucher = {
+        "id": voucher_id,
+        "voucher_no": voucher_no,
+        "payment_id": payment_doc.get("id"),
+        "quotation_id": quotation_id,
+        "amount": float(payment_doc.get("actual_amount") or 0),
+        "vendor_name": payment_doc.get("vendor_name") or (quotation or {}).get("vendor_name"),
+        "qrn": payment_doc.get("qrn") or (quotation or {}).get("qrn"),
+        "center_id": center_id, "company_id": company_id,
+        "file_path": file_path,
+        "content_type": "application/pdf",
+        "generated_at": now_iso,
+        "generated_by": generated_by.get("id"),
+        "generated_by_name": generated_by.get("name") or generated_by.get("email"),
+        "emailed_to_vendor_at": None,
+        "emailed_to": None,
+    }
+    await db.payment_vouchers.insert_one(voucher)
+    voucher.pop("_id", None)
+    return voucher
+
+
+@api.get("/payments/{pid}/voucher/download")
+async def download_payment_voucher(pid: str, user=Depends(get_current_user)):
+    """Stream the payment voucher PDF for a paid payment.
+    Access: creator, admin, hr, accountant, senior_manager, manager, or partners of the center.
+    """
+    from starlette.responses import Response
+    p = await db.payments.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Payment not found")
+    if p.get("status") != "paid":
+        raise HTTPException(400, "Voucher available only after final approval")
+    voucher = await db.payment_vouchers.find_one({"payment_id": pid}, {"_id": 0})
+    if not voucher:
+        # Late-generate if missing (e.g. legacy payments paid before this feature)
+        quotation = await db.quotations.find_one({"id": p.get("quotation_id")}, {"_id": 0}) if p.get("quotation_id") else None
+        eff_center_id = p.get("center_id")
+        eff_company_id = (quotation or {}).get("company_id")
+        if not eff_company_id:
+            ctx = await _derive_context_for_center(eff_center_id) if eff_center_id else {}
+            eff_company_id = ctx.get("company_id") if ctx else None
+        voucher = await _generate_payment_voucher(
+            payment_doc=p, quotation_id=p.get("quotation_id"),
+            company_id=eff_company_id, center_id=eff_center_id,
+            txn_ref=p.get("notes"), generated_by=user,
+        )
+        if not voucher:
+            raise HTTPException(500, "Voucher generation failed")
+        await db.payments.update_one({"id": pid}, {"$set": {
+            "voucher_id": voucher["id"], "voucher_no": voucher["voucher_no"],
+            "voucher_path": voucher["file_path"], "voucher_generated_at": voucher["generated_at"],
+        }})
+    # Fetch bytes
+    file_path = voucher["file_path"]
+    try:
+        pdf_bytes, ct = _get_object(file_path)
+    except Exception:
+        # Local-disk fallback
+        try:
+            with open(file_path, "rb") as fh:
+                pdf_bytes = fh.read()
+            ct = "application/pdf"
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(404, f"Voucher file not found: {str(e)[:120]}") from e
+    from payment_voucher import build_payment_voucher_filename
+    fname = build_payment_voucher_filename(voucher["voucher_no"], voucher.get("vendor_name"))
+    return Response(
+        content=pdf_bytes, media_type=ct or "application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+class VoucherEmailIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    to_email: str
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    cc: Optional[List[str]] = None
+
+
+@api.post("/payments/{pid}/voucher/email")
+async def email_payment_voucher(pid: str, body: VoucherEmailIn,
+                                user=Depends(require_role("admin", "accountant", "hr", "senior_manager"))):
+    """Email the payment voucher PDF to the vendor (or any address).
+    Uses the same Resend backend as other transactional mail.
+    """
+    p = await db.payments.find_one({"id": pid}, {"_id": 0})
+    if not p:
+        raise HTTPException(404, "Payment not found")
+    if p.get("status") != "paid":
+        raise HTTPException(400, "Voucher can be emailed only after final approval")
+    voucher = await db.payment_vouchers.find_one({"payment_id": pid}, {"_id": 0})
+    if not voucher:
+        raise HTTPException(400, "Voucher not yet generated. Try Download first to regenerate.")
+    # Load PDF bytes
+    try:
+        pdf_bytes, _ct = _get_object(voucher["file_path"])
+    except Exception:
+        try:
+            with open(voucher["file_path"], "rb") as fh:
+                pdf_bytes = fh.read()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(404, f"Voucher file missing: {str(e)[:120]}") from e
+    from payment_voucher import build_payment_voucher_filename
+    from email_utils import send_email_with_attachment
+    fname = build_payment_voucher_filename(voucher["voucher_no"], voucher.get("vendor_name"))
+    subject = body.subject or f"Payment Voucher {voucher['voucher_no']} · ₹{voucher.get('amount', 0):,.2f}"
+    html_body = body.body or (
+        f"<p>Dear {voucher.get('vendor_name') or 'Vendor'},</p>"
+        f"<p>Please find attached the Payment Voucher for your reference:</p>"
+        f"<ul>"
+        f"<li><b>Voucher No.:</b> {voucher['voucher_no']}</li>"
+        f"<li><b>Amount:</b> ₹{voucher.get('amount', 0):,.2f}</li>"
+        f"<li><b>QRN:</b> {voucher.get('qrn') or '—'}</li>"
+        f"</ul>"
+        f"<p>Regards,<br/>Accounts Team</p>"
+    )
+    ok = await send_email_with_attachment(
+        to=body.to_email, subject=subject, html=html_body,
+        attachment_bytes=pdf_bytes, attachment_filename=fname,
+        content_type="application/pdf", cc=body.cc or [],
+    )
+    await db.payment_vouchers.update_one({"id": voucher["id"]}, {"$set": {
+        "emailed_to_vendor_at": datetime.now(timezone.utc).isoformat(),
+        "emailed_to": body.to_email,
+        "emailed_by": user["id"],
+    }})
+    return {"ok": True, "emailed": bool(ok), "voucher_no": voucher["voucher_no"], "to": body.to_email}
+
+
+@api.get("/payment-vouchers")
+async def list_payment_vouchers(
+    q: Optional[str] = None, skip: int = 0, limit: int = 100,
+    user=Depends(require_role("admin", "accountant", "hr", "senior_manager", "manager")),
+):
+    """Admin/Finance list of all generated payment vouchers with search on voucher_no or vendor."""
+    query: dict = {}
+    if q:
+        rx = {"$regex": q.strip(), "$options": "i"}
+        query["$or"] = [{"voucher_no": rx}, {"vendor_name": rx}, {"qrn": rx}]
+    total = await db.payment_vouchers.count_documents(query)
+    rows = await db.payment_vouchers.find(query, {"_id": 0}).sort("generated_at", -1).skip(skip).limit(min(limit, 500)).to_list(min(limit, 500))
+    from starlette.responses import JSONResponse
+    return JSONResponse(content=_json_safe(rows), headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"})
 
 
 # ---------- Register router + CORS ----------

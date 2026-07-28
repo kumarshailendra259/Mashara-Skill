@@ -63,6 +63,18 @@ export default function Advances() {
     transaction_ref: "", paid_amount: "", paid_by_user_id: "", remarks: "", attachments: [],
   });
 
+  // Overdue advances (past required_till without settlement) — red banner + filter chip
+  const [overdueRows, setOverdueRows] = useState([]);
+  const [showOverdueOnly, setShowOverdueOnly] = useState(false);
+
+  const loadOverdue = useCallback(async () => {
+    try {
+      const { data } = await api.get("/advance-requests/overdue");
+      setOverdueRows(data || []);
+    } catch (_e) { /* silent — overdue banner is best-effort */ }
+  }, []);
+  useEffect(() => { loadOverdue(); }, [loadOverdue, rows.length]);
+
   const load = useCallback(async () => {
     try {
       if (tab === "my") {
@@ -171,6 +183,54 @@ export default function Advances() {
         </Button>
       </div>
 
+      {/* Overdue Alert Banner */}
+      {overdueRows.length > 0 && (
+        <div className="flex items-start gap-3 border-l-4 border-red-600 bg-red-50 px-4 py-3" data-testid="overdue-banner">
+          <div className="text-red-600 text-2xl leading-none pt-0.5">⚠</div>
+          <div className="flex-1">
+            <div className="text-sm font-bold text-red-900">
+              {overdueRows.length} advance{overdueRows.length > 1 ? "s" : ""} overdue for settlement
+            </div>
+            <div className="text-xs text-red-800 mt-1">
+              These have crossed their <b>Required Till</b> date but are still open. Follow up with the employees or offset/settle to close them.
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+              {overdueRows.slice(0, 4).map((r) => (
+                <span key={r.id} className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-red-300 text-red-900" data-testid={`overdue-chip-${r.id}`}>
+                  <b>{r.advance_no}</b> · {r.employee_name || "—"} · {inr(r.balance_amount || 0)} · <span className="text-red-700 font-semibold">{r.days_overdue}d</span>
+                </span>
+              ))}
+              {overdueRows.length > 4 && (
+                <span className="text-red-700 font-semibold">+{overdueRows.length - 4} more</span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {["admin", "accountant", "hr", "senior_manager", "manager"].includes(user?.role) && (
+              <button
+                className="text-xs font-semibold border border-red-600 bg-white text-red-800 hover:bg-red-100 px-3 py-1 h-fit"
+                onClick={async () => {
+                  try {
+                    const { data } = await api.post("/advance-requests/overdue/notify");
+                    toast.success(`Reminder emails sent to ${data.notified} employee${data.notified === 1 ? "" : "s"}${data.skipped_no_email ? ` (${data.skipped_no_email} skipped)` : ""}`);
+                  } catch (e) { toast.error(formatError(e)); }
+                }}
+                data-testid="overdue-notify-btn"
+              >
+                📧 Send Reminders
+              </button>
+            )}
+            <button
+              className={`text-xs font-semibold border px-3 py-1 h-fit ${showOverdueOnly ? "bg-red-600 text-white border-red-700" : "text-red-800 border-red-300 hover:bg-red-100"}`}
+              onClick={() => { setShowOverdueOnly(!showOverdueOnly); if (!showOverdueOnly) { setTab("all"); setStatusFilter("all"); } }}
+              data-testid="overdue-filter-toggle"
+            >
+              {showOverdueOnly ? "Show All" : "Filter Overdue"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Total Rows" value={totals.count} accent="text-[var(--brand)]" />
@@ -231,7 +291,7 @@ export default function Advances() {
             </div>
           </div>
           <AdvanceTable
-            rows={rows}
+            rows={showOverdueOnly ? rows.filter((r) => r.is_overdue) : rows}
             canFinance={canFinance}
             onTrack={(r) => setTrackId(r.id)}
             onCancel={cancel}
@@ -434,8 +494,15 @@ function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease }) {
         </TableHeader>
         <TableBody>
           {rows.map((r) => (
-            <TableRow key={r.id} data-testid={`adv-row-${r.id}`}>
-              <TableCell className="font-medium whitespace-nowrap">{r.advance_no}</TableCell>
+            <TableRow key={r.id} data-testid={`adv-row-${r.id}`} className={r.is_overdue ? "bg-red-50 hover:bg-red-100 border-l-2 border-red-500" : ""}>
+              <TableCell className="font-medium whitespace-nowrap">
+                {r.advance_no}
+                {r.is_overdue && (
+                  <div className="text-[9px] uppercase font-bold text-red-700 mt-0.5" data-testid={`adv-overdue-${r.id}`}>
+                    ⚠ {r.days_overdue}d overdue
+                  </div>
+                )}
+              </TableCell>
               <TableCell>
                 <div className="font-medium truncate max-w-[140px]" title={r.employee_name}>{r.employee_name || "—"}</div>
                 <div className="text-[10px] text-[var(--muted)]">{r.employee_code || ""}</div>
@@ -449,7 +516,7 @@ function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease }) {
                 {(r.status === "released" || r.status === "adjusting") ? inr(r.balance_amount || 0) : (r.status === "settled" ? "SETTLED" : "—")}
               </TableCell>
               <TableCell className="text-[11px]">{r.voucher_no || "—"}</TableCell>
-              <TableCell className="text-[11px]">{r.required_till || "—"}</TableCell>
+              <TableCell className={`text-[11px] ${r.is_overdue ? "text-red-700 font-bold" : ""}`}>{r.required_till || "—"}</TableCell>
               <TableCell>
                 <span className={`text-[10px] uppercase font-bold px-2 py-0.5 ${STATUS_BADGE[r.status] || "bg-gray-100"}`}>
                   {(r.status || "").replace("_", " ")}

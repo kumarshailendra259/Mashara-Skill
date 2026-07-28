@@ -174,3 +174,39 @@ async def send_otp_email(to_email: str, otp: str, validity_minutes: int = 15) ->
     except Exception as e:  # noqa: BLE001
         logger.error("Resend OTP send failed for %s: %s", to_email, e)
         return {"sent": False, "reason": str(e)}
+
+
+
+async def send_email_with_attachment(
+    to: str,
+    subject: str,
+    html: str,
+    attachment_bytes: bytes,
+    attachment_filename: str,
+    content_type: str = "application/pdf",
+    cc: Optional[list] = None,
+) -> dict:
+    """Generic attachment-carrying email via Resend. Never raises — returns dict."""
+    import base64
+    if not _client_ready():
+        return {"sent": False, "reason": "resend_not_configured"}
+    sender = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev").strip() or "onboarding@resend.dev"
+    params = {
+        "from": sender,
+        "to": [to],
+        "subject": subject,
+        "html": html,
+        "attachments": [{
+            "filename": attachment_filename,
+            "content": base64.b64encode(attachment_bytes).decode("ascii"),
+            "content_type": content_type,
+        }],
+    }
+    if cc:
+        params["cc"] = cc
+    try:
+        res = await asyncio.to_thread(resend.Emails.send, params)
+        return {"sent": True, "id": res.get("id") if isinstance(res, dict) else None}
+    except Exception as e:  # noqa: BLE001
+        logger.error("Attachment email failed for %s: %s", to, e)
+        return {"sent": False, "reason": str(e)[:250]}

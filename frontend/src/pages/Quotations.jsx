@@ -66,6 +66,42 @@ export default function Quotations() {
   });
   // My open advances (released with balance > 0) — powers the "Adjust against Advance" picker
   const [adjustableAdvances, setAdjustableAdvances] = useState([]);
+
+  // Email-voucher-to-vendor dialog state
+  const [voucherEmailPayment, setVoucherEmailPayment] = useState(null);
+  const [voucherEmailForm, setVoucherEmailForm] = useState({ to_email: "", cc: "", subject: "", body: "" });
+  const [voucherEmailBusy, setVoucherEmailBusy] = useState(false);
+
+  const openEmailVoucher = (payment) => {
+    setVoucherEmailPayment(payment);
+    setVoucherEmailForm({
+      to_email: "",
+      cc: "",
+      subject: `Payment Voucher ${payment.voucher_no || ""} — ${payment.vendor_name || ""}`,
+      body: "",
+    });
+  };
+
+  const submitVoucherEmail = async () => {
+    if (!voucherEmailForm.to_email.trim()) { toast.error("Vendor email required"); return; }
+    setVoucherEmailBusy(true);
+    try {
+      const cc = voucherEmailForm.cc.split(",").map((s) => s.trim()).filter(Boolean);
+      const res = await api.post(`/payments/${voucherEmailPayment.id}/voucher/email`, {
+        to_email: voucherEmailForm.to_email.trim(),
+        subject: voucherEmailForm.subject || undefined,
+        body: voucherEmailForm.body || undefined,
+        cc: cc.length > 0 ? cc : undefined,
+      });
+      if (res.data?.emailed) {
+        toast.success(`Voucher emailed to ${voucherEmailForm.to_email}`);
+      } else {
+        toast.error("Voucher email queued but Resend returned an error. Check backend logs.");
+      }
+      setVoucherEmailPayment(null);
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setVoucherEmailBusy(false); }
+  };
   const [uploading, setUploading] = useState(false);
 
   // Single reusable upload helper — pushes into either qForm.attachments or pForm.attachments.
@@ -497,6 +533,30 @@ export default function Quotations() {
                             <IndianRupee size={12} className="mr-1" /> Raise Payment
                           </Button>
                         )}
+                        {p && p.status === "paid" && (
+                          <>
+                            <a
+                              href={`${process.env.REACT_APP_BACKEND_URL}/api/payments/${p.id}/voucher/download`}
+                              target="_blank" rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-xs border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 px-2 h-8"
+                              data-testid={`voucher-download-${p.id}`}
+                              title={`Payment Voucher ${p.voucher_no || ""}`}
+                            >
+                              <FileText size={12} /> Voucher
+                            </a>
+                            {(user?.role === "admin" || user?.role === "accountant" || user?.role === "hr" || user?.role === "senior_manager") && (
+                              <Button
+                                size="sm" variant="outline"
+                                className="rounded-none text-xs border-indigo-300 text-indigo-800 hover:bg-indigo-50"
+                                onClick={() => openEmailVoucher(p)}
+                                data-testid={`voucher-email-${p.id}`}
+                                title="Email voucher to vendor"
+                              >
+                                📧
+                              </Button>
+                            )}
+                          </>
+                        )}
                         {q.status === "sent_back" && (q.created_by === user?.id || user?.role === "admin") && (
                           <Button size="sm" variant="outline" className="rounded-none text-xs text-amber-800 border-amber-300 hover:bg-amber-50" onClick={() => openResubmitQuotation(q)} data-testid={`quotation-resubmit-${q.id}`}>
                             <Undo2 size={12} className="mr-1" /> Edit &amp; Resubmit
@@ -868,6 +928,54 @@ export default function Quotations() {
             <Button variant="outline" className="rounded-none" onClick={() => { setOpenP(false); setPayQuotation(null); setResubmitMode(null); setEditNote(""); }}>Cancel</Button>
             <Button onClick={submitPayment} disabled={busy} className="rounded-none brand-btn" data-testid="p-submit">
               {busy ? "Saving…" : (resubmitMode === "payment" ? "Resubmit Payment" : "Raise Payment Request")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Email Voucher to Vendor dialog */}
+      <Dialog open={!!voucherEmailPayment} onOpenChange={(o) => { if (!o) setVoucherEmailPayment(null); }}>
+        <DialogContent className="rounded-none max-w-lg" data-testid="voucher-email-modal">
+          <DialogHeader>
+            <DialogTitle>Email Voucher to Vendor</DialogTitle>
+            <DialogDescription>
+              {voucherEmailPayment && (
+                <>Voucher <b>{voucherEmailPayment.voucher_no || "(will regenerate)"}</b> · {voucherEmailPayment.vendor_name} · {inr(voucherEmailPayment.actual_amount)}</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="overline">Vendor Email *</Label>
+              <Input type="email" placeholder="vendor@example.com" value={voucherEmailForm.to_email}
+                onChange={(e) => setVoucherEmailForm({ ...voucherEmailForm, to_email: e.target.value })}
+                className="rounded-none" data-testid="voucher-email-to" />
+            </div>
+            <div>
+              <Label className="overline">CC (comma-separated, optional)</Label>
+              <Input placeholder="accounts@masharaskills.com, boss@masharaskills.com"
+                value={voucherEmailForm.cc}
+                onChange={(e) => setVoucherEmailForm({ ...voucherEmailForm, cc: e.target.value })}
+                className="rounded-none" data-testid="voucher-email-cc" />
+            </div>
+            <div>
+              <Label className="overline">Subject</Label>
+              <Input value={voucherEmailForm.subject}
+                onChange={(e) => setVoucherEmailForm({ ...voucherEmailForm, subject: e.target.value })}
+                className="rounded-none" />
+            </div>
+            <div>
+              <Label className="overline">Custom Message (optional)</Label>
+              <Textarea rows={3} value={voucherEmailForm.body}
+                onChange={(e) => setVoucherEmailForm({ ...voucherEmailForm, body: e.target.value })}
+                placeholder="Default professional message will be used if left blank."
+                className="rounded-none" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-none" onClick={() => setVoucherEmailPayment(null)}>Cancel</Button>
+            <Button onClick={submitVoucherEmail} disabled={voucherEmailBusy} className="rounded-none brand-btn" data-testid="voucher-email-send">
+              {voucherEmailBusy ? "Sending…" : "Send Voucher"}
             </Button>
           </DialogFooter>
         </DialogContent>
