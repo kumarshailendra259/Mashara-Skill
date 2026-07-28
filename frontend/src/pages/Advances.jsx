@@ -145,12 +145,16 @@ export default function Advances() {
   const totals = useMemo(() => {
     const s = rows.reduce((a, r) => {
       a.count += 1;
-      if (r.status === "released" || r.status === "adjusting") a.released += r.paid_amount || r.amount || 0;
+      if (r.status === "released" || r.status === "adjusting") {
+        a.released += r.paid_amount || r.amount || 0;
+        a.adjusted += r.adjusted_amount || 0;
+        a.balance += r.balance_amount || 0;
+      }
       if (r.status === "pending" || r.status === "in_progress") a.pending += r.amount || 0;
       if (r.status === "approved") a.approved += r.amount || 0;
       if (r.status === "settled") a.settled += r.paid_amount || 0;
       return a;
-    }, { count: 0, released: 0, pending: 0, approved: 0, settled: 0 });
+    }, { count: 0, released: 0, pending: 0, approved: 0, settled: 0, adjusted: 0, balance: 0 });
     return s;
   }, [rows]);
 
@@ -168,11 +172,12 @@ export default function Advances() {
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <StatCard label="Total Rows" value={totals.count} accent="text-[var(--brand)]" />
         <StatCard label="Awaiting Approval" value={inr(totals.pending)} accent="text-amber-700" />
         <StatCard label="Approved (not released)" value={inr(totals.approved)} accent="text-blue-700" />
         <StatCard label="Released (open)" value={inr(totals.released)} accent="text-emerald-700" />
+        <StatCard label="Adjusted / Balance" value={`${inr(totals.adjusted)} / ${inr(totals.balance)}`} accent="text-indigo-700" />
         <StatCard label="Settled" value={inr(totals.settled)} accent="text-green-700" />
       </div>
 
@@ -419,6 +424,8 @@ function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease }) {
             <TableHead>Category</TableHead>
             <TableHead className="text-right">Amount</TableHead>
             <TableHead className="text-right">Paid</TableHead>
+            <TableHead className="text-right">Adjusted</TableHead>
+            <TableHead className="text-right">Balance</TableHead>
             <TableHead>Voucher</TableHead>
             <TableHead>Required Till</TableHead>
             <TableHead>Status</TableHead>
@@ -437,6 +444,10 @@ function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease }) {
               <TableCell><span className="text-[11px] uppercase text-[var(--muted)]">{r.category || "—"}</span></TableCell>
               <TableCell className="text-right num font-medium">{inr(r.amount)}</TableCell>
               <TableCell className="text-right num text-green-700">{r.paid_amount ? inr(r.paid_amount) : "—"}</TableCell>
+              <TableCell className="text-right num text-indigo-700" data-testid={`adv-adjusted-${r.id}`}>{r.adjusted_amount ? inr(r.adjusted_amount) : "—"}</TableCell>
+              <TableCell className="text-right num font-medium text-amber-700" data-testid={`adv-balance-${r.id}`}>
+                {(r.status === "released" || r.status === "adjusting") ? inr(r.balance_amount || 0) : (r.status === "settled" ? "SETTLED" : "—")}
+              </TableCell>
               <TableCell className="text-[11px]">{r.voucher_no || "—"}</TableCell>
               <TableCell className="text-[11px]">{r.required_till || "—"}</TableCell>
               <TableCell>

@@ -4495,7 +4495,14 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
         # Final approval — finalise per type
         # For payments and reimbursements the approver MUST tell us who actually
         # released the money so the auto-created transaction shows the payer.
-        if body.request_type in ("payment", "reimbursement"):
+        # Exception: payments funded by an existing advance don't need a fresh payer
+        # (the advance itself was the source of cash), so we auto-default paid_by
+        # to the advance requester and skip the validation.
+        _is_adv_adjust_payment = (
+            body.request_type == "payment"
+            and bool(rec.get("advance_request_id"))
+        )
+        if body.request_type in ("payment", "reimbursement") and not _is_adv_adjust_payment:
             if not (body.paid_by_name or "").strip():
                 raise HTTPException(400, "Please select who is making the payment (paid_by_name is required for final approval)")
             if not (body.txn_center_id or "").strip():
@@ -4504,6 +4511,15 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             _sel_center = await db.centers.find_one({"id": body.txn_center_id}, {"_id": 0, "name": 1, "company_id": 1})
             if not _sel_center:
                 raise HTTPException(400, "Selected center not found")
+        elif _is_adv_adjust_payment:
+            # Auto-fill so downstream code has values to work with
+            if not (body.paid_by_name or "").strip():
+                body.paid_by_name = rec.get("created_by_name") or "Advance Holder"
+            if not body.paid_by_user_id:
+                body.paid_by_user_id = rec.get("created_by")
+            _sel_center = None
+            if body.txn_center_id:
+                _sel_center = await db.centers.find_one({"id": body.txn_center_id}, {"_id": 0, "name": 1, "company_id": 1})
         if body.request_type == "reimbursement":
             now = datetime.now(timezone.utc).isoformat()
             staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
@@ -4705,7 +4721,48 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "status": "approved", "approved_by": user["id"], "approved_at": now,
                 "rejected_reason": None,
             }
+            # Phase-2 Advance Adjustment: when this payment is funded by an earlier
+            # released advance, mark the txn as advance-funded so cash-flow reports
+            # can net it out (the outflow already happened at advance release time).
+            adv_id = rec.get("advance_request_id")
+            if adv_id:
+                txn["funded_by_advance_id"] = adv_id
+                txn["advance_no"] = rec.get("advance_no")
+                txn["is_advance_adjustment"] = True
             await db.transactions.insert_one(txn)
+            # If this payment adjusts against an advance, reduce the advance balance,
+            # append to adjustments log, and flip status → adjusting/settled.
+            if adv_id:
+                adv = await db.advance_requests.find_one({"id": adv_id}, {"_id": 0})
+                if adv:
+                    amt = float(rec["actual_amount"])
+                    new_adjusted = float(adv.get("adjusted_amount") or 0) + amt
+                    new_balance = max(0.0, float(adv.get("balance_amount") or 0) - amt)
+                    adjustments = list(adv.get("adjustments") or [])
+                    adjustments.append({
+                        "payment_id": rec["id"],
+                        "quotation_id": rec.get("quotation_id"),
+                        "qrn": rec.get("qrn"),
+                        "amount": amt,
+                        "at": now,
+                        "vendor_name": rec.get("vendor_name"),
+                        "txn_id": txn["id"],
+                    })
+                    adv_status = "settled" if new_balance <= 0.01 else "adjusting"
+                    adv_update = {
+                        "adjusted_amount": round(new_adjusted, 2),
+                        "balance_amount": round(new_balance, 2),
+                        "adjustments": adjustments,
+                        "status": adv_status,
+                    }
+                    if adv_status == "settled":
+                        adv_update["settled_at"] = now
+                    await db.advance_requests.update_one({"id": adv_id}, {"$set": adv_update})
+                    await _notify(
+                        adv.get("created_by"),
+                        f"₹{amt:,.0f} adjusted against your advance {adv.get('advance_no')} — balance ₹{new_balance:,.0f}",
+                        ntype="advance_adjusted", ref_id=adv_id, link="/advances",
+                    )
             # Reflect final state on both payment + quotation
             await db.quotations.update_one(
                 {"id": rec.get("quotation_id")},
@@ -6598,6 +6655,11 @@ class PaymentIn(BaseModel):
     # Payee proof: cancelled cheque / QR screenshot / bank passbook — REQUIRED for
     # bank/upi/cheque modes so Finance can cross-verify the account before releasing funds.
     payee_proof_attachments: List[AttachmentRef] = Field(default_factory=list)
+    # Phase-2 Advance Adjustment — optional link to a RELEASED advance whose
+    # cash-in-hand is being spent on this payment. When set, the payment amount
+    # reduces `balance_amount` of the advance on final approval instead of triggering
+    # a fresh outflow of cash (advance was already an outflow at release time).
+    advance_request_id: Optional[str] = None
 
 
 def _slug_center_prefix(name: str) -> str:
@@ -6791,6 +6853,8 @@ def _validate_payment_payee(body: "PaymentIn") -> None:
     with a user-friendly message when required fields are missing so both the
     create-payment and resubmit-payment paths share identical rules."""
     mode = (body.payment_mode or "").lower().strip()
+    if mode == "advance_adjustment":
+        return  # advance-funded payment — no fresh outflow, no payee details required
     if mode not in ("cash", "bank", "upi", "cheque", "card"):
         raise HTTPException(400, "Invalid payment_mode — must be cash / bank / upi / cheque / card")
     if mode in ("bank", "cheque"):
@@ -6828,6 +6892,20 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
         if q["center_id"] not in assigned:
             raise HTTPException(403, "You can only raise payments for centers you are assigned to")
     _validate_payment_payee(body)
+    # Optional advance adjustment link — validate ownership + balance up-front so the
+    # user gets clear feedback before the payment enters an N-level approval chain.
+    linked_advance = None
+    if body.advance_request_id:
+        linked_advance = await db.advance_requests.find_one({"id": body.advance_request_id}, {"_id": 0})
+        if not linked_advance:
+            raise HTTPException(404, "Linked advance not found")
+        if linked_advance.get("created_by") != user["id"]:
+            raise HTTPException(403, "You can only adjust against your own advance")
+        if linked_advance.get("status") not in ("released", "adjusting"):
+            raise HTTPException(400, f"Advance is not available for adjustment (status={linked_advance.get('status')})")
+        bal = float(linked_advance.get("balance_amount") or 0)
+        if float(body.actual_amount) > bal + 0.01:
+            raise HTTPException(400, f"Actual amount ₹{body.actual_amount:,.2f} exceeds advance balance ₹{bal:,.2f}")
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["quotation_id"] = q["id"]
@@ -6842,6 +6920,8 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
     doc["created_by_name"] = user.get("name") or user.get("email")
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     doc["txn_id"] = None
+    if linked_advance:
+        doc["advance_no"] = linked_advance.get("advance_no")
     doc = await _attach_chain_to_request("payment", doc)
     await db.payments.insert_one(doc)
     # Link back to quotation
@@ -6902,6 +6982,15 @@ async def resubmit_payment(pid: str, body: PaymentResubmitIn, user=Depends(get_c
         merged["attachments"] = [a.model_dump() for a in body.attachments]
     if body.payee_proof_attachments is not None:
         merged["payee_proof_attachments"] = [a.model_dump() for a in body.payee_proof_attachments]
+    # If linked to an advance, re-validate the (possibly-updated) actual_amount fits within
+    # the current balance so the resubmit path shares identical guardrails as create_payment.
+    if merged.get("advance_request_id"):
+        adv = await db.advance_requests.find_one({"id": merged["advance_request_id"]}, {"_id": 0})
+        if not adv or adv.get("status") not in ("released", "adjusting"):
+            raise HTTPException(400, "Linked advance is no longer adjustable")
+        bal = float(adv.get("balance_amount") or 0)
+        if float(merged["actual_amount"]) > bal + 0.01:
+            raise HTTPException(400, f"Actual amount ₹{float(merged['actual_amount']):,.2f} exceeds advance balance ₹{bal:,.2f}")
     # Reuse the strict payee validation used by create_payment
     class _V:  # lightweight shim satisfying the helper's attribute reads
         pass
@@ -9229,6 +9318,33 @@ async def my_advance_requests(user=Depends(get_current_user)):
     for r in rows:
         await _enrich_with_approval_status(r)
     return _json_safe(rows)
+
+
+@api.get("/advance-requests/adjustable")
+async def adjustable_advance_requests(user=Depends(get_current_user)):
+    """Return the current user's advances that still carry an open balance
+    (status ∈ {released, adjusting} and balance_amount > 0). Used by the Payment
+    Request dialog to power the 'Adjust against Advance' picker.
+    """
+    rows = await db.advance_requests.find({
+        "created_by": user["id"],
+        "status": {"$in": ["released", "adjusting"]},
+        "balance_amount": {"$gt": 0},
+    }, {"_id": 0}).sort("released_at", -1).to_list(50)
+    # Slim down payload — dropdown only needs a few fields
+    slim = [{
+        "id": r["id"],
+        "advance_no": r.get("advance_no"),
+        "voucher_no": r.get("voucher_no"),
+        "amount": r.get("amount") or 0,
+        "paid_amount": r.get("paid_amount") or 0,
+        "adjusted_amount": r.get("adjusted_amount") or 0,
+        "balance_amount": r.get("balance_amount") or 0,
+        "purpose": r.get("purpose"),
+        "released_at": r.get("released_at"),
+        "status": r.get("status"),
+    } for r in rows]
+    return _json_safe(slim)
 
 
 @api.get("/advance-requests/{aid}")

@@ -1,0 +1,38 @@
+{
+  "summary": "iter-39 Phase 2 Advance Adjustment ('Expense against Advance') — backend + frontend fully verified. Backend: 12/12 pytest passed (adjustable endpoint scoping/slim payload, happy-path partial adjustment (advance balance 6000→4000 status='adjusting', adjustments[] populated w/ payment_id/qrn/amount/at/vendor_name/txn_id, txn.is_advance_adjustment/funded_by_advance_id/advance_no all set), full-settlement path (status='settled' + settled_at, balance=0), negatives: other-user advance → 403, settled advance → 400, actual>balance → 400, resubmit_payment exceeding balance → 400, non-regression bank/upi/cheque payee validation still enforced, advance-linked payment final-approval works WITHOUT paid_by_name/txn_center_id). Frontend: Advances page shows 'Adjusted / Balance' stat card (₹0/₹16,000), table has adv-adjusted-<id>/adv-balance-<id> cells (20 rows verified, SETTLED + RELEASED colouring correct). Quotations 'Raise Payment' dialog: p-advance-toggle checkbox appears when adjustable advances exist, toggling → p-advance-select dropdown populated with balances, voucher + 'After this payment' preview shown, informational 'No fresh outflow will be created' card visible, bank/UPI payee blocks disappear. All 13 Raise-Payment buttons visible on Quotations page.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard (pre-existing)", "issues": ["Recharts width(-1)/height(-1) console warnings on initial paint — pre-existing, unrelated to iter-39."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter39_advance_adjustment.py",
+    "/app/test_reports/pytest/iter39_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:4501-4520 — good: _is_adv_adjust_payment gate correctly skips paid_by_name/txn_center_id validation ONLY when body.request_type=='payment' AND rec.advance_request_id is set. Auto-fills paid_by_name/paid_by_user_id from the advance requester so downstream txn creation still has values. Clean.",
+    "server.py:4724-4765 — payment approval adjustment block: correctly increments adjusted_amount, decrements balance_amount (max(0,...)) and appends to adjustments[] with all requested fields (payment_id/quotation_id/qrn/amount/at/vendor_name/txn_id). Status flip logic (settled if balance<=0.01 else adjusting) is race-tolerant. Notification to advance owner fires on adjustment. MINOR: this update is non-atomic (find_one → compute → update_one). Under concurrent approvals of two payments against the same advance a small window could over-deduct. Consider $inc on adjusted_amount and $push on adjustments with a compare-current status flip via aggregation pipeline update. Not a blocker for MVP.",
+    "server.py:6898-6908 — create_payment advance validation correctly checks ownership + status in {released,adjusting} + balance sufficiency. Good.",
+    "server.py:6987-6993 — resubmit_payment re-validates balance. Confirmed via test that PaymentResubmitIn does NOT allow changing advance_request_id (immutable after create) — good invariant.",
+    "server.py:9323-9347 — GET /advance-requests/adjustable: correctly filters by created_by=user.id + status in {released,adjusting} + balance>0. Slim payload includes all requested fields. Sorted by released_at desc, limited to 50.",
+    "Advances.jsx / Quotations.jsx — all requested data-testids present (p-advance-toggle, p-advance-select, adv-adjusted-<id>, adv-balance-<id>). Dialog shows real-time 'After this payment' balance preview which is a nice UX touch.",
+    "MINOR: /api/transactions returns 500 for admin listing (pre-existing from iter-38) — did not block iter-39 (used direct DB read for txn assertions), but should be investigated independently."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter39_advance_adjustment.py (NEW — 4 classes, 12 tests)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (all Phase-2 testids present, happy toggling flow verified end-to-end via Playwright)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Created ~10 TEST_iter39_* advances (some settled, some released with balance, some cancelled) + TEST_iter39_Co/IT39-* company+centers + 1 fresh staff user + several quotations & payments. All prefixed for easy cleanup. Balance state at end: admin has 4 released advances w/ ₹1000 balance each + several settled + 1 approved-not-released (₹2,500). Adjusted/Balance stat card in UI shows ₹0/₹16,000 (5 released, 4 of which have adjustments=0 balance=1000, plus the 6000/6000 approve-flow one — matches DB).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Phase 2 Advance Adjustment is fully functional and tested. New endpoint GET /api/advance-requests/adjustable returns scoped slim list. PaymentIn accepts advance_request_id + payment_mode='advance_adjustment' (skips payee validation). On final approval the payment auto-updates the linked advance (adjusted_amount, balance_amount, adjustments[], status flip released→adjusting→settled) and the created transaction gets is_advance_adjustment=true+funded_by_advance_id+advance_no. Frontend Advances page shows new Adjusted/Balance stat card + columns. Quotations Raise-Payment dialog shows p-advance-toggle when user has adjustable advances. NOTE: /api/transactions listing 500 error persists (pre-existing since iter-38) — tests read txns directly from Mongo. Advance-request approval chain is seeded (admin single-step) via iter-38.",
+  "rca of the issue": "N/A — no bugs surfaced this iteration."
+}

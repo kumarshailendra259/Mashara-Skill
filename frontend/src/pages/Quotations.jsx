@@ -62,7 +62,10 @@ export default function Quotations() {
     notes: "", txn_type_override: "", attachments: [],
     payee_account_holder: "", payee_account_no: "", payee_ifsc: "", payee_bank_name: "",
     payee_upi_id: "", payee_proof_attachments: [],
+    advance_request_id: "",
   });
+  // My open advances (released with balance > 0) — powers the "Adjust against Advance" picker
+  const [adjustableAdvances, setAdjustableAdvances] = useState([]);
   const [uploading, setUploading] = useState(false);
 
   // Single reusable upload helper — pushes into either qForm.attachments or pForm.attachments.
@@ -146,8 +149,15 @@ export default function Quotations() {
     finally { setBusy(false); }
   };
 
-  const openPayment = (q) => {
+  const openPayment = async (q) => {
     setPayQuotation(q);
+    // Fetch open advances (own) so the user can offset this payment against one.
+    let advs = [];
+    try {
+      const { data } = await api.get("/advance-requests/adjustable");
+      advs = data || [];
+    } catch (_e) { advs = []; }
+    setAdjustableAdvances(advs);
     // Auto-prefill payee details from Vendor master if a linked vendor has bank/UPI on record.
     const v = q.vendor_id ? vendors.find((x) => x.id === q.vendor_id) : null;
     setPForm({
@@ -163,6 +173,7 @@ export default function Quotations() {
       payee_bank_name: v?.bank_name || "",
       payee_upi_id: "",
       payee_proof_attachments: [],
+      advance_request_id: "",
     });
     setOpenP(true);
   };
@@ -170,8 +181,18 @@ export default function Quotations() {
   const submitPayment = async () => {
     if (!pForm.actual_amount) { toast.error("Enter actual amount"); return; }
     const mode = (pForm.payment_mode || "").toLowerCase();
-    // Client-side guard so users get instant feedback (backend also enforces).
-    if (mode === "bank" || mode === "cheque") {
+    const isAdvAdjust = mode === "advance_adjustment";
+    // Advance-funded payments skip payee-detail validation (no fresh outflow).
+    if (isAdvAdjust) {
+      if (!pForm.advance_request_id) {
+        toast.error("Please pick an advance to adjust against"); return;
+      }
+      const adv = adjustableAdvances.find((a) => a.id === pForm.advance_request_id);
+      if (adv && Number(pForm.actual_amount) > Number(adv.balance_amount || 0) + 0.01) {
+        toast.error(`Amount exceeds advance balance (₹${Number(adv.balance_amount).toLocaleString('en-IN')})`);
+        return;
+      }
+    } else if (mode === "bank" || mode === "cheque") {
       if (!pForm.payee_account_holder?.trim() || !pForm.payee_account_no?.trim() || !pForm.payee_ifsc?.trim() || !pForm.payee_bank_name?.trim()) {
         toast.error("Bank/Cheque payment ke liye Account Holder, Account No, IFSC aur Bank Name — sabhi mandatory hain");
         return;
@@ -227,6 +248,7 @@ export default function Quotations() {
           payee_bank_name: pForm.payee_bank_name || null,
           payee_upi_id: pForm.payee_upi_id || null,
           payee_proof_attachments: pForm.payee_proof_attachments || [],
+          advance_request_id: pForm.advance_request_id || null,
         });
         toast.success("Payment request raised — routing for approval");
       }
@@ -658,6 +680,67 @@ export default function Quotations() {
                 <Input type="number" step="0.01" value={pForm.actual_amount} onChange={(e) => setPForm({ ...pForm, actual_amount: e.target.value })} className="rounded-none" data-testid="p-amount" />
                 <div className="text-[10px] text-[var(--muted)] mt-1">Editable — negotiated / discounted amount may differ from estimate.</div>
               </div>
+
+              {/* Phase-2: Adjust Against Advance — pick an open (released) advance to offset this payment */}
+              {adjustableAdvances.length > 0 && (
+                <div className="border border-indigo-300 bg-indigo-50/60 p-3 space-y-2" data-testid="p-advance-section">
+                  <label className="flex items-center gap-2 text-xs font-semibold text-indigo-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!pForm.advance_request_id}
+                      onChange={(e) => setPForm({
+                        ...pForm,
+                        advance_request_id: e.target.checked ? adjustableAdvances[0].id : "",
+                        payment_mode: e.target.checked ? "advance_adjustment" : "bank",
+                      })}
+                      data-testid="p-advance-toggle"
+                    />
+                    <IndianRupee size={12} /> Adjust this payment against my open advance
+                  </label>
+                  {pForm.advance_request_id && (
+                    <>
+                      <div>
+                        <Label className="overline text-indigo-900">Select Advance</Label>
+                        <Select
+                          value={pForm.advance_request_id}
+                          onValueChange={(v) => setPForm({ ...pForm, advance_request_id: v })}
+                        >
+                          <SelectTrigger className="rounded-none" data-testid="p-advance-select"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {adjustableAdvances.map((a) => (
+                              <SelectItem key={a.id} value={a.id}>
+                                {a.advance_no} · Balance {inr(a.balance_amount)} · {(a.purpose || "").slice(0, 30)}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {(() => {
+                          const sel = adjustableAdvances.find((a) => a.id === pForm.advance_request_id);
+                          if (!sel) return null;
+                          const remaining = Number(sel.balance_amount || 0) - Number(pForm.actual_amount || 0);
+                          const insuff = remaining < -0.01;
+                          return (
+                            <div className="text-[11px] mt-2 space-y-0.5">
+                              <div className="text-indigo-800">
+                                Voucher: <b>{sel.voucher_no || "—"}</b> · Released: {inr(sel.paid_amount)} · Adjusted so far: {inr(sel.adjusted_amount)}
+                              </div>
+                              <div className={insuff ? "text-red-700 font-semibold" : "text-emerald-700"}>
+                                Available: {inr(sel.balance_amount)} · After this payment: {inr(Math.max(0, remaining))}
+                                {insuff && " · ⚠ EXCEEDS BALANCE"}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                      <div className="text-[10px] text-indigo-800 bg-indigo-100/80 p-2 border border-indigo-200">
+                        ℹ️ No fresh outflow will be created — the advance&apos;s cash-in-hand covers this expense. Advance balance will reduce by the amount above on final approval.
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {!pForm.advance_request_id && (
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="overline">Payment Mode</Label>
@@ -677,6 +760,13 @@ export default function Quotations() {
                   <Input type="date" value={pForm.payment_date} onChange={(e) => setPForm({ ...pForm, payment_date: e.target.value })} className="rounded-none" data-testid="p-date" />
                 </div>
               </div>
+              )}
+              {pForm.advance_request_id && (
+                <div>
+                  <Label className="overline">Payment Date</Label>
+                  <Input type="date" value={pForm.payment_date} onChange={(e) => setPForm({ ...pForm, payment_date: e.target.value })} className="rounded-none" data-testid="p-date" />
+                </div>
+              )}
 
               {/* Payee details — required for bank/cheque/upi so approver knows exactly where money will land */}
               {(pForm.payment_mode === "bank" || pForm.payment_mode === "cheque") && (
