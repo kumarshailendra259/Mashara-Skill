@@ -28,6 +28,14 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27F — Advance Request Approval Dialog Fix (Done, Jul 2026)
+- **User reported bug**: Accounts team login me Advance Request approve karte samay Payee Details (bank/UPI) show nahi ho rahe the AND Center/Partner/Paid-By choose karne ka option nahi tha.
+- **Root cause**: `/approvals/pending` summary was missing payee_* fields for advance_request rows; PendingApprovals dialog's amber Payee Details block only rendered for `request_type == 'payment'`; emerald Payment Attribution (Center/Partner/Paid-By) block was hidden for advance_request; filter tab strip missing advance/quotation/payment chips.
+- **Fix (backend)**: `/approvals/pending` summary now maps `employee_name → vendor_name`, `advance_no → qrn`, `preferred_payment_mode → payment_mode` and passes through all `payee_*` fields for advance_request items. `/approvals/act` new advance_request branch stamps `approved_center_id`, `approved_center_name`, `approved_company_id`, `approved_partner_id`, `approved_paid_by_user_id`, `approved_paid_by_name` on the row when accounts picks them during final approval (all OPTIONAL). `release_advance` now uses these as defaults for the auto-created release transaction (release body values win if provided).
+- **Fix (frontend)**: PendingApprovals dialog now shows amber "Payee Details (from Advance Request)" block for advance_request. Emerald Payment Attribution block appears at final-step with '(optional — can be filled at Release)' label + skips validation. TYPE_META includes advance_request (Wallet icon, cyan). Filter tab strip extended with `tab-quotation`, `tab-payment`, `tab-advance_request` chips with live counts. openDetail navigates to /advances.
+- **Verified**: iter-44 — 7/7 backend pytest passed (payee-surfacing + optional attribution + approved_* propagation + release-txn defaults + regression on mandatory payment/reimbursement). iter-45 — frontend follow-up 100% (all 10 filter tabs render with counts: All=129, Advances=42, Payments=4 etc, dropdown lazy-fetch works for advance_request finals).
+- **Minor cosmetic**: React dev-only hydration warning `<span> in <option>` inside native <select> — non-blocking, no user impact.
+
 ### Phase 27E — Advance Payee/Bank Details Capture (Done, Jul 2026)
 - **User ask**: Advance Request creation par bank details capture ho, taki accounts release ke waqt sara payee info + proof auto-flow ho aur transaction par bhi jud jaye.
 - **Backend**:
