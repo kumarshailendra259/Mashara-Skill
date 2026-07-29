@@ -4825,7 +4825,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                     update["voucher_generated_at"] = voucher["generated_at"]
             except Exception as _voucher_err:  # noqa: BLE001
                 logger.exception("Payment voucher auto-generation failed for payment %s", rec.get("id"))
-        else:  # transaction
+        else:  # transaction OR advance_request (both share the generic approved+audit path)
             update = {
                 "current_level": 0,
                 "chain_history": history,
@@ -4834,6 +4834,23 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "approved_at": datetime.now(timezone.utc).isoformat(),
                 "rejected_reason": None,
             }
+            # Advance Request final approval — accounts approver can OPTIONALLY
+            # pre-attribute the release txn by picking Center/Partner/Paid-By in
+            # the approval dialog itself. Values are stored on the advance row so
+            # the Release dialog pre-fills them and the auto-created txn uses them.
+            if body.request_type == "advance_request":
+                if body.txn_center_id:
+                    _sel_center_adv = await db.centers.find_one({"id": body.txn_center_id}, {"_id": 0, "name": 1, "company_id": 1})
+                    if not _sel_center_adv:
+                        raise HTTPException(400, "Selected center not found")
+                    update["approved_center_id"] = body.txn_center_id
+                    update["approved_center_name"] = _sel_center_adv.get("name")
+                    update["approved_company_id"] = _sel_center_adv.get("company_id")
+                if body.txn_partner_id:
+                    update["approved_partner_id"] = body.txn_partner_id
+                if body.paid_by_user_id or body.paid_by_name:
+                    update["approved_paid_by_user_id"] = body.paid_by_user_id
+                    update["approved_paid_by_name"] = body.paid_by_name
         await coll.update_one({"id": body.request_id}, {"$set": update})
         if rec.get("created_by") and rec["created_by"] != user["id"]:
             verb = "paid" if body.request_type == "reimbursement" else "approved"
@@ -4899,9 +4916,11 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                         ),
                         # Payment-only extras: give the approver full payee context inline so
                         # they don't need to open a second screen to verify account details.
-                        "vendor_name": rec.get("vendor_name"),
-                        "qrn": rec.get("qrn"),
-                        "payment_mode": rec.get("payment_mode"),
+                        # For advance_request we surface employee_name via vendor_name so the
+                        # same amber Payee Details block can show the target person.
+                        "vendor_name": rec.get("vendor_name") or (rec.get("employee_name") if req_type == "advance_request" else None),
+                        "qrn": rec.get("qrn") or (rec.get("advance_no") if req_type == "advance_request" else None),
+                        "payment_mode": rec.get("payment_mode") or rec.get("preferred_payment_mode"),
                         "payee_account_holder": rec.get("payee_account_holder"),
                         "payee_account_no": rec.get("payee_account_no"),
                         "payee_ifsc": rec.get("payee_ifsc"),
@@ -9745,10 +9764,26 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
     voucher_no = await _next_voucher_no()
     now_iso = datetime.now(timezone.utc).isoformat()
     paid_amount = body.paid_amount or row.get("amount") or 0
+    # Prefer the approver-picked attribution (captured at final approval) → this way
+    # accounts can pick Center/Partner/Paid-By at approval time and Release just
+    # picks up those values automatically. Fallbacks: release body, then advance row.
+    eff_paid_by_user_id = body.paid_by_user_id or row.get("approved_paid_by_user_id")
+    eff_paid_by_name = row.get("approved_paid_by_name")
     payer = None
-    if body.paid_by_user_id:
-        p = await db.users.find_one({"id": body.paid_by_user_id}, {"_id": 0, "name": 1, "email": 1})
-        payer = (p or {}).get("name") or (p or {}).get("email")
+    if eff_paid_by_user_id:
+        p = await db.users.find_one({"id": eff_paid_by_user_id}, {"_id": 0, "name": 1, "email": 1})
+        payer = (p or {}).get("name") or (p or {}).get("email") or eff_paid_by_name
+    else:
+        payer = eff_paid_by_name
+    eff_center_id = row.get("approved_center_id") or row.get("center_id")
+    eff_partner_id = row.get("approved_partner_id")
+    eff_company_id = row.get("approved_company_id") or row.get("company_id")
+    if eff_partner_id is None or eff_company_id is None:
+        ctx = await _derive_context_for_center(eff_center_id) if eff_center_id else {}
+        if eff_partner_id is None:
+            eff_partner_id = (ctx or {}).get("partner_id")
+        if eff_company_id is None:
+            eff_company_id = (ctx or {}).get("company_id")
     # Create a corresponding transaction for cash-flow visibility.
     # Payee bank/UPI details captured at request-time flow through here so accounts
     # doesn't have to re-key them, and the ledger row shows exactly where the money went.
@@ -9760,12 +9795,12 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "category": "advance",
         "amount": paid_amount,
         "description": f"Advance {row['advance_no']} released to {row['employee_name']}",
-        "company_id": row.get("company_id"),
-        "center_id": row.get("center_id"),
+        "company_id": eff_company_id,
+        "center_id": eff_center_id,
         "project_id": row.get("project_id"),
-        "partner_id": None,
+        "partner_id": eff_partner_id,
         "payment_mode": body.payment_mode,
-        "paid_by_user_id": body.paid_by_user_id,
+        "paid_by_user_id": eff_paid_by_user_id,
         "paid_by_name": payer,
         "transaction_ref": body.transaction_ref,
         "advance_request_id": row["id"],
@@ -9800,7 +9835,7 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "payment_date": body.payment_date or now_iso[:10],
         "transaction_ref": body.transaction_ref,
         "paid_amount": paid_amount,
-        "paid_by_user_id": body.paid_by_user_id,
+        "paid_by_user_id": eff_paid_by_user_id,
         "paid_by_name": payer,
         "release_remarks": body.remarks,
         "release_attachments": [a.model_dump() if hasattr(a, "model_dump") else a for a in (body.attachments or [])],

@@ -1,0 +1,43 @@
+{
+  "summary": "Iter-44 — Advance Request payee surfacing on /approvals/pending + optional Payment Attribution at final approval + approved_* propagation to Release txn. Backend: 7/7 pytest pass on /app/backend/tests/test_iter44_advance_approval_attribution.py — verifies (a) /approvals/pending summary for advance_request items now carries vendor_name(=employee_name), qrn(=advance_no), payment_mode(=preferred_payment_mode), payee_account_holder/no/ifsc/bank_name/upi_id/proof_attachments; (b) /approvals/act request_type=advance_request final step SUCCEEDS with no attribution fields (200), stamps approved_center_id/name/company_id when txn_center_id provided, stamps approved_partner_id when txn_partner_id provided, stamps approved_paid_by_user_id/name when provided; (c) invalid txn_center_id → 400 'Selected center not found'; (d) /release with empty body uses approved_center/partner/company/paid_by defaults on the auto-created txn; (e) release body.paid_by_user_id overrides approved value; (f) regression — payment/reimbursement final-step still 400s without attribution. Frontend: opened Approve dialog on an advance_request row — amber 'Payee Details (from Advance Request)' block renders QRN=ADV-26-0108, Mode=BANK, Employee=TEST_AttachStaff_285c90, Account Holder=Iter44 Holder, Account No=4444555566, IFSC=HDFC0004444, Bank=HDFC Bank exactly as expected. Emerald 'Payment Attribution (optional — can be filled at Release)' block shows all 3 dropdowns with testids txn-center-select / txn-partner-select / paid-by-select and the 'optional' wording (Partner labelled 'Partner (optional)'). Client-side validation does NOT block Confirm on empty attribution — only Remarks is enforced (toast: 'Remarks required (min 3 chars)').",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "N/A", "issue": "Default advance_request approval chain (id=226732bf-…) was persisted with active=False, so newly-raised advance requests skip chain attachment (current_level=None, chain_id=None) and become invisible to /approvals/pending. Testing fixture re-activates it. Main agent should verify whether iter-41 reroute test intentionally deactivated it or if this is stale state that should be cleaned up."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "PendingApprovals type filter tab strip", "issue": "The tabs array (lines 198-206) does NOT include an 'advance_request' entry, so there is no per-type tab/badge chip for Advance in the filter strip — even though TYPE_META has advance_request with Wallet icon and the per-row ADVANCE badge renders correctly. The review request explicitly states 'type filter tab strip and colour badge now include advance_request'. `counts` map also omits advance_request in its initial keys.", "selector": "[data-testid=\"tab-advance_request\"] (does not exist)", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PendingApprovals Approve dialog (all types)", "issues": ["React console hydration warning: '<span> cannot be a child of <option>' — one of the <select> options has a <span> wrapper (likely in the payer/center rendered label). Non-visual but should be cleaned up."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter44_advance_approval_attribution.py",
+    "/app/test_reports/pytest/iter44.xml"
+  ],
+  "action_items": [
+    "Add {key: 'advance_request', label: 'Advances'} entry to the PendingApprovals tab strip array and include 'advance_request: 0' in the initial counts map so the filter chip renders with a live badge.",
+    "(minor) Verify whether the default advance_request approval chain should be active=True in production seed data — currently active=False which prevents newly created advances from entering /approvals/pending queue.",
+    "(cosmetic) Fix the <option><span>…</span></option> React hydration warning in the Center/Partner/Payer dropdown option rendering inside the Approve dialog."
+  ],
+  "critical_code_review_comments": [
+    "Backend /approvals/act advance_request branch correctly returns 200 when all attribution fields are omitted, and correctly 400s when a bogus txn_center_id is provided (center existence check before stamping). Symmetric to the payment path.",
+    "release_advance's precedence order (body.paid_by_user_id > approved_paid_by_user_id > None) is correct and verified. However `eff_paid_by_name` (line 9771) reads ONLY from row.approved_paid_by_name — it does NOT fall back to body — this is fine because the payer name is re-resolved via db.users lookup from eff_paid_by_user_id (line 9773-9777), so it works, but the local variable naming is slightly misleading.",
+    "/approvals/pending summary correctly falls back to employee_name→vendor_name and advance_no→qrn only when request_type=='advance_request' (line 4921-4922), avoiding cross-contamination with regular payments.",
+    "PendingApprovals.jsx paidByOptional flag drives BOTH the '*' asterisk hiding AND the validation-skip logic — clean single source of truth. However the tabs array (line 198-206) was not updated in the same edit, which is the sole frontend gap."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter44_advance_approval_attribution.py (new — 7 pytest cases)"
+  ],
+  "success_rate": {"backend": "100% (7/7)", "frontend": "90% — dialog & payee block perfect; filter tab strip gap"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Created ~7 fresh TEST44-tagged advance requests during backend test runs, half of them progressed through admin approval to status='approved' and 2 further released → linked_transaction created with approved_center/partner/paid_by picked up correctly. Also mutated approval_chains: set active=True on the 'Advance Request — Default (Admin only)' chain (id=226732bf-9e73-4ebb-a7d1-dabfbfc222f1) — this is left activated so future testing / production behaviour is consistent.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "iter-44 verifies the accounts approver's Advance Request payee-visibility + optional Payment Attribution flow. Backend key testids: /approvals/pending summary now surfaces payee_* + vendor_name + qrn + payment_mode for advance_request rows. /approvals/act with request_type=advance_request accepts optional txn_center_id / txn_partner_id / paid_by_user_id / paid_by_name and stamps them as approved_center_id / approved_center_name / approved_company_id / approved_partner_id / approved_paid_by_user_id / approved_paid_by_name on the advance row. /advance-requests/{aid}/release then picks these up as defaults for the auto-created transaction. Remember: /approvals/act REQUIRES remarks (min 3 chars) for ALL request types. Release response returns the advance row with linked_transaction_id (not txn_id/transaction_id). Advance approval chain 226732bf-… was flipped active:False before this iteration — fixture re-activates it. Frontend testids present in Approve dialog: txn-center-select, txn-partner-select, paid-by-select; missing testid: tab-advance_request (filter chip not implemented in tab strip array). PendingApprovals.jsx line 198-206 needs the advance_request tab entry.",
+  "rca of the issue": "User-reported bug (Hinglish): 'Advance request ka Payee details show nahi ho raha hai aur sath me choose center, choose partner ye sab ka option nahi aa rha hai'. RCA: (1) Backend /approvals/pending was omitting the payee_* fields for advance_request rows — fixed by mapping employee_name→vendor_name, advance_no→qrn and passing through preferred_payment_mode + payee_* onto the summary payload. (2) Frontend Approve dialog previously showed the amber payee block ONLY for request_type=='payment' — now expanded to (payment || advance_request). (3) Emerald Payment Attribution (Center/Partner/Paid-By) block was previously hidden for advance_request — now shown as OPTIONAL for advance_request only; when approver provides the values, backend stamps them as approved_* and release_advance uses them as txn defaults. All four fixes verified end-to-end via test_iter44_advance_approval_attribution.py + manual UI walkthrough. Minor gap: filter tab chip for advance_request never got wired into the tabs array — main agent to add."
+}

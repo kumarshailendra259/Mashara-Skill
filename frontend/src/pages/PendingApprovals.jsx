@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -19,6 +19,7 @@ import { useNavigate } from "react-router-dom";
 // - Asset purchase requests
 // - Employee transfer requests
 // - Attendance regularisations
+// - Advance requests
 
 const TYPE_META = {
   transaction:       { icon: ArrowLeftRight, label: "Transaction",       color: "bg-blue-50 text-[var(--brand)]" },
@@ -29,6 +30,7 @@ const TYPE_META = {
   regularisation:    { icon: AlertCircle,    label: "Regularisation",     color: "bg-rose-50 text-rose-700" },
   quotation:         { icon: FileSignature,  label: "Quotation",          color: "bg-indigo-50 text-indigo-700" },
   payment:           { icon: IndianRupee,    label: "Payment",            color: "bg-teal-50 text-teal-700" },
+  advance_request:   { icon: Wallet,         label: "Advance",            color: "bg-cyan-50 text-cyan-700" },
 };
 const FALLBACK_META = { icon: Inbox, label: "Approval", color: "bg-gray-100 text-gray-700" };
 
@@ -104,10 +106,17 @@ export default function PendingApprovals() {
     }
   };
 
+  // Payment attribution (Center / Partner / Paid By) is captured at final approval
+  // for: payment, reimbursement, and advance_request. For advance_request it's
+  // OPTIONAL (release step re-collects if not provided) but showing it in the same
+  // dialog lets accounts one-shot the workflow.
   const needsPaidBy = !!(
     acting && acting.action === "approve" && acting.item.is_final_step &&
-    (acting.item.request_type === "payment" || acting.item.request_type === "reimbursement")
+    (acting.item.request_type === "payment"
+     || acting.item.request_type === "reimbursement"
+     || acting.item.request_type === "advance_request")
   );
+  const paidByOptional = acting?.item?.request_type === "advance_request";
 
   const confirmAct = async () => {
     if (!acting) return;
@@ -115,11 +124,13 @@ export default function PendingApprovals() {
       toast.error("Remarks required (min 3 chars)");
       return;
     }
-    if (needsPaidBy && !paidByUserId) {
+    // For advance_request the attribution is OPTIONAL — approver can skip it and
+    // let the Release dialog capture it later. For payment/reimbursement it stays mandatory.
+    if (needsPaidBy && !paidByUserId && !paidByOptional) {
       toast.error("Please select who is making the payment (Paid By is mandatory)");
       return;
     }
-    if (needsPaidBy && !txnCenterId) {
+    if (needsPaidBy && !txnCenterId && !paidByOptional) {
       toast.error("Please select the Center for this payment");
       return;
     }
@@ -137,13 +148,13 @@ export default function PendingApprovals() {
           return;
         }
       } else {
-        // Chain-based: transactions / leaves / reimbursements all dispatch through /approvals/act
+        // Chain-based: transactions / leaves / reimbursements / advance requests dispatch through /approvals/act
         await api.post(`/approvals/act`, {
           request_type: item.request_type, request_id: item.request_id,
           action, remarks,
-          paid_by_user_id: needsPaidBy ? paidByUserId : null,
-          paid_by_name: needsPaidBy ? (payer?.name || "") : null,
-          txn_center_id: needsPaidBy ? txnCenterId : null,
+          paid_by_user_id: needsPaidBy ? (paidByUserId || null) : null,
+          paid_by_name: needsPaidBy ? (payer?.name || null) : null,
+          txn_center_id: needsPaidBy ? (txnCenterId || null) : null,
           txn_partner_id: needsPaidBy ? (txnPartnerId || null) : null,
         });
       }
@@ -160,6 +171,7 @@ export default function PendingApprovals() {
     else if (item.request_type === "employee_transfer") nav("/employee-transfers");
     else if (item.request_type === "regularisation") nav("/pending-approvals");
     else if (item.request_type === "quotation" || item.request_type === "payment") nav("/quotations");
+    else if (item.request_type === "advance_request") nav("/advances");
     else nav("/hrms");
   };
 
@@ -296,16 +308,27 @@ export default function PendingApprovals() {
                 </div>
               </div>
 
-              {/* Payee details — only relevant for payment requests. Approver sees exact
-                  bank/UPI target BEFORE signing off so they can cross-verify with the
-                  attached cancelled cheque / QR. */}
-              {acting.item.request_type === "payment" && (
+              {/* Payee details — shown for both PAYMENT and ADVANCE REQUEST so
+                  approver sees exact bank/UPI target BEFORE signing off (and can
+                  cross-verify with the attached cancelled cheque / QR / passbook). */}
+              {(acting.item.request_type === "payment" || acting.item.request_type === "advance_request") && (
+                (acting.item.summary?.payee_account_no || acting.item.summary?.payee_upi_id || acting.item.summary?.vendor_name || acting.item.summary?.qrn) && (
                 <div className="border border-amber-200 bg-amber-50/40 p-3 text-xs space-y-2" data-testid="approval-payee-block">
-                  <div className="overline font-bold text-amber-900">Payee Details</div>
+                  <div className="overline font-bold text-amber-900">
+                    {acting.item.request_type === "advance_request" ? "Payee Details (from Advance Request)" : "Payee Details"}
+                  </div>
                   <div className="grid grid-cols-2 gap-y-1 gap-x-3">
-                    <div><span className="text-[var(--muted)]">QRN:</span> <span className="font-mono">{acting.item.summary?.qrn || "—"}</span></div>
-                    <div><span className="text-[var(--muted)]">Mode:</span> <span className="uppercase font-medium">{acting.item.summary?.payment_mode || "—"}</span></div>
-                    <div className="col-span-2"><span className="text-[var(--muted)]">Vendor:</span> {acting.item.summary?.vendor_name || "—"}</div>
+                    {acting.item.summary?.qrn && (
+                      <div><span className="text-[var(--muted)]">QRN:</span> <span className="font-mono">{acting.item.summary?.qrn}</span></div>
+                    )}
+                    {acting.item.summary?.payment_mode && (
+                      <div><span className="text-[var(--muted)]">Mode:</span> <span className="uppercase font-medium">{acting.item.summary?.payment_mode}</span></div>
+                    )}
+                    {acting.item.summary?.vendor_name && (
+                      <div className="col-span-2"><span className="text-[var(--muted)]">
+                        {acting.item.request_type === "advance_request" ? "Employee" : "Vendor"}:
+                      </span> {acting.item.summary?.vendor_name}</div>
+                    )}
                     {acting.item.summary?.payee_account_no && <>
                       <div className="col-span-2"><span className="text-[var(--muted)]">Account Holder:</span> {acting.item.summary?.payee_account_holder}</div>
                       <div><span className="text-[var(--muted)]">Account No:</span> <span className="font-mono">{acting.item.summary?.payee_account_no}</span></div>
@@ -318,7 +341,7 @@ export default function PendingApprovals() {
                   </div>
                   {(acting.item.summary?.payee_proof_attachments || []).length > 0 && (
                     <div className="border-t border-amber-200 pt-2">
-                      <div className="text-[10px] uppercase text-amber-900 font-bold mb-1">Payee Proof (cheque / QR)</div>
+                      <div className="text-[10px] uppercase text-amber-900 font-bold mb-1">Payee Proof (cheque / QR / passbook)</div>
                       <div className="flex flex-wrap gap-1">
                         {acting.item.summary.payee_proof_attachments.map((a) => (
                           <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-amber-900 hover:underline inline-flex items-center gap-1 border border-amber-300 bg-white px-1.5 py-0.5">
@@ -329,7 +352,7 @@ export default function PendingApprovals() {
                     </div>
                   )}
                 </div>
-              )}
+              ))}
 
               {/* Supporting attachments — visible for EVERY request type so the
                   approver can review bills / receipts / photos before deciding.
@@ -367,11 +390,13 @@ export default function PendingApprovals() {
               {/* Paid By — final step of payment / reimbursement only */}
               {needsPaidBy && (
                 <div className="border border-emerald-300 bg-emerald-50/60 p-3 space-y-3" data-testid="paid-by-block">
-                  <div className="overline font-bold text-emerald-900">Payment attribution (mandatory)</div>
+                  <div className="overline font-bold text-emerald-900">
+                    Payment attribution {paidByOptional ? "(optional — can be filled at Release)" : "(mandatory)"}
+                  </div>
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Center *</div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Center {paidByOptional ? "" : "*"}</div>
                       <select
                         value={txnCenterId}
                         onChange={(e) => setTxnCenterId(e.target.value)}
@@ -401,7 +426,7 @@ export default function PendingApprovals() {
                   </div>
 
                   <div>
-                    <div className="text-[10px] uppercase text-emerald-900 mb-1">Paid By (who is releasing the money) *</div>
+                    <div className="text-[10px] uppercase text-emerald-900 mb-1">Paid By (who is releasing the money) {paidByOptional ? "" : "*"}</div>
                     <select
                       value={paidByUserId}
                       onChange={(e) => setPaidByUserId(e.target.value)}
@@ -415,7 +440,9 @@ export default function PendingApprovals() {
                     </select>
                   </div>
                   <div className="text-[10px] text-emerald-900/80">
-                    Center, Partner aur Paid By — teenon auto-created transaction pe stamp ho jayenge, jisse Dashboard mein sahi center/partner filter ke saath update dikhega.
+                    {paidByOptional
+                      ? "Advance approval hai — abhi Center/Partner/Paid-By skip kar sakte hain, Release step par bhi enter kar sakte hain. Enter karne pe automatically release txn me stamp ho jayega."
+                      : "Center, Partner aur Paid By — teenon auto-created transaction pe stamp ho jayenge, jisse Dashboard mein sahi center/partner filter ke saath update dikhega."}
                   </div>
                 </div>
               )}
