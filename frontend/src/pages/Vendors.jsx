@@ -14,7 +14,7 @@ import { Plus, Trash2, Pencil, Search, Users } from "lucide-react";
 const emptyVendor = {
   name: "", gst_number: "", pan_number: "", contact_person: "", mobile: "", email: "",
   address: "", bank_account_no: "", bank_name: "", ifsc: "", account_holder_name: "", notes: "",
-  active: true,
+  active: true, center_ids: [],
 };
 
 /**
@@ -25,17 +25,30 @@ const emptyVendor = {
 export default function Vendors() {
   const { user } = useAuth();
   const [vendors, setVendors] = useState([]);
+  const [centers, setCenters] = useState([]);
   const [q, setQ] = useState("");
   const [openForm, setOpenForm] = useState(false);
   const [form, setForm] = useState(emptyVendor);
   const [editingId, setEditingId] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  const canEdit = ["admin", "hr", "manager", "senior_manager", "accountant"].includes(user?.role);
+  const canEdit = ["admin", "hr", "manager", "senior_manager", "accountant", "center_manager"].includes(user?.role);
   const canDelete = user?.role === "admin";
+  const isCenterManager = user?.role === "center_manager";
+  // Center Manager sees only their assigned centers in the picker; HQ roles see all.
+  const availableCenters = useMemo(() => {
+    if (isCenterManager) {
+      const my = new Set(user?.assigned_center_ids || []);
+      return centers.filter((c) => my.has(c.id));
+    }
+    return centers;
+  }, [centers, isCenterManager, user]);
 
   const load = () => api.get("/vendors").then((r) => setVendors(r.data || [])).catch((e) => toast.error(formatError(e)));
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
+  }, []);
 
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -48,15 +61,25 @@ export default function Vendors() {
     );
   }, [vendors, q]);
 
-  const openNew = () => { setForm(emptyVendor); setEditingId(null); setOpenForm(true); };
+  const openNew = () => {
+    // Pre-select the Center Manager's own centers so they can save immediately
+    const preset = isCenterManager ? { ...emptyVendor, center_ids: user?.assigned_center_ids || [] } : emptyVendor;
+    setForm(preset);
+    setEditingId(null);
+    setOpenForm(true);
+  };
   const openEdit = (v) => {
-    setForm({ ...emptyVendor, ...v });
+    setForm({ ...emptyVendor, ...v, center_ids: v.center_ids || [] });
     setEditingId(v.id);
     setOpenForm(true);
   };
 
   const submit = async () => {
     if (!form.name.trim()) { toast.error("Vendor name is required"); return; }
+    if (isCenterManager && (form.center_ids || []).length === 0) {
+      toast.error("Please pick at least one of your assigned centers");
+      return;
+    }
     setBusy(true);
     try {
       if (editingId) {
@@ -128,12 +151,23 @@ export default function Vendors() {
                 <th className="text-left p-3">GST</th>
                 <th className="text-left p-3">Contact</th>
                 <th className="text-left p-3">Bank</th>
+                <th className="text-left p-3">Centers</th>
                 <th className="text-left p-3">Status</th>
                 {canEdit && <th className="text-right p-3">Actions</th>}
               </tr>
             </thead>
             <tbody>
-              {filtered.map((v) => (
+              {filtered.map((v) => {
+                const vCenterIds = v.center_ids || [];
+                const vCenterNames = vCenterIds
+                  .map((cid) => centers.find((c) => c.id === cid)?.name)
+                  .filter(Boolean);
+                // Center Manager can only edit their own scoped vendors (not legacy globals)
+                const canEditRow = canEdit && (
+                  !isCenterManager
+                  || (vCenterIds.some((cid) => (user?.assigned_center_ids || []).includes(cid)))
+                );
+                return (
                 <tr key={v.id} className="border-b border-[var(--border)] last:border-0" data-testid={`vendor-row-${v.id}`}>
                   <td className="p-3">
                     <div className="font-medium">{v.name}</div>
@@ -150,6 +184,20 @@ export default function Vendors() {
                     {v.bank_account_no && <div className="num text-[10px] text-[var(--muted)]">A/c {v.bank_account_no}</div>}
                     {v.ifsc && <div className="num text-[10px] text-[var(--muted)]">{v.ifsc}</div>}
                   </td>
+                  <td className="p-3 text-[11px]">
+                    {vCenterNames.length === 0 ? (
+                      <span className="text-[var(--muted)] italic">Global</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1 max-w-[200px]">
+                        {vCenterNames.slice(0, 2).map((n, i) => (
+                          <span key={i} className="inline-block bg-cyan-50 border border-cyan-200 text-cyan-800 px-1.5 py-0.5">{n}</span>
+                        ))}
+                        {vCenterNames.length > 2 && (
+                          <span className="text-[var(--muted)]" title={vCenterNames.join(', ')}>+{vCenterNames.length - 2}</span>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td className="p-3">
                     <span className={`text-xs px-2 py-0.5 border ${v.active !== false ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-gray-100 text-gray-500 border-gray-200"}`}>
                       {v.active !== false ? "Active" : "Inactive"}
@@ -158,7 +206,11 @@ export default function Vendors() {
                   {canEdit && (
                     <td className="p-3 text-right">
                       <div className="flex justify-end gap-1">
-                        <Button size="sm" variant="outline" className="rounded-none h-8 px-2" onClick={() => openEdit(v)} data-testid={`vendor-edit-${v.id}`}><Pencil size={12} /></Button>
+                        {canEditRow ? (
+                          <Button size="sm" variant="outline" className="rounded-none h-8 px-2" onClick={() => openEdit(v)} data-testid={`vendor-edit-${v.id}`}><Pencil size={12} /></Button>
+                        ) : (
+                          <span className="text-[10px] text-[var(--muted)] italic" title="HQ-owned vendor — you can view but not edit">HQ</span>
+                        )}
                         {canDelete && (
                           <Button size="sm" variant="outline" className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" onClick={() => remove(v)} data-testid={`vendor-delete-${v.id}`}><Trash2 size={12} /></Button>
                         )}
@@ -166,7 +218,8 @@ export default function Vendors() {
                     </td>
                   )}
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -201,6 +254,41 @@ export default function Vendors() {
             <div className="col-span-2"><Label className="overline">Address</Label>
               <Textarea rows={2} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} className="rounded-none" data-testid="v-address" />
             </div>
+            <div className="col-span-2 pt-2 border-t border-[var(--border)]">
+              <div className="overline mb-1">Assigned Centers</div>
+              <div className="text-[11px] text-[var(--muted)] mb-2">
+                {isCenterManager
+                  ? "Auto-populated with your assigned centers. This vendor will only be visible to staff of these centers."
+                  : "Leave blank to make this vendor globally visible. Pick specific centers to restrict visibility."}
+              </div>
+              <div className="border border-[var(--border)] max-h-40 overflow-y-auto">
+                {availableCenters.length === 0 && (
+                  <div className="text-xs text-[var(--muted)] p-2">No centers available.</div>
+                )}
+                {availableCenters.map((c) => {
+                  const checked = (form.center_ids || []).includes(c.id);
+                  return (
+                    <label key={c.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-50 cursor-pointer text-sm border-b border-[var(--border)] last:border-b-0">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) => {
+                          const next = new Set(form.center_ids || []);
+                          if (e.target.checked) next.add(c.id); else next.delete(c.id);
+                          setForm({ ...form, center_ids: [...next] });
+                        }}
+                        data-testid={`v-center-${c.id}`}
+                      />
+                      <span>{c.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {isCenterManager && (form.center_ids || []).length === 0 && (
+                <div className="text-[11px] text-red-700 mt-1">Please pick at least one of your centers.</div>
+              )}
+            </div>
+
             <div className="col-span-2 pt-2 border-t border-[var(--border)]">
               <div className="overline mb-1">Bank Details (for direct-transfer payments)</div>
             </div>

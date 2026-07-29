@@ -1,0 +1,34 @@
+{
+  "summary": "Iter-46 Vendor Center-Manager feature verified. Backend: 19/19 pytest cases pass (POST scoped/empty-auto-fill/OOS-stripped, no-centers 403, center_staff 403, PUT own/global-403/OOS-403/mixed-preserve/no-own-400, DELETE admin-only, GET listing overlap+legacy, HQ regression, legacy backwards-compat). Frontend: Found one blocker bug (Vendors.jsx called /centers which is 404; should be /entities/center) — fixed inline. After fix all frontend acceptance criteria met: Add Vendor visible to CM, Assigned Centers picker shows only CM's 2 centers pre-checked, empty-name toast, uncheck-all toast, cyan chips render, italic 'Global' for legacy, 'HQ' badge (no edit) for HQ-only rows, delete icon hidden.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Vendors.jsx", "issue": "Called non-existent GET /api/centers (404). Broke Assigned Centers picker (0 checkboxes rendered). Fixed to /api/entities/center — matches all other pages in codebase.", "selector": "v-center-*", "priority": "HIGH (fixed by testing agent)"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter46_vendor_center_manager.py",
+    "/app/test_reports/pytest/iter46.xml"
+  ],
+  "action_items": [
+    "Confirm the one-line frontend fix in /app/frontend/src/pages/Vendors.jsx line 50 (/centers -> /entities/center) — testing agent applied it. Please review & retain."
+  ],
+  "critical_code_review_comments": [
+    "Vendors.jsx used a non-existent endpoint /centers for populating the center picker. This would have shipped a completely non-functional 'Assigned Centers' picker for every role. Recommend a lint/grep guard that flags api.get(\"/centers\") since the real endpoint is /entities/center everywhere else.",
+    "Backend logic for _vendor_scope_editable and PUT filter (preserve out-of-scope, require at least one own center) is well-tested and behaves correctly.",
+    "VendorIn.center_ids default via Field(default_factory=list) → good; PUT body always overwrites center_ids from client, but CM path safely re-merges with existing out-of-scope. HQ PUT with model_dump() will overwrite center_ids on every edit (HQ must always resend the full list) — acceptable but consider using exclude_unset for partial updates in a future iteration."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/Vendors.jsx (1-line endpoint fix)",
+    "/app/backend/tests/test_iter46_vendor_center_manager.py (new)"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% after 1 fix"},
+  "test_credentials": "Center Manager: test_iter46_cm_ui_a9da15@x.com / CmUi@12345 (2 assigned centers: IT40-3ac25d, IT40-77fed9). Admin: admin@finance.app / Admin@123.",
+  "seed_data_creation": "Created 1 persistent center_manager user for future retest. All TEST_ vendors cleaned up.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-46 Vendors + center_manager scope verified end-to-end. Test file at /app/backend/tests/test_iter46_vendor_center_manager.py can be re-run any time (requires REACT_APP_BACKEND_URL env). Note the one-line frontend endpoint fix — if regressed, the Assigned Centers picker will silently render 0 checkboxes.",
+  "rca of the issue": "Bug: Vendors.jsx line 50 called api.get('/centers') → 404. Cause: developer used a shorter path that doesn't exist in server.py; every other page uses api.get('/entities/center'). Impact: 'Assigned Centers' checklist rendered empty for ALL users; CM validation blocked creation UNLESS backend auto-filled center_ids from CM's assigned_center_ids (the backend safety net masked the failure for CM creates but not for HQ picking specific centers). Fix applied: changed to '/entities/center'. Re-verified: 2 checkboxes rendered pre-checked, all UI acceptance criteria pass."
+}

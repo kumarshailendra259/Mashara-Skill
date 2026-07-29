@@ -6606,15 +6606,57 @@ class VendorIn(BaseModel):
     account_holder_name: Optional[str] = None
     notes: Optional[str] = None
     active: bool = True
+    # Centers this vendor is authorised for. Empty list = global (visible to
+    # everyone, editable only by HQ roles). When a center_manager creates a
+    # vendor we force this to their assigned centers so scoping stays clean.
+    center_ids: List[str] = Field(default_factory=list)
+
+
+def _vendor_scope_visible(user: dict, vendor: dict) -> bool:
+    """Return True when `user` should be able to SEE `vendor` in listings.
+    HQ roles see everything. center_manager/center_staff/partner see:
+      - vendors that have at least one center overlap, OR
+      - legacy vendors with empty center_ids (backwards compat — old vendors were global)."""
+    role = user.get("role")
+    if role in ("admin", "hr", "manager", "senior_manager", "accountant"):
+        return True
+    vendor_centers = set(vendor.get("center_ids") or [])
+    if not vendor_centers:
+        return True  # legacy global vendor
+    if role in ("center_manager", "center_staff"):
+        my = set(user.get("assigned_center_ids") or [])
+        return bool(my & vendor_centers)
+    if role == "partner":
+        # partners see vendors whose center belongs to their partner scope; keep
+        # this permissive for now — partner scoping is enforced at the payment layer.
+        return True
+    return False
+
+
+def _vendor_scope_editable(user: dict, vendor: dict) -> bool:
+    """Return True when `user` can EDIT this vendor. Center Managers can only
+    manage vendors that are scoped to at least one of their centers (and never
+    a global vendor — those stay with HQ)."""
+    role = user.get("role")
+    if role in ("admin", "hr", "manager", "senior_manager", "accountant"):
+        return True
+    if role == "center_manager":
+        vendor_centers = set(vendor.get("center_ids") or [])
+        if not vendor_centers:
+            return False  # legacy global vendor stays HQ-owned
+        my = set(user.get("assigned_center_ids") or [])
+        return bool(my & vendor_centers)
+    return False
 
 
 @api.get("/vendors")
 async def list_vendors(user=Depends(get_current_user)):
     """All logged-in users can browse the vendor directory (needed for the
-    dropdown in the Quotation form). Only admin/hr/manager/accountant can
-    mutate — enforced on write endpoints."""
+    dropdown in the Quotation form). Scoping: center_manager and center_staff
+    only see vendors whose `center_ids` overlap their assigned centers OR
+    legacy global vendors (empty center_ids). Mutation is enforced separately."""
     docs = await db.vendors.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
-    return docs
+    return [v for v in docs if _vendor_scope_visible(user, v)]
 
 
 @api.get("/vendors/{vid}")
@@ -6622,11 +6664,18 @@ async def get_vendor(vid: str, user=Depends(get_current_user)):
     v = await db.vendors.find_one({"id": vid}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Vendor not found")
+    if not _vendor_scope_visible(user, v):
+        raise HTTPException(403, "Vendor is not assigned to any of your centers")
     return v
 
 
 @api.post("/vendors", status_code=201)
-async def create_vendor(body: VendorIn, user=Depends(require_role("admin", "hr", "manager", "senior_manager", "accountant"))):
+async def create_vendor(
+    body: VendorIn,
+    user=Depends(require_role(
+        "admin", "hr", "manager", "senior_manager", "accountant", "center_manager",
+    )),
+):
     if not (body.name or "").strip():
         raise HTTPException(400, "Vendor name is required")
     doc = body.model_dump()
@@ -6634,17 +6683,48 @@ async def create_vendor(body: VendorIn, user=Depends(require_role("admin", "hr",
     doc["created_by"] = user["id"]
     doc["created_by_name"] = user.get("name") or user.get("email")
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # Center Manager can only create vendors scoped to THEIR assigned centers.
+    # Any center_ids they submit outside their scope are stripped; if they submit
+    # nothing we auto-populate with all their centers so the vendor is at least
+    # visible to their center_staff (and never leaks to other centers as a global).
+    if user.get("role") == "center_manager":
+        my = set(user.get("assigned_center_ids") or [])
+        if not my:
+            raise HTTPException(403, "You have no centers assigned — contact admin")
+        submitted = set(doc.get("center_ids") or [])
+        allowed = list(submitted & my) if submitted else list(my)
+        if not allowed:
+            raise HTTPException(400, "Please pick at least one of your assigned centers")
+        doc["center_ids"] = allowed
     await db.vendors.insert_one(doc)
     doc.pop("_id", None)
     return _json_safe(doc)
 
 
 @api.put("/vendors/{vid}")
-async def update_vendor(vid: str, body: VendorIn, user=Depends(require_role("admin", "hr", "manager", "senior_manager", "accountant"))):
+async def update_vendor(
+    vid: str, body: VendorIn,
+    user=Depends(require_role(
+        "admin", "hr", "manager", "senior_manager", "accountant", "center_manager",
+    )),
+):
     v = await db.vendors.find_one({"id": vid}, {"_id": 0})
     if not v:
         raise HTTPException(404, "Vendor not found")
+    if not _vendor_scope_editable(user, v):
+        raise HTTPException(403, "This vendor is not scoped to any of your centers")
     update = body.model_dump()
+    # Center Manager can't broaden a vendor's scope beyond their centers; also
+    # can't unset the scope to make it a global vendor.
+    if user.get("role") == "center_manager":
+        my = set(user.get("assigned_center_ids") or [])
+        submitted = set(update.get("center_ids") or [])
+        # Preserve center_ids that already exist for centers the CM doesn't own.
+        existing_out_of_scope = set(v.get("center_ids") or []) - my
+        allowed = (submitted & my) | existing_out_of_scope
+        if not (allowed & my):
+            raise HTTPException(400, "At least one of your assigned centers must stay on this vendor")
+        update["center_ids"] = list(allowed)
     update["updated_by"] = user["id"]
     update["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.vendors.update_one({"id": vid}, {"$set": update})
