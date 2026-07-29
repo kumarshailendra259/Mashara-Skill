@@ -28,6 +28,22 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27G — Center Manager Vendor Management (Done, Jul 2026)
+- **User reported**: Center Manager role couldn't create/edit vendors (403 forbidden). Task: allow CM to add + manage vendors scoped to their center.
+- **Backend**:
+  - `VendorIn` extended with `center_ids: List[str]` — empty = global (HQ-only edit), populated = scoped.
+  - `_vendor_scope_visible` + `_vendor_scope_editable` helpers centralise the scoping rules.
+  - `POST /api/vendors` and `PUT /api/vendors/{vid}` accept `center_manager`. CM's center_ids get restricted to their assigned centers (out-of-scope silently stripped, empty auto-filled). On update, existing out-of-scope centers are preserved (CM can't broaden or narrow beyond their reach).
+  - `GET /api/vendors` scopes: HQ sees all; CM/center_staff see overlap + legacy globals; partners keep permissive.
+  - DELETE stays admin-only.
+- **Frontend `Vendors.jsx`**:
+  - `canEdit` now includes `center_manager`.
+  - New 'Assigned Centers' checklist in the Add/Edit dialog (auto-preselects CM's centers, HQ can leave empty for global).
+  - New 'Centers' column showing cyan chips or italic 'Global' badge.
+  - HQ-owned vendors show inline 'HQ' badge instead of Edit icon for CM.
+  - Fixed endpoint bug — was calling `/centers` (404), now correctly `/entities/center`.
+- **Verified**: testing_agent iter-46 — **19/19 backend pytest + full Playwright E2E green** (frontend endpoint bug caught + fixed by testing agent, re-verified).
+
 ### Phase 27F — Advance Request Approval Dialog Fix (Done, Jul 2026)
 - **User reported bug**: Accounts team login me Advance Request approve karte samay Payee Details (bank/UPI) show nahi ho rahe the AND Center/Partner/Paid-By choose karne ka option nahi tha.
 - **Root cause**: `/approvals/pending` summary was missing payee_* fields for advance_request rows; PendingApprovals dialog's amber Payee Details block only rendered for `request_type == 'payment'`; emerald Payment Attribution (Center/Partner/Paid-By) block was hidden for advance_request; filter tab strip missing advance/quotation/payment chips.
