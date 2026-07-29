@@ -75,7 +75,12 @@ export default function PendingApprovals() {
   );
 
   const counts = useMemo(() => {
-    const c = { all: items.length, transaction: 0, leave: 0, reimbursement: 0, asset_purchase: 0, employee_transfer: 0, regularisation: 0 };
+    const c = {
+      all: items.length,
+      transaction: 0, leave: 0, reimbursement: 0, asset_purchase: 0,
+      employee_transfer: 0, regularisation: 0,
+      quotation: 0, payment: 0, advance_request: 0,
+    };
     items.forEach((i) => { c[i.request_type] = (c[i.request_type] || 0) + 1; });
     return c;
   }, [items]);
@@ -91,8 +96,13 @@ export default function PendingApprovals() {
     setPaidByUserId("");
     setTxnCenterId(item?.summary?.center_id || "");
     setTxnPartnerId("");
-    // Only ask "Paid By" on the FINAL step of a payment or reimbursement approval.
-    if (action === "approve" && item.is_final_step && (item.request_type === "payment" || item.request_type === "reimbursement")) {
+    // Ask "Paid By" on the FINAL step of a payment, reimbursement, or advance approval.
+    // For advance_request the block is optional but the dropdowns still need populated data.
+    if (action === "approve" && item.is_final_step && (
+      item.request_type === "payment"
+      || item.request_type === "reimbursement"
+      || item.request_type === "advance_request"
+    )) {
       // Lazy fetch — cache once loaded so subsequent dialogs stay snappy.
       if (payers.length === 0) {
         api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
@@ -203,6 +213,9 @@ export default function PendingApprovals() {
           { key: "asset_purchase",    label: "Assets" },
           { key: "employee_transfer", label: "Transfers" },
           { key: "regularisation",    label: "Regularisations" },
+          { key: "quotation",         label: "Quotations" },
+          { key: "payment",           label: "Payments" },
+          { key: "advance_request",   label: "Advances" },
         ].map((t) => (
           <button
             key={t.key}

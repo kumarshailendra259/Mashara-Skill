@@ -1,0 +1,24 @@
+{
+  "summary": "Frontend-only verification of iter-45 follow-up on /pending-approvals. All 3 new filter tabs (tab-quotation, tab-payment, tab-advance_request) render correctly with live counts. Filtering works. Approve dialog on advance_request final step lazy-fetches payers/centers/partners as expected — all dropdowns populated. Amber Payee Details + emerald 'Payment Attribution (optional — can be filled at Release)' blocks render exactly as specified. Regression tabs (transaction/leave/reimbursement/asset/transfer/regularisation/all) still work.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Approve Advance dialog", "issues": ["React dev-warning: hydration warning 'span cannot be a child of option' inside the Paid By/Center native <select> — coming from build-time instrumentation wrapping option children in <span>. Non-blocking (dropdowns render + function correctly), but produces console noise. Consider replacing native <select> with shadcn Select or stripping instrumentation on <option> children."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Minor: Native <select> option children get wrapped by dev instrumentation causing hydration warning — cosmetic dev-only issue, no user impact."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100%"},
+  "test_credentials": "admin@finance.app / Admin@123 (worked)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter-45 verified: 10 filter tabs on /pending-approvals with counts All=129, Transactions=43, Leaves=17, Reimbursements=12, Assets=0, Transfers=2, Regularisations=9, Quotations=0, Payments=4, Advances=42. Approve dialog on advance_request rows correctly fetches /users/payers, /entities/center, /entities/partner (verified 3 populated dropdowns). Payment Attribution block labeled '(optional — can be filled at Release)' as required. All backend behavior from iter-44 still visible (payee_* fields + amber Payee Details block rendering). No functional regressions.",
+  "rca of the issue": "N/A — verification pass, no bugs found."
+}
