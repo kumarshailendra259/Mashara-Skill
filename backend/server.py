@@ -310,6 +310,9 @@ class TransactionOut(TransactionIn):
     advance_no: Optional[str] = None
     settlement_id: Optional[str] = None
     source: Optional[str] = None
+    # Advance-release txns store category='advance' — expose it so the ledger UI
+    # can label them without inferring from source.
+    category: Optional[str] = None
     # Payee details (bank/UPI) captured at Advance/Payment request time — surfaced so
     # the ledger UI can render a full payee block for advance-release / adjustment txns.
     payee_account_holder: Optional[str] = None

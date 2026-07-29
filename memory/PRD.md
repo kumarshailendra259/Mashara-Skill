@@ -28,6 +28,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27E — Advance Payee/Bank Details Capture (Done, Jul 2026)
+- **User ask**: Advance Request creation par bank details capture ho, taki accounts release ke waqt sara payee info + proof auto-flow ho aur transaction par bhi jud jaye.
+- **Backend**:
+  - `AdvanceRequestIn` extended with `preferred_payment_mode` + `payee_account_holder` / `payee_account_no` / `payee_ifsc` / `payee_bank_name` / `payee_upi_id` / `payee_proof_attachments[]`. All optional — legacy advances stay compatible.
+  - `release_advance` propagates every payee field + `payee_proof_attachments` + original `request_attachments` + `advance_no` + `vendor_name(=employee_name)` onto the auto-created advance-release transaction.
+  - `TransactionOut` model expanded to surface `payee_account_holder/no/ifsc/bank_name/upi_id/proof_attachments` + `vendor_name` + `payment_mode` + `transaction_ref` + `paid_by_user_id/name` + `category` — ledger UI can now render a complete payee block without extra DB reads.
+- **Frontend Advances.jsx**:
+  - Raise Advance dialog: new indigo "Payee / Payment Details" section (data-testid `adv-payee-section`) with contextual fields per mode (bank/cheque → holder/bank/account/IFSC + proof; upi → UPI ID + proof; cash → info callout).
+  - Client-side Hinglish validation: bank/cheque needs all 4 fields; UPI needs UPI ID.
+  - Release dialog: new amber "Payee Details (from advance request)" summary panel (data-testid `rel-payee-summary`) with pre-filled payment_mode from advance's preferred mode.
+- **Verified**: testing_agent iter-43 — **12/12 backend pytest + full Playwright E2E green**. Category field also exposed on TransactionOut post-testing (iter-43 minor item).
+
 ### Phase 27D — Settlement Module + Payroll Auto-Deduction (Done, Jul 2026)
 **Standalone Settlement Module** — settle an advance without going through a Payment Request:
 - New `AdvanceSettleIn` model with 4 types: `cash_repayment` (income txn), `write_off` (expense adj), `salary_deduction` (scheduled next payroll), `manual_adjustment` (audit-only).
