@@ -5447,6 +5447,34 @@ async def payroll_run(
         existing = await db.payroll.find_one({"staff_id": s["id"], "month": month, "year": year})
         if existing:
             continue
+        # Phase-3 Batch B: Payroll auto-deduction for open advances.
+        # For every RELEASED/ADJUSTING advance of this staff (with balance > 0) we
+        # pre-fill the `advance` deduction so Accounts sees the number automatically.
+        # If a scheduled `pending_salary_deduction` exists (from settle-by-salary),
+        # prefer that; else default to full balance (capped at the calculated net so
+        # negative payroll never happens — HR can override in Edit later).
+        adv_rows = await db.advance_requests.find({
+            "created_by": s.get("user_id"),
+            "status": {"$in": ["released", "adjusting"]},
+            "balance_amount": {"$gt": 0},
+        }, {"_id": 0}).to_list(50)
+        adv_details: list = []
+        adv_total = 0.0
+        for a in adv_rows:
+            scheduled = float(a.get("pending_salary_deduction") or 0)
+            bal = float(a.get("balance_amount") or 0)
+            take = scheduled if scheduled > 0 else bal
+            take = min(take, bal)  # never exceed outstanding
+            if take <= 0:
+                continue
+            adv_details.append({
+                "advance_id": a["id"],
+                "advance_no": a.get("advance_no"),
+                "balance_before": bal,
+                "amount": round(take, 2),
+                "reason": "scheduled" if scheduled > 0 else "auto_full_balance",
+            })
+            adv_total += take
         doc = {
             "id": str(uuid.uuid4()),
             "staff_id": s["id"],
@@ -5468,7 +5496,8 @@ async def payroll_run(
             "pf_deduction": 0.0, "esi_deduction": 0.0,
             "late_deduction": late_deduction,
             "early_fine": 0.0,
-            "advance": 0.0, "loan_deduction": 0.0,
+            "advance": round(adv_total, 2), "loan_deduction": 0.0,
+            "advance_deductions_details": adv_details,
             "other_deductions": [],
             # Late buckets snapshot
             "late_buckets": buckets,
@@ -7339,6 +7368,55 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant",
         "rejected_reason": None,
     }
     await db.transactions.insert_one(txn)
+    # Phase-3 Batch B: reduce open advance balances by the amounts we deducted at
+    # payroll-run time (recorded in advance_deductions_details). Each deduction
+    # is appended to the target advance's settlements[] array so the audit trail
+    # is preserved.
+    for det in (rec.get("advance_deductions_details") or []):
+        adv = await db.advance_requests.find_one({"id": det.get("advance_id")}, {"_id": 0})
+        if not adv:
+            continue
+        cur_bal = float(adv.get("balance_amount") or 0)
+        amt = min(float(det.get("amount") or 0), cur_bal)
+        if amt <= 0:
+            continue
+        new_bal = max(0.0, round(cur_bal - amt, 2))
+        new_adj = round(float(adv.get("adjusted_amount") or 0) + amt, 2)
+        settlements = list(adv.get("settlements") or [])
+        settlements.append({
+            "id": str(uuid.uuid4()),
+            "settlement_type": "salary_deduction",
+            "amount": round(amt, 2),
+            "date": txn["date"],
+            "at": now,
+            "by_user_id": user["id"],
+            "by_user_name": user.get("name") or user.get("email"),
+            "txn_id": txn["id"],
+            "payroll_id": rec["id"],
+            "remarks": f"Recovered via payroll {rec['month']:02d}/{rec['year']}",
+        })
+        adv_upd = {
+            "settlements": settlements,
+            "adjusted_amount": new_adj,
+            "balance_amount": new_bal,
+        }
+        # Clear the scheduled amount that was consumed
+        pending = float(adv.get("pending_salary_deduction") or 0)
+        if pending > 0:
+            adv_upd["pending_salary_deduction"] = max(0.0, round(pending - amt, 2))
+        if new_bal <= 0.01:
+            adv_upd["status"] = "settled"
+            adv_upd["settled_at"] = now
+            adv_upd["settlement_reason"] = "salary_deduction"
+        else:
+            adv_upd["status"] = "adjusting"
+        await db.advance_requests.update_one({"id": adv["id"]}, {"$set": adv_upd})
+        await _notify(
+            adv.get("created_by"),
+            f"₹{amt:,.0f} recovered from your salary against advance {adv.get('advance_no')} — balance ₹{new_bal:,.0f}",
+            ntype="advance_settled" if new_bal <= 0.01 else "advance_settlement_partial",
+            ref_id=adv["id"], link="/advances",
+        )
     res = await db.payroll.find_one_and_update(
         {"id": pid},
         {"$set": {"status": "paid", "paid_at": now, "txn_id": txn["id"]}},
@@ -9193,6 +9271,23 @@ class AdvanceReleaseIn(BaseModel):
     attachments: Optional[List[AttachmentRef]] = None
 
 
+class AdvanceSettleIn(BaseModel):
+    """Payload for standalone advance settlement (not via Payment adjustment).
+    - `cash_repayment` — employee returned cash → creates income txn + reduces balance.
+    - `write_off`      — admin writes off unrecoverable balance (bad-debt style expense adj.).
+    - `salary_deduction` — schedule this amount to auto-deduct from the next unpaid payroll.
+    - `manual_adjustment` — free-form accounting adjustment (audit-logged only, no txn).
+    """
+    model_config = ConfigDict(extra="ignore")
+    settlement_type: Literal["cash_repayment", "write_off", "salary_deduction", "manual_adjustment"]
+    amount: float = Field(gt=0)
+    date: Optional[str] = None  # YYYY-MM-DD
+    payment_mode: Optional[Literal["bank", "upi", "cash", "cheque"]] = None  # for cash_repayment
+    transaction_ref: Optional[str] = None
+    remarks: Optional[str] = None
+    attachments: Optional[List[AttachmentRef]] = None
+
+
 async def _next_advance_no() -> str:
     """Generate ADV-YY-N sequential number based on financial year (Apr-Mar)."""
     now = datetime.now(timezone.utc)
@@ -9533,6 +9628,28 @@ async def adjustable_advance_requests(user=Depends(get_current_user)):
     return _json_safe(slim)
 
 
+@api.get("/staff/{staff_id}/open-advances")
+async def staff_open_advances(
+    staff_id: str,
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager")),
+):
+    """Open advances for a specific staff member — used by the HRMS Payroll UI
+    to show the breakdown that populated the auto-deduction number, and by the
+    Advance Ledger page (Phase 3 Batch C).
+    """
+    st = await db.staff.find_one({"id": staff_id}, {"_id": 0, "user_id": 1, "name": 1})
+    if not st or not st.get("user_id"):
+        return []
+    rows = await db.advance_requests.find({
+        "created_by": st["user_id"],
+        "status": {"$in": ["released", "adjusting"]},
+        "balance_amount": {"$gt": 0},
+    }, {"_id": 0}).sort("released_at", -1).to_list(100)
+    for r in rows:
+        _annotate_overdue(r)
+    return _json_safe(rows)
+
+
 @api.get("/advance-requests/{aid}")
 async def get_advance_request(aid: str, user=Depends(get_current_user)):
     row = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
@@ -9637,6 +9754,160 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         f"Your advance {row['advance_no']} · ₹{paid_amount:,.0f} has been released",
         ntype="advance_released", ref_id=row["id"], link="/advances",
     )
+    updated = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    updated.pop("_id", None)
+    return _json_safe(updated)
+
+
+@api.post("/advance-requests/{aid}/settle")
+async def settle_advance(
+    aid: str, body: AdvanceSettleIn,
+    user=Depends(require_role("admin", "accountant")),
+):
+    """Standalone Settlement Module — settle an open advance balance without going
+    through a Payment Request. Supports four types:
+      - cash_repayment: creates an income transaction, reduces balance.
+      - write_off:      writes off outstanding balance as expense adjustment.
+      - salary_deduction: flags amount for next payroll auto-pickup (no txn now).
+      - manual_adjustment: no-txn audit entry (for corrections).
+    Balance updates + status flip (adjusting → settled) mirror the payment-adjustment path.
+    """
+    row = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Advance not found")
+    if row.get("status") not in ("released", "adjusting"):
+        raise HTTPException(400, f"Cannot settle — advance status is {row.get('status')}")
+    balance = float(row.get("balance_amount") or 0)
+    if balance <= 0.01:
+        raise HTTPException(400, "Advance balance is already zero — nothing to settle")
+    amt = round(float(body.amount), 2)
+    if amt > balance + 0.01:
+        raise HTTPException(400, f"Settlement amount ₹{amt:,.2f} exceeds outstanding balance ₹{balance:,.2f}")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    settle_date = body.date or now_iso[:10]
+
+    # Build settlement log entry (always appended, regardless of type)
+    settlement_id = str(uuid.uuid4())
+    entry = {
+        "id": settlement_id,
+        "settlement_type": body.settlement_type,
+        "amount": amt,
+        "date": settle_date,
+        "payment_mode": body.payment_mode,
+        "transaction_ref": body.transaction_ref,
+        "remarks": body.remarks,
+        "attachments": [a.model_dump() if hasattr(a, "model_dump") else a for a in (body.attachments or [])],
+        "at": now_iso,
+        "by_user_id": user["id"],
+        "by_user_name": user.get("name") or user.get("email"),
+        "txn_id": None,
+    }
+
+    # Create a transaction for real-cash-movement types
+    ctx = await _derive_context_for_center(row.get("center_id")) if row.get("center_id") else {}
+    txn = None
+    if body.settlement_type == "cash_repayment":
+        txn = {
+            "id": str(uuid.uuid4()),
+            "type": "income",
+            "amount": amt,
+            "date": settle_date,
+            "description": f"Advance repayment · {row['advance_no']} · {row.get('employee_name') or row.get('created_by_name') or ''}",
+            "company_id": ctx.get("company_id"),
+            "partner_id": ctx.get("partner_id"),
+            "center_id": row.get("center_id"),
+            "project_id": None,
+            "items": [],
+            "attachments": entry["attachments"],
+            "payment_mode": body.payment_mode,
+            "source": "advance_settlement",
+            "settlement_id": settlement_id,
+            "advance_request_id": aid,
+            "advance_no": row["advance_no"],
+            "is_advance_settlement": True,
+            "created_by": user["id"],
+            "created_by_name": user.get("name") or user.get("email"),
+            "created_at": now_iso,
+            "status": "approved",
+            "approved_by": user["id"],
+            "approved_at": now_iso,
+        }
+    elif body.settlement_type == "write_off":
+        # Write-off: recognise the outstanding as a loss (expense adjustment).
+        txn = {
+            "id": str(uuid.uuid4()),
+            "type": "expense",
+            "amount": amt,
+            "date": settle_date,
+            "description": f"Advance write-off · {row['advance_no']} · {row.get('employee_name') or ''}",
+            "company_id": ctx.get("company_id"),
+            "partner_id": ctx.get("partner_id"),
+            "center_id": row.get("center_id"),
+            "project_id": None,
+            "items": [],
+            "attachments": entry["attachments"],
+            "source": "advance_writeoff",
+            "settlement_id": settlement_id,
+            "advance_request_id": aid,
+            "advance_no": row["advance_no"],
+            "is_advance_writeoff": True,
+            "created_by": user["id"],
+            "created_by_name": user.get("name") or user.get("email"),
+            "created_at": now_iso,
+            "status": "approved",
+            "approved_by": user["id"],
+            "approved_at": now_iso,
+        }
+    if txn:
+        await db.transactions.insert_one(txn)
+        entry["txn_id"] = txn["id"]
+
+    # Recompute balances
+    new_adjusted = float(row.get("adjusted_amount") or 0)
+    if body.settlement_type in ("cash_repayment", "salary_deduction", "manual_adjustment", "write_off"):
+        # All settlement types reduce the outstanding balance (write_off closes the
+        # accounting hole even though the cash never returns; the txn on the other
+        # side keeps the P&L honest).
+        new_adjusted += amt
+    new_balance = max(0.0, round(balance - amt, 2))
+    settlements = list(row.get("settlements") or [])
+    settlements.append(entry)
+
+    update = {
+        "settlements": settlements,
+        "adjusted_amount": round(new_adjusted, 2),
+        "balance_amount": new_balance,
+    }
+
+    # salary_deduction only *schedules* the recovery — book it as pending
+    if body.settlement_type == "salary_deduction":
+        pending = float(row.get("pending_salary_deduction") or 0)
+        update["pending_salary_deduction"] = round(pending + amt, 2)
+
+    # Status: fully-settled if balance closes; otherwise stays adjusting.
+    if new_balance <= 0.01:
+        update["status"] = "settled"
+        update["settled_at"] = now_iso
+        update["settlement_reason"] = body.settlement_type
+    else:
+        update["status"] = "adjusting"
+
+    await db.advance_requests.update_one({"id": aid}, {"$set": update})
+
+    # Notify the requester
+    label = {
+        "cash_repayment": "Cash repayment received",
+        "write_off": "Advance written off",
+        "salary_deduction": "Salary deduction scheduled",
+        "manual_adjustment": "Manual adjustment posted",
+    }.get(body.settlement_type, "Settlement posted")
+    await _notify(
+        row.get("created_by"),
+        f"{label} ₹{amt:,.0f} against advance {row['advance_no']} — balance ₹{new_balance:,.0f}",
+        ntype="advance_settled" if new_balance <= 0.01 else "advance_settlement_partial",
+        ref_id=aid, link="/advances",
+    )
+
     updated = await db.advance_requests.find_one({"id": aid}, {"_id": 0})
     updated.pop("_id", None)
     return _json_safe(updated)

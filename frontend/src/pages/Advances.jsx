@@ -144,6 +144,57 @@ export default function Advances() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  // ── Settlement Module (Phase 3 Batch B) ─────────────────────────────
+  const [settleOpen, setSettleOpen] = useState(false);
+  const [settleRow, setSettleRow] = useState(null);
+  const [settleForm, setSettleForm] = useState({
+    settlement_type: "cash_repayment",
+    amount: "",
+    date: new Date().toISOString().slice(0, 10),
+    payment_mode: "cash",
+    transaction_ref: "",
+    remarks: "",
+    attachments: [],
+  });
+
+  const openSettle = (row) => {
+    setSettleRow(row);
+    setSettleForm({
+      settlement_type: "cash_repayment",
+      amount: String(row.balance_amount || ""),  // default to full balance
+      date: new Date().toISOString().slice(0, 10),
+      payment_mode: "cash",
+      transaction_ref: "",
+      remarks: "",
+      attachments: [],
+    });
+    setSettleOpen(true);
+  };
+
+  const submitSettle = async () => {
+    if (!settleRow) return;
+    const amt = Number(settleForm.amount);
+    if (!amt || amt <= 0) { toast.error("Amount must be greater than zero"); return; }
+    if (amt > (settleRow.balance_amount || 0) + 0.01) {
+      toast.error(`Amount exceeds outstanding balance ₹${settleRow.balance_amount}`);
+      return;
+    }
+    try {
+      const payload = { ...settleForm, amount: amt };
+      // payment_mode only relevant for cash_repayment
+      if (settleForm.settlement_type !== "cash_repayment") {
+        delete payload.payment_mode;
+      }
+      const { data } = await api.post(`/advance-requests/${settleRow.id}/settle`, payload);
+      const msg = data.status === "settled"
+        ? `Advance ${data.advance_no} fully settled ✅`
+        : `₹${amt.toLocaleString('en-IN')} settled · Balance ₹${(data.balance_amount || 0).toLocaleString('en-IN')}`;
+      toast.success(msg);
+      setSettleOpen(false); setSettleRow(null);
+      await load();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   const cancel = async (row) => {
     if (!window.confirm(`Cancel advance ${row.advance_no}? This cannot be undone.`)) return;
     try {
@@ -274,6 +325,7 @@ export default function Advances() {
             onTrack={(r) => setTrackId(r.id)}
             onCancel={cancel}
             onRelease={null}
+            onSettle={canFinance ? openSettle : null}
           />
         </TabsContent>
         <TabsContent value="all" className="mt-4 space-y-3">
@@ -316,6 +368,7 @@ export default function Advances() {
             onTrack={(r) => setTrackId(r.id)}
             onCancel={cancel}
             onRelease={canFinance ? openRelease : null}
+            onSettle={canFinance ? openSettle : null}
           />
         </TabsContent>
       </Tabs>
@@ -471,6 +524,103 @@ export default function Advances() {
         </DialogContent>
       </Dialog>
 
+      {/* Settlement Dialog (Phase 3 Batch B) */}
+      <Dialog open={settleOpen} onOpenChange={setSettleOpen}>
+        <DialogContent className="rounded-none max-w-lg" data-testid="settle-modal">
+          <DialogHeader>
+            <DialogTitle>Settle Advance</DialogTitle>
+            <DialogDescription>
+              {settleRow && (
+                <>Choose how the outstanding balance of <b>{settleRow.advance_no}</b> ({inr(settleRow.balance_amount)}) will be cleared.</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          {settleRow && (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <Label className="overline">Settlement Type</Label>
+                  <Select value={settleForm.settlement_type} onValueChange={(v) => setSettleForm({ ...settleForm, settlement_type: v })}>
+                    <SelectTrigger className="rounded-none" data-testid="settle-type"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cash_repayment">Cash Repayment (income txn)</SelectItem>
+                      <SelectItem value="salary_deduction">Salary Deduction (next payroll)</SelectItem>
+                      <SelectItem value="write_off">Write Off (bad debt)</SelectItem>
+                      <SelectItem value="manual_adjustment">Manual Adjustment (audit only)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <div className="text-[10px] text-[var(--muted)] mt-1">
+                    {settleForm.settlement_type === "cash_repayment" && "Employee has returned cash — an income transaction will be created."}
+                    {settleForm.settlement_type === "salary_deduction" && "Balance will be automatically recovered from the employee's next unpaid payroll."}
+                    {settleForm.settlement_type === "write_off" && "⚠ Unrecoverable — creates an expense adjustment. Use for departed/absconded employees only."}
+                    {settleForm.settlement_type === "manual_adjustment" && "Audit-only entry. Use for corrections that don't affect books (e.g. duplicate advance)."}
+                  </div>
+                </div>
+                <div>
+                  <Label className="overline">Amount (₹) *</Label>
+                  <Input type="number" step="0.01" value={settleForm.amount}
+                    onChange={(e) => setSettleForm({ ...settleForm, amount: e.target.value })}
+                    className="rounded-none" data-testid="settle-amount" />
+                  <div className="text-[10px] text-[var(--muted)] mt-1">Max: {inr(settleRow.balance_amount)}</div>
+                </div>
+                <div>
+                  <Label className="overline">Date</Label>
+                  <Input type="date" value={settleForm.date}
+                    onChange={(e) => setSettleForm({ ...settleForm, date: e.target.value })}
+                    className="rounded-none" />
+                </div>
+              </div>
+              {settleForm.settlement_type === "cash_repayment" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="overline">Payment Mode</Label>
+                    <Select value={settleForm.payment_mode} onValueChange={(v) => setSettleForm({ ...settleForm, payment_mode: v })}>
+                      <SelectTrigger className="rounded-none"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="cash">Cash</SelectItem>
+                        <SelectItem value="bank">Bank Transfer</SelectItem>
+                        <SelectItem value="upi">UPI</SelectItem>
+                        <SelectItem value="cheque">Cheque</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="overline">Transaction Ref (optional)</Label>
+                    <Input value={settleForm.transaction_ref}
+                      onChange={(e) => setSettleForm({ ...settleForm, transaction_ref: e.target.value })}
+                      placeholder="UTR / cheque no / receipt no"
+                      className="rounded-none" />
+                  </div>
+                </div>
+              )}
+              <div>
+                <Label className="overline">Remarks</Label>
+                <Input value={settleForm.remarks}
+                  onChange={(e) => setSettleForm({ ...settleForm, remarks: e.target.value })}
+                  placeholder="Why this settlement was posted"
+                  className="rounded-none" data-testid="settle-remarks" />
+              </div>
+              <div className="border border-emerald-200 bg-emerald-50/60 p-2 text-[11px] text-emerald-900">
+                {(() => {
+                  const after = Math.max(0, Number(settleRow.balance_amount || 0) - Number(settleForm.amount || 0));
+                  const willSettle = after <= 0.01;
+                  return (
+                    <>
+                      Balance after this settlement: <b>{inr(after)}</b>
+                      {willSettle && <span className="ml-2 text-green-800 font-bold">✓ Advance will be fully SETTLED</span>}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSettleOpen(false)} className="rounded-none">Cancel</Button>
+            <Button onClick={submitSettle} className="brand-btn rounded-none" data-testid="settle-submit-btn">Post Settlement</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <ApprovalTimelineModal type="advance_request" requestId={trackId} onClose={() => setTrackId(null)} />
     </div>
   );
@@ -485,7 +635,7 @@ function StatCard({ label, value, accent }) {
   );
 }
 
-function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease }) {
+function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease, onSettle }) {
   if (rows.length === 0) {
     return (
       <div className="swiss-card p-8 text-center text-sm text-[var(--muted)]">
@@ -552,6 +702,9 @@ function AdvanceTable({ rows, canFinance, onTrack, onCancel, onRelease }) {
                   <button className="text-[11px] text-[var(--brand)] hover:underline" onClick={() => onTrack(r)} data-testid={`adv-track-${r.id}`}>Track</button>
                   {onRelease && r.status === "approved" && (
                     <Button size="sm" onClick={() => onRelease(r)} className="brand-btn rounded-none h-7 px-2 text-[11px]" data-testid={`adv-release-${r.id}`}>Release</Button>
+                  )}
+                  {onSettle && ["released", "adjusting"].includes(r.status) && (r.balance_amount || 0) > 0 && (
+                    <Button size="sm" onClick={() => onSettle(r)} variant="outline" className="rounded-none h-7 px-2 text-[11px] border-emerald-300 text-emerald-800 hover:bg-emerald-50" data-testid={`adv-settle-${r.id}`}>Settle</Button>
                   )}
                   {["pending", "in_progress", "sent_back", "approved"].includes(r.status) && (
                     <button className="text-[11px] text-red-600 hover:underline" onClick={() => onCancel(r)} data-testid={`adv-cancel-${r.id}`} title="Cancel"><XIcon size={12} /></button>
