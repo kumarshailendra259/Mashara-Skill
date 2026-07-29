@@ -28,6 +28,15 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27C — Advance Request Approval Workflow Fix (Done, Jul 2026)
+- **Bug reported by user**: Advance Requests were NOT following the multi-level approval workflow that reimbursements/leaves used. Every pending advance was auto-approved by admin-only default chain.
+- **Root cause**: `ApprovalWorkflows.jsx` TYPES array was missing the `advance_request` entry, so the New Chain dialog dropdown never exposed the option. Admins could therefore never create a multi-level advance chain via UI — leaving the auto-seeded 1-step "Admin only" default as the only active chain.
+- **Fix**:
+  - Added `{ v: "advance_request", label: "Advance Request" }` to TYPES in ApprovalWorkflows.jsx (line 24).
+  - New backend endpoint `POST /api/advance-requests/reroute-pending` (admin-only) that re-runs `_find_active_chain('advance_request', center_id=...)` for every non-terminal advance and rebuilds snapshot/current_level/chain_history + notifies new first-step approvers. Returns `{ scanned, rerouted, already_on_current_chain }`.
+  - Added admin-only `🔄 Reroute Pending` button on Advances page (data-testid `advance-reroute-btn`) with confirmation dialog + toast on completion.
+- **Verified**: testing_agent iter-41 — **9/9 backend pytest + full frontend E2E passed**. Reproduction steps: login as admin → /approval-workflows → New Chain → dropdown lists "Advance Request" → create 2+ step chain → /advances → Reroute Pending → pending advances migrate.
+
 ### Phase 27B — Payment Voucher + Overdue Alerts (Done, Jul 2026)
 **Payment Voucher — auto-generated proof-of-payment PDF (trust document for vendors):**
 - New module `/app/backend/payment_voucher.py` — professional single-page A4 layout via ReportLab (no external template file needed). Layout: Company header (name + GST + PAN + Center), thick brand divider, big "PAYMENT VOUCHER" title, voucher meta strip (Voucher No, Date, QRN, Mode, Payment Ref, Category), Payee Details box (Vendor, Bank/UPI), highlighted Amount box (₹ + Indian lakh/crore formatting + words), Purpose section, Approval Chain table (Level · Approver · Action · Date · Remarks), signature footer (Prepared By / Approved By / Received By) + system-generated footer with Voucher No + Payment ID.
