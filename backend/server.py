@@ -300,6 +300,16 @@ class TransactionOut(TransactionIn):
     approval_via: Optional[str] = None  # "partner_cross" when cross-approved by associated partner
     approval_reason: Optional[str] = None
     rejected_reason: Optional[str] = None
+    # Advance-linking fields — surfaced so the ledger UI can badge / filter
+    # settlement + write-off + adjustment txns without hitting the DB again.
+    is_advance_settlement: Optional[bool] = None
+    is_advance_writeoff: Optional[bool] = None
+    is_advance_adjustment: Optional[bool] = None
+    funded_by_advance_id: Optional[str] = None
+    advance_request_id: Optional[str] = None
+    advance_no: Optional[str] = None
+    settlement_id: Optional[str] = None
+    source: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -7341,8 +7351,63 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant",
     if rec["status"] == "paid":
         raise HTTPException(400, "Already paid")
     now = datetime.now(timezone.utc).isoformat()
+    # Extract advance-deduction plan so we can run it even in the zero-net short-circuit path
+    _adv_dets = list(rec.get("advance_deductions_details") or [])
+
+    async def _consume_advance_deductions(txn_id_for_settlement):
+        """Reduce open advance balances by the planned deductions and append a
+        salary_deduction settlement entry to each linked advance. Idempotent per
+        payroll — called from BOTH the zero-net and normal-payment code paths.
+        """
+        for det in _adv_dets:
+            adv = await db.advance_requests.find_one({"id": det.get("advance_id")}, {"_id": 0})
+            if not adv:
+                continue
+            cur_bal = float(adv.get("balance_amount") or 0)
+            amt = min(float(det.get("amount") or 0), cur_bal)
+            if amt <= 0:
+                continue
+            new_bal = max(0.0, round(cur_bal - amt, 2))
+            new_adj = round(float(adv.get("adjusted_amount") or 0) + amt, 2)
+            settlements = list(adv.get("settlements") or [])
+            settlements.append({
+                "id": str(uuid.uuid4()),
+                "settlement_type": "salary_deduction",
+                "amount": round(amt, 2),
+                "date": f"{rec['year']:04d}-{rec['month']:02d}-01",
+                "at": now,
+                "by_user_id": user["id"],
+                "by_user_name": user.get("name") or user.get("email"),
+                "txn_id": txn_id_for_settlement,
+                "payroll_id": rec["id"],
+                "remarks": f"Recovered via payroll {rec['month']:02d}/{rec['year']}",
+            })
+            adv_upd = {
+                "settlements": settlements,
+                "adjusted_amount": new_adj,
+                "balance_amount": new_bal,
+            }
+            pending = float(adv.get("pending_salary_deduction") or 0)
+            if pending > 0:
+                adv_upd["pending_salary_deduction"] = max(0.0, round(pending - amt, 2))
+            if new_bal <= 0.01:
+                adv_upd["status"] = "settled"
+                adv_upd["settled_at"] = now
+                adv_upd["settlement_reason"] = "salary_deduction"
+            else:
+                adv_upd["status"] = "adjusting"
+            await db.advance_requests.update_one({"id": adv["id"]}, {"$set": adv_upd})
+            await _notify(
+                adv.get("created_by"),
+                f"₹{amt:,.0f} recovered from your salary against advance {adv.get('advance_no')} — balance ₹{new_bal:,.0f}",
+                ntype="advance_settled" if new_bal <= 0.01 else "advance_settlement_partial",
+                ref_id=adv["id"], link="/advances",
+            )
+
     if (rec.get("net") or 0) <= 0:
         # Nothing to pay (0 days_present etc.). Mark paid without creating a zero-amount transaction.
+        # Still consume any planned advance deductions so scheduled recoveries aren't silently lost.
+        await _consume_advance_deductions(None)
         res = await db.payroll.find_one_and_update(
             {"id": pid},
             {"$set": {"status": "paid", "paid_at": now, "txn_id": None}},
@@ -7368,55 +7433,9 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant",
         "rejected_reason": None,
     }
     await db.transactions.insert_one(txn)
-    # Phase-3 Batch B: reduce open advance balances by the amounts we deducted at
-    # payroll-run time (recorded in advance_deductions_details). Each deduction
-    # is appended to the target advance's settlements[] array so the audit trail
-    # is preserved.
-    for det in (rec.get("advance_deductions_details") or []):
-        adv = await db.advance_requests.find_one({"id": det.get("advance_id")}, {"_id": 0})
-        if not adv:
-            continue
-        cur_bal = float(adv.get("balance_amount") or 0)
-        amt = min(float(det.get("amount") or 0), cur_bal)
-        if amt <= 0:
-            continue
-        new_bal = max(0.0, round(cur_bal - amt, 2))
-        new_adj = round(float(adv.get("adjusted_amount") or 0) + amt, 2)
-        settlements = list(adv.get("settlements") or [])
-        settlements.append({
-            "id": str(uuid.uuid4()),
-            "settlement_type": "salary_deduction",
-            "amount": round(amt, 2),
-            "date": txn["date"],
-            "at": now,
-            "by_user_id": user["id"],
-            "by_user_name": user.get("name") or user.get("email"),
-            "txn_id": txn["id"],
-            "payroll_id": rec["id"],
-            "remarks": f"Recovered via payroll {rec['month']:02d}/{rec['year']}",
-        })
-        adv_upd = {
-            "settlements": settlements,
-            "adjusted_amount": new_adj,
-            "balance_amount": new_bal,
-        }
-        # Clear the scheduled amount that was consumed
-        pending = float(adv.get("pending_salary_deduction") or 0)
-        if pending > 0:
-            adv_upd["pending_salary_deduction"] = max(0.0, round(pending - amt, 2))
-        if new_bal <= 0.01:
-            adv_upd["status"] = "settled"
-            adv_upd["settled_at"] = now
-            adv_upd["settlement_reason"] = "salary_deduction"
-        else:
-            adv_upd["status"] = "adjusting"
-        await db.advance_requests.update_one({"id": adv["id"]}, {"$set": adv_upd})
-        await _notify(
-            adv.get("created_by"),
-            f"₹{amt:,.0f} recovered from your salary against advance {adv.get('advance_no')} — balance ₹{new_bal:,.0f}",
-            ntype="advance_settled" if new_bal <= 0.01 else "advance_settlement_partial",
-            ref_id=adv["id"], link="/advances",
-        )
+    # Phase-3 Batch B: reduce open advance balances via the shared helper (same
+    # logic used by the zero-net short-circuit path above).
+    await _consume_advance_deductions(txn["id"])
     res = await db.payroll.find_one_and_update(
         {"id": pid},
         {"$set": {"status": "paid", "paid_at": now, "txn_id": txn["id"]}},

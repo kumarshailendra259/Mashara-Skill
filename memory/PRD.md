@@ -28,6 +28,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27D — Settlement Module + Payroll Auto-Deduction (Done, Jul 2026)
+**Standalone Settlement Module** — settle an advance without going through a Payment Request:
+- New `AdvanceSettleIn` model with 4 types: `cash_repayment` (income txn), `write_off` (expense adj), `salary_deduction` (scheduled next payroll), `manual_adjustment` (audit-only).
+- New endpoint `POST /api/advance-requests/{aid}/settle` (admin/accountant). Guards: only released/adjusting rows, balance>0, amount ≤ balance.
+- Behaviour: `settlements[]` array appended with full audit entry; `adjusted_amount` +=amount; `balance_amount` -=amount; status → `adjusting` or `settled` (with `settled_at` + `settlement_reason`). `pending_salary_deduction` tracked for salary-deduction schedules. Notification fires to requester (`advance_settled` / `advance_settlement_partial`).
+- Cash-repayment creates income txn tagged `source='advance_settlement'`, `is_advance_settlement=true`, `advance_no`, `advance_request_id`, `settlement_id`. Write-off mirrors as expense with `is_advance_writeoff=true`.
+
+**Payroll Auto-Deduction** — recovery of open advances from monthly salary:
+- `POST /api/payroll/run` now scans each staff's linked user for released/adjusting advances with balance>0 and auto-populates the payroll row's `advance` field + new `advance_deductions_details[]` (advance_id, advance_no, balance_before, amount, reason ∈ {scheduled, auto_full_balance}). Prefers `pending_salary_deduction` when set.
+- `PATCH /api/payroll/{pid}/pay` now consumes those planned deductions on payment: reduces advance balance, appends settlement entry (settlement_type='salary_deduction' + payroll_id + txn_id), clears matching `pending_salary_deduction`, flips status to `settled` if balance closes. Extracted into `_consume_advance_deductions()` helper so the zero-net short-circuit path also honours the plan (fix from iter-42 minor item).
+
+**New helper endpoint**: `GET /api/staff/{staff_id}/open-advances` (admin/hr/accountant/manager/sr-mgr) — returns open advances for a staff's linked user, enriched with overdue flags. Powers upcoming Advance Ledger view.
+
+**Model additions**: `TransactionOut` now exposes `is_advance_settlement`, `is_advance_writeoff`, `is_advance_adjustment`, `funded_by_advance_id`, `advance_request_id`, `advance_no`, `settlement_id`, `source` so the ledger UI can label/filter settlement txns without extra DB reads.
+
+**Frontend `Advances.jsx`**: New emerald "Settle" button (data-testid `adv-settle-<id>`) on released/adjusting rows with balance>0 (finance-role only). Settle Dialog (`settle-modal`) with settlement-type dropdown + contextual explanation, amount pre-filled to full balance, payment-mode/ref (cash_repayment only), date, remarks, live "Balance after this settlement" + fully-SETTLED badge preview.
+
+**Verified**: testing_agent iter-42 — **18/18 backend pytest + full Playwright E2E green**. Both minor issues surfaced (payroll_pay zero-net short-circuit + TransactionOut missing fields) fixed same-session and self-verified via curl.
+
 ### Phase 27C — Advance Request Approval Workflow Fix (Done, Jul 2026)
 - **Bug reported by user**: Advance Requests were NOT following the multi-level approval workflow that reimbursements/leaves used. Every pending advance was auto-approved by admin-only default chain.
 - **Root cause**: `ApprovalWorkflows.jsx` TYPES array was missing the `advance_request` entry, so the New Chain dialog dropdown never exposed the option. Admins could therefore never create a multi-level advance chain via UI — leaving the auto-seeded 1-step "Admin only" default as the only active chain.
