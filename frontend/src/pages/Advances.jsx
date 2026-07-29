@@ -178,9 +178,29 @@ export default function Advances() {
           <h1 className="font-heading font-black tracking-tight text-2xl md:text-3xl">Advances</h1>
           <p className="text-sm text-[var(--muted)] mt-1">Raise, approve, release and track employee advances.</p>
         </div>
-        <Button onClick={() => setCreateOpen(true)} className="brand-btn rounded-none" data-testid="advance-new-btn">
-          <Plus size={14} className="mr-1" /> Raise Advance
-        </Button>
+        <div className="flex items-center gap-2">
+          {user?.role === "admin" && (
+            <Button
+              variant="outline"
+              onClick={async () => {
+                if (!window.confirm("Reroute all pending/in-progress advance requests through the currently-active Advance Request approval chain?\n\nExisting approvals will be reset to step 1 on the new chain. This action is logged in the audit trail.")) return;
+                try {
+                  const { data } = await api.post("/advance-requests/reroute-pending");
+                  toast.success(`Scanned ${data.scanned} · Rerouted ${data.rerouted} · Already correct ${data.already_on_current_chain}`);
+                  await load();
+                } catch (e) { toast.error(formatError(e)); }
+              }}
+              className="rounded-none border-indigo-300 text-indigo-800 hover:bg-indigo-50"
+              data-testid="advance-reroute-btn"
+              title="Re-attach the active Advance Request chain to all pending advances"
+            >
+              🔄 Reroute Pending
+            </Button>
+          )}
+          <Button onClick={() => setCreateOpen(true)} className="brand-btn rounded-none" data-testid="advance-new-btn">
+            <Plus size={14} className="mr-1" /> Raise Advance
+          </Button>
+        </div>
       </div>
 
       {/* Overdue Alert Banner */}

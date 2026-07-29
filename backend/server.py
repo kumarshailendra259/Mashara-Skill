@@ -9442,6 +9442,70 @@ async def notify_overdue_holders(
     return {"total_overdue": len(rows), "notified": notified, "skipped_no_email": skipped}
 
 
+@api.post("/advance-requests/reroute-pending")
+async def reroute_pending_advances(user=Depends(require_role("admin"))):
+    """Re-attach the currently-active advance_request approval chain to every
+    pending/in_progress/sent_back advance whose snapshot doesn't match the
+    newly-configured chain. Useful right after an admin configures a new
+    multi-level Advance Request chain (e.g. Reporting Manager → Sr Mgr → Accountant)
+    so all in-flight requests immediately re-route.
+
+    Only reroutes rows where:
+      - status ∈ {pending, in_progress, sent_back}
+      - the chain currently attached is different from the one the resolver would pick now
+    Rows already partially approved keep their audit trail but jump back to level=1 on the
+    NEW chain and append a system `rerouted` history entry.
+    """
+    rows = await db.advance_requests.find({
+        "status": {"$in": ["pending", "in_progress", "sent_back"]},
+    }, {"_id": 0}).to_list(1000)
+    rerouted = 0
+    already_on_current = 0
+    for r in rows:
+        chain = await _find_active_chain("advance_request", center_id=r.get("center_id"))
+        if not chain or not chain.get("steps"):
+            continue
+        old_chain_id = r.get("chain_id")
+        # If it's the same chain and same step count, skip (no reroute needed)
+        if old_chain_id == chain.get("id") and len(r.get("chain_snapshot") or []) == len(chain.get("steps") or []):
+            already_on_current += 1
+            continue
+        # Build fresh snapshot from the new chain (reuse _attach helper by copying its logic)
+        steps = sorted(chain["steps"], key=lambda s: s.get("level", 0))
+        snap = _json_safe(steps)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        history = list(r.get("chain_history") or [])
+        history.append({
+            "level": 0, "action": "rerouted", "by_user_id": user["id"],
+            "by_user_name": user.get("name") or user.get("email"),
+            "at": now_iso,
+            "remarks": f"Rerouted from chain {old_chain_id or 'none'} to {chain.get('id')} by admin",
+        })
+        await db.advance_requests.update_one({"id": r["id"]}, {"$set": {
+            "chain_id": chain.get("id"),
+            "chain_name": chain.get("name"),
+            "chain_snapshot": snap,
+            "current_level": 1,
+            "status": "pending",
+            "chain_history": history,
+            "rerouted_at": now_iso,
+            "rerouted_by": user["id"],
+        }})
+        # Notify the new first-step approvers
+        cur = snap[0] if snap else None
+        if cur:
+            fresh = {**r, "chain_id": chain.get("id"), "chain_snapshot": snap, "current_level": 1}
+            for uid in await _resolve_step_user_ids(cur, fresh):
+                if uid != user["id"]:
+                    await _notify(
+                        uid,
+                        f"Advance approval — {r.get('advance_no')} · {r.get('employee_name')} · ₹{r.get('amount', 0):,.0f} (rerouted)",
+                        ntype="advance_pending", ref_id=r["id"], link="/advances",
+                    )
+        rerouted += 1
+    return {"scanned": len(rows), "rerouted": rerouted, "already_on_current_chain": already_on_current}
+
+
 @api.get("/advance-requests/adjustable")
 async def adjustable_advance_requests(user=Depends(get_current_user)):
     """Return the current user's advances that still carry an open balance

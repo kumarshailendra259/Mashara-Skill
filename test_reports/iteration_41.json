@@ -1,0 +1,22 @@
+{
+  "summary": "Verified iter-41 fix for Advance Request approval workflow bug on preview. Backend: 9/9 pytest cases pass covering auth guard on reroute endpoint, admin reroute returning {scanned, rerouted, already_on_current_chain}, snapshot rebuild + rerouted history entry, idempotency (2nd call rerouted=0), fresh advance auto-attaches to new multi-step advance_request chain, and regression on GET /api/transactions + /api/advance-requests. Frontend: ApprovalWorkflows New Chain dialog now lists 'Advance Request' in the type dropdown (data-testid=chain-type) and the option is selectable. Advances page shows admin-only '🔄 Reroute Pending' button (data-testid=advance-reroute-btn) which calls POST /api/advance-requests/reroute-pending and surfaces the toast 'Scanned 11 · Rerouted 0 · Already correct 0' (0 because pytest teardown deleted the test chain right before the UI click; endpoint contract is confirmed correct).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter41_advance_reroute.py",
+    "/app/test_reports/pytest/iter41.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Endpoint /advance-requests/reroute-pending correctly excludes approved/released/adjusting/settled/cancelled/rejected by filtering status in {pending,in_progress,sent_back}.",
+    "Chain equality check uses (chain_id AND len(snapshot)==len(steps)) — this may false-positively treat two 2-step chains with same length as equal even if step contents differ. Consider hashing step content for stricter idempotency (low priority)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Created a TEST_AdvChain_<hex> advance_request chain via /api/approval-chains during fixture setup; deleted in teardown. Also created 1 TEST_iter41_reroute_verify advance (ADV-26-0052) via test which was left in pending state (cleanup cancel call attempted). Recommend a manual cleanup pass if needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter41 covers: (a) ApprovalWorkflows TYPES dropdown exposes 'advance_request', (b) POST /api/advance-requests/reroute-pending admin-only reroute endpoint, (c) new advance auto-attach to multi-step advance_request chain via _attach_chain_to_request. Test file: /app/backend/tests/test_iter41_advance_reroute.py. Run with REACT_APP_BACKEND_URL env var set. Frontend Reroute button lives on /advances (admin only), Chain type dropdown on /approval-workflows in New Chain dialog.",
+  "rca of the issue": "Root cause: ApprovalWorkflows.jsx TYPES array was missing the 'advance_request' entry, so the type <Select> never surfaced Advance Request. Admins could therefore never create an advance_request chain via UI — leaving the auto-seeded 1-step 'Admin only' default as the only active chain, and every pending advance stuck on it. Fix (verified): TYPES now includes {v:'advance_request', label:'Advance Request'} (line 24). Backend adds POST /api/advance-requests/reroute-pending which re-runs _find_active_chain('advance_request', center_id=...) for every non-terminal advance and rebuilds snapshot/current_level/history + notifies new first-step approvers. Advances page adds admin-only 🔄 Reroute Pending button (data-testid=advance-reroute-btn). Reproduction steps: (1) login as admin, (2) /approval-workflows → New Chain → open Type dropdown → confirm 'Advance Request' is present, (3) create 2-step chain, (4) /advances → click Reroute Pending → verify toast + pending advances migrate to new chain (chain_id, chain_snapshot len, current_level=1, chain_history['rerouted'] entry)."
+}
