@@ -310,6 +310,19 @@ class TransactionOut(TransactionIn):
     advance_no: Optional[str] = None
     settlement_id: Optional[str] = None
     source: Optional[str] = None
+    # Payee details (bank/UPI) captured at Advance/Payment request time — surfaced so
+    # the ledger UI can render a full payee block for advance-release / adjustment txns.
+    payee_account_holder: Optional[str] = None
+    payee_account_no: Optional[str] = None
+    payee_ifsc: Optional[str] = None
+    payee_bank_name: Optional[str] = None
+    payee_upi_id: Optional[str] = None
+    payee_proof_attachments: Optional[List[AttachmentRef]] = None
+    vendor_name: Optional[str] = None
+    payment_mode: Optional[str] = None
+    transaction_ref: Optional[str] = None
+    paid_by_user_id: Optional[str] = None
+    paid_by_name: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -9277,6 +9290,17 @@ class AdvanceRequestIn(BaseModel):
     required_till: Optional[str] = None  # YYYY-MM-DD due-back date
     description: Optional[str] = None
     attachments: Optional[List[AttachmentRef]] = None
+    # Payee bank/UPI details captured at request time — flow through to the Release
+    # dialog + auto-created transaction so accounts don't have to re-key anything.
+    # All optional at creation; enforced (if payment_mode requires) at release time.
+    preferred_payment_mode: Optional[Literal["bank", "upi", "cash", "cheque"]] = None
+    payee_account_holder: Optional[str] = None
+    payee_account_no: Optional[str] = None
+    payee_ifsc: Optional[str] = None
+    payee_bank_name: Optional[str] = None
+    payee_upi_id: Optional[str] = None
+    # Cancelled cheque / UPI QR / passbook proof — same convention as Payment Request
+    payee_proof_attachments: Optional[List[AttachmentRef]] = None
 
 
 class AdvanceReleaseIn(BaseModel):
@@ -9722,7 +9746,9 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
     if body.paid_by_user_id:
         p = await db.users.find_one({"id": body.paid_by_user_id}, {"_id": 0, "name": 1, "email": 1})
         payer = (p or {}).get("name") or (p or {}).get("email")
-    # Create a corresponding transaction for cash-flow visibility
+    # Create a corresponding transaction for cash-flow visibility.
+    # Payee bank/UPI details captured at request-time flow through here so accounts
+    # doesn't have to re-key them, and the ledger row shows exactly where the money went.
     txn_id = str(uuid.uuid4())
     txn_doc = {
         "id": txn_id,
@@ -9740,7 +9766,18 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "paid_by_name": payer,
         "transaction_ref": body.transaction_ref,
         "advance_request_id": row["id"],
+        "advance_no": row.get("advance_no"),
+        # Payee details captured on the advance request → stamped on the txn
+        "payee_account_holder": row.get("payee_account_holder"),
+        "payee_account_no": row.get("payee_account_no"),
+        "payee_ifsc": row.get("payee_ifsc"),
+        "payee_bank_name": row.get("payee_bank_name"),
+        "payee_upi_id": row.get("payee_upi_id"),
+        "vendor_name": row.get("employee_name"),  # for the ledger UI to render a payee label
         "attachments": [a.model_dump() if hasattr(a, "model_dump") else a for a in (body.attachments or [])],
+        # Bring the original request-time attachments + payee proof onto the txn for audit continuity
+        "payee_proof_attachments": row.get("payee_proof_attachments") or [],
+        "request_attachments": row.get("attachments") or [],
         "created_by": user["id"],
         "created_by_name": user.get("name") or user.get("email"),
         "created_at": now_iso,

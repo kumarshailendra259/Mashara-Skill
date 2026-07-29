@@ -49,7 +49,15 @@ export default function Advances() {
   const PAGE = 20;
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ purpose: "", category: "", amount: "", required_till: "", description: "", center_id: "", project_id: "", attachments: [] });
+  const [form, setForm] = useState({
+    purpose: "", category: "", amount: "", required_till: "",
+    description: "", center_id: "", project_id: "", attachments: [],
+    // Payee bank/UPI details — flow through to the Release dialog + auto-created txn
+    preferred_payment_mode: "bank",
+    payee_account_holder: "", payee_account_no: "", payee_ifsc: "", payee_bank_name: "",
+    payee_upi_id: "",
+    payee_proof_attachments: [],
+  });
   const [centers, setCenters] = useState([]);
   const [projects, setProjects] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -104,6 +112,20 @@ export default function Advances() {
     if (!form.purpose.trim() || !Number(form.amount)) {
       toast.error("Purpose and Amount are required"); return;
     }
+    // Payee validation — same rules as Payment Request:
+    // bank/cheque → full bank details, upi → upi id, cash → no payee needed.
+    const mode = (form.preferred_payment_mode || "").toLowerCase();
+    if (mode === "bank" || mode === "cheque") {
+      if (!form.payee_account_holder?.trim() || !form.payee_account_no?.trim()
+          || !form.payee_ifsc?.trim() || !form.payee_bank_name?.trim()) {
+        toast.error("Bank/Cheque ke liye Account Holder, Account No, IFSC aur Bank Name sabhi mandatory hain");
+        return;
+      }
+    } else if (mode === "upi") {
+      if (!form.payee_upi_id?.trim()) {
+        toast.error("UPI ID enter kariye"); return;
+      }
+    }
     setBusy(true);
     try {
       const payload = { ...form, amount: Number(form.amount) };
@@ -112,7 +134,14 @@ export default function Advances() {
       await api.post("/advance-requests", payload);
       toast.success("Advance request submitted for approval");
       setCreateOpen(false);
-      setForm({ purpose: "", category: "", amount: "", required_till: "", description: "", center_id: "", project_id: "", attachments: [] });
+      setForm({
+        purpose: "", category: "", amount: "", required_till: "",
+        description: "", center_id: "", project_id: "", attachments: [],
+        preferred_payment_mode: "bank",
+        payee_account_holder: "", payee_account_no: "", payee_ifsc: "", payee_bank_name: "",
+        payee_upi_id: "",
+        payee_proof_attachments: [],
+      });
       await load();
     } catch (e) { toast.error(formatError(e)); }
     finally { setBusy(false); }
@@ -121,7 +150,9 @@ export default function Advances() {
   const openRelease = (row) => {
     setDetailRow(row);
     setReleaseForm({
-      payment_mode: "bank", payment_date: new Date().toISOString().slice(0, 10),
+      // Pre-fill from the advance's saved preferred mode (falls back to bank)
+      payment_mode: row.preferred_payment_mode || "bank",
+      payment_date: new Date().toISOString().slice(0, 10),
       transaction_ref: "", paid_amount: String(row.amount || ""),
       paid_by_user_id: user?.id || "", remarks: "", attachments: [],
     });
@@ -444,6 +475,111 @@ export default function Advances() {
                 testId="adv-attach"
               />
             </div>
+
+            {/* Payee / Payment Details — flows through to Release + Transaction */}
+            <div className="border border-indigo-200 bg-indigo-50/40 p-3 space-y-3" data-testid="adv-payee-section">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold uppercase tracking-wider text-indigo-900">
+                  Payee / Payment Details
+                </div>
+                <div className="text-[10px] text-indigo-700">Accounts is se hi release karega</div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="overline">Preferred Payment Mode</Label>
+                  <Select
+                    value={form.preferred_payment_mode}
+                    onValueChange={(v) => setForm({ ...form, preferred_payment_mode: v })}
+                  >
+                    <SelectTrigger className="rounded-none" data-testid="adv-pay-mode"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="bank">Bank Transfer</SelectItem>
+                      <SelectItem value="upi">UPI</SelectItem>
+                      <SelectItem value="cash">Cash</SelectItem>
+                      <SelectItem value="cheque">Cheque</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {(form.preferred_payment_mode === "bank" || form.preferred_payment_mode === "cheque") && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="overline">Account Holder *</Label>
+                      <Input
+                        value={form.payee_account_holder}
+                        onChange={(e) => setForm({ ...form, payee_account_holder: e.target.value })}
+                        placeholder="Name on the bank account"
+                        className="rounded-none" data-testid="adv-payee-holder"
+                      />
+                    </div>
+                    <div>
+                      <Label className="overline">Bank Name *</Label>
+                      <Input
+                        value={form.payee_bank_name}
+                        onChange={(e) => setForm({ ...form, payee_bank_name: e.target.value })}
+                        placeholder="e.g. HDFC Bank"
+                        className="rounded-none" data-testid="adv-payee-bank"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="overline">Account Number *</Label>
+                      <Input
+                        value={form.payee_account_no}
+                        onChange={(e) => setForm({ ...form, payee_account_no: e.target.value })}
+                        placeholder="1234567890"
+                        className="rounded-none num" data-testid="adv-payee-account"
+                      />
+                    </div>
+                    <div>
+                      <Label className="overline">IFSC Code *</Label>
+                      <Input
+                        value={form.payee_ifsc}
+                        onChange={(e) => setForm({ ...form, payee_ifsc: (e.target.value || "").toUpperCase() })}
+                        placeholder="HDFC0000123"
+                        className="rounded-none" data-testid="adv-payee-ifsc"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {form.preferred_payment_mode === "upi" && (
+                <div>
+                  <Label className="overline">UPI ID *</Label>
+                  <Input
+                    value={form.payee_upi_id}
+                    onChange={(e) => setForm({ ...form, payee_upi_id: e.target.value })}
+                    placeholder="name@upi"
+                    className="rounded-none" data-testid="adv-payee-upi"
+                  />
+                </div>
+              )}
+
+              {form.preferred_payment_mode === "cash" && (
+                <div className="text-[11px] text-indigo-800 bg-white/60 p-2 border border-indigo-200">
+                  ℹ️ Cash payment — no bank/UPI details required.
+                </div>
+              )}
+
+              {(form.preferred_payment_mode === "bank" || form.preferred_payment_mode === "upi" || form.preferred_payment_mode === "cheque") && (
+                <div>
+                  <Label className="overline">Payee Proof (Cheque / QR / Passbook)</Label>
+                  <AttachmentUploader
+                    attachments={form.payee_proof_attachments}
+                    onChange={(atts) => setForm({ ...form, payee_proof_attachments: atts })}
+                    testId="adv-payee-proof"
+                  />
+                  <div className="text-[10px] text-indigo-700 mt-1">
+                    Cancelled cheque / UPI QR screenshot / bank passbook — helps accounts verify before release.
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} className="rounded-none">Cancel</Button>
@@ -466,6 +602,34 @@ export default function Advances() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
+            {/* Payee snapshot — pulled from the advance request so accounts can verify at a glance */}
+            {detailRow && (detailRow.payee_account_no || detailRow.payee_upi_id || detailRow.payee_bank_name) && (
+              <div className="border border-amber-300 bg-amber-50/60 p-3 space-y-1 text-[12px]" data-testid="rel-payee-summary">
+                <div className="text-[10px] uppercase tracking-widest font-bold text-amber-800 mb-1">
+                  Payee Details (from advance request)
+                </div>
+                {detailRow.payee_account_holder && (
+                  <div>Account Holder: <b>{detailRow.payee_account_holder}</b></div>
+                )}
+                {detailRow.payee_bank_name && (
+                  <div>Bank: <b>{detailRow.payee_bank_name}</b>{detailRow.payee_ifsc ? <> · IFSC: <b>{detailRow.payee_ifsc}</b></> : null}</div>
+                )}
+                {detailRow.payee_account_no && (
+                  <div>Account No: <b className="num">{detailRow.payee_account_no}</b></div>
+                )}
+                {detailRow.payee_upi_id && (
+                  <div>UPI ID: <b>{detailRow.payee_upi_id}</b></div>
+                )}
+                {(detailRow.payee_proof_attachments || []).length > 0 && (
+                  <div className="text-[11px] text-amber-800 mt-1">
+                    📎 Payee proof attached ({(detailRow.payee_proof_attachments || []).length} file{(detailRow.payee_proof_attachments || []).length > 1 ? "s" : ""})
+                  </div>
+                )}
+                <div className="text-[10px] text-amber-700 mt-1">
+                  ✔ In fields ka data auto-created transaction par bhi copy ho jayega.
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label className="overline">Payment Mode</Label>

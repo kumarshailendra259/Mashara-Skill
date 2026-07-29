@@ -1,0 +1,39 @@
+{
+  "summary": "Iter-43 Advance Request payee/bank details capture + propagation to Release + Transaction — end-to-end verified. Backend: 12/12 pytest pass on /app/backend/tests/test_iter43_payee_details.py — covers (a) POST /api/advance-requests persisting preferred_payment_mode + payee_account_holder/no/ifsc/bank_name + payee_upi_id + payee_proof_attachments (verified via GET), (b) /release stamping ALL payee fields + payee_proof_attachments + advance_no + vendor_name(=employee_name) + source='advance_release' + payment_mode + transaction_ref onto the auto-created txn (verified via /api/transactions listing — TransactionOut correctly surfaces these), (c) release_txn has NO is_advance_adjustment/settlement/writeoff flags set, (d) upi and cash modes work with the correct subset of fields, (e) backwards compat: legacy advances without payee_* still create/list/release cleanly, (f) regression /api/advance-requests, /overdue, /reroute-pending, /payment-vouchers, /transactions all 200. Frontend: /advances Raise Advance dialog exposes `adv-payee-section` with `adv-pay-mode` dropdown; Bank mode shows adv-payee-holder/bank/account/ifsc + adv-payee-proof uploader (all visible); UPI mode shows only adv-payee-upi and hides bank fields; Cash mode hides everything and shows 'Cash payment — no bank/UPI details required' callout. Validation toast 'Bank/Cheque ke liye Account Holder, Account No, IFSC aur Bank Name sabhi mandatory hain' fires correctly on empty bank submit. Success toast 'Advance request submitted for approval' fires on full submit. E2E release verified: created bank-mode advance via UI, approved via API, opened Release dialog on the row — amber `rel-payee-summary` panel renders Account Holder=UI Payee, Bank=Axis · IFSC=AXIS0001111, Account No=1122334455, '📎 Payee proof attached (1 file)', payment_mode dropdown pre-filled to 'Bank Transfer'.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/transactions", "issue": "TransactionOut model does not expose `category` field. The release_advance txn is persisted with category='advance' but the listing endpoint strips it. Consider adding `category: Optional[str] = None` to TransactionOut so the ledger UI can filter/badge advance-release txns without re-querying."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter43_payee_details.py",
+    "/app/test_reports/pytest/iter43.xml"
+  ],
+  "action_items": [
+    "(minor / optional) Expose `category` field on TransactionOut so the frontend can label advance-release txns (currently only `source='advance_release'` is available)."
+  ],
+  "critical_code_review_comments": [
+    "AdvanceRequestIn correctly uses model_config extra='ignore' — safe for future backward-compat extension.",
+    "release_advance stamps payee_* + payee_proof_attachments + request_attachments (from row.attachments) + advance_no + vendor_name(=employee_name) atomically before insert — no risk of partial txn.",
+    "TransactionOut newly surfaces payee_account_holder/no/ifsc/bank_name/upi_id/proof_attachments + vendor_name + payment_mode + transaction_ref + paid_by_user_id/name — enough for a ledger row to render a complete payee block. Missing: `category` (documented above).",
+    "Advances.jsx create() validation gates by preferred_payment_mode.toLowerCase() — clean and consistent with Payment Request flow. Toast strings are user-friendly Hinglish.",
+    "openRelease() correctly falls back to 'bank' if row.preferred_payment_mode is missing — no crash on legacy advances.",
+    "rel-payee-summary panel is conditionally rendered only when payee_account_no || payee_upi_id || payee_bank_name is present — correctly hides for cash-mode / legacy rows."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter43_payee_details.py (new — 12 tests)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100%"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Created ~8 fresh ADV-26-00xx advance requests during test runs (bank, upi, cash, legacy, and release-flow variants), plus 3 released transactions with advance_no ADV-26-0070 / 0078 / 0079 carrying full payee proof attachments. All test-created advances prefixed with 'TEST43' in the purpose field for easy identification. Used /api/approvals/act with request_type='advance_request' to auto-approve for release flow.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter43 covers Advance Request payee/bank capture + propagation to Release txn. Test file at /app/backend/tests/test_iter43_payee_details.py (12 tests, all pass). Key new UI testids: adv-payee-section, adv-pay-mode, adv-payee-holder/bank/account/ifsc/upi/proof, rel-payee-summary. AttachmentRef requires {id, path, filename, content_type, size} — not {name, url, size} — remember this when writing payload fixtures. Approvals act endpoint expects `request_type` + `request_id` in body (not `type`/`ref_id`). Category field is stored in DB on release-txn but stripped by TransactionOut — flagged as minor gap.",
+  "rca of the issue": "N/A — feature testing, not a bug fix. Feature fully verified per spec."
+}
