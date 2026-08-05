@@ -28,6 +28,16 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27I — Pending Approvals Row Polish (Done, Jul 2026)
+- **User asked**: Description of Item/Service full dikhaye (chhota nahi), bold rakhe, vendor ka naam bhi dikhe with good color.
+- **Frontend**:
+  - Removed `line-clamp-2` from row description — full text now wraps with `whitespace-pre-wrap` and `break-words`.
+  - Description restyled as an indigo card: `border-l-4 border-indigo-400`, `bg-indigo-50`, `font-bold text-indigo-900 text-[14px]`, `pl-3 py-2` with relaxed leading.
+  - New `🏷 Vendor: <name>` amber chip (data-testid `row-vendor-<id>`) renders whenever `summary.vendor_name` is populated. Advance rows show `Payee:` prefix.
+  - Action dialog header block mirrors the same layout (vendor chip + full indigo description block).
+- **Verified**: testing_agent iter-48 — **100% frontend E2E pass**. Payments tab 4 vendor chips, Advances tab 42 payee chips. All iter-47 regression elements intact (48 requester, 4 center, 74 purpose, 101 amount rows + FINAL STEP badges + 10 filter tabs).
+- **Code review notes** (deferred): Consider extracting shared `<RequestSummaryHeader/>` component to avoid duplication between row + dialog; PendingApprovals.jsx is ~596 lines (approaching split threshold).
+
 ### Phase 27H — Pending Approvals Row Enhancement (Done, Jul 2026)
 - **User asked**: Requester ka naam + center name dikhaye, aur purpose/amount/description bold + prominent ho for quick approver scanning.
 - **Backend `/approvals/pending`** now emits per item: `requester_id`, `requester_name` (falls back to employee_name for advance_request), `center_id_of_request`, `center_name_of_request`, and new `summary.purpose` (from purpose field / reason / 'QRN <qrn>' shorthand for payment/quotation).
