@@ -28,6 +28,13 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 27H — Pending Approvals Row Enhancement (Done, Jul 2026)
+- **User asked**: Requester ka naam + center name dikhaye, aur purpose/amount/description bold + prominent ho for quick approver scanning.
+- **Backend `/approvals/pending`** now emits per item: `requester_id`, `requester_name` (falls back to employee_name for advance_request), `center_id_of_request`, `center_name_of_request`, and new `summary.purpose` (from purpose field / reason / 'QRN <qrn>' shorthand for payment/quotation).
+- **Frontend row redesign**: type strip + FINAL STEP green badge, 👤 requester name line, 🏢 cyan center chip, bold 15px purpose, muted description, emerald bold 15px amount, ⏱ raised date + 📅 required date. Action dialog header mirrors the same structure.
+- New data-testids: `row-requester-<id>`, `row-center-<id>`, `row-purpose-<id>`, `row-desc-<id>`, `row-amount-<id>`.
+- **Verified**: testing_agent iter-47 — **6/6 backend pytest + full Playwright E2E** with 100% success rate. Screenshot verification confirmed: 129 rows rendered, 48 requester chips, 4 center chips, 74 purpose rows, 101 amount rows, 98 FINAL STEP badges.
+
 ### Phase 27G — Center Manager Vendor Management (Done, Jul 2026)
 - **User reported**: Center Manager role couldn't create/edit vendors (403 forbidden). Task: allow CM to add + manage vendors scoped to their center.
 - **Backend**:
