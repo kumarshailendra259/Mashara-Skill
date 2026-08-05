@@ -293,14 +293,31 @@ export default function PendingApprovals() {
                     )}
                   </div>
 
-                  {/* Purpose + description — bold + larger, this is the primary content */}
+                  {/* Purpose (short header — e.g. QRN, advance purpose) */}
                   {item.summary?.purpose && (
-                    <div className="mt-2 text-[15px] font-bold text-[var(--foreground)] line-clamp-2" data-testid={`row-purpose-${item.request_id}`}>
+                    <div className="mt-2 text-[14px] font-bold text-slate-900" data-testid={`row-purpose-${item.request_id}`}>
                       {item.summary.purpose}
                     </div>
                   )}
+
+                  {/* Vendor / Payee chip — visible for payment / quotation / advance rows */}
+                  {item.summary?.vendor_name && (
+                    <div className="mt-1.5">
+                      <span
+                        className="inline-flex items-center gap-1 px-2 py-1 text-[12px] font-bold text-amber-900 bg-amber-100 border border-amber-300"
+                        data-testid={`row-vendor-${item.request_id}`}
+                      >
+                        🏷 {(item.request_type === "advance_request" ? "Payee: " : "Vendor: ")}{item.summary.vendor_name}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Full description — no truncation, bold indigo for readability */}
                   {item.summary?.description && item.summary.description !== item.summary.purpose && (
-                    <div className={`${item.summary?.purpose ? "mt-1 text-[13px] text-[var(--muted)]" : "mt-2 text-[15px] font-bold text-[var(--foreground)]"} line-clamp-2`} data-testid={`row-desc-${item.request_id}`}>
+                    <div
+                      className="mt-2 text-[14px] font-bold text-indigo-900 bg-indigo-50/60 border-l-4 border-indigo-400 pl-3 py-2 whitespace-pre-wrap break-words leading-relaxed"
+                      data-testid={`row-desc-${item.request_id}`}
+                    >
                       {item.summary.description}
                     </div>
                   )}
@@ -363,10 +380,19 @@ export default function PendingApprovals() {
                   </div>
                 )}
                 {acting.item.summary?.purpose && (
-                  <div className="font-bold text-[15px]">{acting.item.summary.purpose}</div>
+                  <div className="font-bold text-[14px] text-slate-900">{acting.item.summary.purpose}</div>
+                )}
+                {acting.item.summary?.vendor_name && (
+                  <div className="mt-1">
+                    <span className="inline-flex items-center gap-1 px-2 py-1 text-[12px] font-bold text-amber-900 bg-amber-100 border border-amber-300">
+                      🏷 {(acting.item.request_type === "advance_request" ? "Payee: " : "Vendor: ")}{acting.item.summary.vendor_name}
+                    </span>
+                  </div>
                 )}
                 {acting.item.summary?.description && acting.item.summary.description !== acting.item.summary.purpose && (
-                  <div className={acting.item.summary?.purpose ? "text-[13px] text-[var(--muted)]" : "font-bold text-[15px]"}>{acting.item.summary.description}</div>
+                  <div className="mt-1.5 text-[14px] font-bold text-indigo-900 bg-indigo-50/70 border-l-4 border-indigo-400 pl-3 py-2 whitespace-pre-wrap break-words leading-relaxed">
+                    {acting.item.summary.description}
+                  </div>
                 )}
                 <div className="num text-xs pt-1">
                   {acting.item.summary?.amount != null && <>Amount: <span className="font-black text-emerald-800 text-[14px]">{inr(acting.item.summary.amount)}</span> · </>}
