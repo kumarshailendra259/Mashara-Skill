@@ -4901,9 +4901,24 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "step_label": (step or {}).get("label"),
                     "is_final_step": is_final_step,
                     "total_steps": len(snap),
+                    # Requester (who created the request) — surfaced at the top so
+                    # approvers can identify the source without opening the detail.
+                    "requester_id": rec.get("created_by"),
+                    "requester_name": rec.get("created_by_name") or rec.get("employee_name"),
+                    "center_id_of_request": rec.get("center_id"),
+                    "center_name_of_request": rec.get("center_name"),
                     "summary": {
                         "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount"),
                         "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
+                        # Short one-liner ("Purpose") — for advance_request use the purpose field,
+                        # for payments/quotations use qrn/vendor, for leaves/regularisations a labelled summary.
+                        "purpose": (
+                            rec.get("purpose")
+                            or rec.get("reason")
+                            or (f"QRN {rec.get('qrn') or ''}"
+                                if req_type in ("payment", "quotation") and rec.get("qrn") else None)
+                            or None
+                        ),
                         "description": (
                             rec.get("description")
                             or rec.get("reason")

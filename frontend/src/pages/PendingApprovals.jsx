@@ -262,23 +262,58 @@ export default function PendingApprovals() {
             return (
               <div
                 key={`${item.request_type}-${item.request_id}`}
-                className="swiss-card p-4 flex items-start gap-4 flex-wrap"
+                className="swiss-card p-4 flex items-start gap-4 flex-wrap hover:border-[var(--brand)] transition-colors"
                 data-testid={`approval-row-${item.request_id}`}
               >
                 <div className={`${meta.color} p-2.5 rounded-none shrink-0`}><Icon size={18} /></div>
-                <div className="flex-1 min-w-[200px]">
+                <div className="flex-1 min-w-[240px]">
+                  {/* Meta strip: type · step */}
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="overline text-xs">{meta.label}</span>
                     {item.via === "partner_cross" && (
                       <span className="bg-[var(--brand)] text-white text-[10px] px-1.5 py-0.5 num font-bold">PARTNER CROSS-APPROVAL</span>
                     )}
                     {item.step_label && <span className="text-xs text-[var(--muted)]">· {item.step_label}</span>}
+                    {item.is_final_step && (
+                      <span className="text-[10px] px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold">FINAL STEP</span>
+                    )}
                   </div>
-                  <div className="font-medium mt-1 line-clamp-2">{item.summary?.description || "—"}</div>
-                  <div className="flex items-center gap-4 mt-1 text-xs text-[var(--muted)]">
-                    {item.summary?.amount != null && <span className="num font-medium text-[var(--foreground)]">{inr(item.summary.amount)}</span>}
-                    {item.summary?.date && <span>📅 {item.summary.date}</span>}
-                    {item.created_at && <span>⏱ {new Date(item.created_at).toLocaleDateString("en-IN")}</span>}
+
+                  {/* Requester + Center — the "who/where" line so approver sees the source at a glance */}
+                  <div className="flex items-center gap-3 flex-wrap mt-1.5 text-[13px]">
+                    {item.requester_name && (
+                      <span className="inline-flex items-center gap-1 text-[var(--foreground)]" data-testid={`row-requester-${item.request_id}`}>
+                        👤 <b>{item.requester_name}</b>
+                      </span>
+                    )}
+                    {item.center_name_of_request && (
+                      <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 px-1.5 py-0.5 text-[11px] font-medium" data-testid={`row-center-${item.request_id}`}>
+                        🏢 {item.center_name_of_request}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Purpose + description — bold + larger, this is the primary content */}
+                  {item.summary?.purpose && (
+                    <div className="mt-2 text-[15px] font-bold text-[var(--foreground)] line-clamp-2" data-testid={`row-purpose-${item.request_id}`}>
+                      {item.summary.purpose}
+                    </div>
+                  )}
+                  {item.summary?.description && item.summary.description !== item.summary.purpose && (
+                    <div className={`${item.summary?.purpose ? "mt-1 text-[13px] text-[var(--muted)]" : "mt-2 text-[15px] font-bold text-[var(--foreground)]"} line-clamp-2`} data-testid={`row-desc-${item.request_id}`}>
+                      {item.summary.description}
+                    </div>
+                  )}
+
+                  {/* Amount + dates — amount in emerald + bold */}
+                  <div className="flex items-center gap-4 mt-2 text-xs text-[var(--muted)] flex-wrap">
+                    {item.summary?.amount != null && (
+                      <span className="num font-black text-[15px] text-emerald-800" data-testid={`row-amount-${item.request_id}`}>
+                        {inr(item.summary.amount)}
+                      </span>
+                    )}
+                    {item.summary?.date && <span>📅 <b>{item.summary.date}</b></span>}
+                    {item.created_at && <span>⏱ Raised {new Date(item.created_at).toLocaleDateString("en-IN")}</span>}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
@@ -313,10 +348,28 @@ export default function PendingApprovals() {
           </DialogHeader>
           {acting && (
             <div className="space-y-3">
-              <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm">
-                <div className="font-medium">{acting.item.summary?.description || "—"}</div>
-                <div className="num text-xs mt-1">
-                  {acting.item.summary?.amount != null && <>Amount: <span className="font-bold">{inr(acting.item.summary.amount)}</span> · </>}
+              <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm space-y-1.5">
+                {/* Requester + center — first line so approver sees source immediately */}
+                {(acting.item.requester_name || acting.item.center_name_of_request) && (
+                  <div className="flex items-center gap-2 flex-wrap text-xs text-[var(--muted)]">
+                    {acting.item.requester_name && (
+                      <span>👤 <b className="text-[var(--foreground)]">{acting.item.requester_name}</b></span>
+                    )}
+                    {acting.item.center_name_of_request && (
+                      <span className="inline-block bg-cyan-50 text-cyan-800 border border-cyan-200 px-1.5 py-0.5 text-[11px]">
+                        🏢 {acting.item.center_name_of_request}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {acting.item.summary?.purpose && (
+                  <div className="font-bold text-[15px]">{acting.item.summary.purpose}</div>
+                )}
+                {acting.item.summary?.description && acting.item.summary.description !== acting.item.summary.purpose && (
+                  <div className={acting.item.summary?.purpose ? "text-[13px] text-[var(--muted)]" : "font-bold text-[15px]"}>{acting.item.summary.description}</div>
+                )}
+                <div className="num text-xs pt-1">
+                  {acting.item.summary?.amount != null && <>Amount: <span className="font-black text-emerald-800 text-[14px]">{inr(acting.item.summary.amount)}</span> · </>}
                   {acting.item.summary?.date}
                 </div>
               </div>

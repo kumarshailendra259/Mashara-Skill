@@ -1,0 +1,30 @@
+{
+  "summary": "Iter-47 tested end-to-end. Backend GET /api/approvals/pending correctly emits new attribution fields (requester_id, requester_name, center_id_of_request, center_name_of_request, summary.purpose) with graceful null fallback for types missing source data. Frontend /pending-approvals renders new data-testids exactly as spec'd: 129 rows, 48 requester chips (👤 + bold name), 4 center chips (🏢 cyan chip), 74 purpose rows (15px bold), 65 description rows, 101 amount rows (emerald 15px black), 98 FINAL STEP badges. Action dialog header mirrors row layout (👤 requester + bold purpose + emerald amount) — verified by opening the first advance approve dialog. All 6 backend pytest cases green + /api/transactions regression 200.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PendingApprovals action dialog (Payment Attribution block)", "issues": ["Pre-existing (NOT introduced by iter-47) React hydration warning: '<span> cannot be a child of <option>' from the Center/Partner <select> in the payment-attribution block. Cosmetic console warning only; select works. Root cause is x-source instrumentation wrapping option children with <span style=display:contents>. Worth cleaning up in a future iteration by switching to shadcn Select or removing instrumentation on option children."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_pending_approvals_iter47.py",
+    "/app/test_reports/pytest/iter47_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py list_pending_approvals — logic is clean and additive; new fields nested under top-level + summary. Consider extracting the ~50-line summary dict into a helper _build_summary(rec, req_type) since server.py is 10k+ lines (file-size code-smell — not blocking).",
+    "PendingApprovals.jsx — row layout is well-conditioned (each testid only renders when data exists), which matches the actual counts (48/4/74/65/101 out of 129). Good UX.",
+    "Minor: description block uses conditional class string that duplicates the 'bold 15px' style when purpose is absent — this is intentional (description becomes primary) but could be extracted to a variable for readability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_pending_approvals_iter47.py (new)"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% (all new testids present, dialog verified)"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "None — used existing 129 pending items.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend regression file /app/backend/tests/test_pending_approvals_iter47.py can be re-run any time. Pre-existing <span>-in-<option> hydration warning in payment attribution select is unrelated to iter-47 and safe to ignore until a dedicated cleanup iteration."
+}
