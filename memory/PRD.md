@@ -28,6 +28,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28D — Milestone Income Orphan Cleanup + Cascade Delete (Done, Aug 2026)
+- **User reported (prod + preview)**: Milestone Income dashboard was showing inflated totals — e.g., BOCWW Ramgarh ke ~₹47L me ~₹15L wo income entries thin jinke parent batches admin ne delete kar diye the. Turned out `receive_batch_payment` auto-generated income/recovery/assessment/TDS transactions bina `batch_id` / `batch_payment_id` linkage ke create karta tha, aur `DELETE /batches` sirf batch_payments delete karta tha — transactions orphan reh jaate the aur `/dashboard/milestone-income` (which reads `source="milestone"` transactions) unhe count karta rehta tha.
+- **Backend `/app/backend/server.py`**:
+  - `receive_batch_payment` — ab har auto-generated txn (4 sources: `milestone`, `candidate_recovery`, `assessment_fee`, `tds_deduction`) par `batch_id` + `batch_payment_id` stamp hote hain.
+  - `DELETE /api/batches/{bid}` — ab cascade: `transactions.delete_many({batch_id: bid})` + `batch_payments.delete_many({batch_id: bid})` + batch. Returns `transactions_deleted` count.
+  - `POST /api/batches/bulk-delete` — same cascade for bulk operations.
+  - `DELETE /api/batch-payments/{pid}` — ab cascade `transactions.delete_many({batch_payment_id: pid})`.
+  - **New endpoint** `POST /api/batches/cleanup-orphan-txns?dry_run={bool}` (admin-only) — legacy one-shot cleanup:
+    - **Phase 1 Backfill**: For any milestone-family txn missing batch_id/batch_payment_id, correlates via `(center_id, project_id, milestone, amount, status="received")` against live `batch_payments` and stamps the IDs.
+    - **Phase 2 Prune**: Deletes any milestone-family txn whose (tagged) batch_id or batch_payment_id no longer exists, AND unmatchable legacy rows.
+    - Returns `{scanned, backfilled, orphans, deleted, dry_run}` — idempotent.
+- **Frontend `Programs.jsx`**: New admin-only "Cleanup Orphan Txns" button (`btn-cleanup-orphans`) in the page header — one-tap fix for old data with confirmation prompt + toast summary.
+- **Preview data recovery run**: scanned 231, backfilled 131 (linked to live batches), deleted 100 orphans → Milestone Income total moved from ₹1,00,59,059 (160 txns) to ₹84,88,457 (99 txns). Idempotent — re-run showed 0 orphans.
+- **Regression pytest** `/app/backend/tests/test_batch_cascade_cleanup.py`:
+  - Create batch → create payment → mark received → verify txn has `batch_id` + `batch_payment_id` ✓
+  - Seed legacy-style orphan → dry-run detects it → real cleanup deletes it ✓
+  - Delete batch → cascade removes the tagged milestone txn ✓
+  - Full assertions pass. Non-regression on prior test_batch_rbac + test_partner_entity_visibility.
+
 ### Phase 28C — Batch Role Split (Done, Aug 2026)
 - **User asked**: Center Manager ko SIRF batch CREATE ka adhikar; edit/update Accountant ke paas.
 - **Backend `/app/backend/server.py`**:

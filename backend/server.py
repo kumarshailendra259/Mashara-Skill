@@ -2057,9 +2057,11 @@ async def bulk_delete_entities(etype: EntityType, body: BulkIds, _=Depends(requi
 async def bulk_delete_batches(body: BulkIds, _=Depends(require_role("admin"))):
     if not body.ids:
         return {"deleted": 0}
+    # Cascade: batch_payments + auto-generated transactions (milestone/recovery/assessment/tds)
+    txn_del = await db.transactions.delete_many({"batch_id": {"$in": body.ids}})
     await db.batch_payments.delete_many({"batch_id": {"$in": body.ids}})
     r = await db.batches.delete_many({"id": {"$in": body.ids}})
-    return {"deleted": r.deleted_count}
+    return {"deleted": r.deleted_count, "transactions_deleted": txn_del.deleted_count}
 
 
 @api.post("/partner-associations/bulk-delete")
@@ -8250,12 +8252,117 @@ async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", 
 
 @api.delete("/batches/{bid}")
 async def delete_batch(bid: str, _=Depends(require_role("admin"))):
-    # Cascade delete payments under this batch
+    # Cascade delete: auto-generated transactions (milestone income + recovery + assessment
+    # fee + TDS) AND batch_payments — otherwise Milestone Income dashboard keeps
+    # showing orphaned totals from deleted batches.
+    txn_del = await db.transactions.delete_many({"batch_id": bid})
     await db.batch_payments.delete_many({"batch_id": bid})
     r = await db.batches.delete_one({"id": bid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
-    return {"ok": True}
+    return {"ok": True, "transactions_deleted": txn_del.deleted_count}
+
+
+@api.post("/batches/cleanup-orphan-txns")
+async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_run: bool = False):
+    """Backfill batch_id/batch_payment_id on legacy milestone txns, then delete
+    milestone-family transactions that no longer correspond to any live batch.
+
+    Rationale: before Aug 2026, `receive_batch_payment` did NOT store `batch_id`
+    or `batch_payment_id` on the auto-generated income/recovery/assessment/TDS
+    transactions. So when a batch was deleted, those txns were orphaned and kept
+    inflating the Milestone Income dashboard. This admin one-shot cleans them up.
+
+    Two phases:
+      1. **Backfill** — for each milestone-family txn that has neither batch_id
+         nor batch_payment_id, find a live `batch_payments` row matching
+         (center_id, project_id, milestone, amount, status="received"). If found,
+         tag the txn with the batch/payment IDs so future cascade delete works.
+      2. **Prune** — delete milestone-family txns whose batch_id/batch_payment_id
+         no longer point to a live batch/payment (either previously-tagged rows
+         pointing to deleted batches, or legacy rows with no correlate).
+
+    `dry_run=true` reports the counts without modifying data.
+
+    Returns: `{ scanned, backfilled, orphans, deleted }`.
+    """
+    MILESTONE_SOURCES = ["milestone", "candidate_recovery", "assessment_fee", "tds_deduction"]
+    # Preload live sets for O(1) checks
+    live_batch_ids = set()
+    async for b in db.batches.find({}, {"_id": 0, "id": 1}):
+        live_batch_ids.add(b["id"])
+    live_bp_ids = set()
+    async for p in db.batch_payments.find({}, {"_id": 0, "id": 1}):
+        live_bp_ids.add(p["id"])
+
+    scanned = 0
+    backfilled = 0
+    orphan_ids: list[str] = []
+
+    async for txn in db.transactions.find(
+        {"source": {"$in": MILESTONE_SOURCES}},
+        {"_id": 0, "id": 1, "batch_id": 1, "batch_payment_id": 1,
+         "center_id": 1, "project_id": 1, "milestone": 1, "amount": 1},
+    ):
+        scanned += 1
+        bid = txn.get("batch_id")
+        bpid = txn.get("batch_payment_id")
+
+        # Case A: already linked → check live
+        if bid or bpid:
+            batch_live = bid in live_batch_ids if bid else True
+            bp_live = bpid in live_bp_ids if bpid else True
+            if not batch_live or not bp_live:
+                orphan_ids.append(txn["id"])
+            continue
+
+        # Case B: legacy txn — try to backfill via structural match
+        match = await db.batch_payments.find_one(
+            {
+                "status": "received",
+                "milestone": txn.get("milestone"),
+                "amount": txn.get("amount"),
+                "batch_id": {"$exists": True},
+            },
+            {"_id": 0, "id": 1, "batch_id": 1},
+        )
+        if not match and txn.get("center_id") and txn.get("project_id"):
+            # Try again with a per-center match using batch's center_id + project_id
+            candidate_batch = await db.batches.find_one(
+                {"center_id": txn["center_id"], "project_id": txn["project_id"]},
+                {"_id": 0, "id": 1},
+            )
+            if candidate_batch:
+                match = await db.batch_payments.find_one(
+                    {
+                        "batch_id": candidate_batch["id"],
+                        "milestone": txn.get("milestone"),
+                        "status": "received",
+                    },
+                    {"_id": 0, "id": 1, "batch_id": 1},
+                )
+        if match:
+            if not dry_run:
+                await db.transactions.update_one(
+                    {"id": txn["id"]},
+                    {"$set": {"batch_id": match["batch_id"], "batch_payment_id": match["id"]}},
+                )
+            backfilled += 1
+        else:
+            orphan_ids.append(txn["id"])
+
+    deleted = 0
+    if orphan_ids and not dry_run:
+        r = await db.transactions.delete_many({"id": {"$in": orphan_ids}})
+        deleted = r.deleted_count
+
+    return {
+        "scanned": scanned,
+        "backfilled": backfilled,
+        "orphans": len(orphan_ids),
+        "deleted": deleted,
+        "dry_run": dry_run,
+    }
 
 
 @api.get("/batch-payments", response_model=List[BatchPaymentOut])
@@ -8414,6 +8521,10 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "items": [], "attachments": [],
             "source": "milestone",
             "milestone": rec["milestone"],
+            # Cascade-delete linkage: cleanup uses these to remove orphaned income
+            # transactions when the parent batch or batch_payment is deleted.
+            "batch_id": rec["batch_id"],
+            "batch_payment_id": pid,
             "created_by": user["id"], "created_at": now,
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
@@ -8441,6 +8552,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "items": [], "attachments": [],
             "source": "candidate_recovery",
             "milestone": rec["milestone"],
+            "batch_id": rec["batch_id"],
+            "batch_payment_id": pid,
             "created_by": user["id"], "created_at": now,
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
@@ -8469,6 +8582,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "items": [], "attachments": [],
             "source": "assessment_fee",
             "milestone": rec["milestone"],
+            "batch_id": rec["batch_id"],
+            "batch_payment_id": pid,
             "created_by": user["id"], "created_at": now,
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
@@ -8500,6 +8615,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
                 "items": [], "attachments": [],
                 "source": "tds_deduction",
                 "milestone": rec["milestone"],
+                "batch_id": rec["batch_id"],
+                "batch_payment_id": pid,
                 "created_by": user["id"], "created_at": now,
                 "status": "approved", "approved_by": user["id"], "approved_at": now,
                 "rejected_reason": None,
@@ -8533,10 +8650,12 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
 
 @api.delete("/batch-payments/{pid}")
 async def delete_batch_payment(pid: str, _=Depends(require_role("admin"))):
+    # Cascade delete: auto-generated milestone-family transactions tied to this payment.
+    txn_del = await db.transactions.delete_many({"batch_payment_id": pid})
     r = await db.batch_payments.delete_one({"id": pid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
-    return {"ok": True}
+    return {"ok": True, "transactions_deleted": txn_del.deleted_count}
 
 
 # ---------- Batch Close / Reopen ----------

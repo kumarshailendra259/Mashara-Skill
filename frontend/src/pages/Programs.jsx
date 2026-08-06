@@ -482,6 +482,15 @@ export default function Programs() {
     return { gross, uniform, recovery, assessmentFee, taxable, pct, tds, net };
   }, [recvTarget, recvTds]);
 
+  const runOrphanCleanup = async () => {
+    if (!window.confirm("This will backfill legacy milestone transactions and delete any that no longer belong to a live batch. Continue?")) return;
+    try {
+      const r = await api.post("/batches/cleanup-orphan-txns");
+      const d = r.data || {};
+      toast.success(`Cleanup done — scanned ${d.scanned}, backfilled ${d.backfilled}, deleted ${d.deleted}`);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   return (
     <div className="space-y-5" data-testid="programs-page">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -489,7 +498,21 @@ export default function Programs() {
           <div className="overline">Programs</div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">Projects · Batches · Milestones</h1>
         </div>
-        <PrintButton />
+        <div className="flex items-center gap-2">
+          {user?.role === "admin" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={runOrphanCleanup}
+              className="rounded-none"
+              title="Backfill or delete milestone transactions whose parent batch no longer exists"
+              data-testid="btn-cleanup-orphans"
+            >
+              Cleanup Orphan Txns
+            </Button>
+          )}
+          <PrintButton />
+        </div>
       </div>
 
       {projects.length === 0 ? (
