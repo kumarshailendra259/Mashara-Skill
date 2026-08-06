@@ -684,11 +684,22 @@ async def _visible_entity_ids(user: dict, etype: str):
         # Also include entities referenced in the partner's OWN transaction history
         # (covers cases where the transaction wasn't linked to a center).
         if role == "partner" and user.get("assigned_partner_id"):
+            own_pid = user["assigned_partner_id"]
             txn_vals = await db.transactions.distinct(
                 target_field,
-                {"partner_id": user["assigned_partner_id"], target_field: {"$ne": None}},
+                {"partner_id": own_pid, target_field: {"$ne": None}},
             )
             ids.update([v for v in txn_vals if v])
+            # And from BATCHES where this partner is listed, regardless of whether
+            # the batch has a center_id set — this covers early-stage batches that
+            # were tagged with a partner + company but not yet linked to a center.
+            async for b in db.batches.find(
+                {"partner_ids": own_pid, target_field: {"$ne": None}},
+                {"_id": 0, target_field: 1},
+            ):
+                v = b.get(target_field)
+                if v:
+                    ids.add(v)
         return ids
 
     # Unknown etype → default deny

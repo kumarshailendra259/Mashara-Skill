@@ -28,6 +28,12 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28B — Partner Entity Visibility Bugfix (Done, Aug 2026)
+- **User reported (production)**: Partner user "Shyam Kumar" ke Companies page pe "NO DATA YET" show ho raha tha — Shyam ka related company visible nahi tha.
+- **Root cause**: `_visible_entity_ids(user, "company"/"project")` sirf `center_ids` set hone par batches se company_id derive kar raha tha. Jab partner ke assigned batches me `center_id: null` set tha (early-stage batch — sirf partner + company/project tagged, center abhi tak assign nahi), toh company/project visible list ban hi nahi rahi thi.
+- **Fix**: `/app/backend/server.py` `_visible_entity_ids` me partner ke liye ek naya fallback source add kiya: `batches.find({partner_ids: own_pid, target_field: {$ne: null}})` — center_id se independent. Ab partner ki jitni bhi batches me wo listed hai (chahe center_id set ho ya na ho), un sabki company + project uski visible list me appear hoti hain. Transactions ka existing fallback bhi maintained hai.
+- **Regression pytest** `/app/backend/tests/test_partner_entity_visibility.py`: seeds a partner + batch with `center_id=null, company_id, project_id, partner_ids=[partner]`, logs in as partner, asserts GET `/entities/company` includes the seeded company AND GET `/entities/project` includes the project. Passes 1/1. Existing 21 tests in `test_finance_api.py` non-regression.
+
 ### Phase 28 — Payment Dashboard + Approval Double-Submit Prevention (Done, Aug 2026)
 - **User asked**: (a) Approvals ka double-submit bug fix karo — same request cheez do baar dabne pe duplicate transaction ban jaati thi. (b) Ek naya Payment Dashboard chahiye jismein Daily/Weekly/Monthly expenses, Upcoming Payments, Center-wise & Project-wise breakdown, aur Income pie chart dikhe.
 - **Double-Submit Fix**:
