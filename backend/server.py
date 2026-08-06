@@ -2766,6 +2766,160 @@ class SettlementRecordIn(BaseModel):
     note: Optional[str] = None
 
 
+@api.get("/dashboard/payment-summary")
+async def payment_dashboard_summary(
+    user=Depends(require_finance_visible),
+    center_id: Optional[str] = None,
+    partner_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    start: Optional[str] = None,   # YYYY-MM-DD (inclusive)
+    end: Optional[str] = None,     # YYYY-MM-DD (inclusive)
+):
+    """One-shot rollup for the Payment Dashboard. Returns:
+      - kpis: daily / weekly / monthly / upcoming totals (₹)
+      - daily_series: last 30 days daily buckets [{date, expense}]
+      - weekly_series: last 12 weeks [{week_start, expense}]
+      - monthly_series: last 12 months [{month, expense}]
+      - center_wise: [{center_id, name, amount}] top 10 by expense
+      - project_wise: [{project_id, name, amount}] top 10 by expense
+      - income_breakdown: [{category, amount}] for the pie chart
+      - meta: {start, end, filter_applied}
+
+    Scoping: partner sees only their partner_id; center_manager/staff their centers;
+    HQ roles see everything unless they pass explicit filters.
+    """
+    role = user.get("role")
+    today = datetime.now(timezone.utc).date()
+    e = today.isoformat() if not end else end
+    s = (today - timedelta(days=365)).isoformat() if not start else start
+
+    # Base filter (scope + type=expense) — used for expense aggregations
+    base: dict = {"date": {"$gte": s, "$lte": e}, "type": "expense", "status": {"$ne": "rejected"}}
+    if role == "partner":
+        base["partner_id"] = user.get("assigned_partner_id")
+    elif role in ("center_manager", "center_staff"):
+        centers = user.get("assigned_center_ids") or []
+        if centers:
+            base["center_id"] = {"$in": centers}
+    if center_id:
+        base["center_id"] = center_id  # override
+    if partner_id and role != "partner":
+        base["partner_id"] = partner_id
+    if project_id:
+        base["project_id"] = project_id
+
+    # KPIs — daily (today), weekly (last 7 days), monthly (current month)
+    daily_start = today.isoformat()
+    week_start = (today - timedelta(days=6)).isoformat()
+    month_start = today.replace(day=1).isoformat()
+
+    async def _sum_between(_start: str, _end: str) -> float:
+        pipe = [
+            {"$match": {**base, "date": {"$gte": _start, "$lte": _end}}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+        ]
+        rows = await db.transactions.aggregate(pipe).to_list(1)
+        return float(rows[0]["total"]) if rows else 0.0
+
+    daily_total = await _sum_between(daily_start, today.isoformat())
+    weekly_total = await _sum_between(week_start, today.isoformat())
+    monthly_total = await _sum_between(month_start, today.isoformat())
+
+    # Upcoming = raised (pending) payment requests waiting for release
+    upcoming_filter: dict = {"status": {"$in": ["pending", "in_progress", "sent_back"]}}
+    if role == "partner":
+        upcoming_filter["partner_id"] = user.get("assigned_partner_id")
+    elif role in ("center_manager", "center_staff"):
+        centers = user.get("assigned_center_ids") or []
+        if centers:
+            upcoming_filter["center_id"] = {"$in": centers}
+    if center_id:
+        upcoming_filter["center_id"] = center_id
+    upcoming_rows = await db.payments.aggregate([
+        {"$match": upcoming_filter},
+        {"$group": {"_id": None, "total": {"$sum": "$actual_amount"}}},
+    ]).to_list(1)
+    upcoming_total = float(upcoming_rows[0]["total"]) if upcoming_rows else 0.0
+
+    # Daily series — last 30 days
+    d30_start = (today - timedelta(days=29)).isoformat()
+    daily_agg = await db.transactions.aggregate([
+        {"$match": {**base, "date": {"$gte": d30_start, "$lte": today.isoformat()}}},
+        {"$group": {"_id": "$date", "expense": {"$sum": "$amount"}}},
+        {"$sort": {"_id": 1}},
+    ]).to_list(100)
+    daily_map = {r["_id"]: float(r["expense"]) for r in daily_agg}
+    daily_series = []
+    for i in range(29, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        daily_series.append({"date": d, "expense": daily_map.get(d, 0.0)})
+
+    # Weekly series — last 12 ISO weeks
+    weeks_start = today - timedelta(weeks=12)
+    weekly_agg = await db.transactions.aggregate([
+        {"$match": {**base, "date": {"$gte": weeks_start.isoformat(), "$lte": today.isoformat()}}},
+        {"$group": {"_id": {"$isoWeek": {"$dateFromString": {"dateString": "$date"}}}, "expense": {"$sum": "$amount"}}},
+    ]).to_list(20)
+    weekly_series = [{"week": int(r["_id"]), "expense": float(r["expense"])} for r in weekly_agg]
+
+    # Monthly series — last 12 months
+    months_start = (today.replace(day=1) - timedelta(days=365)).replace(day=1).isoformat()
+    monthly_agg = await db.transactions.aggregate([
+        {"$match": {**base, "date": {"$gte": months_start, "$lte": today.isoformat()}}},
+        {"$group": {"_id": {"$substr": ["$date", 0, 7]}, "expense": {"$sum": "$amount"}}},
+        {"$sort": {"_id": 1}},
+    ]).to_list(24)
+    monthly_series = [{"month": r["_id"], "expense": float(r["expense"])} for r in monthly_agg]
+
+    # Center-wise (top 10)
+    center_agg = await db.transactions.aggregate([
+        {"$match": {**base, "center_id": {"$ne": None}}},
+        {"$group": {"_id": "$center_id", "amount": {"$sum": "$amount"}}},
+        {"$sort": {"amount": -1}},
+        {"$limit": 10},
+    ]).to_list(10)
+    all_centers = await db.centers.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(500)
+    center_name_by_id = {c["id"]: c.get("name") for c in all_centers}
+    center_wise = [{"center_id": r["_id"], "name": center_name_by_id.get(r["_id"], "—"), "amount": float(r["amount"])} for r in center_agg]
+
+    # Project-wise (top 10)
+    project_agg = await db.transactions.aggregate([
+        {"$match": {**base, "project_id": {"$ne": None}}},
+        {"$group": {"_id": "$project_id", "amount": {"$sum": "$amount"}}},
+        {"$sort": {"amount": -1}},
+        {"$limit": 10},
+    ]).to_list(10)
+    all_projects = await db.projects.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(500)
+    project_name_by_id = {p["id"]: p.get("name") for p in all_projects}
+    project_wise = [{"project_id": r["_id"], "name": project_name_by_id.get(r["_id"], "—"), "amount": float(r["amount"])} for r in project_agg]
+
+    # Income breakdown for pie chart — group by category
+    income_filter = {**base, "type": "income"}
+    income_agg = await db.transactions.aggregate([
+        {"$match": income_filter},
+        {"$group": {"_id": {"$ifNull": ["$category", "Other"]}, "amount": {"$sum": "$amount"}}},
+        {"$sort": {"amount": -1}},
+        {"$limit": 8},
+    ]).to_list(10)
+    income_breakdown = [{"category": r["_id"] or "Other", "amount": float(r["amount"])} for r in income_agg]
+
+    return {
+        "kpis": {
+            "daily": round(daily_total, 2),
+            "weekly": round(weekly_total, 2),
+            "monthly": round(monthly_total, 2),
+            "upcoming": round(upcoming_total, 2),
+        },
+        "daily_series": daily_series,
+        "weekly_series": weekly_series,
+        "monthly_series": monthly_series,
+        "center_wise": center_wise,
+        "project_wise": project_wise,
+        "income_breakdown": income_breakdown,
+        "meta": {"start": s, "end": e, "filter_applied": {"center_id": center_id, "partner_id": partner_id, "project_id": project_id}},
+    }
+
+
 @api.post("/dashboard/settlement/record", status_code=201)
 async def record_settlement(
     payload: SettlementRecordIn,
@@ -4424,6 +4578,11 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
 
     On final-approve of a reimbursement, automatically creates the offsetting expense transaction
     (preserving the existing payroll/reimbursement-ledger sync behaviour).
+
+    Idempotency: uses atomic `find_one_and_update` on {id, current_level} to lock the
+    request during processing. Concurrent duplicate clicks (double-tap, retry) that
+    arrive after the first has flipped current_level will fail with 409 CONFLICT
+    instead of creating duplicate transactions.
     """
     coll_name = APPROVAL_TYPE_COLL[body.request_type]
     coll = db[coll_name]
@@ -4436,8 +4595,21 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
     if not await _user_can_act_on_request(user, rec):
         raise HTTPException(403, "You are not the configured approver for the current step")
 
+    # Atomic lock: bump to a transient level (negative marker) — any concurrent
+    # duplicate click will find no matching {id, current_level: <original>} and
+    # will be rejected with 409. We revert current_level in the update block below
+    # (either to the next real step or to 0/-1 for terminal states).
+    cur_level_at_entry = rec.get("current_level") or 1
+    _lock = await coll.find_one_and_update(
+        {"id": body.request_id, "current_level": cur_level_at_entry, "status": {"$nin": ["paid", "approved", "rejected"]}},
+        {"$set": {"_processing_lock_by": user["id"], "_processing_lock_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    if not _lock:
+        # Another concurrent request beat us; return 409 so the client can refresh.
+        raise HTTPException(409, "This request is already being processed or was just actioned. Please refresh.")
+
     snap = rec.get("chain_snapshot") or []
-    cur_level = rec.get("current_level") or 1
+    cur_level = cur_level_at_entry
     history = list(rec.get("chain_history") or [])
     update: dict = {}
 
@@ -4450,7 +4622,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             "rejected_reason": body.remarks or "",
             "rejected_at": datetime.now(timezone.utc).isoformat(),
         }
-        await coll.update_one({"id": body.request_id}, {"$set": update})
+        await coll.update_one({"id": body.request_id}, {"$set": update, "$unset": {"_processing_lock_by": "", "_processing_lock_at": ""}})
         # If a payment gets rejected, free up the quotation so a fresh payment can be raised.
         if body.request_type == "payment" and rec.get("quotation_id"):
             await db.quotations.update_one(
@@ -4482,7 +4654,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             "sent_back_by_name": user.get("name") or user.get("email"),
             "sent_back_from_level": cur_level,
         }
-        await coll.update_one({"id": body.request_id}, {"$set": update})
+        await coll.update_one({"id": body.request_id}, {"$set": update, "$unset": {"_processing_lock_by": "", "_processing_lock_at": ""}})
         # If a payment gets sent back, temporarily park the quotation status too so
         # the creator can update payee details and resubmit; on resubmit the
         # quotation flips back to 'payment_pending'.
@@ -4851,7 +5023,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 if body.paid_by_user_id or body.paid_by_name:
                     update["approved_paid_by_user_id"] = body.paid_by_user_id
                     update["approved_paid_by_name"] = body.paid_by_name
-        await coll.update_one({"id": body.request_id}, {"$set": update})
+        await coll.update_one({"id": body.request_id}, {"$set": update, "$unset": {"_processing_lock_by": "", "_processing_lock_at": ""}})
         if rec.get("created_by") and rec["created_by"] != user["id"]:
             verb = "paid" if body.request_type == "reimbursement" else "approved"
             await _notify(rec["created_by"], f"Your {body.request_type} was {verb}",
@@ -4861,7 +5033,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
 
     # Otherwise advance to next level
     update = {"current_level": next_level, "chain_history": history}
-    await coll.update_one({"id": body.request_id}, {"$set": update})
+    await coll.update_one({"id": body.request_id}, {"$set": update, "$unset": {"_processing_lock_by": "", "_processing_lock_at": ""}})
     # Notify next approvers
     nxt = next((s for s in snap if s.get("level") == next_level), None)
     if nxt:

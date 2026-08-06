@@ -41,6 +41,7 @@ export default function PendingApprovals() {
   const [filterType, setFilterType] = useState("all");
   const [acting, setActing] = useState(null);  // { item, action: "approve" | "reject" | "send_back" }
   const [remarks, setRemarks] = useState("");
+  const [confirmBusy, setConfirmBusy] = useState(false);  // guards double-submit on approvals
   // Payer roster (accountants, admins, cashiers…). Lazily fetched the first
   // time an accountant opens the approve dialog for a payment/reimbursement.
   const [payers, setPayers] = useState([]);
@@ -130,6 +131,7 @@ export default function PendingApprovals() {
 
   const confirmAct = async () => {
     if (!acting) return;
+    if (confirmBusy) return;  // guard: rapid double-click won't fire twice
     if (!remarks.trim() || remarks.trim().length < 3) {
       toast.error("Remarks required (min 3 chars)");
       return;
@@ -146,6 +148,7 @@ export default function PendingApprovals() {
     }
     const { item, action } = acting;
     const payer = payers.find((p) => p.id === paidByUserId);
+    setConfirmBusy(true);
     try {
       if (item.request_type === "transaction" && item.via === "partner_cross") {
         if (action === "approve") {
@@ -173,6 +176,7 @@ export default function PendingApprovals() {
       setActing(null);
       load();
     } catch (e) { toast.error(formatError(e)); }
+    finally { setConfirmBusy(false); }
   };
 
   const openDetail = (item) => {
@@ -566,19 +570,26 @@ export default function PendingApprovals() {
             <Button variant="outline" onClick={() => setActing(null)} className="rounded-none">Cancel</Button>
             <Button
               onClick={confirmAct}
+              disabled={confirmBusy}
               className={`rounded-none gap-1 ${
                 acting?.action === "approve"
                   ? "brand-btn"
                   : (acting?.action === "reject"
                       ? "bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90"
                       : "bg-amber-600 text-white hover:bg-amber-700")
-              }`}
+              } ${confirmBusy ? "opacity-60 cursor-not-allowed" : ""}`}
               data-testid="confirm-act"
             >
-              {acting?.action === "approve" && <Check size={14} />}
-              {acting?.action === "reject" && <X size={14} />}
-              {acting?.action === "send_back" && <Undo2 size={14} />}
-              Confirm {acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")}
+              {confirmBusy ? (
+                <>⏳ Processing…</>
+              ) : (
+                <>
+                  {acting?.action === "approve" && <Check size={14} />}
+                  {acting?.action === "reject" && <X size={14} />}
+                  {acting?.action === "send_back" && <Undo2 size={14} />}
+                  Confirm {acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")}
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>
