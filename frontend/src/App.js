@@ -71,7 +71,7 @@ function App() {
             <Route path="/approvals" element={<ProtectedRoute><Shell><ApprovalLog /></Shell></ProtectedRoute>} />
             <Route path="/approval-workflows" element={<ProtectedRoute><Shell><ApprovalWorkflows /></Shell></ProtectedRoute>} />
             <Route path="/hr-settings" element={<ProtectedRoute><Shell><HrSettings /></Shell></ProtectedRoute>} />
-            <Route path="/programs" element={<ProtectedRoute requireFinance><Shell><Programs /></Shell></ProtectedRoute>} />
+            <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
             <Route path="/tds-register" element={<ProtectedRoute requireFinance><Shell><TdsRegister /></Shell></ProtectedRoute>} />
             <Route path="/pending-approvals" element={<ProtectedRoute><Shell><PendingApprovals /></Shell></ProtectedRoute>} />

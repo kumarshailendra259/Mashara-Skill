@@ -8179,7 +8179,7 @@ class ReceivePaymentIn(BaseModel):
 
 @api.get("/batches", response_model=List[BatchOut])
 async def list_batches(project_id: Optional[str] = None, center_id: Optional[str] = None,
-                       user=Depends(require_finance_visible)):
+                       user=Depends(require_role("admin", "manager", "senior_manager", "hr", "accountant", "partner", "center_manager", "center_staff"))):
     q: dict = {}
     if project_id:
         q["project_id"] = project_id
@@ -8205,12 +8205,19 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
 
 
 @api.post("/batches", response_model=BatchOut)
-async def create_batch(body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager"))):
+async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manager", "senior_manager", "center_manager"))):
     # Validate referenced project / center actually exist
     if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "project_id does not exist")
     if body.center_id and not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "center_id does not exist")
+    # Center manager can only create batches at their assigned centers.
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if not body.center_id:
+            raise HTTPException(400, "center_id is required for center_manager")
+        if body.center_id not in assigned:
+            raise HTTPException(403, "center_manager can only create batches at assigned centers")
     # Validate all partner_ids
     if body.partner_ids:
         cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
@@ -8224,7 +8231,7 @@ async def create_batch(body: BatchIn, _=Depends(require_role("admin", "manager",
 
 
 @api.put("/batches/{bid}", response_model=BatchOut)
-async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager"))):
+async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
     # Re-validate same FKs as create (project/center/partners)
     if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "project_id does not exist")
@@ -8534,7 +8541,7 @@ async def delete_batch_payment(pid: str, _=Depends(require_role("admin"))):
 
 # ---------- Batch Close / Reopen ----------
 @api.patch("/batches/{bid}/close")
-async def close_batch(bid: str, _=Depends(require_role("admin", "manager", "senior_manager"))):
+async def close_batch(bid: str, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
     """Mark a batch as closed. Closed batches reject new fooding entry creation."""
     r = await db.batches.find_one_and_update({"id": bid}, {"$set": {"closed": True}}, return_document=True)
     if not r:

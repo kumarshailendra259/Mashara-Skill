@@ -24,7 +24,7 @@ const navItems = [
   { to: "/partners", key: "partners", icon: Users },
   { to: "/centers", key: "centers", icon: MapPin },
   { to: "/projects", key: "projects", icon: Briefcase },
-  { to: "/programs", key: "programs", icon: Layers, financeOnly: true },
+  { to: "/programs", key: "programs", icon: Layers, programsAccess: true },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
   { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
   { to: "/advances", key: "advances", icon: Wallet },
@@ -163,6 +163,7 @@ export default function Layout({ children }) {
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
       if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
+      if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
       if (it.nonPartner && user?.role === "partner") return false;
       if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;
       return true;

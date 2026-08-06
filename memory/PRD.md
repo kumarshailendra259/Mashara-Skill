@@ -28,6 +28,28 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28C — Batch Role Split (Done, Aug 2026)
+- **User asked**: Center Manager ko SIRF batch CREATE ka adhikar; edit/update Accountant ke paas.
+- **Backend `/app/backend/server.py`**:
+  - `POST /api/batches` — allowed roles: `admin, manager, senior_manager, center_manager`. Center manager ke liye extra guard — `body.center_id` unke `assigned_center_ids` mein hona chahiye, warna 403.
+  - `PUT /api/batches/{bid}` — added `accountant`. Full list: `admin, manager, senior_manager, accountant`.
+  - `PATCH /api/batches/{bid}/close` — added `accountant`.
+  - `GET /api/batches` — guard changed from `require_finance_visible` to explicit role list including `center_manager, center_staff` (already had scoping logic; now the guard admits them).
+  - `DELETE /api/batches` — remains admin-only.
+- **Frontend**:
+  - `Programs.jsx` — split `canEditBatches` into three vars: `canCreateBatch` (admin/manager/sr-mgr/**center_manager**), `canEditBatch` (admin/manager/sr-mgr/**accountant**), `canDeleteBatch` (admin only). New Batch button visible per `canCreateBatch`; Edit + Close/Reopen per `canEditBatch`; Delete per `canDeleteBatch`.
+  - `Layout.jsx` — `/programs` sidebar entry flag changed from `financeOnly` to new `programsAccess` that also admits `center_manager`.
+  - `App.js` — `/programs` route: removed `requireFinance` (Programs page itself handles endpoint 403s via `.catch(() => setPayments([]))`).
+- **Regression pytest** `/app/backend/tests/test_batch_rbac.py`:
+  - CM creates batch at own center → 200 ✓
+  - CM at other center → 403 ✓
+  - CM update → 403 ✓
+  - CM delete → 403 ✓
+  - Accountant update → 200 ✓
+  - Accountant create → 403 ✓
+  - Accountant delete → 403 ✓
+  - All 7 assertions pass. Non-regression on `test_partner_entity_visibility.py`.
+
 ### Phase 28B — Partner Entity Visibility Bugfix (Done, Aug 2026)
 - **User reported (production)**: Partner user "Shyam Kumar" ke Companies page pe "NO DATA YET" show ho raha tha — Shyam ka related company visible nahi tha.
 - **Root cause**: `_visible_entity_ids(user, "company"/"project")` sirf `center_ids` set hone par batches se company_id derive kar raha tha. Jab partner ke assigned batches me `center_id: null` set tha (early-stage batch — sirf partner + company/project tagged, center abhi tak assign nahi), toh company/project visible list ban hi nahi rahi thi.

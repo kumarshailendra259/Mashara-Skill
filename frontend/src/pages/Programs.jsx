@@ -170,7 +170,9 @@ export default function Programs() {
   const { user } = useAuth();
   const canEditPayments = ["admin", "manager", "senior_manager", "accountant"].includes(user?.role);
   const canReceive = ["admin", "accountant", "senior_manager"].includes(user?.role);
-  const canEditBatches = ["admin", "manager", "senior_manager"].includes(user?.role);
+  const canCreateBatch = ["admin", "manager", "senior_manager", "center_manager"].includes(user?.role);
+  const canEditBatch = ["admin", "manager", "senior_manager", "accountant"].includes(user?.role);
+  const canDeleteBatch = user?.role === "admin";
 
   const [projects, setProjects] = useState([]);
   const [centers, setCenters] = useState([]);
@@ -538,12 +540,12 @@ export default function Programs() {
                   </div>
                 </div>
                 <div className="flex items-end gap-2 no-print">
-                  {canEditBatches && (
+                  {canCreateBatch && (
                     <Button onClick={openNewBatch} className="brand-btn rounded-none gap-1" data-testid="btn-new-batch">
                       <Plus size={14} /> New Batch
                     </Button>
                   )}
-                  {activeBatch && canEditBatches && (
+                  {activeBatch && canEditBatch && (
                     <>
                       <Button variant="outline" onClick={() => openEditBatch(activeBatch)} className="rounded-none" data-testid="btn-edit-batch"><Pencil size={14} /></Button>
                       {activeBatch.closed ? (
@@ -555,8 +557,10 @@ export default function Programs() {
                           <Lock size={14} />
                         </Button>
                       )}
-                      <Button variant="outline" onClick={() => deleteBatch(activeBatch)} className="rounded-none hover:text-[var(--danger)]" data-testid="btn-delete-batch"><Trash2 size={14} /></Button>
                     </>
+                  )}
+                  {activeBatch && canDeleteBatch && (
+                    <Button variant="outline" onClick={() => deleteBatch(activeBatch)} className="rounded-none hover:text-[var(--danger)]" data-testid="btn-delete-batch"><Trash2 size={14} /></Button>
                   )}
                 </div>
               </div>
