@@ -28,6 +28,14 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28H — Partner Batch Scope Bug Fix (Done, Aug 2026)
+- **User reported (prod)**: Partner login (Niranjan Kumar) mein "Ramgarh_10 · BOCWW Ramgarh" batch pe upper KPI cards `Total Configured` / `Total Received` ₹42,97,104 dikhaya jab actual sum sirf ₹4,32,180 tha (1st ₹1,85,220 + 2nd ₹2,46,960). Admin/accountant login mein sahi ₹4,32,180 aa raha tha.
+- **Root cause**: `list_batch_payments` (`GET /api/batch-payments`) aur `list_batches` (`GET /api/batches`) mein partner/center-scoped roles ke liye scoping logic `q["batch_id" or "center_id"] = {"$in": scoped_ids}` UNCONDITIONALLY set kar deta tha — chahe frontend ne specific `batch_id=X` bheja ho ya nahi. Isse specific batch ka query broadening ho ke ALL allowed batches mein change ho jata tha, aur frontend un sabhi payments ko current batch ki mein add karta tha.
+- **Fix `/app/backend/server.py`**:
+  - `list_batch_payments`: Ab `if batch_id:` branch mein sirf authorization check (`batch_id not in allowed → []`) hota hai, `q["batch_id"] = batch_id` filter untouched raheta hai. Broad `$in` filter sirf tab lagta hai jab koi specific batch nahi maanga gaya.
+  - `list_batches`: Same pattern for center_manager/center_staff/partner — specific `center_id` filter respect hota hai; broadening sirf tab jab param blank.
+- **Regression pytest** `/app/backend/tests/test_partner_batch_scope.py`: Seed partner + 2 batches (A: 2 payments, B: 3 payments) at same center. Verify `GET /batch-payments?batch_id=A` returns EXACTLY 2 rows (all `batch_id == A`); `?batch_id=B` returns 3; no-filter returns 5; out-of-scope batch returns `[]`. Also `GET /batches?center_id=X` filters correctly. 6/6 milestone-family tests pass.
+
 ### Phase 28G — Regenerate Missing Milestone Transactions (Done, Aug 2026)
 - **User reported (prod)**: After orphan-cleanup + de-dup ran, received milestones stopped showing on the Milestone Income dashboard.
 - **Root cause**: Earlier permissive Phase-1 backfill in cleanup wrongly re-attributed some legacy milestone txns to unrelated `batch_payments` that shared the same (milestone, amount). Then Phase-3 de-dup, which groups by `(batch_payment_id, source, partner_id, milestone)`, saw those wrongly-attributed txns as duplicates of the real txns and deleted the "extras" — effectively wiping legitimate income rows for their original batches.

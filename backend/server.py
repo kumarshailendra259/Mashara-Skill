@@ -8287,18 +8287,23 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
     role = user.get("role")
     if role in ("center_manager", "center_staff"):
         scoped_ids = user.get("assigned_center_ids") or []
-        if center_id and center_id not in scoped_ids:
-            return []
-        q["center_id"] = {"$in": scoped_ids}
+        if center_id:
+            if center_id not in scoped_ids:
+                return []
+            # Specific center requested — keep the exact filter set above.
+        else:
+            q["center_id"] = {"$in": scoped_ids}
     elif role == "partner":
         # Partner sees only batches at centers where they are mapped.
         await _enrich_user_with_associations(user)
         scoped_ids = user.get("_associated_center_ids") or []
-        if center_id and center_id not in scoped_ids:
-            return []
         if not scoped_ids:
             return []
-        q["center_id"] = {"$in": scoped_ids}
+        if center_id:
+            if center_id not in scoped_ids:
+                return []
+        else:
+            q["center_id"] = {"$in": scoped_ids}
     docs = await db.batches.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
     return [BatchOut(**d) for d in docs]
 
@@ -8663,9 +8668,14 @@ async def list_batch_payments(batch_id: Optional[str] = None, user=Depends(requi
             {"center_id": {"$in": center_ids}}, {"_id": 0, "id": 1},
         ).to_list(5000)
         allowed = [b["id"] for b in scoped_batches]
-        if batch_id and batch_id not in allowed:
-            return []
-        q["batch_id"] = {"$in": allowed}
+        if batch_id:
+            # A specific batch was requested — keep the exact filter (already
+            # set above); only enforce authorization.
+            if batch_id not in allowed:
+                return []
+        else:
+            # No specific batch requested — scope to ALL allowed batches.
+            q["batch_id"] = {"$in": allowed}
     docs = await db.batch_payments.find(q, {"_id": 0}).sort([("batch_id", 1), ("milestone", 1)]).to_list(5000)
     return [BatchPaymentOut(**d) for d in docs]
 
