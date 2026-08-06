@@ -98,19 +98,22 @@ export default function FoodingTab({ batch, companies, partners, canEdit, canRec
     } catch (err) { toast.error(formatError(err)); }
   };
 
+  const [recvBusy, setRecvBusy] = useState(false);
   const openReceive = (e) => {
     setRecvTarget(e);
     setRecvCompanyId(e.company_id || batch.company_id || "");
     setRecvOpen(true);
   };
   const confirmReceive = async () => {
-    if (!recvTarget) return;
+    if (!recvTarget || recvBusy) return;  // guard against rapid double-click
+    setRecvBusy(true);
     try {
       await api.patch(`/fooding-entries/${recvTarget.id}/receive`, { company_id: recvCompanyId || null });
       setRecvOpen(false);
       load();
       toast.success("Received & transactions recorded");
     } catch (e) { toast.error(formatError(e)); }
+    finally { setRecvBusy(false); }
   };
 
   const totals = useMemo(() => {
@@ -261,8 +264,8 @@ export default function FoodingTab({ batch, companies, partners, canEdit, canRec
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRecvOpen(false)} className="rounded-none">Cancel</Button>
-            <Button onClick={confirmReceive} className="brand-btn rounded-none gap-1" data-testid="fooding-recv-confirm"><Check size={14} /> Confirm Receive</Button>
+            <Button variant="outline" onClick={() => setRecvOpen(false)} className="rounded-none" disabled={recvBusy}>Cancel</Button>
+            <Button onClick={confirmReceive} disabled={recvBusy} className={`brand-btn rounded-none gap-1 ${recvBusy ? "opacity-60 cursor-not-allowed" : ""}`} data-testid="fooding-recv-confirm"><Check size={14} /> {recvBusy ? "Processing…" : "Confirm Receive"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

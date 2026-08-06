@@ -797,6 +797,31 @@ async def on_startup():
     await db.payments.create_index([("center_id", 1), ("status", 1)])
     await db.qrn_counters.create_index("center_id", unique=True)
 
+    # Prevent duplicate auto-generated milestone-family transactions from a
+    # single batch_payment (e.g. rapid double-click on Mark Received).
+    # Partial index: only enforced on rows that have batch_payment_id set.
+    # milestone can be null (fooding), partner_id can be null (company share).
+    try:
+        await db.transactions.create_index(
+            [("batch_payment_id", 1), ("source", 1), ("partner_id", 1), ("milestone", 1)],
+            unique=True,
+            name="uniq_batch_payment_source_partner_milestone",
+            partialFilterExpression={"batch_payment_id": {"$type": "string"}},
+        )
+    except Exception:
+        # Existing legacy duplicates would cause the unique index build to fail;
+        # log and continue rather than crashing the whole app startup.
+        logger.exception("Could not create transactions unique index (legacy duplicates present?)")
+    try:
+        await db.transactions.create_index(
+            [("fooding_entry_id", 1), ("source", 1), ("partner_id", 1)],
+            unique=True,
+            name="uniq_fooding_entry_source_partner",
+            partialFilterExpression={"fooding_entry_id": {"$type": "string"}},
+        )
+    except Exception:
+        logger.exception("Could not create fooding transactions unique index")
+
     # Best-effort LibreOffice install for the offer-letter PDF pipeline. Runs
     # in the background so it never blocks startup; when it finishes, offer
     # letters will start delivering as PDF automatically. If apt isn't present
@@ -8316,27 +8341,23 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
                 orphan_ids.append(txn["id"])
             continue
 
-        # Case B: legacy txn — try to backfill via structural match
-        match = await db.batch_payments.find_one(
-            {
-                "status": "received",
-                "milestone": txn.get("milestone"),
-                "amount": txn.get("amount"),
-                "batch_id": {"$exists": True},
-            },
-            {"_id": 0, "id": 1, "batch_id": 1},
-        )
-        if not match and txn.get("center_id") and txn.get("project_id"):
-            # Try again with a per-center match using batch's center_id + project_id
-            candidate_batch = await db.batches.find_one(
+        # Case B: legacy txn — try to backfill via STRICT structural match on
+        # (center_id, project_id, milestone, amount) with status='received'. The
+        # earlier permissive query (milestone+amount only) could backfill onto an
+        # unrelated batch and inflate live totals; that path is removed.
+        match = None
+        if txn.get("center_id") and txn.get("project_id") and txn.get("milestone"):
+            candidate_batches = await db.batches.find(
                 {"center_id": txn["center_id"], "project_id": txn["project_id"]},
                 {"_id": 0, "id": 1},
-            )
-            if candidate_batch:
+            ).to_list(50)
+            candidate_batch_ids = [b["id"] for b in candidate_batches]
+            if candidate_batch_ids:
                 match = await db.batch_payments.find_one(
                     {
-                        "batch_id": candidate_batch["id"],
-                        "milestone": txn.get("milestone"),
+                        "batch_id": {"$in": candidate_batch_ids},
+                        "milestone": txn["milestone"],
+                        "amount": txn["amount"],
                         "status": "received",
                     },
                     {"_id": 0, "id": 1, "batch_id": 1},
@@ -8356,11 +8377,40 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
         r = await db.transactions.delete_many({"id": {"$in": orphan_ids}})
         deleted = r.deleted_count
 
+    # ---- Phase 3: De-duplicate ----
+    # If a single batch_payment produced multiple identical txns (e.g. from rapid
+    # double-click before the idempotency lock was in place), keep the earliest
+    # and remove the rest. Group by (batch_payment_id, source, partner_id, milestone)
+    # — the same tuple that our new unique index enforces going forward.
+    dup_deleted = 0
+    if not dry_run:
+        pipeline = [
+            {"$match": {
+                "source": {"$in": MILESTONE_SOURCES + ["fooding"]},
+                "batch_payment_id": {"$type": "string"},
+            }},
+            {"$group": {
+                "_id": {"bp": "$batch_payment_id", "src": "$source",
+                        "pid": "$partner_id", "ms": "$milestone"},
+                "ids": {"$push": {"id": "$id", "created_at": "$created_at"}},
+                "count": {"$sum": 1},
+            }},
+            {"$match": {"count": {"$gt": 1}}},
+        ]
+        async for group in db.transactions.aggregate(pipeline):
+            # Sort by created_at ascending; keep index 0, delete the rest.
+            rows = sorted(group["ids"], key=lambda r: r.get("created_at") or "")
+            to_delete = [r["id"] for r in rows[1:]]
+            if to_delete:
+                r = await db.transactions.delete_many({"id": {"$in": to_delete}})
+                dup_deleted += r.deleted_count
+
     return {
         "scanned": scanned,
         "backfilled": backfilled,
         "orphans": len(orphan_ids),
         "deleted": deleted,
+        "duplicates_deleted": dup_deleted,
         "dry_run": dry_run,
     }
 
@@ -8466,11 +8516,26 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
       (source='assessment_fee') is recorded for the per-passed-candidate assessment fee.
     - net_amount on the payment row = gross − tds_amount − recovery_amount − assessment_fee_total.
     """
-    rec = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
-    if not rec:
-        raise HTTPException(404, "Not found")
-    if rec["status"] == "received":
+    # STEP 1 — Atomic idempotency lock: flip status from anything-but-'received' to
+    # 'received' in a single conditional update. If the update matches 0 documents,
+    # someone else already flipped it — return 400 idempotently. This closes the
+    # duplicate-receive race that was inflating Milestone Income totals when the
+    # same milestone was mark-received twice.
+    lock = await db.batch_payments.find_one_and_update(
+        {"id": pid, "status": {"$ne": "received"}},
+        {"$set": {
+            "status": "received",
+            "_receive_lock_by": user["id"],
+            "_receive_lock_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if not lock:
+        existing = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
+        if not existing:
+            raise HTTPException(404, "Not found")
+        # Already received — return the persisted row idempotently.
         raise HTTPException(400, "Already received")
+    rec = lock  # snapshot pre-update
     batch = await db.batches.find_one({"id": rec["batch_id"]}, {"_id": 0})
     project_name = ""
     if batch:
@@ -8641,7 +8706,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "assessment_fee_txn_id": assessment_fee_txn_id,
             "company_id": company_id_resolved,
             "net_amount": net_amount,
-        }},
+        }, "$unset": {"_receive_lock_by": "", "_receive_lock_at": ""}},
         return_document=True,
     )
     res.pop("_id", None)
@@ -8790,11 +8855,21 @@ async def receive_fooding(fid: str, body: FoodingReceiveIn = FoodingReceiveIn(),
                           user=Depends(require_role("admin", "accountant", "senior_manager"))):
     """Mark fooding entry as received — creates split income transactions using same
     partner_share_percent logic as milestone payments. NO TDS deduction."""
-    rec = await db.fooding_entries.find_one({"id": fid}, {"_id": 0})
-    if not rec:
-        raise HTTPException(404, "Not found")
-    if rec.get("status") == "received":
+    # Atomic idempotency lock — see receive_batch_payment for full rationale.
+    lock = await db.fooding_entries.find_one_and_update(
+        {"id": fid, "status": {"$ne": "received"}},
+        {"$set": {
+            "status": "received",
+            "_receive_lock_by": user["id"],
+            "_receive_lock_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    if not lock:
+        existing = await db.fooding_entries.find_one({"id": fid}, {"_id": 0})
+        if not existing:
+            raise HTTPException(404, "Not found")
         raise HTTPException(400, "Already received")
+    rec = lock
     batch = await db.batches.find_one({"id": rec["batch_id"]}, {"_id": 0})
     project_name = ""
     if batch:
@@ -8841,6 +8916,8 @@ async def receive_fooding(fid: str, body: FoodingReceiveIn = FoodingReceiveIn(),
             "items": [], "attachments": [],
             "source": "fooding",
             "milestone": None,
+            "batch_id": rec["batch_id"],
+            "fooding_entry_id": fid,
             "created_by": user["id"], "created_at": now,
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
@@ -8853,7 +8930,7 @@ async def receive_fooding(fid: str, body: FoodingReceiveIn = FoodingReceiveIn(),
         {"$set": {
             "status": "received", "received_date": today, "received_by": user["id"],
             "txn_ids": created_txn_ids, "company_id": company_id_resolved,
-        }},
+        }, "$unset": {"_receive_lock_by": "", "_receive_lock_at": ""}},
         return_document=True,
     )
     res.pop("_id", None)

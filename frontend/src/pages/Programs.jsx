@@ -431,6 +431,7 @@ export default function Programs() {
   };
 
   // Receive flow with TDS confirmation
+  const [recvBusy, setRecvBusy] = useState(false);
   const openReceive = (p) => {
     setRecvTarget(p);
     setRecvTds("0");
@@ -439,7 +440,8 @@ export default function Programs() {
     setRecvOpen(true);
   };
   const confirmReceive = async () => {
-    if (!recvTarget) return;
+    if (!recvTarget || recvBusy) return;  // guard against rapid double-click
+    setRecvBusy(true);
     try {
       await api.patch(`/batch-payments/${recvTarget.id}/receive`, {
         tds_percent: parseInt(recvTds, 10) || 0,
@@ -450,6 +452,7 @@ export default function Programs() {
       setRecvOpen(false);
       toast.success("Received & transactions recorded");
     } catch (e) { toast.error(formatError(e)); }
+    finally { setRecvBusy(false); }
   };
 
   const deletePayment = async (p) => {
@@ -1174,9 +1177,9 @@ export default function Programs() {
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRecvOpen(false)} className="rounded-none">Cancel</Button>
-            <Button onClick={confirmReceive} className="brand-btn rounded-none gap-1" data-testid="recv-confirm">
-              <Check size={14} /> Confirm Receive
+            <Button variant="outline" onClick={() => setRecvOpen(false)} className="rounded-none" disabled={recvBusy}>Cancel</Button>
+            <Button onClick={confirmReceive} disabled={recvBusy} className={`brand-btn rounded-none gap-1 ${recvBusy ? "opacity-60 cursor-not-allowed" : ""}`} data-testid="recv-confirm">
+              <Check size={14} /> {recvBusy ? "Processing…" : "Confirm Receive"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -28,6 +28,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28E — Idempotent Receive + Duplicate Cleanup (Done, Aug 2026)
+- **User-reported (production)**: Milestone Income total still inflated after orphan cleanup — actual root cause was **duplicate transactions** created by rapid double-click on "Mark Received" (each click created a fresh set of milestone/recovery/TDS txns even though the batch_payment already had status="received").
+- **Backend `/app/backend/server.py` — atomic receive lock**:
+  - `receive_batch_payment` (`PATCH /api/batch-payments/{pid}/receive`) — first operation is now an **atomic** `find_one_and_update({id: pid, status: {$ne: "received"}}, $set: {status: "received", _receive_lock_by, _receive_lock_at})`. If MongoDB matches 0 documents, the payment was already received → 400 "Already received" (idempotent). Only the winning caller proceeds to create the milestone/recovery/assessment/TDS transactions.
+  - `receive_fooding` (`PATCH /api/fooding-entries/{fid}/receive`) — same lock pattern. Fooding txns now also stamped with `batch_id` + `fooding_entry_id` for cascade delete.
+- **Backend — unique index guardrail**: at startup we build `transactions` unique indexes:
+  - `(batch_payment_id, source, partner_id, milestone)` — partial (only rows with `batch_payment_id: string`).
+  - `(fooding_entry_id, source, partner_id)` — partial (only rows with `fooding_entry_id: string`).
+  Both wrapped in try/except so legacy duplicates don't crash startup.
+- **Backend — cleanup Phase 3 (De-dup)**: `POST /api/batches/cleanup-orphan-txns` now also groups milestone-family txns by `(batch_payment_id, source, partner_id, milestone)` and deletes all but the earliest in each duplicate group. Response payload gains `duplicates_deleted`.
+- **Backend — strict backfill**: The permissive `(milestone, amount)`-only backfill removed. Only strict `(center_id, project_id, milestone, amount, status="received")` correlation is used now, preventing wrong-batch attribution during legacy cleanup.
+- **Frontend — button disabling**:
+  - `Programs.jsx` `confirmReceive` — new `recvBusy` state, dialog "Confirm Receive" button `disabled={recvBusy}`, opacity-60 + "Processing…" label until server responds.
+  - `FoodingTab.jsx` `confirmReceive` — same `recvBusy` guard on the fooding "Confirm Receive" button.
+- **Preview data recovery**: Cleanup with the enhanced de-dup phase deleted 75 duplicate txns → Milestone Income total ₹84,88,457 → ₹19,87,848 (correct after removing double-received duplicates).
+- **Verified**: `test_receive_idempotency.py` — 5 concurrent PATCH calls with same payload → exactly 1×200 + 4×400 "Already received", exactly 1 income txn created, direct duplicate insert blocked by unique index. Plus regression: `test_batch_cascade_cleanup.py`, `test_batch_rbac.py`, `test_partner_entity_visibility.py` — all pass.
+
 ### Phase 28D — Milestone Income Orphan Cleanup + Cascade Delete (Done, Aug 2026)
 - **User reported (prod + preview)**: Milestone Income dashboard was showing inflated totals — e.g., BOCWW Ramgarh ke ~₹47L me ~₹15L wo income entries thin jinke parent batches admin ne delete kar diye the. Turned out `receive_batch_payment` auto-generated income/recovery/assessment/TDS transactions bina `batch_id` / `batch_payment_id` linkage ke create karta tha, aur `DELETE /batches` sirf batch_payments delete karta tha — transactions orphan reh jaate the aur `/dashboard/milestone-income` (which reads `source="milestone"` transactions) unhe count karta rehta tha.
 - **Backend `/app/backend/server.py`**:
