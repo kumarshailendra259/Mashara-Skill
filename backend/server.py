@@ -822,6 +822,78 @@ async def on_startup():
     except Exception:
         logger.exception("Could not create fooding transactions unique index")
 
+    # ---- Read-path performance indexes (Phase 28F, Aug 2026) ----------------
+    # These target the hottest query filters across the app so dashboards and
+    # list endpoints don't do full-collection scans. All wrapped in try/except
+    # so a single failure never blocks startup — MongoDB will simply keep the
+    # old query plan for that collection.
+    async def _safe_idx(coll, keys, **kw):
+        try:
+            await db[coll].create_index(keys, **kw)
+        except Exception:
+            logger.exception("Failed to create index on %s: %s", coll, keys)
+
+    # transactions — the single hottest collection (dashboards, ledger, milestone,
+    # payment dashboard, settlement, TDS register all read from here).
+    await _safe_idx("transactions", [("source", 1), ("status", 1)])
+    await _safe_idx("transactions", [("center_id", 1), ("date", -1)])
+    await _safe_idx("transactions", [("project_id", 1), ("date", -1)])
+    await _safe_idx("transactions", [("partner_id", 1), ("status", 1)])
+    await _safe_idx("transactions", [("company_id", 1), ("date", -1)])
+    await _safe_idx("transactions", [("type", 1), ("date", -1)])
+    await _safe_idx("transactions", [("status", 1), ("current_level", 1)])
+    await _safe_idx("transactions", [("batch_id", 1)])
+    await _safe_idx("transactions", [("batch_payment_id", 1)])
+    await _safe_idx("transactions", [("created_by", 1), ("created_at", -1)])
+
+    # Attendance — self-check-in + HR list; queries by staff, center + date range.
+    await _safe_idx("attendance", [("staff_id", 1), ("date", -1)])
+    await _safe_idx("attendance", [("center_id", 1), ("date", -1)])
+    await _safe_idx("attendance", [("date", -1), ("status", 1)])
+
+    # Staff — center scoping is on every HRMS + attendance query.
+    await _safe_idx("staff", [("center_id", 1), ("is_active", 1)])
+    await _safe_idx("staff", [("user_id", 1)])
+    await _safe_idx("staff", [("employee_code", 1)])
+
+    # Leaves / Reimbursements / Regularisations — approval inbox + staff dashboards.
+    await _safe_idx("leaves", [("created_by", 1), ("status", 1)])
+    await _safe_idx("leaves", [("status", 1), ("current_level", 1)])
+    await _safe_idx("reimbursements", [("created_by", 1), ("status", 1)])
+    await _safe_idx("reimbursements", [("status", 1), ("current_level", 1)])
+    await _safe_idx("regularisations", [("status", 1), ("current_level", 1)])
+
+    # Payroll — month/year lookups + per-staff history.
+    await _safe_idx("payroll", [("staff_id", 1), ("year", -1), ("month", -1)])
+    await _safe_idx("payroll", [("year", -1), ("month", -1), ("status", 1)])
+
+    # Advance requests — creator view + approver inbox + overdue scans.
+    await _safe_idx("advance_requests", [("created_by", 1), ("status", 1)])
+    await _safe_idx("advance_requests", [("center_id", 1), ("status", 1)])
+    await _safe_idx("advance_requests", [("status", 1), ("current_level", 1)])
+    await _safe_idx("advance_requests", [("status", 1), ("required_till", 1)])
+    await _safe_idx("advance_requests", [("advance_no", 1)])
+
+    # Quotations / Payments — payment dashboard + approval inbox.
+    await _safe_idx("quotations", [("status", 1), ("current_level", 1)])
+    await _safe_idx("payments", [("status", 1), ("current_level", 1)])
+
+    # Assets / Purchase / Transfers.
+    await _safe_idx("asset_purchase_requests", [("status", 1), ("current_level", 1)])
+    await _safe_idx("asset_transfers", [("status", 1), ("current_level", 1)])
+    await _safe_idx("employee_transfers", [("status", 1), ("current_level", 1)])
+
+    # Batch payments — dashboard reads by status + received_date.
+    await _safe_idx("batch_payments", [("status", 1), ("received_date", -1)])
+    await _safe_idx("fooding_entries", [("batch_id", 1), ("month", 1)])
+    await _safe_idx("fooding_entries", [("status", 1), ("received_date", -1)])
+
+    # Vendors — center-scoped listing.
+    await _safe_idx("vendors", [("center_ids", 1)])
+
+    # Approval log / audit — user + created_at descending.
+    await _safe_idx("audit_log", [("user_id", 1), ("created_at", -1)])
+
     # Best-effort LibreOffice install for the offer-letter PDF pipeline. Runs
     # in the background so it never blocks startup; when it finishes, offer
     # letters will start delivering as PDF automatically. If apt isn't present

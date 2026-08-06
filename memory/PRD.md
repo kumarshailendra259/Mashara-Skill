@@ -28,6 +28,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28F — Read-Path Performance Indexes (Done, Aug 2026)
+- **User asked**: Frequently used fields (source, status, center_id, etc.) par indexes add karein taaki data reading tez ho jaaye.
+- **Backend `/app/backend/server.py` startup**: Added a `_safe_idx(coll, keys, **kw)` helper (wraps every index create in try/except so a single failure never blocks startup) and built compound indexes on the hottest read paths:
+  - **transactions** (10 new): `(source,status)`, `(center_id,date desc)`, `(project_id,date desc)`, `(partner_id,status)`, `(company_id,date desc)`, `(type,date desc)`, `(status,current_level)`, `(batch_id)`, `(batch_payment_id)`, `(created_by,created_at desc)`.
+  - **attendance** (3 new): `(staff_id,date desc)`, `(center_id,date desc)`, `(date desc,status)`.
+  - **staff** (3 new): `(center_id,is_active)`, `(user_id)`, `(employee_code)`.
+  - **leaves / reimbursements / regularisations** (5 new): `(created_by,status)` + `(status,current_level)` on each.
+  - **payroll** (2 new): `(staff_id,year desc,month desc)`, `(year desc,month desc,status)`.
+  - **advance_requests** (5 new): `(created_by,status)`, `(center_id,status)`, `(status,current_level)`, `(status,required_till)`, `(advance_no)`.
+  - **quotations / payments** (2 new): `(status,current_level)` on each.
+  - **assets / transfers** (3 new): `(status,current_level)` on `asset_purchase_requests`, `asset_transfers`, `employee_transfers`.
+  - **batch_payments / fooding_entries** (3 new): status-based dashboards.
+  - **vendors** (1 new): `(center_ids)` for center-scoped listing.
+- **Verified**: Backend restarted clean (no index-build failures). MongoDB `.explain()` confirms the winning plan uses the new indexes:
+  - `source: "milestone", status: "approved"` → `source_1_status_1`
+  - `center_id + date + type: "expense"` → `center_id_1_date_-1`
+  - `status + current_level > 0` → `status_1_current_level_1`
+- **Regression**: 25/25 pytest across `test_receive_idempotency`, `test_batch_cascade_cleanup`, `test_batch_rbac`, `test_partner_entity_visibility`, `test_finance_api` — all pass.
+
 ### Phase 28E — Idempotent Receive + Duplicate Cleanup (Done, Aug 2026)
 - **User-reported (production)**: Milestone Income total still inflated after orphan cleanup — actual root cause was **duplicate transactions** created by rapid double-click on "Mark Received" (each click created a fresh set of milestone/recovery/TDS txns even though the batch_payment already had status="received").
 - **Backend `/app/backend/server.py` — atomic receive lock**:
