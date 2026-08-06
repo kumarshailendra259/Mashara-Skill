@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2,
-  Menu, Fingerprint, MoreHorizontal, Wallet,
+  Menu, Fingerprint, MoreHorizontal, Wallet, PieChart,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +34,7 @@ const navItems = [
   { to: "/assets", key: "assets", icon: Box },
   { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
   { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
+  { to: "/payment-dashboard", key: "payment_dashboard", icon: PieChart, financeOnly: true },
   { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
