@@ -28,6 +28,20 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 28G — Regenerate Missing Milestone Transactions (Done, Aug 2026)
+- **User reported (prod)**: After orphan-cleanup + de-dup ran, received milestones stopped showing on the Milestone Income dashboard.
+- **Root cause**: Earlier permissive Phase-1 backfill in cleanup wrongly re-attributed some legacy milestone txns to unrelated `batch_payments` that shared the same (milestone, amount). Then Phase-3 de-dup, which groups by `(batch_payment_id, source, partner_id, milestone)`, saw those wrongly-attributed txns as duplicates of the real txns and deleted the "extras" — effectively wiping legitimate income rows for their original batches.
+- **Preview evidence**: 108 batch_payments in status=received but 97 of them had 0 corresponding milestone txns.
+- **Fix — new admin endpoint** `POST /api/batches/regenerate-missing-milestone-txns?dry_run={bool}`:
+  - Scans all batch_payments where `status="received"`.
+  - Skips any that already have at least one milestone-family txn (idempotent).
+  - For the rest, reconstructs milestone + candidate_recovery + assessment_fee + tds_deduction transactions using the SAME math as `receive_batch_payment` (gross → partner_pool via `partner_share_percent` split across `partner_ids`; company share; recovery, assessment fee, TDS from persisted `batch_payments` fields). Uses `received_date` as the txn date to preserve historical timing.
+  - Each regenerated txn is tagged with `batch_id`, `batch_payment_id`, and a `_regenerated: true` marker for future audit.
+  - Returns `{scanned, regenerated_payments, transactions_created, skipped, dry_run}`.
+- **Frontend `Programs.jsx`**: New admin-only button "Regenerate Missing Txns" (`btn-regenerate-missing`) next to Cleanup — one-tap recovery with confirmation prompt + detailed toast counts.
+- **Preview data recovery**: 93 payments regenerated → 172 new txns → Milestone Income ₹19,87,848 → ₹1,06,59,643 (correct). Idempotent re-run reports 0 regenerated, 108 skipped.
+- **Regression pytest** `/app/backend/tests/test_regenerate_missing_milestone.py`: seeds a batch + received payment without any txns → dry-run reports 1, DB unchanged → real run creates 1 txn tagged with batch_id + batch_payment_id → re-run creates 0 (idempotent). All 5 milestone-family test files still pass (5/5).
+
 ### Phase 28F — Read-Path Performance Indexes (Done, Aug 2026)
 - **User asked**: Frequently used fields (source, status, center_id, etc.) par indexes add karein taaki data reading tez ho jaaye.
 - **Backend `/app/backend/server.py` startup**: Added a `_safe_idx(coll, keys, **kw)` helper (wraps every index create in try/except so a single failure never blocks startup) and built compound indexes on the hottest read paths:

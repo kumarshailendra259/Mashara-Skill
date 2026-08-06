@@ -8487,6 +8487,167 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
     }
 
 
+@api.post("/batches/regenerate-missing-milestone-txns")
+async def regenerate_missing_milestone_txns(user=Depends(require_role("admin")), dry_run: bool = False):
+    """Reconstruct auto-generated milestone income/recovery/assessment/TDS
+    transactions for any `batch_payments` row that is currently status='received'
+    but has no matching entries in `transactions` (source in the milestone family).
+
+    Why this exists: an earlier cleanup pass wrongly attributed some legacy
+    milestone txns to unrelated batches (permissive backfill), which then made
+    the de-duplicate step delete otherwise-valid income rows for their original
+    batches. This endpoint rebuilds those missing rows using the persisted data
+    on the batch_payment row (amount, milestone, tds_percent, recovery_amount,
+    assessment_fee_total, company_id) plus the parent batch's partner_ids and
+    partner_share_percent — same math as `receive_batch_payment`.
+
+    Skips any batch_payment that already has at least one milestone-source txn
+    (idempotent — safe to re-run).
+
+    `dry_run=true` reports what WOULD be regenerated without writing.
+
+    Returns: `{ scanned, regenerated_payments, transactions_created, skipped, dry_run }`.
+    """
+    scanned = 0
+    regenerated = 0
+    txns_created = 0
+    skipped = 0
+    now = datetime.now(timezone.utc).isoformat()
+
+    async for bp in db.batch_payments.find({"status": "received"}, {"_id": 0}):
+        scanned += 1
+        pid = bp["id"]
+        # Skip if this bp already has ANY milestone-family txn.
+        existing = await db.transactions.count_documents({
+            "batch_payment_id": pid,
+            "source": {"$in": ["milestone", "candidate_recovery", "assessment_fee", "tds_deduction"]},
+        })
+        if existing > 0:
+            skipped += 1
+            continue
+
+        batch = await db.batches.find_one({"id": bp["batch_id"]}, {"_id": 0})
+        if not batch:
+            # Parent batch is gone — cannot reconstruct; leave as-is for the
+            # cleanup endpoint to prune. Not counted as regenerated.
+            continue
+
+        proj = await db.projects.find_one({"id": batch.get("project_id")}, {"_id": 0, "name": 1})
+        project_name = (proj or {}).get("name", "")
+        today = (bp.get("received_date") or now)[:10]
+        partner_ids = list(batch.get("partner_ids") or [])
+        partner_share_pct = float(batch.get("partner_share_percent") or 0)
+        gross = float(bp["amount"])
+        description_base = f"{project_name} — {batch.get('name','')} — {bp['milestone']} milestone"
+        company_id_resolved = bp.get("company_id") or batch.get("company_id")
+        recovery_amount = float(bp.get("recovery_amount") or 0)
+        assessment_fee_total = float(bp.get("assessment_fee_total") or 0)
+        assessment_fee_per = float(bp.get("assessment_fee_per_candidate") or 0)
+        tds_percent = float(bp.get("tds_percent") or 0)
+        uniform_amount = float(bp.get("uniform_amount") or 0)
+        batch_partner_id = partner_ids[0] if len(partner_ids) == 1 else None
+        received_by = bp.get("received_by") or user["id"]
+
+        partner_pool = round(gross * partner_share_pct / 100.0, 2) if partner_ids and partner_share_pct > 0 else 0.0
+        company_amount = round(gross - partner_pool, 2)
+        splits: list[tuple[Optional[str], float, str]] = []
+        if company_amount > 0:
+            sfx = f" (company {round(100.0 - partner_share_pct, 2)}% share)" if partner_pool > 0 else ""
+            splits.append((None, company_amount, sfx))
+        if partner_pool > 0:
+            per_partner = round(partner_pool / len(partner_ids), 2)
+            last = round(partner_pool - per_partner * (len(partner_ids) - 1), 2)
+            for idx, pid_split in enumerate(partner_ids):
+                amt = last if idx == len(partner_ids) - 1 else per_partner
+                sfx = f" (partner share {partner_share_pct}% ÷ {len(partner_ids)} = {round(partner_share_pct / len(partner_ids), 2)}%)"
+                splits.append((pid_split, amt, sfx))
+
+        this_created: list[dict] = []
+        for pid_split, amt, sfx in splits:
+            if amt <= 0:
+                continue
+            this_created.append({
+                "id": str(uuid.uuid4()), "type": "income", "amount": amt,
+                "date": today, "description": description_base + sfx,
+                "company_id": company_id_resolved if pid_split is None else None,
+                "partner_id": pid_split,
+                "center_id": batch.get("center_id"), "project_id": batch.get("project_id"),
+                "items": [], "attachments": [],
+                "source": "milestone", "milestone": bp["milestone"],
+                "batch_id": bp["batch_id"], "batch_payment_id": pid,
+                "created_by": received_by, "created_at": now,
+                "status": "approved", "approved_by": received_by, "approved_at": now,
+                "rejected_reason": None,
+                "_regenerated": True,
+            })
+
+        if recovery_amount > 0:
+            this_created.append({
+                "id": str(uuid.uuid4()), "type": "expense", "amount": recovery_amount,
+                "date": today,
+                "description": f"Candidate-failure recovery (claw-back of 1st-milestone) on {description_base}",
+                "company_id": company_id_resolved, "partner_id": batch_partner_id,
+                "center_id": batch.get("center_id"), "project_id": batch.get("project_id"),
+                "items": [], "attachments": [],
+                "source": "candidate_recovery", "milestone": bp["milestone"],
+                "batch_id": bp["batch_id"], "batch_payment_id": pid,
+                "created_by": received_by, "created_at": now,
+                "status": "approved", "approved_by": received_by, "approved_at": now,
+                "rejected_reason": None, "_regenerated": True,
+            })
+
+        if assessment_fee_total > 0:
+            passed_n = int(batch.get("passed_candidates") or 0)
+            this_created.append({
+                "id": str(uuid.uuid4()), "type": "expense", "amount": assessment_fee_total,
+                "date": today,
+                "description": (
+                    f"Assessment fee on {description_base} (₹{assessment_fee_per:,.2f} × {passed_n} passed)"
+                    if assessment_fee_per > 0 else f"Assessment fee on {description_base}"
+                ),
+                "company_id": company_id_resolved, "partner_id": batch_partner_id,
+                "center_id": batch.get("center_id"), "project_id": batch.get("project_id"),
+                "items": [], "attachments": [],
+                "source": "assessment_fee", "milestone": bp["milestone"],
+                "batch_id": bp["batch_id"], "batch_payment_id": pid,
+                "created_by": received_by, "created_at": now,
+                "status": "approved", "approved_by": received_by, "approved_at": now,
+                "rejected_reason": None, "_regenerated": True,
+            })
+
+        if tds_percent > 0:
+            taxable = max(0.0, gross - uniform_amount - recovery_amount)
+            tds_amount = round(taxable * tds_percent / 100.0, 2)
+            if tds_amount > 0:
+                this_created.append({
+                    "id": str(uuid.uuid4()), "type": "expense", "amount": tds_amount,
+                    "date": today,
+                    "description": f"TDS {tds_percent}% deducted by department on {description_base} (taxable ₹{taxable:,.2f})",
+                    "company_id": company_id_resolved, "partner_id": batch_partner_id,
+                    "center_id": batch.get("center_id"), "project_id": batch.get("project_id"),
+                    "items": [], "attachments": [],
+                    "source": "tds_deduction", "milestone": bp["milestone"],
+                    "batch_id": bp["batch_id"], "batch_payment_id": pid,
+                    "created_by": received_by, "created_at": now,
+                    "status": "approved", "approved_by": received_by, "approved_at": now,
+                    "rejected_reason": None, "_regenerated": True,
+                })
+
+        if this_created:
+            if not dry_run:
+                await db.transactions.insert_many(this_created)
+            regenerated += 1
+            txns_created += len(this_created)
+
+    return {
+        "scanned": scanned,
+        "regenerated_payments": regenerated,
+        "transactions_created": txns_created,
+        "skipped": skipped,
+        "dry_run": dry_run,
+    }
+
+
 @api.get("/batch-payments", response_model=List[BatchPaymentOut])
 async def list_batch_payments(batch_id: Optional[str] = None, user=Depends(require_finance_visible)):
     q: dict = {}

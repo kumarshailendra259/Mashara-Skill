@@ -490,7 +490,16 @@ export default function Programs() {
     try {
       const r = await api.post("/batches/cleanup-orphan-txns");
       const d = r.data || {};
-      toast.success(`Cleanup done — scanned ${d.scanned}, backfilled ${d.backfilled}, deleted ${d.deleted}`);
+      toast.success(`Cleanup done — scanned ${d.scanned}, backfilled ${d.backfilled}, deleted ${d.deleted}, dup deleted ${d.duplicates_deleted || 0}`);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const runRegenerateMissing = async () => {
+    if (!window.confirm("Rebuild income transactions for any 'Received' milestone payment that lost its txns. Safe & idempotent. Continue?")) return;
+    try {
+      const r = await api.post("/batches/regenerate-missing-milestone-txns");
+      const d = r.data || {};
+      toast.success(`Regenerate done — scanned ${d.scanned}, payments regenerated ${d.regenerated_payments}, txns created ${d.transactions_created}, skipped ${d.skipped}`);
     } catch (e) { toast.error(formatError(e)); }
   };
 
@@ -503,16 +512,28 @@ export default function Programs() {
         </div>
         <div className="flex items-center gap-2">
           {user?.role === "admin" && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={runOrphanCleanup}
-              className="rounded-none"
-              title="Backfill or delete milestone transactions whose parent batch no longer exists"
-              data-testid="btn-cleanup-orphans"
-            >
-              Cleanup Orphan Txns
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={runRegenerateMissing}
+                className="rounded-none"
+                title="Rebuild income transactions for Received milestone payments that lost their txns"
+                data-testid="btn-regenerate-missing"
+              >
+                Regenerate Missing Txns
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={runOrphanCleanup}
+                className="rounded-none"
+                title="Backfill or delete milestone transactions whose parent batch no longer exists"
+                data-testid="btn-cleanup-orphans"
+              >
+                Cleanup Orphan Txns
+              </Button>
+            </>
           )}
           <PrintButton />
         </div>
