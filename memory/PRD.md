@@ -28,7 +28,21 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
-### Phase 27I — Pending Approvals Row Polish (Done, Jul 2026)
+### Phase 28 — Payment Dashboard + Approval Double-Submit Prevention (Done, Aug 2026)
+- **User asked**: (a) Approvals ka double-submit bug fix karo — same request cheez do baar dabne pe duplicate transaction ban jaati thi. (b) Ek naya Payment Dashboard chahiye jismein Daily/Weekly/Monthly expenses, Upcoming Payments, Center-wise & Project-wise breakdown, aur Income pie chart dikhe.
+- **Double-Submit Fix**:
+  - Backend `/api/approvals/act` — atomic optimistic lock via `find_one_and_update({id, current_level, status $nin ["paid","approved","rejected"]}, $set: {_processing_lock_by, _processing_lock_at})`. Concurrent duplicate returns **409** "This request is already being processed or was just actioned." Lock is cleared (`$unset`) on every terminal update path (approve/reject/send_back).
+  - Frontend `PendingApprovals.jsx` — new `confirmBusy` state; confirm button `disabled={confirmBusy}` + opacity-60 + loading spinner; guarded rapid-clicks all collapse to a SINGLE POST.
+  - **Verified iter-49**: 4 parallel threads → exactly 1×200 success, 3× rejected (400/409). Frontend rapid-click of 6 = exactly 1 POST.
+- **Payment Dashboard**:
+  - Backend `GET /api/dashboard/payment-summary` (finance-only via `require_finance_visible`). Filters: `center_id`, `partner_id`, `project_id`, `start`, `end`. Returns `kpis` (daily/weekly/monthly/upcoming), `daily_series` (last 30 days), `weekly_series` (last 12 ISO weeks), `monthly_series` (last 12 months), `center_wise` (top-10), `project_wise` (top-10), `income_breakdown` (top-8 categories), `meta.filter_applied`. Auto-scopes for partner/center_manager/center_staff.
+  - Frontend `/app/frontend/src/pages/PaymentDashboard.jsx` — new page at route `/payment-dashboard`. Recharts-based: KPI grid, Daily Line chart, Weekly & Monthly Bar charts, Center-wise & Project-wise horizontal bars, Income pie chart with category legend + percentages. Filter row with Center/Partner/Project selects + date pickers + Reset button + Refresh button.
+  - Sidebar entry `Payment Dashboard` (PieChart icon, `financeOnly: true`) visible only to admin/senior_manager/hr/accountant/partner. Route wrapped in `ProtectedRoute requireFinance`.
+  - **Route-guard tightening**: `ProtectedRoute.jsx` — the `OPS_DASHBOARD_ROLES` bypass now only applies to path `/` (RoleHome). Any other `requireFinance` route redirects center_manager to `/`, preventing them from opening blank finance shells.
+  - **Verified iter-49**: 4/4 backend pytest pass + full Playwright E2E — all KPIs, filters, refresh, sidebar RBAC verified. Admin sees page, center_manager redirected to `/`.
+- **Test IDs added**: `payment-dashboard-page`, `pd-kpi-{daily,weekly,monthly,upcoming}`, `pd-chart-{daily,weekly,monthly,center,project,income}`, `pd-filter-{center,partner,project,start,end,reset}`, `pd-refresh-btn`, `pd-income-row-<i>`.
+
+
 - **User asked**: Description of Item/Service full dikhaye (chhota nahi), bold rakhe, vendor ka naam bhi dikhe with good color.
 - **Frontend**:
   - Removed `line-clamp-2` from row description — full text now wraps with `whitespace-pre-wrap` and `break-words`.

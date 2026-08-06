@@ -1,5 +1,5 @@
 import React from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 
 // Roles that may see investments / income / expense / profit-loss / milestones / TDS.
@@ -19,10 +19,12 @@ const LANDING_FOR_ROLE = {
   viewer:              "/pending-approvals",
   reporting_authority: "/pending-approvals",
   center_partner:      "/pending-approvals",
+  center_manager:      "/",
 };
 
 export default function ProtectedRoute({ children, requireFinance = false }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen text-sm overline" data-testid="loading-screen">
@@ -32,8 +34,9 @@ export default function ProtectedRoute({ children, requireFinance = false }) {
   }
   if (!user) return <Navigate to="/login" replace />;
   if (requireFinance && !FINANCE_VISIBLE_ROLES.includes(user.role)) {
-    // Operational roles (center_manager) get to stay on / — App.js will render the ops dashboard.
-    if (OPS_DASHBOARD_ROLES.includes(user.role)) return children;
+    // Operational roles (center_manager) get to stay ONLY on `/` — App.js will render the ops dashboard.
+    // Any other requireFinance route (e.g. /payment-dashboard, /transactions, /reports) redirects to LANDING.
+    if (OPS_DASHBOARD_ROLES.includes(user.role) && location.pathname === "/") return children;
     return <Navigate to={LANDING_FOR_ROLE[user.role] || "/hrms"} replace />;
   }
   return children;
