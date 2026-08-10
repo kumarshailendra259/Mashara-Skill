@@ -35,6 +35,7 @@ const navItems = [
   { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
   { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
   { to: "/payment-dashboard", key: "payment_dashboard", icon: PieChart, financeOnly: true },
+  { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
   { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
   { to: "/hrms", key: "HRMS", icon: Users },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
@@ -163,6 +164,7 @@ export default function Layout({ children }) {
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
       if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
+      if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
       if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
       if (it.nonPartner && user?.role === "partner") return false;
       if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;

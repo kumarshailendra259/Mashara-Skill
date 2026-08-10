@@ -66,9 +66,11 @@ export default function Advances() {
   const [trackId, setTrackId] = useState(null);
   const [releaseOpen, setReleaseOpen] = useState(false);
   const [payers, setPayers] = useState([]);
+  const [bankAccounts, setBankAccounts] = useState([]);
   const [releaseForm, setReleaseForm] = useState({
     payment_mode: "bank", payment_date: new Date().toISOString().slice(0, 10),
     transaction_ref: "", paid_amount: "", paid_by_user_id: "", remarks: "", attachments: [],
+    bank_account_id: "",
   });
 
   // Overdue advances (past required_till without settlement) — red banner + filter chip
@@ -106,6 +108,9 @@ export default function Advances() {
     api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
     api.get("/entities/project").then((r) => setProjects(r.data || [])).catch(() => {});
     api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
+    api.get("/bank-accounts", { params: { active_only: true } })
+      .then((r) => setBankAccounts(r.data || []))
+      .catch(() => setBankAccounts([]));
   }, []);
 
   const create = async () => {
@@ -155,6 +160,7 @@ export default function Advances() {
       payment_date: new Date().toISOString().slice(0, 10),
       transaction_ref: "", paid_amount: String(row.amount || ""),
       paid_by_user_id: user?.id || "", remarks: "", attachments: [],
+      bank_account_id: "",
     });
     setReleaseOpen(true);
   };
@@ -164,10 +170,15 @@ export default function Advances() {
     const paid = Number(releaseForm.paid_amount) || detailRow.amount;
     if (!paid || paid <= 0) { toast.error("Paid amount is required"); return; }
     if (!releaseForm.paid_by_user_id) { toast.error("Please select who is paying"); return; }
+    if (bankAccounts.length > 0 && !releaseForm.bank_account_id) {
+      toast.error("Please pick the Bank/Cash account this advance is being released from");
+      return;
+    }
     try {
       await api.post(`/advance-requests/${detailRow.id}/release`, {
         ...releaseForm,
         paid_amount: paid,
+        bank_account_id: bankAccounts.length > 0 ? (releaseForm.bank_account_id || null) : null,
       });
       toast.success("Advance released — transaction created");
       setReleaseOpen(false); setDetailRow(null);
@@ -668,6 +679,20 @@ export default function Advances() {
                 </SelectContent>
               </Select>
             </div>
+            {bankAccounts.length > 0 && (
+              <div>
+                <Label className="overline">Bank / Cash Account (jahaan se release ho raha hai) <span className="text-red-600">*</span></Label>
+                <Select value={releaseForm.bank_account_id || "__none"} onValueChange={(v) => setReleaseForm({ ...releaseForm, bank_account_id: v === "__none" ? "" : v })}>
+                  <SelectTrigger className="rounded-none" data-testid="rel-bank-account"><SelectValue placeholder="Select account" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none">— Select account —</SelectItem>
+                    {bankAccounts.map((a) => (
+                      <SelectItem key={a.id} value={a.id}>{a.name} — Balance ₹{Number(a.current_balance || 0).toLocaleString("en-IN")}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div>
               <Label className="overline">Remarks</Label>
               <Textarea value={releaseForm.remarks} onChange={(e) => setReleaseForm({ ...releaseForm, remarks: e.target.value })} rows={2} className="rounded-none" />

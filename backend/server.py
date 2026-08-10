@@ -410,6 +410,10 @@ class ApprovalActionIn(BaseModel):
     # money. If left blank we derive from the request's linked center as before.
     txn_center_id: Optional[str] = None
     txn_partner_id: Optional[str] = None
+    # Bank/Cash Reconciliation (Phase 29) — which account to debit for this
+    # outflow. Required at final-approval step of payment / reimbursement whenever
+    # any bank_account is configured. Auto-posts a debit to the ledger.
+    bank_account_id: Optional[str] = None
 
 
 def _txn_scope_for_user(user: dict) -> dict:
@@ -893,6 +897,12 @@ async def on_startup():
 
     # Approval log / audit — user + created_at descending.
     await _safe_idx("audit_log", [("user_id", 1), ("created_at", -1)])
+
+    # Bank / Cash Reconciliation (Phase 29).
+    await _safe_idx("bank_accounts", [("is_active", -1), ("name", 1)])
+    await _safe_idx("bank_transactions", [("account_id", 1), ("date", -1)])
+    await _safe_idx("bank_transactions", [("source", 1), ("date", -1)])
+    await _safe_idx("bank_transactions", [("center_id", 1), ("date", -1)])
 
     # Best-effort LibreOffice install for the offer-letter PDF pipeline. Runs
     # in the background so it never blocks startup; when it finishes, offer
@@ -5038,6 +5048,31 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 txn["advance_no"] = rec.get("advance_no")
                 txn["is_advance_adjustment"] = True
             await db.transactions.insert_one(txn)
+            # Bank/Cash Reconciliation (Phase 29): debit the chosen bank/cash
+            # account UNLESS this payment is funded by an already-released advance
+            # (in which case the outflow was booked at advance-release time).
+            if not adv_id:
+                acct = await _require_bank_account_if_configured(body.bank_account_id)
+                if acct:
+                    ledger_row = await _post_bank_ledger(
+                        account_id=acct["id"], direction="debit",
+                        amount=float(rec["actual_amount"]),
+                        source="payment", source_id=rec.get("id"),
+                        remarks=(
+                            f"Payment · QRN {rec.get('qrn','')} · {rec.get('vendor_name','')}"
+                            + (f" · {body.remarks}" if body.remarks else "")
+                        ),
+                        vendor_name=rec.get("vendor_name"),
+                        center_id=eff_center_id, center_name=eff_center_name,
+                        date=pay_date, user=user,
+                    )
+                    txn["bank_account_id"] = acct["id"]
+                    txn["bank_txn_id"] = ledger_row["id"]
+                    # Also persist on the txn row we just inserted.
+                    await db.transactions.update_one(
+                        {"id": txn["id"]},
+                        {"$set": {"bank_account_id": acct["id"], "bank_txn_id": ledger_row["id"]}},
+                    )
             # If this payment adjusts against an advance, reduce the advance balance,
             # append to adjustments log, and flip status → adjusting/settled.
             if adv_id:
@@ -10058,6 +10093,9 @@ class AdvanceReleaseIn(BaseModel):
     paid_by_user_id: Optional[str] = None
     remarks: Optional[str] = None
     attachments: Optional[List[AttachmentRef]] = None
+    # Bank/Cash Reconciliation (Phase 29) — required if any bank_account is
+    # configured. Debits the chosen account by paid_amount.
+    bank_account_id: Optional[str] = None
 
 
 class AdvanceSettleIn(BaseModel):
@@ -10549,6 +10587,25 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "source": "advance_release",
     }
     await db.transactions.insert_one(txn_doc)
+    # Bank/Cash Reconciliation (Phase 29): debit the chosen account for this
+    # advance release. Backward compat: if no bank_accounts configured, skip.
+    acct = await _require_bank_account_if_configured(body.bank_account_id)
+    bank_txn_id = None
+    if acct:
+        ledger_row = await _post_bank_ledger(
+            account_id=acct["id"], direction="debit", amount=float(paid_amount),
+            source="advance", source_id=row["id"],
+            remarks=f"Advance release · {row['advance_no']} · {row['employee_name']}"
+                    + (f" · {body.remarks}" if body.remarks else ""),
+            vendor_name=row.get("employee_name"),
+            center_id=eff_center_id, center_name=None,
+            date=body.payment_date or now_iso[:10], user=user,
+        )
+        bank_txn_id = ledger_row["id"]
+        await db.transactions.update_one(
+            {"id": txn_id},
+            {"$set": {"bank_account_id": acct["id"], "bank_txn_id": bank_txn_id}},
+        )
     await db.advance_requests.update_one({"id": aid}, {"$set": {
         "status": "released",
         "voucher_no": voucher_no,
@@ -10564,6 +10621,8 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "release_remarks": body.remarks,
         "release_attachments": [a.model_dump() if hasattr(a, "model_dump") else a for a in (body.attachments or [])],
         "linked_transaction_id": txn_id,
+        "bank_account_id": (acct or {}).get("id"),
+        "bank_txn_id": bank_txn_id,
         "balance_amount": paid_amount,   # initially = paid; will decrease as expenses adjust in Phase 2
     }})
     # Notify requester
@@ -10958,8 +11017,280 @@ async def list_payment_vouchers(
     return JSONResponse(content=_json_safe(rows), headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"})
 
 
+# ============================================================================
+# Bank / Cash Reconciliation Module (Phase 29, Aug 2026)
+# ----------------------------------------------------------------------------
+# Tracks real-money balances across bank accounts, cash-in-hand, and UPI wallets.
+# Every outflow (payment approve, advance release, reimbursement approve,
+# payroll disburse) atomically debits the chosen account; manual deposits credit.
+# An append-only `bank_transactions` ledger records each movement with a
+# `balance_after` snapshot for audit-safe running balance.
+# ============================================================================
+
+BANK_ACCESS_ROLES = ("admin", "accountant")
+
+
+class BankAccountIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(min_length=1, max_length=80)  # e.g. "SBI Current 1234"
+    type: Literal["bank", "cash", "upi_wallet"]
+    bank_name: Optional[str] = None
+    account_no: Optional[str] = None
+    ifsc: Optional[str] = None
+    upi_id: Optional[str] = None
+    opening_balance: float = Field(default=0, ge=0)
+    is_active: bool = True
+    remarks: Optional[str] = None
+
+
+class BankAccountOut(BankAccountIn):
+    id: str
+    current_balance: float
+    created_by: str
+    created_by_name: Optional[str] = None
+    created_at: str
+
+
+class BankDepositIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    amount: float = Field(gt=0)
+    date: Optional[str] = None  # YYYY-MM-DD, defaults to today
+    remarks: str = Field(min_length=1, max_length=500)
+    source_label: Optional[str] = Field(default=None, max_length=120)  # e.g. "Milestone received — BOCWW batch A"
+
+
+class BankAdjustIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    delta: float  # signed — positive credits, negative debits
+    remarks: str = Field(min_length=3, max_length=500)
+
+
+async def _post_bank_ledger(*, account_id: str, direction: Literal["credit", "debit"],
+                            amount: float, source: str, source_id: Optional[str],
+                            remarks: str, vendor_name: Optional[str] = None,
+                            center_id: Optional[str] = None, center_name: Optional[str] = None,
+                            date: Optional[str] = None, user: dict) -> dict:
+    """Atomic balance mutation + append-only ledger row.
+
+    Raises 400 if the account is missing/inactive or a debit would overdraw.
+    Returns the persisted `bank_transactions` row.
+    """
+    if amount <= 0:
+        raise HTTPException(400, "amount must be > 0")
+    acct = await db.bank_accounts.find_one({"id": account_id}, {"_id": 0})
+    if not acct:
+        raise HTTPException(404, "Bank account not found")
+    if not acct.get("is_active", True):
+        raise HTTPException(400, "Bank account is inactive")
+
+    delta = amount if direction == "credit" else -amount
+    # Guard against overdraft on debit — atomic conditional update.
+    filter_ = {"id": account_id, "is_active": True}
+    if direction == "debit":
+        filter_["current_balance"] = {"$gte": amount}
+    updated = await db.bank_accounts.find_one_and_update(
+        filter_, {"$inc": {"current_balance": delta}}, return_document=True,
+    )
+    if not updated:
+        if direction == "debit":
+            raise HTTPException(400, f"Insufficient balance in {acct.get('name')} — available ₹{acct.get('current_balance',0):,.2f}, needed ₹{amount:,.2f}")
+        raise HTTPException(400, "Account update failed")
+
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "id": str(uuid.uuid4()),
+        "account_id": account_id,
+        "account_name": acct.get("name"),
+        "account_type": acct.get("type"),
+        "direction": direction,
+        "amount": round(float(amount), 2),
+        "balance_after": round(float(updated.get("current_balance") or 0), 2),
+        "source": source,       # payment | advance | reimbursement | payroll | deposit | adjustment
+        "source_id": source_id,
+        "remarks": remarks,
+        "vendor_name": vendor_name,
+        "center_id": center_id,
+        "center_name": center_name,
+        "date": date or now[:10],
+        "created_by": user["id"],
+        "created_by_name": user.get("name"),
+        "created_at": now,
+    }
+    await db.bank_transactions.insert_one(row)
+    row.pop("_id", None)
+    return row
+
+
+@api.get("/bank-accounts", response_model=List[BankAccountOut])
+async def list_bank_accounts(active_only: bool = False,
+                             user=Depends(require_role(*BANK_ACCESS_ROLES))):
+    q = {"is_active": True} if active_only else {}
+    docs = await db.bank_accounts.find(q, {"_id": 0}).sort([("is_active", -1), ("name", 1)]).to_list(500)
+    return [BankAccountOut(**d) for d in docs]
+
+
+@api.post("/bank-accounts", response_model=BankAccountOut)
+async def create_bank_account(body: BankAccountIn, user=Depends(require_role("admin"))):
+    if body.type == "bank" and not (body.account_no and body.ifsc):
+        raise HTTPException(400, "Bank type requires account_no and IFSC")
+    if body.type == "upi_wallet" and not body.upi_id:
+        raise HTTPException(400, "UPI Wallet type requires upi_id")
+    doc = body.model_dump()
+    doc["id"] = str(uuid.uuid4())
+    doc["current_balance"] = float(body.opening_balance)
+    doc["created_by"] = user["id"]
+    doc["created_by_name"] = user.get("name")
+    doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    await db.bank_accounts.insert_one(doc)
+    # If opening_balance > 0, seed an "opening" credit in the ledger so the audit
+    # trail explains where the initial balance came from.
+    if float(body.opening_balance) > 0:
+        await db.bank_transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "account_id": doc["id"], "account_name": doc["name"], "account_type": doc["type"],
+            "direction": "credit", "amount": round(float(body.opening_balance), 2),
+            "balance_after": round(float(body.opening_balance), 2),
+            "source": "opening_balance", "source_id": None,
+            "remarks": "Opening balance at account creation",
+            "vendor_name": None, "center_id": None, "center_name": None,
+            "date": doc["created_at"][:10],
+            "created_by": user["id"], "created_by_name": user.get("name"),
+            "created_at": doc["created_at"],
+        })
+    return BankAccountOut(**doc)
+
+
+@api.patch("/bank-accounts/{aid}", response_model=BankAccountOut)
+async def update_bank_account(aid: str, body: BankAccountIn, user=Depends(require_role("admin"))):
+    """Edit metadata only — current_balance is never modified through this path."""
+    update = body.model_dump(exclude={"opening_balance"})
+    r = await db.bank_accounts.find_one_and_update(
+        {"id": aid}, {"$set": update}, return_document=True,
+    )
+    if not r:
+        raise HTTPException(404, "Not found")
+    return BankAccountOut(**{k: v for k, v in r.items() if k != "_id"})
+
+
+@api.delete("/bank-accounts/{aid}")
+async def delete_bank_account(aid: str, _=Depends(require_role("admin"))):
+    n = await db.bank_transactions.count_documents({"account_id": aid})
+    if n > 0:
+        raise HTTPException(400, f"Cannot delete — {n} ledger entries exist. Deactivate the account instead.")
+    r = await db.bank_accounts.delete_one({"id": aid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.post("/bank-accounts/{aid}/deposit")
+async def deposit_to_bank_account(aid: str, body: BankDepositIn,
+                                  user=Depends(require_role(*BANK_ACCESS_ROLES))):
+    row = await _post_bank_ledger(
+        account_id=aid, direction="credit", amount=body.amount,
+        source="deposit", source_id=None,
+        remarks=body.remarks + (f" · {body.source_label}" if body.source_label else ""),
+        date=body.date, user=user,
+    )
+    return {"ok": True, "transaction": row}
+
+
+@api.post("/bank-accounts/{aid}/adjust")
+async def adjust_bank_account(aid: str, body: BankAdjustIn,
+                              user=Depends(require_role("admin"))):
+    if body.delta == 0:
+        raise HTTPException(400, "delta must be non-zero")
+    direction = "credit" if body.delta > 0 else "debit"
+    row = await _post_bank_ledger(
+        account_id=aid, direction=direction, amount=abs(body.delta),
+        source="adjustment", source_id=None,
+        remarks=f"Admin adjustment: {body.remarks}", user=user,
+    )
+    return {"ok": True, "transaction": row}
+
+
+@api.get("/bank-transactions")
+async def list_bank_transactions(
+    account_id: Optional[str] = None,
+    source: Optional[str] = None,
+    center_id: Optional[str] = None,
+    from_date: Optional[str] = Query(default=None, alias="from"),
+    to_date: Optional[str] = Query(default=None, alias="to"),
+    q: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    user=Depends(require_role(*BANK_ACCESS_ROLES)),
+):
+    query: dict = {}
+    if account_id:
+        query["account_id"] = account_id
+    if source:
+        query["source"] = source
+    if center_id:
+        query["center_id"] = center_id
+    if from_date or to_date:
+        drange: dict = {}
+        if from_date:
+            drange["$gte"] = from_date
+        if to_date:
+            drange["$lte"] = to_date
+        query["date"] = drange
+    if q:
+        rx = {"$regex": q.strip(), "$options": "i"}
+        query["$or"] = [{"vendor_name": rx}, {"remarks": rx}, {"center_name": rx}, {"account_name": rx}]
+    total = await db.bank_transactions.count_documents(query)
+    rows = await db.bank_transactions.find(query, {"_id": 0}).sort([
+        ("date", -1), ("created_at", -1),
+    ]).skip(skip).limit(min(limit, 500)).to_list(min(limit, 500))
+    from starlette.responses import JSONResponse
+    # Sum totals for the current filter — useful for header KPIs.
+    tot_credit = 0.0; tot_debit = 0.0
+    async for row in db.bank_transactions.aggregate([
+        {"$match": query},
+        {"$group": {"_id": "$direction", "sum": {"$sum": "$amount"}}},
+    ]):
+        if row["_id"] == "credit":
+            tot_credit = float(row["sum"])
+        else:
+            tot_debit = float(row["sum"])
+    return JSONResponse(
+        content=_json_safe({
+            "rows": rows,
+            "total_credit": round(tot_credit, 2),
+            "total_debit": round(tot_debit, 2),
+            "net": round(tot_credit - tot_debit, 2),
+        }),
+        headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"},
+    )
+
+
+# ---- Integration hooks ----------------------------------------------------
+# Below sections extend existing endpoints (payment approval, advance release,
+# reimbursement, payroll) to accept an optional `bank_account_id` and post a
+# debit ledger row.  The bank_account_id becomes MANDATORY once at least one
+# bank_account exists in the DB — this is enforced at each hook site.
+
+
+async def _require_bank_account_if_configured(bank_account_id: Optional[str]) -> Optional[dict]:
+    """If any bank account exists, callers must pass a bank_account_id. Returns
+    the resolved account doc (or None if no accounts configured yet — backwards
+    compatible for brand-new deployments).
+    """
+    n = await db.bank_accounts.count_documents({"is_active": True})
+    if n == 0:
+        return None  # No accounts yet — skip debit; user hasn't onboarded module.
+    if not bank_account_id:
+        raise HTTPException(400, "bank_account_id is required — pick which account to debit")
+    acct = await db.bank_accounts.find_one({"id": bank_account_id, "is_active": True}, {"_id": 0})
+    if not acct:
+        raise HTTPException(400, "Selected bank account not found or inactive")
+    return acct
+
+
 # ---------- Register router + CORS ----------
 app.include_router(api)
+
+
 
 app.add_middleware(
     CORSMiddleware,

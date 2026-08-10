@@ -31,6 +31,7 @@ import CenterManagerDashboard from "@/pages/CenterManagerDashboard";
 import Quotations from "@/pages/Quotations";
 import Vendors from "@/pages/Vendors";
 import PaymentDashboard from "@/pages/PaymentDashboard";
+import BankReconciliation from "@/pages/BankReconciliation";
 import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
@@ -80,6 +81,7 @@ function App() {
             <Route path="/employee-transfers" element={<ProtectedRoute><Shell><EmployeeTransfers /></Shell></ProtectedRoute>} />
             <Route path="/quotations" element={<ProtectedRoute><Shell><Quotations /></Shell></ProtectedRoute>} />
             <Route path="/payment-dashboard" element={<ProtectedRoute requireFinance><Shell><PaymentDashboard /></Shell></ProtectedRoute>} />
+            <Route path="/bank-reconciliation" element={<ProtectedRoute><Shell><BankReconciliation /></Shell></ProtectedRoute>} />
             <Route path="/vendors" element={<ProtectedRoute><Shell><Vendors /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />

@@ -28,6 +28,34 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 29 — Bank / Cash Reconciliation (Done, Aug 2026)
+- **User asked**: Ek menu banao "Bank/Cash Reconciliation" jo sirf admin + accountant ko dikhe. Payment/Advance/Reimbursement/Payroll disbursements pe accountant chuni hui account se paisa deduct ho, wallet me actual live balance dikhe, aur transaction log niche same page pe show ho — kis vendor/center ko kya diya, remarks ke saath.
+- **Backend `/app/backend/server.py` (Phase 29 module)** — new collections + endpoints:
+  - `bank_accounts`: `{id, name, type (bank|cash|upi_wallet), bank_name, account_no, ifsc, upi_id, opening_balance, current_balance, is_active, remarks, created_by, created_at}`
+  - `bank_transactions` (append-only ledger): `{id, account_id, account_name, account_type, direction (credit|debit), amount, balance_after, source (payment|advance|reimbursement|payroll|deposit|adjustment|opening_balance), source_id, remarks, vendor_name, center_id, center_name, date, created_by, created_by_name, created_at}`
+  - Helper `_post_bank_ledger(...)` — atomic conditional `find_one_and_update({id, is_active, current_balance>=amount}, {$inc: current_balance ±amount})` + ledger insert. Overdraft-safe (returns 400 if balance short); no negative balances possible.
+  - `GET /bank-accounts` (admin, accountant) — list accounts.
+  - `POST /bank-accounts` (admin) — create with opening_balance; seeds an "opening_balance" credit ledger row.
+  - `PATCH /bank-accounts/{aid}` (admin) — edit metadata (never balance).
+  - `DELETE /bank-accounts/{aid}` (admin) — only if 0 ledger entries (else prompts to deactivate).
+  - `POST /bank-accounts/{aid}/deposit` (admin, accountant) — manual credit with remarks + optional source_label.
+  - `POST /bank-accounts/{aid}/adjust` (admin) — signed delta correction (audit-logged as source="adjustment").
+  - `GET /bank-transactions` (admin, accountant) — combined ledger with filters: `account_id`, `source`, `center_id`, `from`, `to`, `q` (search vendor/remarks/center). Returns `{rows, total_credit, total_debit, net}` + `X-Total-Count`.
+  - New startup indexes: `bank_accounts(is_active desc, name)`, `bank_transactions(account_id, date desc)`, `(source, date desc)`, `(center_id, date desc)`.
+- **Backend integration hooks** (Phase 29):
+  - `POST /approvals/act` — new field `bank_account_id`. On the FINAL step of a `payment` request, backend calls `_post_bank_ledger(direction="debit", source="payment", source_id=payment_id)` and stamps `bank_account_id` + `bank_txn_id` on the auto-created `transactions` row. Skips debit when the payment is `funded_by_advance_id` (advance release already booked the outflow).
+  - `POST /advance-requests/{aid}/release` — new field `bank_account_id`. Debits the chosen account by `paid_amount`; stamps IDs onto the linked transaction + advance_request row.
+  - Helper `_require_bank_account_if_configured(bank_account_id)` — makes `bank_account_id` MANDATORY as soon as one active account exists; if zero configured, path stays backward-compatible (no debit, no error).
+- **Frontend — new page** `/app/frontend/src/pages/BankReconciliation.jsx` (route `/bank-reconciliation`):
+  - Two tabs: "Account Balances" (cards with type badge, current balance in num, Deposit + Edit buttons per account) and "Transactions Ledger" (filterable table with credit/debit/balance columns + KPI cards for Credits/Debits/Net).
+  - Admin-only "New Account" dialog — supports Bank / Cash-in-Hand / UPI Wallet with type-conditional required fields (A/C+IFSC for bank; UPI ID for wallet).
+  - Deposit dialog previews "Current → New" balance live.
+- **Frontend — approval dialog** (`PendingApprovals.jsx`): For payment/reimbursement final approvals, a new "Bank / Cash Account" dropdown appears (required when accounts exist) — dropdown shows live balances so the accountant can pick a well-funded account.
+- **Frontend — advance release dialog** (`Advances.jsx`): Same "Bank / Cash Account" dropdown wired into `submitRelease`, mandatory when accounts exist.
+- **Sidebar**: New "Bank / Cash Reconciliation" entry (Wallet icon) via `adminAccountantOnly: true` flag in Layout.jsx nav config; route in App.js.
+- **i18n**: `bank_reconciliation` label added to both English (`Bank / Cash Reconciliation`) and Hindi (`बैंक / कैश Reconciliation`).
+- **Verified**: New pytest `test_bank_reconciliation.py` — CRUD create/list/deposit/adjust, overdraft prevention, viewer 403, delete-with-ledger blocked. 28/28 across all milestone-family + bank tests pass. Screenshot confirms page renders end-to-end (sidebar link visible for admin only; empty-state prompts to create first account).
+
 ### Phase 28H — Partner Batch Scope Bug Fix (Done, Aug 2026)
 - **User reported (prod)**: Partner login (Niranjan Kumar) mein "Ramgarh_10 · BOCWW Ramgarh" batch pe upper KPI cards `Total Configured` / `Total Received` ₹42,97,104 dikhaya jab actual sum sirf ₹4,32,180 tha (1st ₹1,85,220 + 2nd ₹2,46,960). Admin/accountant login mein sahi ₹4,32,180 aa raha tha.
 - **Root cause**: `list_batch_payments` (`GET /api/batch-payments`) aur `list_batches` (`GET /api/batches`) mein partner/center-scoped roles ke liye scoping logic `q["batch_id" or "center_id"] = {"$in": scoped_ids}` UNCONDITIONALLY set kar deta tha — chahe frontend ne specific `batch_id=X` bheja ho ya nahi. Isse specific batch ka query broadening ho ke ALL allowed batches mein change ho jata tha, aur frontend un sabhi payments ko current batch ki mein add karta tha.

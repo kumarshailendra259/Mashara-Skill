@@ -52,6 +52,9 @@ export default function PendingApprovals() {
   const [partners, setPartners] = useState([]);
   const [txnCenterId, setTxnCenterId] = useState("");
   const [txnPartnerId, setTxnPartnerId] = useState("");
+  // Phase 29 — Bank/Cash account for final-step debit of Payment / Reimbursement.
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [bankAccountId, setBankAccountId] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -68,6 +71,10 @@ export default function PendingApprovals() {
     api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
     api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
     api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
+    // Bank/cash accounts for final-approval debit (empty for non-accountant/admin — API will 403).
+    api.get("/bank-accounts", { params: { active_only: true } })
+      .then((r) => setBankAccounts(r.data || []))
+      .catch(() => setBankAccounts([]));
   }, []);
 
   const filtered = useMemo(
@@ -97,6 +104,7 @@ export default function PendingApprovals() {
     setPaidByUserId("");
     setTxnCenterId(item?.summary?.center_id || "");
     setTxnPartnerId("");
+    setBankAccountId("");
     // Ask "Paid By" on the FINAL step of a payment, reimbursement, or advance approval.
     // For advance_request the block is optional but the dropdowns still need populated data.
     if (action === "approve" && item.is_final_step && (
@@ -146,6 +154,17 @@ export default function PendingApprovals() {
       toast.error("Please select the Center for this payment");
       return;
     }
+    // Bank/Cash Reconciliation: payment / reimbursement final approvals must
+    // debit a specific account (once at least one is configured).
+    const needsBankAccount = (
+      needsPaidBy &&
+      (acting.item.request_type === "payment" || acting.item.request_type === "reimbursement") &&
+      bankAccounts.length > 0
+    );
+    if (needsBankAccount && !bankAccountId) {
+      toast.error("Please pick the Bank/Cash account from which this payment is being made");
+      return;
+    }
     const { item, action } = acting;
     const payer = payers.find((p) => p.id === paidByUserId);
     setConfirmBusy(true);
@@ -169,6 +188,7 @@ export default function PendingApprovals() {
           paid_by_name: needsPaidBy ? (payer?.name || null) : null,
           txn_center_id: needsPaidBy ? (txnCenterId || null) : null,
           txn_partner_id: needsPaidBy ? (txnPartnerId || null) : null,
+          bank_account_id: needsBankAccount ? (bankAccountId || null) : null,
         });
       }
       const verb = action === "approve" ? "Approved" : (action === "reject" ? "Rejected" : "Sent back");
@@ -535,6 +555,22 @@ export default function PendingApprovals() {
                       ))}
                     </select>
                   </div>
+                  {(acting.item.request_type === "payment" || acting.item.request_type === "reimbursement") && bankAccounts.length > 0 && (
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Bank / Cash Account (kis account se paisa jayega) *</div>
+                      <select
+                        value={bankAccountId}
+                        onChange={(e) => setBankAccountId(e.target.value)}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="bank-account-select"
+                      >
+                        <option value="">— Select account —</option>
+                        {bankAccounts.map((a) => (
+                          <option key={a.id} value={a.id}>{a.name} — Balance ₹{Number(a.current_balance || 0).toLocaleString("en-IN")}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                   <div className="text-[10px] text-emerald-900/80">
                     {paidByOptional
                       ? "Advance approval hai — abhi Center/Partner/Paid-By skip kar sakte hain, Release step par bhi enter kar sakte hain. Enter karne pe automatically release txn me stamp ho jayega."
