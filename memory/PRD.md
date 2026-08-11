@@ -28,6 +28,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 30B — Attendance Spoofing Security Fix (Done, Aug 2026 — 🚨 CRITICAL)
+- **User reported (production, ⚠️ security)**: Anand Kumar (center_staff, no admin credentials) ke 2026-08-11 ke HR list me row appear ho gaya jismein `Source: ADMIN`, `Punch IN: —`, `Punch OUT: 09:43`, no selfie, no location. User's concern: "Ye toh koi bhi hack kar sakta hai."
+- **Root cause identified**: `POST /api/attendance` endpoint mein `require_role("admin", "manager", "center_manager", "hr", "center_staff")` — `center_staff` role INCLUDED tha. Aur `marked_via` field client-supplied thi (default fallback `"admin"`). Iska matlab ANY logged-in center_staff:
+  1. Kisi bhi `staff_id` ke naam ka attendance row post kar sakta tha (apna ya kisi aur ka)
+  2. Geofence + selfie bypass kar sakta tha (ye endpoint dono nahi check karta)
+  3. `marked_via` client se koi bhi value bhej sakta tha — including "admin" — jo HR dashboard pe "Source: ADMIN" dikha deti thi.
+- **Fix `/app/backend/server.py`**:
+  - **POST /attendance**: Roles reduced to `admin, manager, center_manager, hr` — **center_staff removed**. center_staff ke liye ab sirf `/attendance/self` valid route hai (geofence + selfie enforced).
+  - **Server-authoritative `marked_via`**: Ab hardcoded `doc["marked_via"] = "admin"` — client body ka value ignore. Koi bhi `marked_via="self"` bhej ke source spoof nahi kar sakta.
+  - **Center-manager scoping**: Agar caller `center_manager` hai, `staff_id` ka `center_id` uske `assigned_center_ids` mein hona chahiye — warna 403. Pehle CM koi bhi staff ke liye create/edit kar sakta tha.
+  - Same scoping added to `PATCH /attendance/{aid}` (retro-edit) — CM ab dusre centers ke staff rows edit nahi kar sakta.
+  - Both endpoints ab `marked_by_name` / `edited_by_name` bhi audit stamp karte hain.
+- **Regression pytest** `/app/backend/tests/test_attendance_security.py`:
+  - `test_center_staff_cannot_spoof_admin_attendance`: center_staff → POST /attendance → 403 (both own + other user); admin → POST with `marked_via="self"` → 200, but stored `marked_via` is FORCED to `"admin"`.
+  - `test_center_manager_scoped_to_own_center`: CM can mark own-center staff (200), other-center staff (403).
+- **Verified**: 31/31 total regression pytest pass (security + timezone + bank + milestone suite).
+
 ### Phase 30 — Attendance Timezone + Next-Day Fresh Start (Done, Aug 2026)
 - **User reported (production)**: Screenshot showed Anand Kumar's Home card as "Day Complete" with Check-In "Aug 10, 11:15 PM" and Check-Out "Aug 11, 09:43 AM" — one shift bridging two calendar days. User expected: agar staff previous day punch-out bhool jaye, next day fresh Check-In se start ho.
 - **Root causes**:

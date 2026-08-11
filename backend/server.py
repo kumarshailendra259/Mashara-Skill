@@ -3937,13 +3937,34 @@ async def delete_staff_document(did: str, user=Depends(get_current_user)):
 
 # -------- Attendance --------
 @api.post("/attendance")
-async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin", "manager", "center_manager", "hr", "center_staff"))):
-    # upsert by (staff_id, date)
+async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin", "manager", "center_manager", "hr"))):
+    """Admin/HR path to create or edit an attendance row for a staff.
+    - `center_staff` are intentionally NOT allowed here — they must use
+      `/attendance/self` (geofenced + selfie required). Previously, center_staff
+      could call this endpoint and pass any `staff_id`, `marked_via`, and
+      bypass geofence — a serious spoofing hole (see Phase 30B).
+    - `center_manager` is scoped to staff of their assigned centers only.
+    - `marked_via` is ALWAYS forced to "admin" server-side — client cannot spoof.
+    """
     doc = body.model_dump(exclude_none=True)
+    if not doc.get("staff_id"):
+        raise HTTPException(400, "staff_id is required")
+    if not doc.get("date"):
+        raise HTTPException(400, "date is required")
+    # Scope check for center_manager — cannot mark for staff outside their centers.
+    if user.get("role") == "center_manager":
+        allowed_centers = set(user.get("assigned_center_ids") or [])
+        staff_row = await db.staff.find_one({"id": doc["staff_id"]}, {"_id": 0, "center_id": 1})
+        if not staff_row:
+            raise HTTPException(404, "Staff not found")
+        if staff_row.get("center_id") not in allowed_centers:
+            raise HTTPException(403, "You can only mark attendance for staff at your assigned centers")
     if not doc.get("marked_at"):
         doc["marked_at"] = datetime.now(timezone.utc).isoformat()
-    doc["marked_via"] = doc.get("marked_via") or "admin"
+    # Force server-authoritative source — no client-side spoofing of "self".
+    doc["marked_via"] = "admin"
     doc["marked_by"] = user["id"]
+    doc["marked_by_name"] = user.get("name")
     new_id = str(uuid.uuid4())
     await db.attendance.update_one(
         {"staff_id": doc["staff_id"], "date": doc["date"]},
@@ -3970,10 +3991,17 @@ async def edit_attendance(aid: str, body: AttendanceEditIn, user=Depends(require
     row = await db.attendance.find_one({"id": aid}, {"_id": 0})
     if not row:
         raise HTTPException(404, "Attendance row not found")
+    # Scope: center_manager can only edit rows for staff at their assigned centers.
+    if user.get("role") == "center_manager":
+        allowed_centers = set(user.get("assigned_center_ids") or [])
+        staff_row = await db.staff.find_one({"id": row.get("staff_id")}, {"_id": 0, "center_id": 1})
+        if not staff_row or staff_row.get("center_id") not in allowed_centers:
+            raise HTTPException(403, "You can only edit attendance for staff at your assigned centers")
     update = body.model_dump(exclude_none=True)
     if not update:
         return row
     update["edited_by"] = user["id"]
+    update["edited_by_name"] = user.get("name")
     update["edited_at"] = datetime.now(timezone.utc).isoformat()
     await db.attendance.update_one({"id": aid}, {"$set": update})
     return await db.attendance.find_one({"id": aid}, {"_id": 0})
