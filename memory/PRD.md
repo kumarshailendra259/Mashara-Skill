@@ -28,6 +28,24 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 30 — Attendance Timezone + Next-Day Fresh Start (Done, Aug 2026)
+- **User reported (production)**: Screenshot showed Anand Kumar's Home card as "Day Complete" with Check-In "Aug 10, 11:15 PM" and Check-Out "Aug 11, 09:43 AM" — one shift bridging two calendar days. User expected: agar staff previous day punch-out bhool jaye, next day fresh Check-In se start ho.
+- **Root causes**:
+  1. **UTC vs IST mismatch**: `self_check_in`, `self_check_out`, and `/attendance/today` used `datetime.now(timezone.utc).date()` for the `date` field. At 11:15 PM IST (Aug 10 17:45 UTC → UTC date "2026-08-10"), a check-in was stamped for date "2026-08-10". A follow-up check-out at 9:43 AM IST (Aug 11 04:13 UTC → UTC date "2026-08-11") queried the wrong day and stitched itself into a stale row, producing the confusing display.
+  2. **No previous-day cleanup**: If a staff forgot to punch out, the previous day's row stayed with `check_in_at` set + `check_out_at` empty forever — surfacing on dashboards as "Present" and confusing the client-side "checkedIn / checkedOut" logic.
+- **Backend fix `/app/backend/server.py`**:
+  - New `BUSINESS_TZ = ZoneInfo("Asia/Kolkata")` and helper `_today_ist()` — used consistently across all 3 attendance endpoints (`/attendance/self`, `/attendance/checkout`, `/attendance/today`).
+  - `self_check_in` now runs a preliminary `update_many` that flips ANY previous-day rows (staff_id + date < today_IST + check_in_at set + check_out_at empty) to `status="incomplete"` with an `auto_closed_at` timestamp. `check_out_at` stays empty (we don't fabricate a punch-out timestamp — only close the state).
+  - `list_attendance` `effective_status` recognises `status="incomplete"` explicitly so HR dashboards render an "Incomplete" badge instead of misleading "Present" or "Absent".
+- **Regression pytest** `/app/backend/tests/test_attendance_next_day_fresh.py`:
+  - Seeds yesterday-IST row with check-in only (no check-out).
+  - `/attendance/today` returns empty (fresh start) ✓
+  - New check-in: yesterday's row auto-flipped to `incomplete` + `auto_closed_at` populated; `check_out_at` stays empty (no fake data) ✓
+  - Today's row has check-in stamped at today's IST date ✓
+  - Check-out succeeds and marks today as `present` ✓
+  - Attendance list returns yesterday as `effective_status="incomplete"` and today as `"present"` ✓
+- All 29 milestone/bank/attendance regression tests pass.
+
 ### Phase 29 — Bank / Cash Reconciliation (Done, Aug 2026)
 - **User asked**: Ek menu banao "Bank/Cash Reconciliation" jo sirf admin + accountant ko dikhe. Payment/Advance/Reimbursement/Payroll disbursements pe accountant chuni hui account se paisa deduct ho, wallet me actual live balance dikhe, aur transaction log niche same page pe show ho — kis vendor/center ko kya diya, remarks ke saath.
 - **Backend `/app/backend/server.py` (Phase 29 module)** — new collections + endpoints:

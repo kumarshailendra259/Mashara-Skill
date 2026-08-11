@@ -15,6 +15,17 @@ import bcrypt
 import jwt
 import requests
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
+# App-wide business timezone. All attendance "dates" (which represent the
+# staff's calendar day at their center) are computed in IST so a check-in at
+# 11:15 PM IST belongs to the same calendar day as a check-out at 10:00 PM
+# — not shift into the next UTC day at 6:30 PM local.
+BUSINESS_TZ = ZoneInfo("Asia/Kolkata")
+
+
+def _today_ist() -> str:
+    return datetime.now(BUSINESS_TZ).date().isoformat()
 from typing import Optional, List, Literal
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query, Header
@@ -4008,8 +4019,21 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
                     break
             if not inside:
                 raise HTTPException(400, f"Outside geofence. Nearest: {nearest_name or 'site'} (~{(nearest_dist or 0)/1000:.2f} km away). Move closer to mark attendance.")
-    today = (body.date or datetime.now(timezone.utc).date().isoformat())[:10]
+    today = (body.date or _today_ist())[:10]
     now_iso = datetime.now(timezone.utc).isoformat()
+    # If a previous day's row is still open (staff forgot to punch out),
+    # close it as "incomplete" so today starts fresh. Prevents the display
+    # bug where yesterday's dangling check-in was paired with today's
+    # check-in-as-check-out on the UI.
+    await db.attendance.update_many(
+        {
+            "staff_id": staff["id"],
+            "date": {"$lt": today},
+            "check_in_at": {"$exists": True, "$ne": None},
+            "check_out_at": {"$in": [None, ""]},
+        },
+        {"$set": {"status": "incomplete", "auto_closed_at": now_iso}},
+    )
     doc = {
         "staff_id": staff["id"],
         "date": today,
@@ -4037,7 +4061,7 @@ async def self_check_out(body: CheckOutIn, user=Depends(get_current_user)):
     staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
     if not staff:
         raise HTTPException(400, "Your user is not linked to any staff record.")
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = _today_ist()
     row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     if not row:
         raise HTTPException(400, "Please check in first before checking out.")
@@ -4086,7 +4110,7 @@ async def my_today_attendance(user=Depends(get_current_user)):
     staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
     if not staff:
         return {"staff": None, "attendance": None}
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = _today_ist()
     row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     return {"staff": staff, "attendance": row}
 
@@ -4113,7 +4137,9 @@ async def list_attendance(
     # only punched in but never punched out — instead of misleading "Present".
     for d in docs:
         s = d.get("status")
-        if s == "present" and d.get("check_in_at") and not d.get("check_out_at"):
+        if s == "incomplete":
+            d["effective_status"] = "incomplete"
+        elif s == "present" and d.get("check_in_at") and not d.get("check_out_at"):
             d["effective_status"] = "incomplete"
         elif s == "present" and d.get("check_in_at") and d.get("check_out_at"):
             d["effective_status"] = "present"
