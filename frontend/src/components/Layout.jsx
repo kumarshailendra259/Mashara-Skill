@@ -55,14 +55,17 @@ const DASHBOARD_ROLES = [...FINANCE_VISIBLE_ROLES, "center_manager"];
 
 // Sidebar navigation body — shared between desktop <aside> and the mobile Sheet drawer.
 // Extracted out of Layout to satisfy react/no-unstable-nested-components.
-function SidebarBody({ t, visibleNavItems, badgeFor, onNavigate }) {
+function SidebarBody({ t, visibleNavItems, badgeFor, onNavigate, companyLine }) {
   return (
     <>
       <div className="px-5 py-5 border-b border-[var(--border)]">
         <div className="text-xs overline">Console</div>
         <div className="font-heading text-xl font-black tracking-tight mt-1">{t("app_name")}</div>
         <div className="mt-2 pt-2 border-t border-[var(--border)] text-[10px] leading-tight text-[var(--muted)]" data-testid="company-banner">
-          Welcome to<br /><span className="font-medium text-[var(--ink)]">Mashara Skills and Creative Learning Pvt Ltd</span>
+          Welcome to<br />
+          <span className="font-bold text-[var(--ink)]" data-testid="company-banner-name">
+            {companyLine || "—"}
+          </span>
         </div>
       </div>
       <nav className="flex-1 py-3 overflow-y-auto" data-testid="sidebar-nav">
@@ -107,6 +110,11 @@ export default function Layout({ children }) {
   const [tasks, setTasks] = useState({ txn_pending: 0, reimb_l1: 0, reimb_accountant: 0, reimb_pay: 0, payroll_pay: 0, total: 0 });
   const [notifs, setNotifs] = useState({ items: [], unread: 0 });
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Scoped company names for the sidebar welcome banner — respects the same
+  // visibility rules as /entities/company (partner sees only their mapped
+  // companies; center_manager/staff see companies at their centers; admin
+  // sees everything).
+  const [companyLine, setCompanyLine] = useState("");
 
   useEffect(() => {
     if (!user) return;
@@ -117,6 +125,16 @@ export default function Layout({ children }) {
     load();
     const id = setInterval(load, 30000);
     return () => clearInterval(id);
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) { setCompanyLine(""); return; }
+    api.get("/entities/company")
+      .then((r) => {
+        const names = (r.data || []).map((c) => c.name).filter(Boolean);
+        setCompanyLine(names.length === 0 ? "—" : names.slice(0, 3).join(" · ") + (names.length > 3 ? ` +${names.length - 3}` : ""));
+      })
+      .catch(() => setCompanyLine("—"));
   }, [user]);
 
   const markAllRead = async () => {
@@ -191,7 +209,7 @@ export default function Layout({ children }) {
     <div className="min-h-screen flex" data-testid="app-layout">
       {/* Desktop sidebar */}
       <aside className="w-60 shrink-0 border-r border-[var(--border)] bg-white hidden md:flex md:flex-col">
-        <SidebarBody t={t} visibleNavItems={visibleNavItems} badgeFor={badgeFor} />
+        <SidebarBody t={t} visibleNavItems={visibleNavItems} badgeFor={badgeFor} companyLine={companyLine} />
       </aside>
 
       {/* Mobile drawer (Sheet) */}
@@ -206,6 +224,7 @@ export default function Layout({ children }) {
             visibleNavItems={visibleNavItems}
             badgeFor={badgeFor}
             onNavigate={() => setMobileOpen(false)}
+            companyLine={companyLine}
           />
         </SheetContent>
       </Sheet>
