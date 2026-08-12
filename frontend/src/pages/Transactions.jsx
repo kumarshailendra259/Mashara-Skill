@@ -30,6 +30,8 @@ export default function Transactions() {
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [items, setItems] = useState([]);
   const [filters, setFilters] = useState({ type: "", status: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
+  // Sort state for the txn table — clickable Date and Amount headers cycle desc → asc → desc.
+  const [sort, setSort] = useState({ field: "date", dir: "desc" });
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -57,6 +59,36 @@ export default function Transactions() {
     if (pendingMyApproval) p.status = "pending";
     return p;
   }, [filters, pendingMyApproval]);
+
+  // Client-side sorted view of the loaded transactions.
+  const sortedItems = useMemo(() => {
+    const arr = [...items];
+    const { field, dir } = sort;
+    const mul = dir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      let av, bv;
+      if (field === "amount") { av = Number(a.amount || 0); bv = Number(b.amount || 0); }
+      else { av = a.date || ""; bv = b.date || ""; }
+      if (av === bv) {
+        // Tiebreak on created_at desc so newest still floats.
+        return (b.created_at || "").localeCompare(a.created_at || "");
+      }
+      return av < bv ? -mul : mul;
+    });
+    return arr;
+  }, [items, sort]);
+
+  const toggleSort = (field) => {
+    setSort((s) => (
+      s.field === field
+        ? { field, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { field, dir: field === "amount" ? "desc" : "desc" }
+    ));
+  };
+  const sortIcon = (field) => {
+    if (sort.field !== field) return "↕";
+    return sort.dir === "asc" ? "↑" : "↓";
+  };
 
   const load = () => api.get("/transactions", { params }).then((r) => {
     const list = r.data || [];
@@ -346,9 +378,31 @@ export default function Transactions() {
                   <input type="checkbox" checked={allSelected} onChange={toggleAll} className="cursor-pointer" data-testid="select-all-txn" disabled={eligibleIds.length === 0} />
                 </th>
               )}
-              <th className="text-left p-3">{t("date")}</th>
+              <th className="text-left p-3">
+                <button
+                  type="button"
+                  onClick={() => toggleSort("date")}
+                  className="inline-flex items-center gap-1 hover:text-[var(--ink)] transition-colors"
+                  data-testid="sort-date"
+                  title="Click to sort by date"
+                >
+                  {t("date")}
+                  <span className={`text-xs ${sort.field === "date" ? "text-[var(--brand)] font-bold" : "opacity-40"}`}>{sortIcon("date")}</span>
+                </button>
+              </th>
               <th className="text-left p-3">{t("type")}</th>
-              <th className="text-right p-3">{t("amount")}</th>
+              <th className="text-right p-3">
+                <button
+                  type="button"
+                  onClick={() => toggleSort("amount")}
+                  className="inline-flex items-center gap-1 hover:text-[var(--ink)] transition-colors"
+                  data-testid="sort-amount"
+                  title="Click to sort by amount"
+                >
+                  {t("amount")}
+                  <span className={`text-xs ${sort.field === "amount" ? "text-[var(--brand)] font-bold" : "opacity-40"}`}>{sortIcon("amount")}</span>
+                </button>
+              </th>
               <th className="text-left p-3">{t("company")}</th>
               <th className="text-left p-3">{t("partner")}</th>
               <th className="text-left p-3">{t("center")}</th>
@@ -361,7 +415,7 @@ export default function Transactions() {
           <tbody>
             {items.length === 0 ? (
               <tr><td colSpan={isAdmin ? 11 : 10} className="text-center py-8 overline">{t("no_data")}</td></tr>
-            ) : items.map((it) => (
+            ) : sortedItems.map((it) => (
               <tr key={it.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                 {isAdmin && (
                   <td className="p-3">
