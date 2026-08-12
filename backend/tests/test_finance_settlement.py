@@ -139,41 +139,57 @@ class TestSettlementMath:
         assert len(body["centers"]) == 1
         ctr = body["centers"][0]
         assert ctr["center_id"] == setup_centers["center"]
-        for k in ("center_name", "total_contribution", "fair_share_each",
+        for k in ("center_name", "total_contribution", "total_income",
+                  "profit_loss", "profit_share_each", "fair_share_each",
                   "partner_count", "partners"):
             assert k in ctr
         assert ctr["partner_count"] == 2
-        # total_contribution = 50000+10000 + 30000-15000 = 75000
-        assert ctr["total_contribution"] == 75000
-        assert ctr["fair_share_each"] == 37500
+        # NEW cycle math:
+        #   P1 contribution = 50000+10000 = 60000; P2 contribution = 30000+0 = 30000
+        #   total_contribution = 90000
+        #   total_income = 15000 (only P2's income)
+        #   profit_loss = 15000 - 90000 = -75000
+        #   profit_share_each = -37500
+        #   fair_share = 45000
+        assert ctr["total_contribution"] == 90000
+        assert ctr["total_income"] == 15000
+        assert ctr["profit_loss"] == -75000
+        assert ctr["profit_share_each"] == -37500
+        assert ctr["fair_share_each"] == 45000
         p_by_id = {p["id"]: p for p in ctr["partners"]}
         p1 = p_by_id[setup_centers["p1"]]
         p2 = p_by_id[setup_centers["p2"]]
-        # net contributions
+        # per-partner contribution
+        assert p1["total_contribution"] == 60000
+        assert p2["total_contribution"] == 30000
+        # legacy net still exposed
         assert p1["net_contribution"] == 60000
-        assert p2["net_contribution"] == 15000
-        # adjustments
-        assert p1["adjustment"] == -22500   # receive
-        assert p2["adjustment"] == 22500    # pay
-        # sum of adjustments ≈ 0
+        assert p2["net_contribution"] == 15000  # 30000 - 15000
+        # adjustments (fair_share - contribution)
+        assert p1["adjustment"] == -15000   # over-contributed → receive
+        assert p2["adjustment"] == 15000    # under-contributed → pay
         assert abs(sum(p["adjustment"] for p in ctr["partners"])) < 0.01
-        # profit_share = income - expense
-        assert p1["profit_share"] == -10000
-        assert p2["profit_share"] == 15000
+        # profit_share is EQUAL for all partners (50/50 split of P/L)
+        assert p1["profit_share"] == -37500
+        assert p2["profit_share"] == -37500
+        # final_share = contribution + profit_share
+        assert p1["final_share"] == 60000 + (-37500)  # 22500
+        assert p2["final_share"] == 30000 + (-37500)  # -7500
         # per-partner field presence
         for p in ctr["partners"]:
             for k in ("id", "name", "investment", "income", "expense",
-                      "net_contribution", "profit_share", "fair_share", "adjustment"):
+                      "total_contribution", "net_contribution", "profit_share",
+                      "final_share", "fair_share", "adjustment"):
                 assert k in p
 
     def test_pending_excluded(self, admin, setup_centers):
         r = admin.get(f"{BASE_URL}/api/dashboard/settlement",
                       params={"center_id": setup_centers["center"]})
         ctr = r.json()["centers"][0]
-        # If 99999 pending had been included, P1 income would skew net_contrib hugely.
+        # If 99999 pending had been included, P1 income would skew total hugely.
         p1 = next(p for p in ctr["partners"] if p["id"] == setup_centers["p1"])
         assert p1["income"] == 0
-        assert p1["net_contribution"] == 60000
+        assert p1["total_contribution"] == 60000
 
 
 # ----- Partner scoping -----
@@ -218,4 +234,4 @@ class TestAdminGlobal:
         assert r.status_code == 200
         ctrs = r.json()["centers"]
         assert len(ctrs) == 1
-        assert ctrs[0]["total_contribution"] == 75000
+        assert ctrs[0]["total_contribution"] == 90000

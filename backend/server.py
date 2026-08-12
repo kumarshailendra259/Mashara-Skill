@@ -2713,8 +2713,20 @@ async def _latest_settlement_for_center(cid: str) -> Optional[dict]:
     return doc
 
 
-def _aggregate_partners_for_center(rows: list, p_name: dict) -> list:
-    """Group raw txn aggregation rows into per-partner totals and add fair-share fields."""
+def _aggregate_partners_for_center(rows: list, p_name: dict) -> tuple:
+    """Group raw txn aggregation rows into per-partner totals with settlement fields.
+
+    Formula (Phase 31 — cycle-based partner settlement, Aug 2026):
+      • total_contribution  = investment + expense   (money the partner PUT IN)
+      • total_income        = sum of income across partners (center-level)
+      • profit_loss         = total_income − sum(total_contribution)
+      • profit_share_each   = profit_loss / n  (equal 50-50 split)
+      • final_share         = total_contribution + profit_share_each
+      • fair_share          = sum(total_contribution) / n  (equalized contribution)
+      • adjustment          = fair_share − total_contribution  (positive = partner still owes; negative = to be reimbursed)
+
+    Backward-compatible fields (kept for legacy UI): net_contribution, profit_share.
+    """
     agg: dict = {}
     for r in rows:
         pid = r["_id"]["pid"]
@@ -2724,16 +2736,24 @@ def _aggregate_partners_for_center(rows: list, p_name: dict) -> list:
         })
         agg[pid][r["_id"]["type"]] += r["total"]
     partners = list(agg.values())
-    for p in partners:
-        p["net_contribution"] = p["investment"] + p["expense"] - p["income"]
-        p["profit_share"] = p["income"] - p["expense"]
-    total_contrib = sum(p["net_contribution"] for p in partners)
     n = len(partners) or 1
-    fair_share = total_contrib / n
     for p in partners:
-        p["fair_share"] = round(fair_share, 2)
-        p["adjustment"] = round(fair_share - p["net_contribution"], 2)
-    return partners, total_contrib, fair_share, n
+        # NEW: money the partner put IN (investment + expense) — income NOT netted here.
+        p["total_contribution"] = round(p["investment"] + p["expense"], 2)
+        # LEGACY: kept for existing displays that already computed net.
+        p["net_contribution"] = round(p["investment"] + p["expense"] - p["income"], 2)
+    total_expense = sum(p["total_contribution"] for p in partners)
+    total_income = sum(p["income"] for p in partners)
+    profit_loss = round(total_income - total_expense, 2)
+    profit_share_each = round(profit_loss / n, 2)
+    fair_share = round(total_expense / n, 2)
+    for p in partners:
+        p["profit_share"] = profit_share_each
+        p["final_share"] = round(p["total_contribution"] + profit_share_each, 2)
+        p["fair_share"] = fair_share
+        p["adjustment"] = round(fair_share - p["total_contribution"], 2)
+    # Return tuple carries per-center totals used by the response envelope.
+    return partners, total_expense, fair_share, n, total_income, profit_loss
 
 
 @api.get("/dashboard/settlement")
@@ -2834,10 +2854,12 @@ async def settlement_view(
                     {"id": {"$in": life_partner_ids}}, {"_id": 0, "id": 1, "name": 1},
                 ).to_list(1000)
                 life_p_name = {p["id"]: p["name"] for p in life_pdocs}
-                l_partners, l_total, l_fair, l_n = _aggregate_partners_for_center(life_rows, life_p_name)
+                l_partners, l_total, l_fair, l_n, l_income, l_pl = _aggregate_partners_for_center(life_rows, life_p_name)
                 lifetime_block = {
                     "total_contribution": round(l_total, 2),
                     "fair_share_each": round(l_fair, 2),
+                    "total_income": round(l_income, 2),
+                    "profit_loss": round(l_pl, 2),
                     "partner_count": l_n,
                     "partners": sorted(l_partners, key=lambda x: x["adjustment"]),
                 }
@@ -2855,6 +2877,9 @@ async def settlement_view(
                 "center_id": cid,
                 "center_name": center_name.get(cid, "Unknown"),
                 "total_contribution": 0,
+                "total_income": 0,
+                "profit_loss": 0,
+                "profit_share_each": 0,
                 "fair_share_each": 0,
                 "partner_count": 0,
                 "partners": [],
@@ -2866,12 +2891,16 @@ async def settlement_view(
         p_docs = await db.partners.find({"id": {"$in": pids_needed}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
         p_name = {p["id"]: p["name"] for p in p_docs}
 
-        partners, total_contrib, fair_share, n = _aggregate_partners_for_center(rows, p_name)
+        partners, total_contrib, fair_share, n, total_income, profit_loss = _aggregate_partners_for_center(rows, p_name)
+        profit_share_each = round(profit_loss / n, 2) if n else 0
 
         entry = {
             "center_id": cid,
             "center_name": center_name.get(cid, "Unknown"),
             "total_contribution": round(total_contrib, 2),
+            "total_income": round(total_income, 2),
+            "profit_loss": round(profit_loss, 2),
+            "profit_share_each": profit_share_each,
             "fair_share_each": round(fair_share, 2),
             "partner_count": n,
             "partners": sorted(partners, key=lambda x: x["adjustment"]),

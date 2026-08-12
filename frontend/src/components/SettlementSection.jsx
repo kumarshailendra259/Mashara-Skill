@@ -124,8 +124,8 @@ export default function SettlementSection({ settlement, onSettled }) {
         </div>
       </div>
       <p className="text-sm text-[var(--muted)] mb-4">
-        Net contribution = investment + expense − income. Adjustment shows who should pay or receive to balance.
-        Once a settlement is recorded, balances reset from that date onward.
+        <b>Cycle Math:</b> Contribution = Investment + Expense · Profit/Loss = Total Income − Total Contribution ·
+        Final Share = Contribution + 50% × P/L. Only <b>active cycle</b> transactions (after the last settlement) are counted.
       </p>
 
       <div className="space-y-6">
@@ -141,15 +141,41 @@ export default function SettlementSection({ settlement, onSettled }) {
                 <span className="font-heading font-bold">{c.center_name}</span>
                 {c.settled_till && (
                   <span className="ml-3 text-xs px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    Settled till {c.settled_till} • showing activity after
+                    Settled till {c.settled_till} • Active cycle from next day
                   </span>
                 )}
               </div>
-              <div className="text-sm">
-                <span className="overline mr-2">Fair share / partner</span>
-                <span className="num font-semibold">{inr(c.fair_share_each)}</span>
-              </div>
             </div>
+
+            {/* Active Cycle KPI strip */}
+            {c.partners.length > 0 && (
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-0 border-b border-[var(--border)] bg-white text-sm">
+                <div className="p-3 border-r border-[var(--border)]" data-testid={`kpi-income-${c.center_id}`}>
+                  <div className="overline text-[10px]">Total Income</div>
+                  <div className="num font-semibold value-positive">{inr(c.total_income || 0)}</div>
+                </div>
+                <div className="p-3 border-r border-[var(--border)]" data-testid={`kpi-expense-${c.center_id}`}>
+                  <div className="overline text-[10px]">Total Contribution (Expense)</div>
+                  <div className="num font-semibold value-negative">{inr(c.total_contribution || 0)}</div>
+                </div>
+                <div className="p-3 border-r border-[var(--border)]" data-testid={`kpi-pl-${c.center_id}`}>
+                  <div className="overline text-[10px]">Profit / Loss</div>
+                  <div className={`num font-bold ${(c.profit_loss || 0) >= 0 ? "value-positive" : "value-negative"}`}>
+                    {inr(c.profit_loss || 0)}
+                  </div>
+                </div>
+                <div className="p-3 border-r border-[var(--border)]" data-testid={`kpi-pshare-${c.center_id}`}>
+                  <div className="overline text-[10px]">Profit Share / Partner (50/50)</div>
+                  <div className={`num font-semibold ${(c.profit_share_each || 0) >= 0 ? "value-positive" : "value-negative"}`}>
+                    {inr(c.profit_share_each || 0)}
+                  </div>
+                </div>
+                <div className="p-3" data-testid={`kpi-fair-${c.center_id}`}>
+                  <div className="overline text-[10px]">Fair Share / Partner</div>
+                  <div className="num font-semibold">{inr(c.fair_share_each || 0)}</div>
+                </div>
+              </div>
+            )}
 
             {c.partners.length === 0 ? (
               <div className="p-6 text-center text-sm text-[var(--muted)]">
@@ -162,8 +188,9 @@ export default function SettlementSection({ settlement, onSettled }) {
                     <th className="text-left p-3">{t("partner")}</th>
                     <th className="text-right p-3">{t("investment")}</th>
                     <th className="text-right p-3">{t("expense")}</th>
-                    <th className="text-right p-3">{t("income")}</th>
-                    <th className="text-right p-3">{t("net_contribution")}</th>
+                    <th className="text-right p-3">Contribution</th>
+                    <th className="text-right p-3">Profit Share (50%)</th>
+                    <th className="text-right p-3">Final Share</th>
                     <th className="text-right p-3">{t("adjustment")}</th>
                     {canRecord && <th className="text-right p-3">Action</th>}
                   </tr>
@@ -174,13 +201,15 @@ export default function SettlementSection({ settlement, onSettled }) {
                     const isSettled = Math.abs(adj) < 0.5;
                     const label = isSettled ? t("settled") : adj > 0 ? t("to_pay") : t("to_receive");
                     const color = isSettled ? "text-[var(--muted)]" : adj > 0 ? "value-negative" : "value-positive";
+                    const psColor = (p.profit_share || 0) >= 0 ? "value-positive" : "value-negative";
                     return (
-                      <tr key={p.id} className="border-b border-[var(--border)] last:border-0">
+                      <tr key={p.id} className="border-b border-[var(--border)] last:border-0" data-testid={`settle-row-${c.center_id}-${p.id}`}>
                         <td className="p-3 font-medium">{p.name}</td>
                         <td className="p-3 num">{inr(p.investment)}</td>
                         <td className="p-3 num value-negative">{inr(p.expense)}</td>
-                        <td className="p-3 num value-positive">{inr(p.income)}</td>
-                        <td className="p-3 num font-medium">{inr(p.net_contribution)}</td>
+                        <td className="p-3 num font-semibold" data-testid={`p-contrib-${p.id}`}>{inr(p.total_contribution)}</td>
+                        <td className={`p-3 num ${psColor}`} data-testid={`p-pshare-${p.id}`}>{inr(p.profit_share || 0)}</td>
+                        <td className="p-3 num font-bold" data-testid={`p-final-${p.id}`}>{inr(p.final_share || 0)}</td>
                         <td className={`p-3 num font-bold ${color}`}>
                           <div className="flex justify-end items-center gap-2">
                             <span className="overline text-[10px]">{label}</span>
@@ -212,16 +241,38 @@ export default function SettlementSection({ settlement, onSettled }) {
             {/* Settled History block */}
             {showHistory && (
               <div className="border-t border-[var(--border)] bg-gray-50 p-4 space-y-3" data-testid={`history-${c.center_id}`}>
-                <div className="overline">Lifetime totals (ignoring cutoff)</div>
+                <div className="overline">Lifetime totals (info-only, ignores cutoff)</div>
                 {c.lifetime ? (
-                  <table className="w-full text-sm bg-white border border-[var(--border)]">
+                  <>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-0 border border-[var(--border)] bg-white text-sm">
+                      <div className="p-2 border-r border-[var(--border)]">
+                        <div className="overline text-[10px]">Lifetime Income</div>
+                        <div className="num font-semibold value-positive">{inr(c.lifetime.total_income || 0)}</div>
+                      </div>
+                      <div className="p-2 border-r border-[var(--border)]">
+                        <div className="overline text-[10px]">Lifetime Contribution</div>
+                        <div className="num font-semibold value-negative">{inr(c.lifetime.total_contribution || 0)}</div>
+                      </div>
+                      <div className="p-2 border-r border-[var(--border)]">
+                        <div className="overline text-[10px]">Lifetime P/L</div>
+                        <div className={`num font-bold ${(c.lifetime.profit_loss || 0) >= 0 ? "value-positive" : "value-negative"}`}>
+                          {inr(c.lifetime.profit_loss || 0)}
+                        </div>
+                      </div>
+                      <div className="p-2">
+                        <div className="overline text-[10px]">Fair Share / Partner</div>
+                        <div className="num font-semibold">{inr(c.lifetime.fair_share_each || 0)}</div>
+                      </div>
+                    </div>
+                    <table className="w-full text-sm bg-white border border-[var(--border)]">
                     <thead>
                       <tr className="border-b border-[var(--border)] overline">
                         <th className="text-left p-2">{t("partner")}</th>
                         <th className="text-right p-2">{t("investment")}</th>
                         <th className="text-right p-2">{t("expense")}</th>
                         <th className="text-right p-2">{t("income")}</th>
-                        <th className="text-right p-2">{t("net_contribution")}</th>
+                        <th className="text-right p-2">Contribution</th>
+                        <th className="text-right p-2">Final Share</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -231,11 +282,13 @@ export default function SettlementSection({ settlement, onSettled }) {
                           <td className="p-2 num">{inr(p.investment)}</td>
                           <td className="p-2 num value-negative">{inr(p.expense)}</td>
                           <td className="p-2 num value-positive">{inr(p.income)}</td>
-                          <td className="p-2 num font-medium">{inr(p.net_contribution)}</td>
+                          <td className="p-2 num font-semibold">{inr(p.total_contribution)}</td>
+                          <td className="p-2 num font-bold">{inr(p.final_share || 0)}</td>
                         </tr>
                       ))}
                     </tbody>
-                  </table>
+                    </table>
+                  </>
                 ) : (
                   <div className="text-sm text-[var(--muted)]">No lifetime data.</div>
                 )}

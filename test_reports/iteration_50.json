@@ -1,0 +1,30 @@
+{
+  "summary": "Iter50 (Phase 31 — Cycle-Based Settlement Math): Verified backend + frontend for the new settlement contract. 12/12 pytest cases pass (5 new test_settlement_cycle_math + 7 existing test_finance_settlement). Frontend Settlement section on admin dashboard renders the new 5-KPI strip (Total Income, Total Contribution, Profit/Loss, Profit Share/Partner, Fair Share/Partner) and new partner columns (Contribution, Profit Share (50%), Final Share, Adjustment) for all 110 centers. Live math validated via API assertions: profit_loss = total_income − total_contribution, final_share = contribution + profit_share, adjustment = fair_share − contribution. View Settled History toggle reveals Lifetime Income / Lifetime Contribution / Lifetime P/L block, and include_history=true API returns lifetime object with all 6 required keys. Settle Dues dialog opens correctly with pre-filled recipient partner, absolute-adjustment amount, and today's date.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_settlement_cycle_math.py",
+    "/app/backend/tests/test_finance_settlement.py",
+    "/app/test_reports/pytest/iter50.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py _aggregate_partners_for_center now correctly returns 6-tuple; settlement_view caller unpacks 6 values — the 500-error root cause from prior iteration is fully resolved.",
+    "Response envelope for GET /api/dashboard/settlement now exposes total_contribution, total_income, profit_loss, profit_share_each, fair_share_each, partner_count on each center row and total_contribution, profit_share, final_share, fair_share, adjustment on each partner row — matches user-confirmed math.",
+    "Settlement cutoff logic verified: recording a settlement with date D excludes txns on/before D; center still returns in envelope with settled_till=D and total_contribution=0 for active cycle. include_history=true attaches a lifetime block with 6 required keys and lifetime.total_contribution retains pre-cutoff totals.",
+    "Frontend SettlementSection.jsx correctly wires all data-testids from the spec: kpi-{income,expense,pl,pshare,fair}-<cid>, p-{contrib,pshare,final}-<pid>, settle-btn-<cid>-<pid>, toggle-settled-history, settle-dialog, settle-{to-partner,amount,date,note,submit}. Adjustment column uses sign-based labels (to_pay/to_receive/settled) and Settle Dues button appears only when adjustment > 0.5.",
+    "Minor UX: Cycle Math help caption on dashboard is clear and educates end users on the formula. Good."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "100% (12/12)", "frontend": "100%" },
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "test_settlement_cycle_math.py creates a temporary center + 2 partners + 5 transactions via API (TEST_cycle_* prefix) at module scope. Records are left behind — recommend a cleanup fixture in a future iteration but is non-blocking (all data uses TEST_ prefix).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Login redirects admin to '/' (not '/dashboard') — RoleHome renders the admin dashboard including Settlement section. Use wait_for_load_state('networkidle') after login instead of waiting for '/dashboard' URL. Sample verified math from live data: Center 'Birsa Kairo' → total_income=0, total_contribution=950, profit_loss=-950, profit_share_each=-950, fair_share_each=950 (single partner center). For Palojori Deoghar 2-partner center, sum of adjustments is zero-sum: Manisha adj=-₹29,050 (receive), Shailendra adj=+₹550 (pay). Settle Dues dialog pre-fill uses Math.abs(adjustment) so amount is the paying partner's excess-owe, not the receiver's due. include_history=true works and lifetime block has: fair_share_each, partner_count, partners, profit_loss, total_contribution, total_income.",
+  "rca of the issue": "N/A — no issues found in this iteration. Previous 500 error from missing 6-tuple unpack in settlement_view is resolved."
+}

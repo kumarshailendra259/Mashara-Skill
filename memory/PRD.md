@@ -28,6 +28,22 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 ## Implemented Features (Mar 2026)
 
+### Phase 31 — Cycle-Based Partner Settlement Math (Done, Aug 2026)
+- **User asked**: Explicit math rules — (a) `A_Contribution + B_Contribution = Total Expense` where each partner's contribution = investment + expense; (b) `Total Income − Total Expense = Profit/Loss`; (c) `Final Share = Contribution + (P/L × 0.5)` [equal 50-50 split]; (d) only ACTIVE cycle transactions (strictly AFTER last settlement date) count — once settled, older cycles are closed. Lifetime totals stay visible only via the "View Settled History" toggle.
+- **Root cause of blocker**: Previous fork rewrote helper `_aggregate_partners_for_center` to return a 6-tuple (partners, total_expense, fair_share, n, total_income, profit_loss) but the caller at `settlement_view` (line 2891) was still unpacking a 4-tuple → `GET /api/dashboard/settlement` returned 500 for every user.
+- **Backend `/app/backend/server.py`**:
+  - Fixed tuple unpacking: `partners, total_contrib, fair_share, n, total_income, profit_loss = _aggregate_partners_for_center(rows, p_name)`.
+  - Response envelope for each center now includes `total_income`, `profit_loss`, `profit_share_each` in addition to existing `total_contribution`, `fair_share_each`, `partner_count`.
+  - Per-partner rows now expose `total_contribution`, `profit_share` (equal for all partners = `profit_loss / n`), `final_share` (= contribution + profit_share), plus legacy `net_contribution` for back-compat.
+  - "All-settled stub" (no post-cutoff activity) now also carries the 5 zero-KPI fields so frontend renders consistently.
+- **Frontend `/app/frontend/src/components/SettlementSection.jsx`**:
+  - New 5-KPI strip per center: Total Income · Total Contribution (Expense) · Profit/Loss · Profit Share/Partner (50/50) · Fair Share/Partner. Colors flip red/green based on P/L sign. testids: `kpi-income-<cid>`, `kpi-expense-<cid>`, `kpi-pl-<cid>`, `kpi-pshare-<cid>`, `kpi-fair-<cid>`.
+  - Partner rows now show 4 new columns — `Contribution`, `Profit Share (50%)`, `Final Share`, `Adjustment`. testids: `p-contrib-<pid>`, `p-pshare-<pid>`, `p-final-<pid>`.
+  - Cycle-math explanation banner above center list.
+  - Lifetime block (History toggle) enriched with its own 4-KPI strip (Lifetime Income/Contribution/P/L + Fair Share) and a Contribution + Final Share column in the partner table.
+  - `settled_till` badge text updated to "Active cycle from next day".
+- **Verified**: 12/12 pytest pass (`test_settlement_cycle_math.py` new = 5 cases + `test_finance_settlement.py` updated = 7 cases). testing_agent iter-50 confirmed live UI renders all KPIs across 110 centers with math accuracy validated end-to-end. Zero bugs, `retest_needed=false`.
+
 ### Phase 30B — Attendance Spoofing Security Fix (Done, Aug 2026 — 🚨 CRITICAL)
 - **User reported (production, ⚠️ security)**: Anand Kumar (center_staff, no admin credentials) ke 2026-08-11 ke HR list me row appear ho gaya jismein `Source: ADMIN`, `Punch IN: —`, `Punch OUT: 09:43`, no selfie, no location. User's concern: "Ye toh koi bhi hack kar sakta hai."
 - **Root cause identified**: `POST /api/attendance` endpoint mein `require_role("admin", "manager", "center_manager", "hr", "center_staff")` — `center_staff` role INCLUDED tha. Aur `marked_via` field client-supplied thi (default fallback `"admin"`). Iska matlab ANY logged-in center_staff:
