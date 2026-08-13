@@ -3178,6 +3178,78 @@ async def delete_settlement_record(sid: str, user=Depends(require_finance_visibl
     return None
 
 
+@api.get("/dashboard/settlement/txns")
+async def settlement_contributing_txns(
+    center_id: str,
+    scope: str = "current",  # "current" | "lifetime"
+    user=Depends(require_finance_visible),
+):
+    """Drill-down: list the exact transactions being counted in the settlement view for a center.
+
+    scope="current"  → transactions in the ACTIVE cycle (strictly AFTER the last settlement date)
+    scope="lifetime" → all approved partner-tagged transactions for the center (no cutoff)
+
+    Returned rows carry all fields the UI needs to explain WHY a number is what it is:
+      id, date, type, amount, source, category, description, partner_id, partner_name,
+      created_at, created_by_name.
+    """
+    # Partner-scoping — only own centers.
+    role = user.get("role")
+    if role == "partner":
+        own_pid = user.get("assigned_partner_id")
+        own_centers = await _centers_for_partner(own_pid) if own_pid else []
+        if center_id not in own_centers:
+            raise HTTPException(status_code=403, detail="Center not mapped to your partner profile")
+
+    q: dict = {"status": "approved", "center_id": center_id, "partner_id": {"$ne": None}}
+    cutoff = None
+    if scope == "current":
+        last = await _latest_settlement_for_center(center_id)
+        cutoff = last.get("date") if last else None
+        if cutoff:
+            q["date"] = {"$gt": cutoff}
+
+    docs = await db.transactions.find(q, {"_id": 0}).sort([("date", 1), ("created_at", 1)]).to_list(2000)
+
+    # Enrich partner name
+    pids = list({d.get("partner_id") for d in docs if d.get("partner_id")})
+    p_docs = await db.partners.find({"id": {"$in": pids}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000) if pids else []
+    p_name = {p["id"]: p["name"] for p in p_docs}
+
+    total_by_type: dict = {"investment": 0.0, "income": 0.0, "expense": 0.0}
+    rows = []
+    for d in docs:
+        t = d.get("type") or ""
+        amt = float(d.get("amount") or 0)
+        total_by_type[t] = total_by_type.get(t, 0.0) + amt
+        rows.append({
+            "id": d.get("id"),
+            "date": d.get("date"),
+            "type": t,
+            "amount": amt,
+            "source": d.get("source"),
+            "category": d.get("category"),
+            "description": d.get("description"),
+            "partner_id": d.get("partner_id"),
+            "partner_name": p_name.get(d.get("partner_id"), "Unknown"),
+            "created_at": d.get("created_at"),
+            "created_by_name": d.get("created_by_name"),
+            "batch_id": d.get("batch_id"),
+            "batch_payment_id": d.get("batch_payment_id"),
+            "advance_request_id": d.get("advance_request_id"),
+            "payment_id": d.get("payment_id"),
+            "quotation_id": d.get("quotation_id"),
+        })
+    return {
+        "center_id": center_id,
+        "scope": scope,
+        "cutoff": cutoff,
+        "count": len(rows),
+        "totals": {k: round(v, 2) for k, v in total_by_type.items()},
+        "rows": rows,
+    }
+
+
 
 # ---------- Role-specific dashboard widgets ----------
 @api.get("/dashboard/role-widgets")

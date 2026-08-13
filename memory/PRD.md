@@ -37,12 +37,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
   - Per-partner rows now expose `total_contribution`, `profit_share` (equal for all partners = `profit_loss / n`), `final_share` (= contribution + profit_share), plus legacy `net_contribution` for back-compat.
   - "All-settled stub" (no post-cutoff activity) now also carries the 5 zero-KPI fields so frontend renders consistently.
 - **Frontend `/app/frontend/src/components/SettlementSection.jsx`**:
-  - New 5-KPI strip per center: Total Income · Total Contribution (Expense) · Profit/Loss · Profit Share/Partner (50/50) · Fair Share/Partner. Colors flip red/green based on P/L sign. testids: `kpi-income-<cid>`, `kpi-expense-<cid>`, `kpi-pl-<cid>`, `kpi-pshare-<cid>`, `kpi-fair-<cid>`.
-  - Partner rows now show 4 new columns — `Contribution`, `Profit Share (50%)`, `Final Share`, `Adjustment`. testids: `p-contrib-<pid>`, `p-pshare-<pid>`, `p-final-<pid>`.
-  - Cycle-math explanation banner above center list.
-  - Lifetime block (History toggle) enriched with its own 4-KPI strip (Lifetime Income/Contribution/P/L + Fair Share) and a Contribution + Final Share column in the partner table.
-  - `settled_till` badge text updated to "Active cycle from next day".
-- **Verified**: 12/12 pytest pass (`test_settlement_cycle_math.py` new = 5 cases + `test_finance_settlement.py` updated = 7 cases). testing_agent iter-50 confirmed live UI renders all KPIs across 110 centers with math accuracy validated end-to-end. Zero bugs, `retest_needed=false`.
+  - New 5-KPI strip per center: Total Income · Total Contribution (Expense) · Profit/Loss · Profit Share/Partner (50/50) · Fair Share/Partner. Colors flip red/green based on P/L sign.
+  - Partner rows now show 4 new columns — Contribution, Profit Share (50%), Final Share, Adjustment.
+  - Cycle-math explanation banner + `settled_till` badge with "Active cycle from next day".
+  - Lifetime block (History toggle) enriched with its own 4-KPI strip.
+- **Verified**: 12/12 pytest pass; testing_agent iter-50 validated live UI + math accuracy across 110 centers, zero bugs.
+
+### Phase 31B — Settlement Drill-Down (Done, Aug 2026)
+- **User reported (production)**: After settling ₹35,692 on 2026-08-13 (Niranjan → Shailendra), Current Cycle still showed ~₹2,46,060 expense despite claim of no new post-cutoff transactions. To debug this remotely without DB access.
+- **Backend — new endpoint** `GET /api/dashboard/settlement/txns?center_id=X&scope={current|lifetime}` (finance-visible, partner-scoped): returns EXACTLY which transactions are being counted — includes id, date, type, amount, source (milestone/candidate_recovery/tds_deduction/advance_release/quotation_payment/etc), category, description, partner_name, batch/payment/advance IDs, created_at. Also returns aggregated `totals.investment/expense/income` and the resolved `cutoff` date. Verified via curl: correctly excludes pre-cutoff rows in current scope; includes all in lifetime.
+- **Frontend `SettlementSection.jsx`**: New "View Contributing Txns" button (`view-txns-current-<cid>`) on every center header. Opens a modal (`txn-drill-dialog`) with a totals strip + scrollable table of all counted txns showing Date · Type · Partner · Source · Amount · Description. Empty state clearly explains "Current Cycle totals should read ₹0" when no rows.
+- **Purpose**: Gives finance users total transparency — clicking the button on a center that shows unexpected Current Cycle numbers reveals the exact transactions being counted (with dates, sources, and descriptions), so it's immediately clear whether the numbers are correct or whether legit orphan/auto-generated txns snuck in.
+
 
 ### Phase 30B — Attendance Spoofing Security Fix (Done, Aug 2026 — 🚨 CRITICAL)
 - **User reported (production, ⚠️ security)**: Anand Kumar (center_staff, no admin credentials) ke 2026-08-11 ke HR list me row appear ho gaya jismein `Source: ADMIN`, `Punch IN: —`, `Punch OUT: 09:43`, no selfie, no location. User's concern: "Ye toh koi bhi hack kar sakta hai."

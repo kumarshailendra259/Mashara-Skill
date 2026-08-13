@@ -16,6 +16,8 @@ import { toast } from "sonner";
  * - Shows ONLY post-cutoff balances by default (auto cutoff from last recorded settlement).
  * - "View Settled History" toggle reveals lifetime (pre-cutoff) totals & past settlements.
  * - Per-partner "Settle" button opens a modal to record a partner-to-partner payment.
+ * - "View Contributing Txns" opens a drill-down modal listing the exact transactions
+ *   currently counted in the active cycle.
  */
 export default function SettlementSection({ settlement, onSettled }) {
   const { t } = useLang();
@@ -25,6 +27,7 @@ export default function SettlementSection({ settlement, onSettled }) {
   const [openModal, setOpenModal] = useState(null); // { center, fromPartner, toCandidates }
   const [form, setForm] = useState({ to_partner_id: "", amount: "", date: "", note: "" });
   const [submitting, setSubmitting] = useState(false);
+  const [txnDrill, setTxnDrill] = useState(null); // { center, scope, loading, data }
 
   const canRecord = ["admin", "senior_manager", "manager", "accountant", "partner"].includes(user?.role);
 
@@ -104,6 +107,17 @@ export default function SettlementSection({ settlement, onSettled }) {
     }
   };
 
+  const openTxnDrill = async (c, scope) => {
+    setTxnDrill({ center: c, scope, loading: true, data: null });
+    try {
+      const r = await api.get("/dashboard/settlement/txns", { params: { center_id: c.center_id, scope } });
+      setTxnDrill({ center: c, scope, loading: false, data: r.data });
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to load transactions");
+      setTxnDrill(null);
+    }
+  };
+
   if (!settlement?.centers?.length) return null;
 
   return (
@@ -144,6 +158,17 @@ export default function SettlementSection({ settlement, onSettled }) {
                     Settled till {c.settled_till} • Active cycle from next day
                   </span>
                 )}
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="rounded-none text-xs"
+                  onClick={() => openTxnDrill(c, "current")}
+                  data-testid={`view-txns-current-${c.center_id}`}
+                >
+                  View Contributing Txns
+                </Button>
               </div>
             </div>
 
@@ -341,6 +366,89 @@ export default function SettlementSection({ settlement, onSettled }) {
           </div>
         ))}
       </div>
+
+      {/* Contributing Transactions Drill-Down */}
+      <Dialog open={!!txnDrill} onOpenChange={(o) => !o && setTxnDrill(null)}>
+        <DialogContent className="rounded-none max-w-4xl" data-testid="txn-drill-dialog">
+          <DialogHeader>
+            <DialogTitle>
+              Contributing Transactions — {txnDrill?.center?.center_name}
+            </DialogTitle>
+            <DialogDescription>
+              {txnDrill?.scope === "current"
+                ? `Active cycle (${txnDrill?.data?.cutoff ? `after ${txnDrill?.data?.cutoff}` : "no cutoff yet"}). If this list is empty and the totals above are ₹0, everything is settled.`
+                : "All approved partner-tagged transactions for this center (lifetime)."}
+            </DialogDescription>
+          </DialogHeader>
+          {txnDrill?.loading ? (
+            <div className="text-sm text-[var(--muted)] p-4">Loading…</div>
+          ) : txnDrill?.data ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-0 border border-[var(--border)] bg-gray-50 text-sm">
+                <div className="p-2 border-r border-[var(--border)]">
+                  <div className="overline text-[10px]">Total Investment</div>
+                  <div className="num font-semibold">{inr(txnDrill.data.totals.investment)}</div>
+                </div>
+                <div className="p-2 border-r border-[var(--border)]">
+                  <div className="overline text-[10px]">Total Expense</div>
+                  <div className="num font-semibold value-negative">{inr(txnDrill.data.totals.expense)}</div>
+                </div>
+                <div className="p-2">
+                  <div className="overline text-[10px]">Total Income</div>
+                  <div className="num font-semibold value-positive">{inr(txnDrill.data.totals.income)}</div>
+                </div>
+              </div>
+              <div className="text-xs text-[var(--muted)]">
+                <b>{txnDrill.data.count}</b> transaction{txnDrill.data.count === 1 ? "" : "s"} counted
+                {txnDrill.data.cutoff && ` — cutoff: ${txnDrill.data.cutoff}`}
+              </div>
+              {txnDrill.data.rows.length === 0 ? (
+                <div className="p-8 text-center text-sm text-[var(--muted)] border border-dashed border-[var(--border)]">
+                  No transactions in this scope. Current Cycle totals should read ₹0.
+                </div>
+              ) : (
+                <div className="max-h-[50vh] overflow-y-auto border border-[var(--border)]">
+                  <table className="w-full text-xs" data-testid="txn-drill-table">
+                    <thead className="bg-gray-50 sticky top-0">
+                      <tr className="overline border-b border-[var(--border)]">
+                        <th className="text-left p-2">Date</th>
+                        <th className="text-left p-2">Type</th>
+                        <th className="text-left p-2">Partner</th>
+                        <th className="text-left p-2">Source</th>
+                        <th className="text-right p-2">Amount</th>
+                        <th className="text-left p-2">Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {txnDrill.data.rows.map((r) => (
+                        <tr key={r.id} className="border-b border-[var(--border)] last:border-0 hover:bg-gray-50">
+                          <td className="p-2 num whitespace-nowrap">{r.date}</td>
+                          <td className={`p-2 font-semibold ${r.type === "income" ? "value-positive" : r.type === "expense" ? "value-negative" : ""}`}>
+                            {r.type}
+                          </td>
+                          <td className="p-2">{r.partner_name}</td>
+                          <td className="p-2 text-[var(--muted)]">{r.source || "—"}</td>
+                          <td className={`p-2 num font-semibold ${r.type === "income" ? "value-positive" : r.type === "expense" ? "value-negative" : ""}`}>
+                            {inr(r.amount)}
+                          </td>
+                          <td className="p-2 text-[var(--muted)] max-w-md truncate" title={r.description}>
+                            {r.description || "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" className="rounded-none" onClick={() => setTxnDrill(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Settle Dialog */}
       <Dialog open={!!openModal} onOpenChange={(o) => !o && setOpenModal(null)}>
