@@ -549,6 +549,32 @@ export default function HRMS() {
     }
   };
 
+  const _triggerDownload = (url, filename) => {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const downloadStaffTemplate = async () => {
+    try {
+      const r = await api.get("/staff/template.csv", { responseType: "blob" });
+      _triggerDownload(URL.createObjectURL(r.data), "staff_bulk_template.csv");
+      toast.success("Template downloaded — fill it and use Bulk Add (CSV)");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const downloadStaffExport = async () => {
+    try {
+      const r = await api.get("/staff/export.csv", { responseType: "blob" });
+      const today = new Date().toISOString().slice(0, 10);
+      _triggerDownload(URL.createObjectURL(r.data), `staff_export_${today}.csv`);
+      toast.success("Staff exported to CSV");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   const deleteStaff = async (s) => {
     if (!window.confirm(`Delete staff "${s.name}"? This cannot be undone.`)) return;
     try {await api.delete(`/staff/${s.id}`);
@@ -839,6 +865,24 @@ export default function HRMS() {
                     title="Assign EMP-YYYY-XXXX codes to staff who are missing one"
                   >
                     <Hash size={14} /> Backfill Codes
+                  </Button>
+                  <Button
+                    onClick={downloadStaffExport}
+                    variant="outline"
+                    className="rounded-none gap-2"
+                    data-testid="export-staff-csv-btn"
+                    title="Download all staff as CSV (same format as bulk import)"
+                  >
+                    <Download size={14} /> Export CSV
+                  </Button>
+                  <Button
+                    onClick={downloadStaffTemplate}
+                    variant="outline"
+                    className="rounded-none gap-2"
+                    data-testid="template-staff-csv-btn"
+                    title="Download an empty CSV template for bulk import"
+                  >
+                    <FileDown size={14} /> Template
                   </Button>
                   <label className="inline-flex items-center gap-2 border border-[var(--border)] rounded-none px-3 h-9 cursor-pointer hover:bg-gray-50 text-sm" data-testid="bulk-add-staff-label">
                     <Upload size={14} /> Bulk Add (CSV)

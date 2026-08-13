@@ -4027,6 +4027,67 @@ async def backfill_employee_codes(dry_run: bool = True, user=Depends(require_rol
     return {"scanned": len(rows), "assigned": len(assigned), "dry_run": dry_run, "samples": assigned[:25]}
 
 
+@api.get("/staff/template.csv")
+async def staff_import_template(_=Depends(require_role("admin", "hr"))):
+    """Return an EMPTY CSV template with the correct headers for bulk staff import.
+    Users download this to see the exact column names + order expected by /staff/import.
+    """
+    headers = ["name", "designation", "email", "mobile", "salary", "center_id", "employee_code"]
+    example = ["Ram Kumar", "Trainer", "ram@example.com", "9999900001", "15000", "", ""]
+    csv_text = ",".join(headers) + "\n" + ",".join(example) + "\n"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="staff_bulk_template.csv"'},
+    )
+
+
+@api.get("/staff/export.csv")
+async def staff_export_csv(user=Depends(get_current_user)):
+    """Export ALL staff (respecting role scoping) as a CSV matching the /staff/import format
+    so an admin can round-trip: export → edit in Excel → re-import. Includes bank fields too."""
+    import csv, io
+    role = user.get("role")
+    query: dict = {}
+    if role in ("center_manager", "center_staff"):
+        query["center_id"] = {"$in": user.get("assigned_center_ids") or []}
+    docs = await db.staff.find(query, {"_id": 0}).sort("name", 1).to_list(5000)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "employee_code", "name", "designation", "email", "mobile",
+        "salary", "per_day_rate", "center_id", "active",
+        "bank_name", "bank_account_no", "ifsc", "bank_verified",
+        "joining_date", "created_at",
+    ])
+    for d in docs:
+        w.writerow([
+            d.get("employee_code") or "",
+            d.get("name") or "",
+            d.get("designation") or "",
+            d.get("email") or "",
+            d.get("mobile") or "",
+            d.get("monthly_salary") or 0,
+            d.get("per_day_rate") or 0,
+            d.get("center_id") or "",
+            "yes" if d.get("active", True) else "no",
+            d.get("bank_name") or "",
+            d.get("bank_account_no") or "",
+            d.get("ifsc") or "",
+            "yes" if d.get("bank_verified") else "no",
+            d.get("joining_date") or "",
+            (d.get("created_at") or "")[:19],
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="staff_export_{datetime.now(timezone.utc).date().isoformat()}.csv"',
+            "X-Row-Count": str(len(docs)),
+        },
+    )
+
+
 @api.post("/staff/import")
 async def import_staff(file: UploadFile = File(...), user=Depends(require_role("admin", "hr"))):
     """Bulk-add staff from a CSV. Headers (case-insensitive):
