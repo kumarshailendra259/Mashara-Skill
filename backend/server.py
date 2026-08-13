@@ -2551,6 +2551,65 @@ async def import_transactions(file: UploadFile = File(...), user=Depends(require
 
 
 # ---------- Dashboard ----------
+@api.get("/dashboard/all")
+async def dashboard_all(
+    user=Depends(require_finance_visible),
+    company_id: Optional[str] = None,
+    partner_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    include_pending: bool = False,
+    include_settlement_history: bool = False,
+):
+    """Phase 34 — Consolidated dashboard endpoint.
+
+    Fires the four independent dashboard queries (summary + milestone-income +
+    fooding-income + settlement) in PARALLEL via asyncio.gather and returns
+    them in a single response envelope, replacing 4 round-trips with 1. Each
+    sub-block matches the shape of its dedicated endpoint so the frontend can
+    slot the payload into its existing state without re-mapping.
+
+    Errors on any single sub-query are surfaced as a null block + an entry in
+    `errors[]` — the rest still render, so a slow/failing settlement never
+    blocks the summary tiles anymore.
+    """
+    async def _safe(name, coro):
+        try:
+            return name, await coro, None
+        except Exception as e:
+            logger.exception("dashboard/all sub-query failed: %s", name)
+            return name, None, str(e)[:200]
+
+    tasks = [
+        _safe("summary", dashboard_summary(
+            user=user, company_id=company_id, partner_id=partner_id,
+            center_id=center_id, project_id=project_id,
+            start=start, end=end, include_pending=include_pending,
+        )),
+        _safe("milestone_income", milestone_income_summary(
+            user=user, start=start, end=end,
+            project_id=project_id, center_id=center_id,
+        )),
+        _safe("fooding_income", fooding_income_summary(
+            user=user, start=start, end=end,
+            project_id=project_id, center_id=center_id,
+        )),
+        _safe("settlement", settlement_view(
+            user=user, center_id=center_id, partner_id=partner_id,
+            start=start, end=end, include_history=include_settlement_history,
+        )),
+    ]
+    results = await asyncio.gather(*tasks)
+    envelope: dict = {"errors": []}
+    for name, val, err in results:
+        envelope[name] = val
+        if err:
+            envelope["errors"].append({"block": name, "error": err})
+    return envelope
+
+
 @api.get("/dashboard/summary")
 async def dashboard_summary(
     user=Depends(require_finance_visible),
@@ -9023,9 +9082,21 @@ async def delete_batch(bid: str, _=Depends(require_role("admin"))):
 
 
 @api.post("/batches/cleanup-orphan-txns")
-async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_run: bool = False):
+async def cleanup_orphan_milestone_txns(
+    _=Depends(require_role("admin")),
+    dry_run: bool = True,
+    confirm: bool = False,
+    max_delete: int = 100,
+):
     """Backfill batch_id/batch_payment_id on legacy milestone txns, then delete
     milestone-family transactions that no longer correspond to any live batch.
+
+    ⚠️  PHASE 34 — HARDENED: this endpoint now REFUSES to delete anything unless
+    the caller passes BOTH `dry_run=false` AND `confirm=true`. It also refuses
+    to proceed when the number of would-be-deleted rows exceeds `max_delete`
+    (default 100) — pass a higher value only when you have manually reviewed
+    the dry-run output. These guards protect valid manual milestone txns from
+    being wiped in one shot.
 
     Rationale: before Aug 2026, `receive_batch_payment` did NOT store `batch_id`
     or `batch_payment_id` on the auto-generated income/recovery/assessment/TDS
@@ -9041,9 +9112,9 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
          no longer point to a live batch/payment (either previously-tagged rows
          pointing to deleted batches, or legacy rows with no correlate).
 
-    `dry_run=true` reports the counts without modifying data.
+    `dry_run=true` (default) reports the counts without modifying data.
 
-    Returns: `{ scanned, backfilled, orphans, deleted }`.
+    Returns: `{ scanned, backfilled, orphans, deleted, duplicates_deleted, dry_run, refused_reason? }`.
     """
     MILESTONE_SOURCES = ["milestone", "candidate_recovery", "assessment_fee", "tds_deduction"]
     # Preload live sets for O(1) checks
@@ -9107,7 +9178,20 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
             orphan_ids.append(txn["id"])
 
     deleted = 0
-    if orphan_ids and not dry_run:
+    refused_reason = None
+    # PHASE 34 SAFETY GUARDS:
+    #  • dry_run must be explicitly false
+    #  • confirm must be explicitly true
+    #  • orphan count must be ≤ max_delete (default 100) — protects against
+    #    accidental mass-wipe of valid manual milestone txns.
+    will_delete = bool(orphan_ids) and (not dry_run) and confirm
+    if orphan_ids and not dry_run and not confirm:
+        refused_reason = "confirm=true not passed — call with dry_run=false&confirm=true to actually delete"
+        will_delete = False
+    if will_delete and len(orphan_ids) > max_delete:
+        refused_reason = f"orphans ({len(orphan_ids)}) exceed max_delete ({max_delete}) — review dry-run and re-run with a higher max_delete if intended"
+        will_delete = False
+    if will_delete:
         r = await db.transactions.delete_many({"id": {"$in": orphan_ids}})
         deleted = r.deleted_count
 
@@ -9117,7 +9201,7 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
     # and remove the rest. Group by (batch_payment_id, source, partner_id, milestone)
     # — the same tuple that our new unique index enforces going forward.
     dup_deleted = 0
-    if not dry_run:
+    if not dry_run and confirm:
         pipeline = [
             {"$match": {
                 "source": {"$in": MILESTONE_SOURCES + ["fooding"]},
@@ -9146,6 +9230,7 @@ async def cleanup_orphan_milestone_txns(_=Depends(require_role("admin")), dry_ru
         "deleted": deleted,
         "duplicates_deleted": dup_deleted,
         "dry_run": dry_run,
+        "refused_reason": refused_reason,
     }
 
 
@@ -9416,15 +9501,20 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
       (source='assessment_fee') is recorded for the per-passed-candidate assessment fee.
     - net_amount on the payment row = gross − tds_amount − recovery_amount − assessment_fee_total.
     """
-    # STEP 1 — Atomic idempotency lock: flip status from anything-but-'received' to
-    # 'received' in a single conditional update. If the update matches 0 documents,
-    # someone else already flipped it — return 400 idempotently. This closes the
-    # duplicate-receive race that was inflating Milestone Income totals when the
-    # same milestone was mark-received twice.
+    # STEP 1 — Atomic idempotency lock: set status to an INTERMEDIATE '_receiving'
+    # state (flipping FROM pending). If the update matches 0 documents, someone
+    # else is already receiving or the payment has already been received — bail.
+    # This closes the duplicate-receive race that was inflating Milestone Income
+    # totals when the same milestone was mark-received twice.
+    #
+    # PHASE 34 — we now only flip to the FINAL 'received' state at the END, once
+    # all transactions have been persisted successfully. If any insert fails, we
+    # roll back: delete already-inserted txns AND reset the payment status back
+    # to 'pending' so the user can retry cleanly.
     lock = await db.batch_payments.find_one_and_update(
-        {"id": pid, "status": {"$ne": "received"}},
+        {"id": pid, "status": "pending"},
         {"$set": {
-            "status": "received",
+            "status": "_receiving",
             "_receive_lock_by": user["id"],
             "_receive_lock_at": datetime.now(timezone.utc).isoformat(),
         }},
@@ -9433,9 +9523,26 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
         existing = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
         if not existing:
             raise HTTPException(404, "Not found")
-        # Already received — return the persisted row idempotently.
+        if existing.get("status") == "_receiving":
+            raise HTTPException(409, "Another receive is in progress — try again in a moment")
         raise HTTPException(400, "Already received")
     rec = lock  # snapshot pre-update
+    all_created_ids: list[str] = []  # tracks EVERY txn we insert so rollback is complete on failure
+
+    async def _rollback(reason: str):
+        """Undo the partial receive: delete any txns we managed to insert and revert
+        the payment status back to 'pending' so the user can retry cleanly."""
+        try:
+            if all_created_ids:
+                await db.transactions.delete_many({"id": {"$in": all_created_ids}})
+            await db.batch_payments.update_one(
+                {"id": pid},
+                {"$set": {"status": "pending"},
+                 "$unset": {"_receive_lock_by": "", "_receive_lock_at": ""}},
+            )
+        except Exception:
+            logger.exception("receive_batch_payment rollback failed for pid=%s (%s)", pid, reason)
+
     batch = await db.batches.find_one({"id": rec["batch_id"]}, {"_id": 0})
     project_name = ""
     if batch:
@@ -9494,8 +9601,13 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
         }
-        await db.transactions.insert_one(txn)
+        try:
+            await db.transactions.insert_one(txn)
+        except Exception as e:
+            await _rollback(f"income insert failed: {e}")
+            raise HTTPException(500, f"Failed to save income transactions — rolled back. {e}")
         created_txn_ids.append(txn["id"])
+        all_created_ids.append(txn["id"])
 
     # Candidate-failure recovery (2nd milestone): separate expense to claw back 1st-milestone
     recovery_amount = float(rec.get("recovery_amount") or 0)
@@ -9523,8 +9635,13 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
         }
-        await db.transactions.insert_one(rec_txn)
+        try:
+            await db.transactions.insert_one(rec_txn)
+        except Exception as e:
+            await _rollback(f"recovery insert failed: {e}")
+            raise HTTPException(500, f"Failed to save recovery transaction — rolled back. {e}")
         recovery_txn_id = rec_txn["id"]
+        all_created_ids.append(rec_txn["id"])
 
     # Assessment fee (2nd milestone): per-passed-candidate fee, manually entered
     assessment_fee_total = float(rec.get("assessment_fee_total") or 0)
@@ -9553,8 +9670,13 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "status": "approved", "approved_by": user["id"], "approved_at": now,
             "rejected_reason": None,
         }
-        await db.transactions.insert_one(af_txn)
+        try:
+            await db.transactions.insert_one(af_txn)
+        except Exception as e:
+            await _rollback(f"assessment_fee insert failed: {e}")
+            raise HTTPException(500, f"Failed to save assessment fee transaction — rolled back. {e}")
         assessment_fee_txn_id = af_txn["id"]
+        all_created_ids.append(af_txn["id"])
 
     # TDS deduction: calculated on (gross − uniform − recovery) per spec.
     # Uniform (1st milestone only) and recovery (2nd milestone) are both excluded from
@@ -9586,29 +9708,44 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
                 "status": "approved", "approved_by": user["id"], "approved_at": now,
                 "rejected_reason": None,
             }
-            await db.transactions.insert_one(tds_txn)
+            try:
+                await db.transactions.insert_one(tds_txn)
+            except Exception as e:
+                await _rollback(f"tds insert failed: {e}")
+                raise HTTPException(500, f"Failed to save TDS transaction — rolled back. {e}")
             tds_txn_id = tds_txn["id"]
+            all_created_ids.append(tds_txn["id"])
 
     net_amount = round(gross - tds_amount - recovery_amount - assessment_fee_total, 2)
-    res = await db.batch_payments.find_one_and_update(
-        {"id": pid},
-        {"$set": {
-            "status": "received", "received_date": today, "received_by": user["id"],
-            "txn_id": created_txn_ids[0] if created_txn_ids else None,
-            "txn_ids": created_txn_ids,
-            "tds_percent": tds_percent,
-            "tds_amount": tds_amount,
-            "tds_txn_id": tds_txn_id,
-            "recovery_amount": recovery_amount,
-            "recovery_txn_id": recovery_txn_id,
-            "assessment_fee_total": assessment_fee_total,
-            "assessment_fee_per_candidate": assessment_fee_per,
-            "assessment_fee_txn_id": assessment_fee_txn_id,
-            "company_id": company_id_resolved,
-            "net_amount": net_amount,
-        }, "$unset": {"_receive_lock_by": "", "_receive_lock_at": ""}},
-        return_document=True,
-    )
+    # PHASE 34 — Final commit: NOW flip from '_receiving' → 'received' with all
+    # aggregated metadata. If this step somehow fails, roll everything back so
+    # the ledger stays consistent.
+    try:
+        res = await db.batch_payments.find_one_and_update(
+            {"id": pid},
+            {"$set": {
+                "status": "received", "received_date": today, "received_by": user["id"],
+                "txn_id": created_txn_ids[0] if created_txn_ids else None,
+                "txn_ids": created_txn_ids,
+                "tds_percent": tds_percent,
+                "tds_amount": tds_amount,
+                "tds_txn_id": tds_txn_id,
+                "recovery_amount": recovery_amount,
+                "recovery_txn_id": recovery_txn_id,
+                "assessment_fee_total": assessment_fee_total,
+                "assessment_fee_per_candidate": assessment_fee_per,
+                "assessment_fee_txn_id": assessment_fee_txn_id,
+                "company_id": company_id_resolved,
+                "net_amount": net_amount,
+            }, "$unset": {"_receive_lock_by": "", "_receive_lock_at": ""}},
+            return_document=True,
+        )
+    except Exception as e:
+        await _rollback(f"final status commit failed: {e}")
+        raise HTTPException(500, f"Failed to finalize receive — rolled back. {e}")
+    if not res:
+        await _rollback("final commit returned no doc")
+        raise HTTPException(500, "Failed to finalize receive — rolled back")
     res.pop("_id", None)
     return BatchPaymentOut(**res)
 

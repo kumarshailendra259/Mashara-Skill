@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
+import SubmitButton from "@/components/SubmitButton";
 
 const TXN_TYPES = ["investment", "income", "expense"];
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
@@ -643,7 +644,7 @@ export default function Transactions() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">{t("cancel")}</Button>
-            <Button onClick={save} className="brand-btn rounded-none" data-testid="txn-save">{t("save")}</Button>
+            <SubmitButton onClick={save} className="brand-btn rounded-none" data-testid="txn-save" loadingLabel="Saving…">{t("save")}</SubmitButton>
           </DialogFooter>
           {/* Shared datalist for item-name autocomplete */}
           <datalist id="txn-item-names">

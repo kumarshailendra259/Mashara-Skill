@@ -52,18 +52,21 @@ export default function Dashboard() {
   }, [filters]);
 
   useEffect(() => {
-    api.get("/dashboard/summary", { params: query }).then((r) => setData(r.data)).catch(() => setData(null));
-    api.get("/dashboard/milestone-income", { params: query }).then((r) => setMilestoneSummary(r.data)).catch(() => setMilestoneSummary(null));
-    api.get("/dashboard/fooding-income", { params: query }).then((r) => setFoodingSummary(r.data)).catch(() => setFoodingSummary(null));
-  }, [query]);
-
-  useEffect(() => {
-    if (!showSettlement) return;
-    const p = { include_history: true };
-    if (query.start) p.start = query.start;
-    if (query.end) p.end = query.end;
-    if (query.center_id) p.center_id = query.center_id;
-    api.get("/dashboard/settlement", { params: p }).then((r) => setSettlement(r.data)).catch(() => setSettlement(null));
+    // Phase 34 — Consolidated call. One HTTP round-trip fetches summary +
+    // milestone-income + fooding-income (+ settlement when the toggle is on).
+    const params = { ...query, include_settlement_history: showSettlement };
+    api.get("/dashboard/all", { params })
+      .then((r) => {
+        const d = r.data || {};
+        setData(d.summary || null);
+        setMilestoneSummary(d.milestone_income || null);
+        setFoodingSummary(d.fooding_income || null);
+        if (showSettlement) setSettlement(d.settlement || null);
+      })
+      .catch(() => {
+        setData(null); setMilestoneSummary(null); setFoodingSummary(null);
+        if (showSettlement) setSettlement(null);
+      });
   }, [query, showSettlement]);
 
   const refreshSettlement = () => {
