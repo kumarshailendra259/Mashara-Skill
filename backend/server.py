@@ -30,7 +30,7 @@ from typing import Optional, List, Literal
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 from motor.motor_asyncio import AsyncIOMotorClient
 from bson import ObjectId as _BsonObjectId
 
@@ -276,11 +276,45 @@ class AttachmentRef(BaseModel):
     size: int
 
 
+def _normalize_date(v):
+    """Coerce common date formats to strict YYYY-MM-DD.
+
+    Accepts:
+      • "YYYY-MM-DD"          → passthrough
+      • "DD-MM-YYYY" / "DD/MM/YYYY"  → converted (Indian dashboard imports)
+      • "YYYY/MM/DD"          → converted
+      • datetime / date obj   → isoformat()
+    Raises ValueError otherwise.
+    """
+    if v is None:
+        raise ValueError("date is required")
+    if hasattr(v, "isoformat"):
+        return v.isoformat()[:10]
+    s = str(v).strip()
+    # Strip a trailing time part if present ("2026-08-13T..." or "2026-08-13 14:00")
+    if "T" in s:
+        s = s.split("T", 1)[0]
+    if " " in s:
+        s = s.split(" ", 1)[0]
+    # Already YYYY-MM-DD
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s
+    # DD-MM-YYYY or DD/MM/YYYY (Indian input)
+    m = re.fullmatch(r"(\d{2})[-/](\d{2})[-/](\d{4})", s)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+    # YYYY/MM/DD
+    m = re.fullmatch(r"(\d{4})/(\d{2})/(\d{2})", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    raise ValueError(f"invalid date format: {v!r} (expected YYYY-MM-DD)")
+
+
 class TransactionIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     type: TxnType
     amount: float = Field(gt=0)
-    date: str  # ISO YYYY-MM-DD
+    date: str  # ISO YYYY-MM-DD (auto-normalized from DD-MM-YYYY / DD/MM/YYYY etc)
     description: Optional[str] = ""
     company_id: Optional[str] = None
     partner_id: Optional[str] = None
@@ -294,6 +328,11 @@ class TransactionIn(BaseModel):
     qrn: Optional[str] = None
     quotation_id: Optional[str] = None
     payment_id: Optional[str] = None
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def _v_date(cls, v):
+        return _normalize_date(v)
 
 
 TxnStatus = Literal["pending", "approved", "rejected"]
@@ -2403,6 +2442,7 @@ async def import_transactions(file: UploadFile = File(...), user=Depends(require
             date = row.get("date", "").strip()
             if not date:
                 raise ValueError("missing date")
+            date = _normalize_date(date)  # coerce DD-MM-YYYY etc → YYYY-MM-DD
             doc = {
                 "id": str(uuid.uuid4()),
                 "type": ttype,
@@ -3247,6 +3287,57 @@ async def settlement_contributing_txns(
         "count": len(rows),
         "totals": {k: round(v, 2) for k, v in total_by_type.items()},
         "rows": rows,
+    }
+
+
+@api.post("/admin/normalize-txn-dates")
+async def normalize_txn_dates(user=Depends(require_role("admin")), dry_run: bool = True):
+    """One-shot admin-only maintenance: scan the `transactions` collection and
+    convert any `date` field that is NOT in strict YYYY-MM-DD format into that
+    format (e.g. "24-02-2026" → "2026-02-24", "24/10/2025" → "2025-10-24").
+
+    Why this exists: CSV imports before validation was hardened stored dates
+    exactly as the user typed them (Indian DD-MM-YYYY). Because our settlement
+    cutoff uses lexicographic string comparison (`$gt: "2026-08-13"`), a stored
+    value like "24-10-2025" appears LEXICOGRAPHICALLY greater than the cutoff
+    (since '2','4' > '2','0'), so pre-settlement transactions leak into the
+    "current cycle" totals. Normalising the format fixes the leakage.
+
+    Response: `{ scanned, fixed, unfixable, dry_run, samples: [...] }`.
+    `dry_run=true` (default) reports what WOULD change without writing.
+
+    Idempotent: rows already in YYYY-MM-DD are skipped.
+    """
+    scanned = 0
+    fixed = 0
+    unfixable = 0
+    samples: list = []
+    async for d in db.transactions.find(
+        {"date": {"$not": {"$regex": r"^\d{4}-\d{2}-\d{2}$"}}},
+        {"_id": 0, "id": 1, "date": 1, "type": 1, "amount": 1, "description": 1},
+    ):
+        scanned += 1
+        old = d.get("date")
+        try:
+            new = _normalize_date(old)
+        except Exception:
+            unfixable += 1
+            if len(samples) < 25:
+                samples.append({"id": d.get("id"), "old": old, "new": None, "ok": False, "desc": d.get("description")})
+            continue
+        if new == old:
+            continue
+        fixed += 1
+        if len(samples) < 25:
+            samples.append({"id": d.get("id"), "old": old, "new": new, "ok": True, "amount": d.get("amount"), "desc": d.get("description")})
+        if not dry_run:
+            await db.transactions.update_one({"id": d["id"]}, {"$set": {"date": new, "_date_normalized_at": datetime.now(timezone.utc).isoformat()}})
+    return {
+        "scanned": scanned,
+        "fixed": fixed,
+        "unfixable": unfixable,
+        "dry_run": dry_run,
+        "samples": samples,
     }
 
 

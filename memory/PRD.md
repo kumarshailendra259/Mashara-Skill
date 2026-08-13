@@ -43,11 +43,17 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
   - Lifetime block (History toggle) enriched with its own 4-KPI strip.
 - **Verified**: 12/12 pytest pass; testing_agent iter-50 validated live UI + math accuracy across 110 centers, zero bugs.
 
-### Phase 31B — Settlement Drill-Down (Done, Aug 2026)
-- **User reported (production)**: After settling ₹35,692 on 2026-08-13 (Niranjan → Shailendra), Current Cycle still showed ~₹2,46,060 expense despite claim of no new post-cutoff transactions. To debug this remotely without DB access.
-- **Backend — new endpoint** `GET /api/dashboard/settlement/txns?center_id=X&scope={current|lifetime}` (finance-visible, partner-scoped): returns EXACTLY which transactions are being counted — includes id, date, type, amount, source (milestone/candidate_recovery/tds_deduction/advance_release/quotation_payment/etc), category, description, partner_name, batch/payment/advance IDs, created_at. Also returns aggregated `totals.investment/expense/income` and the resolved `cutoff` date. Verified via curl: correctly excludes pre-cutoff rows in current scope; includes all in lifetime.
-- **Frontend `SettlementSection.jsx`**: New "View Contributing Txns" button (`view-txns-current-<cid>`) on every center header. Opens a modal (`txn-drill-dialog`) with a totals strip + scrollable table of all counted txns showing Date · Type · Partner · Source · Amount · Description. Empty state clearly explains "Current Cycle totals should read ₹0" when no rows.
-- **Purpose**: Gives finance users total transparency — clicking the button on a center that shows unexpected Current Cycle numbers reveals the exact transactions being counted (with dates, sources, and descriptions), so it's immediately clear whether the numbers are correct or whether legit orphan/auto-generated txns snuck in.
+### Phase 31C — Legacy DD-MM-YYYY Date Corruption Fix (Done, Aug 2026 — 🚨 CRITICAL DATA BUG)
+- **User reported (production)**: BOCWW Ramgarh center pe settlement 2026-08-13 par kiya, phir bhi Current Cycle mein ₹2,46,060 expense dikha. Drill-down modal ne saaf dikhaya ki 16 transactions actually 2025-10-24, 2026-02-24, etc dates ki thin — but format `DD-MM-YYYY` mein stored thin (e.g., `"24-02-2026"` instead of `"2026-02-24"`).
+- **Root cause**: CSV importer `POST /api/transactions/import` (line 2410) and `TransactionIn` model (line 283) accepted whatever `date` string was provided without format validation. Users bulk-importing older CSVs entered Indian DD-MM-YYYY dates. Because our settlement cutoff uses **lexicographic string comparison** (`$gt: "2026-08-13"`), a stored `"24-10-2025"` appears LEXICOGRAPHICALLY GREATER than `"2026-08-13"` (since `'2','4' > '2','0'` at char index 1), so pre-settlement transactions LEAKED into "current cycle" totals.
+- **Backend `/app/backend/server.py`**:
+  - New helper `_normalize_date(v)` — coerces `DD-MM-YYYY`, `DD/MM/YYYY`, `YYYY/MM/DD`, or datetime objects into strict `YYYY-MM-DD`. Raises ValueError otherwise.
+  - `TransactionIn.date` now uses a Pydantic `@field_validator("date", mode="before")` which runs `_normalize_date`. All POST/PATCH `/api/transactions` payloads with Indian-format dates are auto-corrected on the way in.
+  - `import_transactions` CSV importer now runs `_normalize_date` on the `date` column before persistence.
+  - **New maintenance endpoint** `POST /api/admin/normalize-txn-dates?dry_run={bool}` (admin-only) — scans `transactions` for any `date` not matching `^\d{4}-\d{2}-\d{2}$` regex and converts them in-place. Idempotent; sets `_date_normalized_at` audit stamp on each fixed row. `dry_run=true` reports what would change without writing. Response: `{ scanned, fixed, unfixable, samples[] }`.
+- **Frontend `SettlementSection.jsx`**: New admin-only "Fix Legacy Dates" button in the Partner Settlement section header (`normalize-dates-btn`). Runs dry-run first, prompts user with the count of rows that will change, then executes the real update. Auto-refreshes the settlement view on success.
+- **Verified**: End-to-end tested with 3 legacy-format seeds (`"24-02-2026"`, `"24-10-2025"`, `"10/08/2026"`) — all converted correctly to YYYY-MM-DD, `_date_normalized_at` audit stamp populated. Fresh POST `/api/transactions` with `"13-08-2026"` in body auto-normalized to `"2026-08-13"` before persistence. 28/28 settlement pytest still green (including test_iter29 updated for new cycle math).
+
 
 
 ### Phase 30B — Attendance Spoofing Security Fix (Done, Aug 2026 — 🚨 CRITICAL)

@@ -118,6 +118,31 @@ export default function SettlementSection({ settlement, onSettled }) {
     }
   };
 
+  const isAdmin = user?.role === "admin";
+  const runNormalizeDates = async () => {
+    if (!window.confirm(
+      "Ye maintenance action legacy transactions ke DD-MM-YYYY / DD/MM/YYYY dates ko YYYY-MM-DD me convert karega. " +
+      "Ye zaroori hai kyunki galat format se puraani expenses \"Current Cycle\" me leak ho jaati hain. Continue?"
+    )) return;
+    try {
+      const dry = await api.post("/admin/normalize-txn-dates?dry_run=true");
+      const preview = dry.data;
+      if (preview.fixed === 0) {
+        toast.success(`Kuch nahi karna — sab ${preview.scanned} rows already sahi format me hain.`);
+        return;
+      }
+      if (!window.confirm(
+        `Dry run: ${preview.fixed} rows fix hoge, ${preview.unfixable} unfixable. ` +
+        `Real update karein?`
+      )) return;
+      const real = await api.post("/admin/normalize-txn-dates?dry_run=false");
+      toast.success(`Fixed ${real.data.fixed} txn dates. Refresh…`);
+      onSettled?.();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Normalize failed");
+    }
+  };
+
   if (!settlement?.centers?.length) return null;
 
   return (
@@ -126,6 +151,18 @@ export default function SettlementSection({ settlement, onSettled }) {
         <div className="font-heading font-bold tracking-tight text-lg">{t("settlement")}</div>
         <div className="flex items-center gap-3">
           <div className="overline">Equal-split fair share</div>
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={runNormalizeDates}
+              className="rounded-none text-xs"
+              data-testid="normalize-dates-btn"
+              title="Fix legacy DD-MM-YYYY dates that leak into current cycle"
+            >
+              Fix Legacy Dates
+            </Button>
+          )}
           <Button
             size="sm"
             variant={showHistory ? "default" : "outline"}

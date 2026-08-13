@@ -61,7 +61,7 @@ def seed(admin):
         assert r.status_code == 200, r.text
         return r.json()
 
-    # P1 net_contribution = 60000, P2 = 15000 -> total 75000, fair=37500
+    # P1 contribution = 60000, P2 = 30000 -> total 90000, fair=45000 (new cycle math)
     _post({"type": "investment", "amount": 50000, "date": "2026-06-01",
            "description": "TEST_iter29_p1_inv", "center_id": c, "partner_id": p1})
     _post({"type": "expense", "amount": 10000, "date": "2026-06-02",
@@ -184,8 +184,8 @@ class TestSettlementCutoff:
         assert ctr["partner_count"] == 0
         assert ctr["partners"] == []
         # Lifetime preserved
-        assert ctr["lifetime"]["total_contribution"] == 75000
-        assert ctr["lifetime"]["fair_share_each"] == 37500
+        assert ctr["lifetime"]["total_contribution"] == 90000
+        assert ctr["lifetime"]["fair_share_each"] == 45000
         assert ctr["lifetime"]["partner_count"] == 2
         assert ctr["total_contribution"] <= ctr["lifetime"]["total_contribution"]
 
@@ -204,7 +204,7 @@ class TestSettlementCutoff:
         assert ctr["partners"] == []
         assert ctr["settled_till"] == "2099-12-31"
         # Lifetime is FULL history regardless
-        assert ctr["lifetime"]["total_contribution"] == 75000
+        assert ctr["lifetime"]["total_contribution"] == 90000
 
 
 # ---------- GET /history ----------
@@ -256,7 +256,7 @@ class TestDeleteSettlement:
                        params={"center_id": seed["center"]})
         ctr = r2.json()["centers"][0]
         assert "settled_till" not in ctr
-        assert ctr["total_contribution"] == 75000
+        assert ctr["total_contribution"] == 90000
         assert ctr["partner_count"] == 2
 
     def test_delete_404_for_unknown(self, admin):
