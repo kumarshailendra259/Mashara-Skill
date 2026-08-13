@@ -2852,42 +2852,65 @@ async def settlement_view(
         last_settlement = await _latest_settlement_for_center(cid)
         cutoff = after_date or (last_settlement.get("date") if last_settlement else None)
 
-        # Build the date window for CURRENT (post-cutoff) view
-        cur_match: dict = {"status": "approved", "center_id": cid, "partner_id": {"$ne": None}}
-        date_filter: dict = {}
-        if cutoff:
-            date_filter["$gt"] = cutoff
-        if start:
-            # If user-supplied start is later than cutoff, use it; otherwise keep cutoff
-            if not cutoff or start > cutoff:
-                date_filter["$gte"] = start
-                date_filter.pop("$gt", None)
-        if end:
-            date_filter["$lte"] = end
-        if date_filter:
-            cur_match["date"] = date_filter
+        # PHASE 31C — Defensive: fetch ALL approved partner txns for the center, then filter
+        # + group in Python using a normalized date (YYYY-MM-DD). This is intentionally NOT
+        # a MongoDB `$match` on `date` because legacy CSV imports stored dates as "DD-MM-YYYY"
+        # ("24-10-2025") which, in lexicographic string comparison, is > "2026-08-13" and
+        # leaks pre-cutoff transactions into the current cycle. Normalising in Python fixes
+        # this regardless of stored format.
+        raw_docs = await db.transactions.find(
+            {"status": "approved", "center_id": cid, "partner_id": {"$ne": None}},
+            {"_id": 0, "partner_id": 1, "type": 1, "amount": 1, "date": 1},
+        ).to_list(50000)
 
-        pipe = [
-            {"$match": cur_match},
-            {"$group": {"_id": {"pid": "$partner_id", "type": "$type"}, "total": {"$sum": "$amount"}}},
-        ]
-        rows = await db.transactions.aggregate(pipe).to_list(5000)
+        def _norm(d: str) -> Optional[str]:
+            try:
+                return _normalize_date(d)
+            except Exception:
+                return None
+
+        def _in_current_window(nd: Optional[str]) -> bool:
+            if nd is None:
+                return False
+            if cutoff and not (nd > cutoff):
+                return False
+            if start and not (nd >= start):
+                return False
+            if end and not (nd <= end):
+                return False
+            return True
+
+        def _in_lifetime_window(nd: Optional[str]) -> bool:
+            if nd is None:
+                return False
+            if start and not (nd >= start):
+                return False
+            if end and not (nd <= end):
+                return False
+            return True
+
+        # Group rows locally to mirror the previous aggregation output shape.
+        cur_agg: dict = {}
+        life_agg: dict = {}
+        for d in raw_docs:
+            nd = _norm(d.get("date"))
+            pid_val = d.get("partner_id")
+            t_val = d.get("type")
+            amt = float(d.get("amount") or 0)
+            if t_val not in ("investment", "income", "expense"):
+                continue
+            key = (pid_val, t_val)
+            if _in_current_window(nd):
+                cur_agg[key] = cur_agg.get(key, 0.0) + amt
+            if include_history and _in_lifetime_window(nd):
+                life_agg[key] = life_agg.get(key, 0.0) + amt
+
+        rows = [{"_id": {"pid": k[0], "type": k[1]}, "total": v} for k, v in cur_agg.items()]
 
         # Lifetime (pre-cutoff) numbers — for the "View Settled History" toggle
         lifetime_block = None
         if include_history:
-            life_match: dict = {"status": "approved", "center_id": cid, "partner_id": {"$ne": None}}
-            life_date: dict = {}
-            if start:
-                life_date["$gte"] = start
-            if end:
-                life_date["$lte"] = end
-            if life_date:
-                life_match["date"] = life_date
-            life_rows = await db.transactions.aggregate([
-                {"$match": life_match},
-                {"$group": {"_id": {"pid": "$partner_id", "type": "$type"}, "total": {"$sum": "$amount"}}},
-            ]).to_list(5000)
+            life_rows = [{"_id": {"pid": k[0], "type": k[1]}, "total": v} for k, v in life_agg.items()]
             if life_rows:
                 life_partner_ids = list({r["_id"]["pid"] for r in life_rows})
                 life_pdocs = await db.partners.find(
@@ -3246,10 +3269,29 @@ async def settlement_contributing_txns(
     if scope == "current":
         last = await _latest_settlement_for_center(center_id)
         cutoff = last.get("date") if last else None
-        if cutoff:
-            q["date"] = {"$gt": cutoff}
+        # NOTE: NO date filter in DB — filtered in Python below using normalised dates
+        # so legacy DD-MM-YYYY entries don't leak past the cutoff.
 
-    docs = await db.transactions.find(q, {"_id": 0}).sort([("date", 1), ("created_at", 1)]).to_list(2000)
+    all_docs = await db.transactions.find(q, {"_id": 0}).to_list(50000)
+
+    def _norm_dt(x):
+        try:
+            return _normalize_date(x)
+        except Exception:
+            return None
+
+    # Apply the cutoff in Python using normalised dates
+    docs = []
+    for d in all_docs:
+        nd = _norm_dt(d.get("date"))
+        if scope == "current" and cutoff:
+            if nd is None or not (nd > cutoff):
+                continue
+        # Overwrite the display date with the normalized value so the UI always shows YYYY-MM-DD
+        d["date"] = nd or d.get("date")
+        docs.append(d)
+    # Sort by normalised date
+    docs.sort(key=lambda d: (d.get("date") or "", d.get("created_at") or ""))
 
     # Enrich partner name
     pids = list({d.get("partner_id") for d in docs if d.get("partner_id")})
