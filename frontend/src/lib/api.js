@@ -8,6 +8,26 @@ export const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+/**
+ * Auto-attach a fresh `Idempotency-Key` to every POST / PUT / PATCH so the
+ * server's per-key store can dedupe double-submits (Phase 32). Callers can
+ * override by passing their own header explicitly.
+ */
+api.interceptors.request.use((config) => {
+  const method = (config.method || "get").toLowerCase();
+  if (["post", "put", "patch"].includes(method)) {
+    config.headers = config.headers || {};
+    if (!config.headers["Idempotency-Key"]) {
+      // Use browser crypto if available, else fall back to a timestamped random.
+      const uuid =
+        (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      config.headers["Idempotency-Key"] = uuid;
+    }
+  }
+  return config;
+});
+
 export function formatError(err) {
   const d = err?.response?.data?.detail;
   if (!d) return err?.message || "Request failed";

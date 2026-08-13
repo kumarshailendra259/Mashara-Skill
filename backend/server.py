@@ -646,6 +646,51 @@ def _can_auto_approve(user: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Phase 32 — Idempotency helpers
+# ---------------------------------------------------------------------------
+# The frontend attaches a UUID `Idempotency-Key` header per submit-click.
+# If the same (key + user_id) pair arrives a second time (double-click, network
+# retry, browser back+resubmit), we return the stored response instead of
+# creating a duplicate. TTL: 24h (managed by a Mongo TTL index).
+
+async def _get_idempotency_key(idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key")) -> Optional[str]:
+    """FastAPI dependency that lifts the `Idempotency-Key` header (if present)."""
+    return idempotency_key
+
+
+async def _check_idempotency(key: Optional[str], user_id: str) -> Optional[dict]:
+    """Return the previously-stored response for (key, user_id) if any, else None."""
+    if not key:
+        return None
+    doc = await db.idempotency_keys.find_one(
+        {"key": f"{user_id}:{key}"},
+        {"_id": 0, "response": 1},
+    )
+    return (doc or {}).get("response")
+
+
+async def _store_idempotency(key: Optional[str], user_id: str, response: dict) -> None:
+    """Persist a response under (key, user_id) with a 24h TTL. Best-effort — never
+    raises. `response` must already be JSON-serialisable (pydantic model .model_dump())."""
+    if not key:
+        return
+    try:
+        await db.idempotency_keys.update_one(
+            {"key": f"{user_id}:{key}"},
+            {"$set": {
+                "key": f"{user_id}:{key}",
+                "user_id": user_id,
+                "response": _json_safe(response),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": datetime.now(timezone.utc) + timedelta(hours=24),
+            }},
+            upsert=True,
+        )
+    except Exception:
+        logger.exception("Failed to store idempotency key")
+
+
+# ---------------------------------------------------------------------------
 # Entity list scoping (Companies / Partners / Centers / Projects)
 # ---------------------------------------------------------------------------
 # Global-visibility roles: they see EVERY entity regardless of assignment.
@@ -953,6 +998,30 @@ async def on_startup():
     await _safe_idx("bank_transactions", [("account_id", 1), ("date", -1)])
     await _safe_idx("bank_transactions", [("source", 1), ("date", -1)])
     await _safe_idx("bank_transactions", [("center_id", 1), ("date", -1)])
+
+    # Phase 32 — Pending Approvals fast-path + Settlement view speed-ups.
+    # `current_level > 0` is scanned for every approval-type collection when the
+    # pending inbox loads; compound (current_level desc, created_at desc) gives
+    # the sort-order for free.
+    await _safe_idx("transactions", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("leaves", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("reimbursements", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("regularisations", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("asset_purchase_requests", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("asset_transfers", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("employee_transfers", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("advance_requests", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("quotations", [("current_level", -1), ("created_at", -1)])
+    await _safe_idx("payments", [("current_level", -1), ("created_at", -1)])
+    # Settlement view — approved partner txns scanned per-center for cycle math.
+    await _safe_idx("transactions", [("center_id", 1), ("status", 1), ("partner_id", 1)])
+    # partner_settlements — cutoff lookup (latest per center)
+    await _safe_idx("partner_settlements", [("center_id", 1), ("date", -1)])
+    # reports_to for pending-approvals subordinate resolution
+    await _safe_idx("staff", [("reports_to_id", 1)])
+    # Idempotency keys (Phase 32)
+    await _safe_idx("idempotency_keys", [("key", 1)], unique=True)
+    await _safe_idx("idempotency_keys", [("expires_at", 1)], expireAfterSeconds=0)
 
     # Best-effort LibreOffice install for the offer-letter PDF pipeline. Runs
     # in the background so it never blocks startup; when it finishes, offer
@@ -2023,7 +2092,16 @@ async def list_transactions(
 
 
 @api.post("/transactions", response_model=TransactionOut)
-async def create_transaction(body: TransactionIn, user=Depends(require_role("admin", "manager", "center_manager", "partner", "accountant"))):
+async def create_transaction(
+    body: TransactionIn,
+    user=Depends(require_role("admin", "manager", "center_manager", "partner", "accountant")),
+    idempotency_key: Optional[str] = Depends(_get_idempotency_key),
+):
+    # Idempotency short-circuit — same (key, user) inside 24h returns the previous response
+    if idempotency_key:
+        prev = await _check_idempotency(idempotency_key, user["id"])
+        if prev is not None:
+            return prev
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["created_by"] = user["id"]
@@ -2101,7 +2179,9 @@ async def create_transaction(body: TransactionIn, user=Depends(require_role("adm
                 f"Associated partner submitted txn for your approval (₹{doc.get('amount', 0):,.0f})",
                 ntype="txn_partner_approve", ref_id=doc["id"], link="/transactions",
             )
-    return TransactionOut(**doc)
+    result = TransactionOut(**doc)
+    await _store_idempotency(idempotency_key, user["id"], result.model_dump())
+    return result
 
 
 @api.put("/transactions/{tid}", response_model=TransactionOut)
@@ -5484,82 +5564,139 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
 async def list_pending_approvals(user=Depends(get_current_user)):
     """Return all requests across types where the current user is the resolved approver
     for the current step. ALSO includes transactions partner-cross-approve-eligible
-    for the requesting user (so associated partners see them here)."""
+    for the requesting user (so associated partners see them here).
+
+    PERFORMANCE (Phase 32): Pre-compute the user's context ONCE (role, assigned
+    centers, staff record, direct-report subordinates) and do all step-membership
+    checks in-memory. Also fetches all approval-type collections in PARALLEL via
+    asyncio.gather.
+    """
+    is_admin = user.get("role") == "admin"
+    user_id = user["id"]
+    user_role = user.get("role")
+    user_center_ids = set(user.get("assigned_center_ids") or [])
+
+    # Fetch the caller's staff record ONCE so `kind=staff` and `kind=reports_to`
+    # checks can be resolved with pure-Python comparisons below.
+    user_staff = await db.staff.find_one({"user_id": user_id}, {"_id": 0, "id": 1})
+    user_staff_id = (user_staff or {}).get("id")
+
+    # Pre-compute the set of subordinate user_ids that report to this user, so
+    # reports_to steps route without extra DB lookups per request. Depth ≤ 3 is
+    # more than enough for real-world hierarchies.
+    subordinate_user_ids: set[str] = set()
+    if user_staff_id:
+        direct = await db.staff.find(
+            {"reports_to_id": user_staff_id},
+            {"_id": 0, "id": 1, "user_id": 1},
+        ).to_list(2000)
+        subordinate_user_ids = {s["user_id"] for s in direct if s.get("user_id")}
+
+    def _fast_can_act(step: dict, doc: dict) -> bool:
+        """Purely-in-memory version of _user_can_act_on_request. Returns True iff
+        the caller is eligible for the given step of the given request doc.
+        Fallback to False (safe — the row simply won't surface)."""
+        if is_admin:
+            return True
+        if not step:
+            return False
+        kind = step.get("kind")
+        value = step.get("value", "")
+        if kind == "user":
+            return value == user_id
+        if kind == "role":
+            if value != user_role:
+                return False
+            # Center-scoped roles need the request's center to match user's assigned centers
+            if value in ("partner", "center_partner", "center_manager", "center_staff"):
+                cid = doc.get("center_id")
+                if cid and cid not in user_center_ids:
+                    return False
+            return True
+        if kind == "staff":
+            return bool(user_staff_id) and value == user_staff_id
+        if kind == "reports_to":
+            submitter_id = doc.get("created_by")
+            return bool(submitter_id) and submitter_id in subordinate_user_ids
+        return False
+
+    # Kick off every collection scan in parallel.
+    async def _fetch(coll_name):
+        return await db[coll_name].find(
+            {"current_level": {"$gt": 0}}, {"_id": 0},
+        ).sort("created_at", -1).to_list(2000)
+
+    coll_names = list(APPROVAL_TYPE_COLL.items())
+    fetched = await asyncio.gather(*[_fetch(c) for _, c in coll_names])
+
     out: List[dict] = []
     seen_txn_ids: set[str] = set()
-    for req_type, coll_name in APPROVAL_TYPE_COLL.items():
-        rows = await db[coll_name].find({"current_level": {"$gt": 0}}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    for (req_type, _), rows in zip(coll_names, fetched):
         for rec in rows:
-            if await _user_can_act_on_request(user, rec):
-                step = await _current_step(rec)
-                # Compute whether this step is the FINAL one so the UI knows to
-                # ask "Paid By" for payments/reimbursements.
-                snap = rec.get("chain_snapshot") or []
-                is_final_step = False
-                if snap:
-                    max_level = max((s.get("level", 0) for s in snap), default=0)
-                    is_final_step = (rec.get("current_level") == max_level)
-                out.append({
-                    "request_type": req_type,
-                    "request_id": rec["id"],
-                    "current_level": rec.get("current_level"),
-                    "step_label": (step or {}).get("label"),
-                    "is_final_step": is_final_step,
-                    "total_steps": len(snap),
-                    # Requester (who created the request) — surfaced at the top so
-                    # approvers can identify the source without opening the detail.
-                    "requester_id": rec.get("created_by"),
-                    "requester_name": rec.get("created_by_name") or rec.get("employee_name"),
-                    "center_id_of_request": rec.get("center_id"),
-                    "center_name_of_request": rec.get("center_name"),
-                    "summary": {
-                        "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount"),
-                        "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
-                        # Short one-liner ("Purpose") — for advance_request use the purpose field,
-                        # for payments/quotations use qrn/vendor, for leaves/regularisations a labelled summary.
-                        "purpose": (
-                            rec.get("purpose")
-                            or rec.get("reason")
-                            or (f"QRN {rec.get('qrn') or ''}"
-                                if req_type in ("payment", "quotation") and rec.get("qrn") else None)
-                            or None
-                        ),
-                        "description": (
-                            rec.get("description")
-                            or rec.get("reason")
-                            or (f"{rec.get('name','Asset')} → {rec.get('category') or ''}".strip(" →")
-                                if req_type == "asset_purchase" else None)
-                            or (f"{rec.get('staff_name','Staff')} → center {rec.get('to_center_id','')[:8]}"
-                                if req_type == "employee_transfer" else None)
-                            or (f"Regularise {rec.get('attendance_status','present').upper()} on {rec.get('date','')}"
-                                if req_type == "regularisation" else None)
-                        ),
-                        # Payment-only extras: give the approver full payee context inline so
-                        # they don't need to open a second screen to verify account details.
-                        # For advance_request we surface employee_name via vendor_name so the
-                        # same amber Payee Details block can show the target person.
-                        "vendor_name": rec.get("vendor_name") or (rec.get("employee_name") if req_type == "advance_request" else None),
-                        "qrn": rec.get("qrn") or (rec.get("advance_no") if req_type == "advance_request" else None),
-                        "payment_mode": rec.get("payment_mode") or rec.get("preferred_payment_mode"),
-                        "payee_account_holder": rec.get("payee_account_holder"),
-                        "payee_account_no": rec.get("payee_account_no"),
-                        "payee_ifsc": rec.get("payee_ifsc"),
-                        "payee_bank_name": rec.get("payee_bank_name"),
-                        "payee_upi_id": rec.get("payee_upi_id"),
-                        "payee_proof_attachments": rec.get("payee_proof_attachments") or [],
-                        "attachments": rec.get("attachments") or [],
-                        "chain_history": rec.get("chain_history") or [],
-                        # Pre-fill hints for Center / Partner dropdowns on final approval
-                        "center_id": rec.get("center_id"),
-                        "center_name": rec.get("center_name"),
-                    },
-                    "created_at": rec.get("created_at"),
-                    "via": "chain",
-                })
-                if req_type == "transaction":
-                    seen_txn_ids.add(rec["id"])
+            snap = rec.get("chain_snapshot") or []
+            cur = rec.get("current_level")
+            step = None
+            if snap and cur:
+                for s in snap:
+                    if s.get("level") == cur:
+                        step = s
+                        break
+            if not _fast_can_act(step, rec):
+                continue
+            max_level = max((s.get("level", 0) for s in snap), default=0)
+            is_final_step = (cur == max_level) if snap else False
+            out.append({
+                "request_type": req_type,
+                "request_id": rec["id"],
+                "current_level": cur,
+                "step_label": (step or {}).get("label"),
+                "is_final_step": is_final_step,
+                "total_steps": len(snap),
+                "requester_id": rec.get("created_by"),
+                "requester_name": rec.get("created_by_name") or rec.get("employee_name"),
+                "center_id_of_request": rec.get("center_id"),
+                "center_name_of_request": rec.get("center_name"),
+                "summary": {
+                    "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount"),
+                    "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
+                    "purpose": (
+                        rec.get("purpose")
+                        or rec.get("reason")
+                        or (f"QRN {rec.get('qrn') or ''}"
+                            if req_type in ("payment", "quotation") and rec.get("qrn") else None)
+                        or None
+                    ),
+                    "description": (
+                        rec.get("description")
+                        or rec.get("reason")
+                        or (f"{rec.get('name','Asset')} → {rec.get('category') or ''}".strip(" →")
+                            if req_type == "asset_purchase" else None)
+                        or (f"{rec.get('staff_name','Staff')} → center {rec.get('to_center_id','')[:8]}"
+                            if req_type == "employee_transfer" else None)
+                        or (f"Regularise {rec.get('attendance_status','present').upper()} on {rec.get('date','')}"
+                            if req_type == "regularisation" else None)
+                    ),
+                    "vendor_name": rec.get("vendor_name") or (rec.get("employee_name") if req_type == "advance_request" else None),
+                    "qrn": rec.get("qrn") or (rec.get("advance_no") if req_type == "advance_request" else None),
+                    "payment_mode": rec.get("payment_mode") or rec.get("preferred_payment_mode"),
+                    "payee_account_holder": rec.get("payee_account_holder"),
+                    "payee_account_no": rec.get("payee_account_no"),
+                    "payee_ifsc": rec.get("payee_ifsc"),
+                    "payee_bank_name": rec.get("payee_bank_name"),
+                    "payee_upi_id": rec.get("payee_upi_id"),
+                    "payee_proof_attachments": rec.get("payee_proof_attachments") or [],
+                    "attachments": rec.get("attachments") or [],
+                    "chain_history": rec.get("chain_history") or [],
+                    "center_id": rec.get("center_id"),
+                    "center_name": rec.get("center_name"),
+                },
+                "created_at": rec.get("created_at"),
+                "via": "chain",
+            })
+            if req_type == "transaction":
+                seen_txn_ids.add(rec["id"])
     # Add partner-cross-approve-eligible transactions (not already in chain list)
-    if user.get("role") == "partner":
+    if user_role == "partner":
         pending_txns = await db.transactions.find(
             {"status": "pending"}, {"_id": 0},
         ).sort("created_at", -1).to_list(2000)
@@ -7479,8 +7616,16 @@ QUOTATION_CREATORS = ("admin", "hr", "manager", "senior_manager", "accountant", 
 
 
 @api.post("/quotations")
-async def create_quotation(body: QuotationIn, user=Depends(get_current_user)):
+async def create_quotation(
+    body: QuotationIn,
+    user=Depends(get_current_user),
+    idempotency_key: Optional[str] = Depends(_get_idempotency_key),
+):
     """Any non-partner role can raise a quotation request for a center they belong to."""
+    if idempotency_key:
+        prev = await _check_idempotency(idempotency_key, user["id"])
+        if prev is not None:
+            return prev
     if user.get("role") not in QUOTATION_CREATORS:
         raise HTTPException(403, "Partners cannot raise quotations")
     # Center-scope check for center_manager / center_staff
@@ -7514,7 +7659,9 @@ async def create_quotation(body: QuotationIn, user=Depends(get_current_user)):
                               f"New quotation from {doc['created_by_name']} — {doc['vendor_name']} · ₹{doc['estimated_amount']:,.0f}",
                               ntype="quotation_pending", ref_id=doc["id"], link="/quotations")
     doc.pop("_id", None)
-    return _json_safe(doc)
+    resp = _json_safe(doc)
+    await _store_idempotency(idempotency_key, user["id"], resp)
+    return resp
 
 
 @api.get("/quotations")
@@ -7667,8 +7814,16 @@ def _validate_payment_payee(body: "PaymentIn") -> None:
 
 
 @api.post("/payments")
-async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
+async def create_payment(
+    body: PaymentIn,
+    user=Depends(get_current_user),
+    idempotency_key: Optional[str] = Depends(_get_idempotency_key),
+):
     """Raise a payment request against an APPROVED quotation."""
+    if idempotency_key:
+        prev = await _check_idempotency(idempotency_key, user["id"])
+        if prev is not None:
+            return prev
     if user.get("role") not in QUOTATION_CREATORS:
         raise HTTPException(403, "Partners cannot raise payment requests")
     q = await db.quotations.find_one({"id": body.quotation_id}, {"_id": 0})
@@ -7725,7 +7880,9 @@ async def create_payment(body: PaymentIn, user=Depends(get_current_user)):
                               f"Payment approval — QRN {doc.get('qrn')} · ₹{doc['actual_amount']:,.0f}",
                               ntype="payment_pending", ref_id=doc["id"], link="/quotations")
     doc.pop("_id", None)
-    return _json_safe(doc)
+    resp = _json_safe(doc)
+    await _store_idempotency(idempotency_key, user["id"], resp)
+    return resp
 
 
 class PaymentResubmitIn(BaseModel):
@@ -10472,8 +10629,16 @@ def _annotate_overdue(row: dict) -> None:
 
 
 @api.post("/advance-requests", status_code=201)
-async def create_advance_request(body: AdvanceRequestIn, user=Depends(get_current_user)):
+async def create_advance_request(
+    body: AdvanceRequestIn,
+    user=Depends(get_current_user),
+    idempotency_key: Optional[str] = Depends(_get_idempotency_key),
+):
     """Create a new Advance Request. Staff / center_manager / manager / admin / hr can raise one for themselves."""
+    if idempotency_key:
+        prev = await _check_idempotency(idempotency_key, user["id"])
+        if prev is not None:
+            return prev
     doc = body.model_dump()
     now_iso = datetime.now(timezone.utc).isoformat()
     staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0}) or {}
@@ -10510,7 +10675,9 @@ async def create_advance_request(body: AdvanceRequestIn, user=Depends(get_curren
                     f"Advance approval — {doc['advance_no']} · {doc['employee_name']} · ₹{doc['amount']:,.0f}",
                     ntype="advance_pending", ref_id=doc["id"], link="/advances",
                 )
-    return _json_safe(doc)
+    resp = _json_safe(doc)
+    await _store_idempotency(idempotency_key, user["id"], resp)
+    return resp
 
 
 @api.get("/advance-requests")

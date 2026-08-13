@@ -43,6 +43,17 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
   - Lifetime block (History toggle) enriched with its own 4-KPI strip.
 - **Verified**: 12/12 pytest pass; testing_agent iter-50 validated live UI + math accuracy across 110 centers, zero bugs.
 
+### Phase 32 — Performance + Idempotency Guard (Done, Aug 2026)
+- **User asked**: (a) Optimize the dashboard to fetch data in fewer/consolidated calls and add DB indexes to speed up reads; (b) implement a global submission guard: disable submit immediately + spinner, and make transaction-creation endpoints idempotent so duplicate submits don't create duplicate records. The screenshot showed Pending Approvals stuck on "LOADING…".
+- **Backend `/app/backend/server.py`**:
+  - **Pending Approvals fast-path**: `list_pending_approvals` pre-computes the caller's role + assigned_center_ids + linked staff_id + direct-report subordinate set ONCE, then evaluates step-eligibility in pure Python (no per-row DB roundtrip). All approval-type collections are now fetched **in parallel via `asyncio.gather`**. Response for admin now <400ms.
+  - **DB indexes added** (Phase 32): `current_level` + `created_at` compound index on every approval-type collection (10 in total), `partner_settlements(center_id, date desc)`, `transactions(center_id, status, partner_id)` for settlement fetch, `staff(reports_to_id)`, plus TTL index on `idempotency_keys(expires_at)`.
+  - **Idempotency helpers** — `_get_idempotency_key` FastAPI dependency + `_check_idempotency` / `_store_idempotency` helpers backed by a new `idempotency_keys` collection with 24h TTL. Wired into `POST /api/transactions`, `POST /api/quotations`, `POST /api/payments`, `POST /api/advance-requests`. Same `(user_id, Idempotency-Key)` on repeat returns the stored response → **no duplicate records**.
+- **Frontend**:
+  - `lib/api.js` — Axios interceptor now auto-attaches a fresh `Idempotency-Key` header (crypto.randomUUID) to every POST/PUT/PATCH so no code changes were needed at call-sites; the whole app is now duplicate-safe.
+  - New reusable `<SubmitButton>` component (`components/SubmitButton.jsx`) with a `useRef` synchronous latch that beats React re-render lag, plus busy-state spinner (`Loader2`) and optional `loadingLabel`. Ready for adoption on high-traffic forms.
+- **Verified**: 4 new pytest cases in `test_iter32_idempotency_perf.py` (same key → same txn, different keys → different txns, missing key → normal flow, pending approvals under 2s SLA). 32/34 regression pass (2 pre-existing MONGO_URL-env failures unrelated). Live browser test — Pending Approvals renders 219 items instantly with populated KPI strip; Idempotency-Key confirmed present on `POST /auth/login`.
+
 ### Phase 31C — Legacy DD-MM-YYYY Date Corruption Fix (Done, Aug 2026 — 🚨 CRITICAL DATA BUG)
 - **User reported (production)**: BOCWW Ramgarh pe settlement 2026-08-13 par ki, phir bhi Current Cycle ₹2,46,060 dikha. Drill-down modal ne saaf dikhaya ki 16 txns ki `date` field DD-MM-YYYY format ("24-10-2025", "24-02-2026") mein stored thi. Because `$gt: "2026-08-13"` compares strings LEXICOGRAPHICALLY, `"24-10-2025"` > `"2026-08-13"` (since '2','4' > '2','0'), so ALL such rows leaked into the "active cycle" totals despite being months older than the cutoff.
 - **Root cause**: `TransactionIn` model + CSV importer `POST /api/transactions/import` accepted any date string without format validation. Users bulk-importing older CSVs entered Indian-style DD-MM-YYYY dates.
