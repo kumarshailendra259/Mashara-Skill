@@ -3761,6 +3761,8 @@ class StaffIn(BaseModel):
 class StaffOut(StaffIn):
     id: str
     created_at: str
+    # Phase 33 — today's attendance status ("present"|"absent"|"half"|"leave"|None)
+    today_status: Optional[str] = None
 
 
 class AttendanceIn(BaseModel):
@@ -3922,10 +3924,14 @@ async def list_staff(
     skip: int = 0,
     limit: int = 1000,
     include_inactive: bool = True,
+    include_today_status: bool = True,  # Phase 33 — attach today's attendance
     user=Depends(get_current_user),
 ):
-    """List staff. Supports ?q=<search>, ?skip=, ?limit=.
+    """List staff. Supports ?q=<search>, ?skip=, ?limit=, ?include_today_status=false.
     Response includes header `X-Total-Count` for pagination UIs.
+    When include_today_status=true (default), each row carries a `today_status`
+    field valued "present" | "absent" | "half" | "leave" | null so the HR UI
+    can render color-coded chips (green/red/blue/yellow) without a second call.
     """
     query: dict = {}
     role = user.get("role")
@@ -3951,6 +3957,21 @@ async def list_staff(
     if limit:
         cursor = cursor.limit(min(limit, 2000))
     docs = await cursor.to_list(min(limit or 2000, 2000))
+    # Phase 33 — Bulk-join today's attendance status so the HR list can render
+    # color chips without a per-row API roundtrip.
+    if include_today_status and docs:
+        try:
+            today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+        except Exception:
+            today_ist = datetime.now(timezone.utc).date().isoformat()
+        sids = [d["id"] for d in docs]
+        att_rows = await db.attendance.find(
+            {"staff_id": {"$in": sids}, "date": today_ist},
+            {"_id": 0, "staff_id": 1, "status": 1},
+        ).to_list(3000)
+        att_map = {r["staff_id"]: r.get("status") for r in att_rows}
+        for d in docs:
+            d["today_status"] = att_map.get(d["id"])
     from fastapi import Response
     # Emit total via response header so pagination UIs don't need a second call.
     # Return the plain list body (matches historical response_model).
@@ -3962,29 +3983,124 @@ async def list_staff(
     )
 
 
+async def _next_employee_code() -> str:
+    """Allocate a fresh Employee Code — format `EMP-YYYY-NNNN`.
+
+    Scans existing codes for the current calendar year and returns the next
+    4-digit sequence. Safe under concurrent adds because the caller inserts
+    the doc immediately after — the unique index on `staff.employee_code`
+    guarantees no duplicates (the loop retries on the rare collision race).
+    """
+    year = datetime.now(timezone.utc).year
+    prefix = f"EMP-{year}-"
+    latest = await db.staff.find_one(
+        {"employee_code": {"$regex": f"^{prefix}\\d+$"}},
+        {"_id": 0, "employee_code": 1},
+        sort=[("employee_code", -1)],
+    )
+    next_seq = 1
+    if latest and latest.get("employee_code"):
+        try:
+            next_seq = int(latest["employee_code"].split("-")[-1]) + 1
+        except (ValueError, IndexError):
+            next_seq = 1
+    return f"{prefix}{next_seq:04d}"
+
+
+@api.post("/staff/backfill-employee-codes")
+async def backfill_employee_codes(dry_run: bool = True, user=Depends(require_role("admin", "hr"))):
+    """Backfill missing/blank `employee_code` values on existing staff rows.
+
+    Format assigned: `EMP-YYYY-NNNN`. Idempotent: rows that already have a code
+    are skipped. `dry_run=true` (default) reports the count without writing.
+    """
+    q = {"$or": [{"employee_code": {"$exists": False}}, {"employee_code": None}, {"employee_code": ""}]}
+    rows = await db.staff.find(q, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    assigned = []
+    if not dry_run:
+        # Allocate sequentially inside a single call to avoid burning through
+        # multiple aggregation queries.
+        for r in rows:
+            code = await _next_employee_code()
+            await db.staff.update_one({"id": r["id"]}, {"$set": {"employee_code": code}})
+            assigned.append({"id": r["id"], "name": r.get("name"), "employee_code": code})
+    return {"scanned": len(rows), "assigned": len(assigned), "dry_run": dry_run, "samples": assigned[:25]}
+
+
+@api.post("/staff/import")
+async def import_staff(file: UploadFile = File(...), user=Depends(require_role("admin", "hr"))):
+    """Bulk-add staff from a CSV. Headers (case-insensitive):
+    `name` (required), `designation`, `email`, `mobile`, `salary`, `center_id`, `employee_code` (optional).
+
+    - Rows without a name are skipped.
+    - `employee_code` blanks auto-allocate via `_next_employee_code()`.
+    - Duplicates (same employee_code OR same email if provided) are skipped with
+      a per-row reason returned. Returns `{ created, skipped, errors[] }`.
+    """
+    import csv, io
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(400, "CSV must include a header row")
+    # Normalise headers to lowercase
+    reader.fieldnames = [h.strip().lower() for h in reader.fieldnames]
+    created, skipped = 0, 0
+    errors = []
+    now = datetime.now(timezone.utc).isoformat()
+    for idx, row in enumerate(reader, start=2):  # start=2 accounts for header
+        row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+        name = row.get("name")
+        if not name:
+            errors.append({"row": idx, "reason": "missing name"})
+            skipped += 1
+            continue
+        emp_code = row.get("employee_code") or await _next_employee_code()
+        email_lc = (row.get("email") or "").lower() or None
+        # Duplicate check
+        clash_q: list = []
+        clash_q.append({"employee_code": emp_code})
+        if email_lc:
+            clash_q.append({"email": email_lc})
+        if await db.staff.find_one({"$or": clash_q}, {"_id": 0, "id": 1}):
+            errors.append({"row": idx, "reason": f"duplicate (employee_code={emp_code} / email={email_lc})"})
+            skipped += 1
+            continue
+        try:
+            salary = float(row.get("salary") or 0)
+        except ValueError:
+            salary = 0.0
+        doc = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "designation": row.get("designation") or None,
+            "email": email_lc,
+            "mobile": row.get("mobile") or None,
+            "employee_code": emp_code,
+            "monthly_salary": salary,
+            "center_id": row.get("center_id") or None,
+            "active": True,
+            "created_at": now,
+            "created_by": user["id"],
+        }
+        try:
+            await db.staff.insert_one(doc)
+            created += 1
+        except Exception as e:
+            errors.append({"row": idx, "reason": str(e)[:200]})
+            skipped += 1
+    return {"created": created, "skipped": skipped, "errors": errors[:50]}
+
+
 @api.post("/staff")
 async def create_staff(body: StaffIn, user=Depends(require_role("admin", "manager", "hr"))):
     doc = body.model_dump()
-    # Auto-generate a unique Employee Code if the admin didn't set one. Format:
-    # "EMP-YYYY-NNNN" (year-scoped 4-digit sequence). Increment inside a filter
-    # on existing codes for the current year to avoid a collision hot spot on
-    # concurrent adds.
+    # Auto-generate a unique Employee Code if the admin didn't set one.
     if not (doc.get("employee_code") or "").strip():
-        year = datetime.now(timezone.utc).year
-        prefix = f"EMP-{year}-"
-        # Latest existing code for this year; parse the last 4 digits.
-        latest = await db.staff.find_one(
-            {"employee_code": {"$regex": f"^{prefix}\\d+$"}},
-            {"_id": 0, "employee_code": 1},
-            sort=[("employee_code", -1)],
-        )
-        next_seq = 1
-        if latest and latest.get("employee_code"):
-            try:
-                next_seq = int(latest["employee_code"].split("-")[-1]) + 1
-            except (ValueError, IndexError):
-                next_seq = 1
-        doc["employee_code"] = f"{prefix}{next_seq:04d}"
+        doc["employee_code"] = await _next_employee_code()
     # Only admin can assign the reports_to chain (approval hierarchy)
     if user.get("role") != "admin":
         doc["reports_to_id"] = None

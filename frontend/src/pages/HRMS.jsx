@@ -14,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -38,6 +38,34 @@ function Stepper({ status }) {
       })}
       <span className="ml-2 overline">{status}</span>
     </div>
+  );
+}
+
+/**
+ * Today's attendance status chip — color-coded per user request:
+ *   present → green
+ *   absent  → red
+ *   leave   → blue
+ *   half    → yellow (rest of the day still available)
+ *   null    → light grey "—" (not marked yet)
+ */
+function StaffTodayChip({ status }) {
+  const map = {
+    present: { label: "Present", cls: "bg-emerald-50 text-emerald-700 border-emerald-300" },
+    absent:  { label: "Absent",  cls: "bg-red-50 text-red-700 border-red-300" },
+    leave:   { label: "On Leave", cls: "bg-blue-50 text-blue-700 border-blue-300" },
+    half:    { label: "Half-day",  cls: "bg-amber-50 text-amber-700 border-amber-300" },
+  };
+  const m = map[status];
+  if (!m) return <span className="text-xs text-[var(--muted)]">—</span>;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase border rounded-none ${m.cls}`}
+      data-testid={`today-chip-${status}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${status === "present" ? "bg-emerald-500" : status === "absent" ? "bg-red-500" : status === "leave" ? "bg-blue-500" : "bg-amber-500"}`} />
+      {m.label}
+    </span>
   );
 }
 
@@ -479,6 +507,48 @@ export default function HRMS() {
     setOpenS(true);
   };
 
+  const runBackfillEmpCodes = async () => {
+    try {
+      const dry = await api.post("/staff/backfill-employee-codes?dry_run=true");
+      const preview = dry.data;
+      if (!preview.scanned) {
+        toast.success("All staff already have an Emp Code.");
+        return;
+      }
+      if (!window.confirm(
+        `${preview.scanned} staff members ke pass Emp Code nahin hai. Assign kar dun (EMP-YYYY-XXXX format)?`
+      )) return;
+      const real = await api.post("/staff/backfill-employee-codes?dry_run=false");
+      toast.success(`Assigned ${real.data.assigned} employee codes`);
+      loadAll();
+    } catch (e) {
+      toast.error(formatError(e));
+    }
+  };
+
+  const handleBulkStaffCsv = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = ""; // reset so re-selecting the same file re-triggers
+    if (!f) return;
+    if (!window.confirm(
+      `Import staff from "${f.name}"? Required column: name. ` +
+      `Optional: designation, email, mobile, salary, center_id, employee_code. Continue?`
+    )) return;
+    try {
+      const form = new FormData();
+      form.append("file", f);
+      const r = await api.post("/staff/import", form, { headers: { "Content-Type": "multipart/form-data" } });
+      const { created, skipped, errors } = r.data;
+      toast.success(`Imported ${created} staff · ${skipped} skipped`);
+      if (errors?.length) {
+        console.warn("CSV import errors:", errors);
+      }
+      loadAll();
+    } catch (err) {
+      toast.error(formatError(err));
+    }
+  };
+
   const deleteStaff = async (s) => {
     if (!window.confirm(`Delete staff "${s.name}"? This cannot be undone.`)) return;
     try {await api.delete(`/staff/${s.id}`);
@@ -759,6 +829,29 @@ export default function HRMS() {
                   <Archive size={14} /> Archive ({selectedStaff.size})
                 </Button>
               )}
+              {isAdmin && (
+                <>
+                  <Button
+                    onClick={runBackfillEmpCodes}
+                    variant="outline"
+                    className="rounded-none gap-2"
+                    data-testid="backfill-empcodes-btn"
+                    title="Assign EMP-YYYY-XXXX codes to staff who are missing one"
+                  >
+                    <Hash size={14} /> Backfill Codes
+                  </Button>
+                  <label className="inline-flex items-center gap-2 border border-[var(--border)] rounded-none px-3 h-9 cursor-pointer hover:bg-gray-50 text-sm" data-testid="bulk-add-staff-label">
+                    <Upload size={14} /> Bulk Add (CSV)
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      onChange={handleBulkStaffCsv}
+                      className="hidden"
+                      data-testid="bulk-add-staff-input"
+                    />
+                  </label>
+                </>
+              )}
               <Dialog open={openS} onOpenChange={(o) => { setOpenS(o); if (!o) { setEditingStaffId(null); setStaffForm(emptyStaffForm); } }}>
                 <DialogTrigger asChild><Button onClick={openAddStaff} className="brand-btn rounded-none gap-2" data-testid="btn-new-staff"><Plus size={16} /> Add Staff</Button></DialogTrigger>
                 <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto">
@@ -921,6 +1014,7 @@ export default function HRMS() {
               )}
               <th className="text-left p-3">Emp Code</th>
               <th className="text-left p-3">Name</th>
+              <th className="text-left p-3">Today</th>
               <th className="text-left p-3">Designation</th>
               <th className="text-left p-3">Email</th>
               <th className="text-left p-3">Mobile</th>
@@ -929,7 +1023,7 @@ export default function HRMS() {
               <th className="text-right p-3">Per-Day</th>
               {canManageStaff && <th className="text-right p-3 no-print">Actions</th>}
             </tr></thead><tbody>
-              {staff.length === 0 ? <tr><td colSpan={(canManageStaff ? 9 : 8) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
+              {staff.length === 0 ? <tr><td colSpan={(canManageStaff ? 10 : 9) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
                 <tr key={s.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${s.is_active === false ? "opacity-50" : ""}`}>
                   {isAdmin && (
                     <td className="p-3">
@@ -940,6 +1034,9 @@ export default function HRMS() {
                   <td className="p-3 font-medium">
                     {s.name}
                     {s.is_active === false && <span className="ml-2 text-xs text-[var(--muted)]">(archived)</span>}
+                  </td>
+                  <td className="p-3" data-testid={`staff-today-${s.id}`}>
+                    <StaffTodayChip status={s.today_status} />
                   </td>
                   <td className="p-3">{s.designation}</td>
                   <td className="p-3 text-[var(--muted)] text-xs">{s.email || "—"}</td>

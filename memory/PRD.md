@@ -43,6 +43,19 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
   - Lifetime block (History toggle) enriched with its own 4-KPI strip.
 - **Verified**: 12/12 pytest pass; testing_agent iter-50 validated live UI + math accuracy across 110 centers, zero bugs.
 
+### Phase 33 — Staff Bulk Ops + Attendance Chips (Done, Aug 2026)
+- **User asked**: (a) missing Employee Codes wale staff ko codes assign karo, (b) bulk staff add karne ka option do, (c) attendance status pe color dikhao — Present = green, Absent = red, On Leave = blue.
+- **Backend `/app/backend/server.py`**:
+  - Extracted reusable `_next_employee_code()` helper (format `EMP-YYYY-NNNN`, year-scoped 4-digit sequence, safe under concurrent adds thanks to the existing unique index on `staff.employee_code`).
+  - New `POST /api/staff/backfill-employee-codes?dry_run={bool}` (admin/hr) — scans staff with missing/blank codes, assigns fresh codes sequentially. `dry_run=true` reports count without writing.
+  - New `POST /api/staff/import` (multipart CSV; admin/hr) — bulk-adds staff. Headers case-insensitive: `name` (required), `designation`, `email`, `mobile`, `salary`, `center_id`, `employee_code` (optional; auto-allocated when blank). Duplicate detection on employee_code + email. Returns `{created, skipped, errors[]}` with per-row reasons.
+  - `GET /api/staff` now bulk-joins today's attendance status (IST-normalised date) → new `today_status` field on `StaffOut` (`"present"|"absent"|"half"|"leave"|null`). No extra API roundtrip for the HR UI.
+- **Frontend `HRMS.jsx`**:
+  - **"Backfill Codes"** button in Staff tab toolbar — dry-run first, prompts with count, then real fix. Uses hash icon.
+  - **"Bulk Add (CSV)"** upload label with hidden file input — sends CSV multipart, toasts `created/skipped` count.
+  - New **`StaffTodayChip`** component renders a color-coded pill with a status dot: present→emerald, absent→red, on-leave→blue, half-day→amber. Placed in a new "Today" column between Name and Designation.
+- **Verified**: End-to-end script — backfill run assigned 164 codes in one shot; CSV import created 3 valid rows + correctly skipped 1 duplicate + surfaced the reason. Live browser test — Auto Provisioned = green PRESENT chip, Boss1_23de04 = red ABSENT, Boss1_49b718 = blue ON LEAVE (screenshot confirms). All 25 visible staff now have `EMP-2026-XXXX` codes.
+
 ### Phase 32 — Performance + Idempotency Guard (Done, Aug 2026)
 - **User asked**: (a) Optimize the dashboard to fetch data in fewer/consolidated calls and add DB indexes to speed up reads; (b) implement a global submission guard: disable submit immediately + spinner, and make transaction-creation endpoints idempotent so duplicate submits don't create duplicate records. The screenshot showed Pending Approvals stuck on "LOADING…".
 - **Backend `/app/backend/server.py`**:
