@@ -1149,37 +1149,70 @@ export default function HRMS() {
             )}
           </div>
 
-          <div className="swiss-card overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
-                <th className="text-left p-3">Staff</th>
-                <th className="text-left p-3">Designation</th>
-                <th className="text-left p-3 w-64">Status</th>
-              </tr></thead>
-              <tbody>
-                {staff.length === 0 ? <tr><td colSpan={3} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
-                  <tr key={s.id} className="border-b border-[var(--border)] hover:bg-gray-50">
-                    <td className="p-3 font-medium">{s.name}</td>
-                    <td className="p-3 text-[var(--muted)]">{s.designation}</td>
-                    <td className="p-3">
-                      {canMarkAttendance ? (
-                        <Select value={attMap[s.id] || ""} onValueChange={(v) => setAtt(s.id, v)}>
-                          <SelectTrigger className="rounded-none h-9" data-testid={`att-status-${s.id}`}><SelectValue placeholder="—" /></SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="present">Present</SelectItem>
-                            <SelectItem value="absent">Absent</SelectItem>
-                            <SelectItem value="half">Half Day</SelectItem>
-                            <SelectItem value="leave">Leave</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <span className="overline">{attMap[s.id] || "—"}</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="swiss-card p-4">
+            {staff.length === 0 ? (
+              <div className="text-center py-12 overline">No staff yet</div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3" data-testid="att-thumbnail-grid">
+                {staff.map((s) => {
+                  const status = attMap[s.id] || "";
+                  const badgeCls = {
+                    present: "bg-emerald-50 text-emerald-700 border-emerald-300",
+                    absent:  "bg-red-50 text-red-700 border-red-300",
+                    half:    "bg-amber-50 text-amber-700 border-amber-300",
+                    leave:   "bg-blue-50 text-blue-700 border-blue-300",
+                  }[status] || "bg-gray-50 text-[var(--muted)] border-[var(--border)]";
+                  const initials = (s.name || "?").split(/\s+/).filter(Boolean).slice(0,2).map(w => w[0]?.toUpperCase()).join("");
+                  const avatarBg = {
+                    present: "bg-emerald-100 text-emerald-700",
+                    absent:  "bg-red-100 text-red-700",
+                    half:    "bg-amber-100 text-amber-700",
+                    leave:   "bg-blue-100 text-blue-700",
+                  }[status] || "bg-gray-100 text-[var(--brand)]";
+                  return (
+                    <div
+                      key={s.id}
+                      className={`border rounded-none p-3 flex items-center gap-3 hover:shadow-sm transition-shadow ${status ? "border-l-4" : "border-l-4 border-l-transparent"}`}
+                      style={status ? { borderLeftColor: status === "present" ? "#10b981" : status === "absent" ? "#ef4444" : status === "leave" ? "#3b82f6" : "#f59e0b" } : undefined}
+                      data-testid={`att-card-${s.id}`}
+                    >
+                      <div className={`w-11 h-11 flex items-center justify-center font-bold text-sm ${avatarBg} rounded-none flex-shrink-0`}>
+                        {initials || "?"}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-bold text-sm truncate" title={s.name}>{s.name}</div>
+                        <div className="text-xs text-[var(--muted)] truncate" title={s.designation}>{s.designation || "—"}</div>
+                        {s.employee_code && (
+                          <div className="text-[10px] font-mono text-[var(--brand)] mt-0.5">{s.employee_code}</div>
+                        )}
+                      </div>
+                      <div className="flex-shrink-0 min-w-[100px]">
+                        {canMarkAttendance ? (
+                          <Select value={status} onValueChange={(v) => setAtt(s.id, v)}>
+                            <SelectTrigger
+                              className={`rounded-none h-9 text-xs font-semibold border ${badgeCls}`}
+                              data-testid={`att-status-${s.id}`}
+                            >
+                              <SelectValue placeholder="—" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="present">🟢 Present</SelectItem>
+                              <SelectItem value="absent">🔴 Absent</SelectItem>
+                              <SelectItem value="half">🟡 Half Day</SelectItem>
+                              <SelectItem value="leave">🔵 Leave</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <span className={`inline-block w-full text-center text-[10px] font-bold uppercase px-2 py-1 border ${badgeCls}`}>
+                            {status || "—"}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="swiss-card overflow-x-auto">
