@@ -438,6 +438,7 @@ function AnnouncementsTab({ canEdit }) {
                 <SelectTrigger className="rounded-none" data-testid="ann-priority"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="info">Info (blue)</SelectItem>
+                  <SelectItem value="notice">notice (green)</SelectItem>
                   <SelectItem value="important">Important (amber)</SelectItem>
                   <SelectItem value="urgent">Urgent (red)</SelectItem>
                 </SelectContent>
