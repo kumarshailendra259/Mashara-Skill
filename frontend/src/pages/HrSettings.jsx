@@ -43,7 +43,7 @@ export default function HrSettings() {
           <TabsTrigger value="announcements" data-testid="tab-announcements"><Megaphone size={14} className="mr-2" /> Announcements</TabsTrigger>
           <TabsTrigger value="leave_allocation" data-testid="tab-leave-allocation"><Wallet size={14} className="mr-2" /> Leave Allocation</TabsTrigger>
           <TabsTrigger value="geofences" data-testid="tab-geofences"><MapPin size={14} className="mr-2" /> Geofences</TabsTrigger>
-          <TabsTrigger value="staff_documents" data-testid="tab-staff_documents"><FileText size={14} className="mr-2" /> Staff Documents</TabsTrigger>
+          <TabsTrigger value="staff_documents" data-testid="tab-staff-documents"><FileText size={14} className="mr-2" /> Staff Documents</TabsTrigger>
           <TabsTrigger value="shifts" data-testid="tab-shifts"><Clock size={14} className="mr-2" /> Shifts</TabsTrigger>
           <TabsTrigger value="offer_letters" data-testid="tab-offer-letters"><FileText size={14} className="mr-2" /> Offer Letters</TabsTrigger>
           <TabsTrigger value="salary_slips" data-testid="tab-salary-slips"><Receipt size={14} className="mr-2" /> Salary Slips</TabsTrigger>
