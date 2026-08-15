@@ -14,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -575,6 +575,51 @@ export default function HRMS() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  const generateLogin = async (s) => {
+    const isReset = !!s.user_id;
+    if (!s.email) { toast.error("Staff has no email — add one first"); return; }
+    if (!window.confirm(
+      isReset
+        ? `Reset ${s.name}'s login password and email new credentials to ${s.email}?`
+        : `Generate a login ID + password for ${s.name} and email it to ${s.email}?`
+    )) return;
+    try {
+      const r = await api.post(`/staff/${s.id}/generate-login`, null, {
+        params: { send_email: true, force_reset: isReset },
+      });
+      const d = r.data;
+      if (d.email_sent) {
+        toast.success(isReset ? "Password reset + credentials emailed" : "Login created + credentials emailed");
+      } else if (d.password) {
+        // Fallback: show the password so admin can share manually
+        window.prompt(
+          `Email delivery failed (${d.email_reason || "unknown"}). Share this password manually with the staff (they can change it after first login):`,
+          d.password,
+        );
+      } else if (d.linked) {
+        toast.info(d.note || "Existing account already linked");
+      } else {
+        toast.success("Login generated");
+      }
+      loadAll();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const verifyBank = async (s) => {
+    if (!window.confirm(
+      `Verify ${s.name}'s bank details?\n\n` +
+      `Bank: ${s.bank_name || "—"}\n` +
+      `A/C:  ${s.bank_account_no || "—"}\n` +
+      `IFSC: ${s.ifsc || "—"}\n\n` +
+      `Only click Verify AFTER a penny-drop or physical passbook check.`
+    )) return;
+    try {
+      await api.post(`/staff/${s.id}/verify-bank`);
+      toast.success("Bank details verified");
+      loadAll();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   const deleteStaff = async (s) => {
     if (!window.confirm(`Delete staff "${s.name}"? This cannot be undone.`)) return;
     try {await api.delete(`/staff/${s.id}`);
@@ -1114,6 +1159,29 @@ export default function HRMS() {
                           data-testid={`staff-offer-send-${s.id}`}
                           title="Generate & email offer letter"
                         ><Mail size={14} /></Button>
+                        {isAdmin && (
+                          <Button
+                            size="sm" variant="outline"
+                            onClick={() => generateLogin(s)}
+                            className={`rounded-none h-8 px-2 ${s.user_id ? "text-emerald-700 border-emerald-300" : ""}`}
+                            data-testid={`staff-genlogin-${s.id}`}
+                            title={s.user_id ? "Login exists — click to reset password + re-email" : "Generate login ID + password and email to staff"}
+                          ><KeyRound size={14} /></Button>
+                        )}
+                        {canManageStaff && s.bank_account_no && !s.bank_verified && (
+                          <Button
+                            size="sm" variant="outline"
+                            onClick={() => verifyBank(s)}
+                            className="rounded-none h-8 px-2 text-amber-700 border-amber-300 bg-amber-50"
+                            data-testid={`staff-verify-bank-${s.id}`}
+                            title="Bank details submitted — click to verify"
+                          ><ShieldAlert size={14} /></Button>
+                        )}
+                        {s.bank_verified && (
+                          <span className="inline-flex items-center h-8 px-2 rounded-none border border-emerald-300 bg-emerald-50 text-emerald-700" title="Bank verified">
+                            <ShieldCheck size={14} />
+                          </span>
+                        )}
                         <Button
                           size="sm" variant="outline"
                           onClick={() => nav(`/hrms/staff/${s.id}/salary`)}

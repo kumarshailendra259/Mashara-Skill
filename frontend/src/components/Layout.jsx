@@ -38,6 +38,7 @@ const navItems = [
   { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
   { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
   { to: "/hrms", key: "HRMS", icon: Users },
+  { to: "/me/profile", key: "my_profile", icon: UserCog, staffOnly: true },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
   { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
   { to: "/partner-associations", key: "partner_associations", icon: Link2, adminManagerOnly: true },
@@ -185,6 +186,7 @@ export default function Layout({ children }) {
       if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
       if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
       if (it.nonPartner && user?.role === "partner") return false;
+      if (it.staffOnly && !["center_staff", "center_manager", "hr", "manager", "senior_manager"].includes(user?.role)) return false;
       if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;
       return true;
     }),

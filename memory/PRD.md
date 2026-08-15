@@ -43,6 +43,21 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
   - Lifetime block (History toggle) enriched with its own 4-KPI strip.
 - **Verified**: 12/12 pytest pass; testing_agent iter-50 validated live UI + math accuracy across 110 centers, zero bugs.
 
+### Phase 35 — Login Provisioning + Self-Service Profile + Bank Verify (Done, Aug 2026)
+- **User asked**: (1) staff add hone ke baad login ID + password generate hoke mail ho jaye, (2) staff khud bank details fill kare aur HR approve kare, (3) profile photo bhi laga sake.
+- **Backend `/app/backend/server.py`**:
+  - New **`POST /api/staff/{sid}/generate-login`** (admin/hr) — creates the linked user account (role: `center_staff`), generates a random 12-char password, emails credentials via Resend. Params: `send_email=true`, `force_reset=true` to rotate password on an existing user. Idempotent — second call without `force_reset` returns the existing user without a new password. Password is echoed back only when the email failed AND caller is admin.
+  - New **`GET /api/me/staff-profile`** — returns the calling user's linked staff row for the self-service page.
+  - New **`PUT /api/me/staff-profile`** — staff self-updates a whitelisted subset (`mobile, address, photo_url, bank_name, bank_account_no, ifsc, account_holder_name, upi_id`). Explicitly EXCLUDES role/salary/center. If ANY bank field changed → auto-sets `bank_verified=false` and pings all admin/hr users so they re-approve.
+  - New **`POST /api/me/staff-profile/photo`** — multipart image upload to object storage; sets `photo_url` + `photo_key` on the staff row. Enforces 3MB + `image/*` guard.
+  - `POST /api/staff/{sid}/verify-bank` (existing) — now also fires a `bank_verified` notification to the staff so they know HR approved.
+- **Frontend**:
+  - **New page `pages/MyProfile.jsx`** — self-service form with (a) photo tile + upload/change button, (b) Contact Details section, (c) Bank Details section with real-time "Pending HR Approval" amber badge vs "Verified" emerald badge. All submits use `<SubmitButton>` for double-click safety.
+  - **Sidebar** — new "My Profile" entry (`staffOnly` — visible to center_staff / center_manager / hr / manager / senior_manager). English + Hindi translations added.
+  - **HRMS Staff table** — new **KeyRound** button per row (`staff-genlogin-<id>`) that (a) creates the login + emails password if not yet linked, (b) rotates the password + re-emails if login already exists. Fallback: if email delivery fails, admin gets a browser prompt showing the plaintext password to share manually.
+  - **HRMS Staff table** — new amber **ShieldAlert** icon when the staff has bank details but they're not verified (click to approve); replaced with a green **ShieldCheck** badge when verified.
+- **Verified**: End-to-end script — generate-login on a fresh staff created the user + rotated password on second call with `force_reset=true`; idempotent second call returned the existing user without rotation. Live browser: 25 Generate-Login buttons render on Staff tab, `/me/profile` page renders with photo/contact/bank sections + hint copy "Fill in and submit — HR will approve".
+
 ### Phase 34 — Safe Receive Rollback + Cleanup Guards + Dashboard Consolidation (Done, Aug 2026)
 - **User asked**: (1) disable Transactions submit + busy state, (2) idempotency guard on `create_transaction` via unique index, (3) `receive_batch_payment` must save txns BEFORE flipping to `received` and rollback on failure, (4) guard `cleanup-orphan-txns` so it never deletes valid milestone txns, (5) consolidate dashboard API calls.
 - **Frontend `pages/Transactions.jsx`** — new-transaction "Save" button now uses `<SubmitButton>` (synchronous ref-latch prevents rapid double-click; spinner + "Saving…" label; auto-unlocks on completion). All other `api.post` calls are already duplicate-safe thanks to the Phase 32 axios `Idempotency-Key` interceptor.

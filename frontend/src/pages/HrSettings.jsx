@@ -132,6 +132,10 @@ function GeofencesTab() {
   const [centers, setCenters] = useState([]);
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ name: "", center_id: "", latitude: "", longitude: "", radius_m: 200, active: true });
+  // Phase 36 — address search state
+  const [searchQ, setSearchQ] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchBusy, setSearchBusy] = useState(false);
 
   const load = async () => {
     try {
@@ -149,6 +153,35 @@ function GeofencesTab() {
       (err) => toast.error(err.message || "Location denied"),
       { enableHighAccuracy: true },
     );
+  };
+
+  /**
+   * Phase 36 — Address search via OpenStreetMap Nominatim (same free geocoder
+   * already used elsewhere in the app). Returns up to 6 suggestions; user picks
+   * one and lat/lng snaps to that place. `countrycodes=in` biases results to
+   * India so "Ranchi Head Office" doesn't jump to a US result.
+   */
+  const runSearch = async (q) => {
+    const query = (q ?? searchQ).trim();
+    if (!query) { setSearchResults([]); return; }
+    setSearchBusy(true);
+    try {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&countrycodes=in&q=${encodeURIComponent(query)}`;
+      const r = await fetch(url, { headers: { "Accept-Language": "en" } });
+      const data = await r.json();
+      setSearchResults(Array.isArray(data) ? data : []);
+      if ((data || []).length === 0) toast.info("No matches — try a landmark, PIN code, or full address");
+    } catch (e) {
+      toast.error("Search failed — check your internet");
+    } finally { setSearchBusy(false); }
+  };
+  const pickResult = (r) => {
+    const lat = parseFloat(r.lat), lng = parseFloat(r.lon);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+    setForm((f) => ({ ...f, latitude: lat.toFixed(6), longitude: lng.toFixed(6) }));
+    setSearchResults([]);
+    setSearchQ(r.display_name.slice(0, 60));
+    toast.success("Location placed on map");
   };
 
   const save = async () => {
@@ -188,6 +221,50 @@ function GeofencesTab() {
                   <span>Map (click anywhere or <b>drag the marker</b>)</span>
                   <button type="button" onClick={useMyLocation} className="text-xs text-[var(--brand)] hover:underline inline-flex items-center gap-1" data-testid="fence-use-loc"><MapPin size={12} /> Use my location</button>
                 </Label>
+                {/* Phase 36 — Address search bar */}
+                <div className="relative mt-2">
+                  <div className="flex gap-2">
+                    <Input
+                      value={searchQ}
+                      onChange={(e) => setSearchQ(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); runSearch(); } }}
+                      placeholder="Search location — e.g. Ranchi Head Office, PIN 834001, Mumbai railway station"
+                      className="rounded-none"
+                      data-testid="fence-search-input"
+                    />
+                    <Button
+                      type="button"
+                      onClick={() => runSearch()}
+                      disabled={searchBusy || !searchQ.trim()}
+                      variant="outline"
+                      className="rounded-none whitespace-nowrap gap-1"
+                      data-testid="fence-search-btn"
+                    >
+                      {searchBusy ? "Searching…" : "Search"}
+                    </Button>
+                  </div>
+                  {searchResults.length > 0 && (
+                    <div
+                      className="absolute z-20 left-0 right-0 mt-1 bg-white border border-[var(--border)] shadow-lg max-h-60 overflow-y-auto"
+                      data-testid="fence-search-results"
+                    >
+                      {searchResults.map((r, idx) => (
+                        <button
+                          type="button"
+                          key={`${r.place_id}-${idx}`}
+                          onClick={() => pickResult(r)}
+                          className="w-full text-left px-3 py-2 text-xs hover:bg-gray-50 border-b border-[var(--border)] last:border-0"
+                          data-testid={`fence-search-result-${idx}`}
+                        >
+                          <div className="font-medium truncate">{r.display_name}</div>
+                          <div className="text-[10px] text-[var(--muted)] font-mono">
+                            {parseFloat(r.lat).toFixed(5)}, {parseFloat(r.lon).toFixed(5)}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <div className="mt-2">
                   <MapPicker
                     value={{ lat: form.latitude, lng: form.longitude }}
@@ -196,7 +273,7 @@ function GeofencesTab() {
                     height={300}
                   />
                 </div>
-                <div className="text-xs text-[var(--muted)] mt-1">Tip: zoom in, click to drop marker, then drag for precision. Circle shows the radius preview.</div>
+                <div className="text-xs text-[var(--muted)] mt-1">Tip: search karo, ya map pe click karo, phir marker drag karke exact location fix karo. Circle radius preview dikha raha hai.</div>
               </div>
               <div><Label>Latitude</Label><Input value={form.latitude} onChange={(e) => setForm({ ...form, latitude: e.target.value })} placeholder="19.076" className="rounded-none num" data-testid="fence-lat" /></div>
               <div><Label>Longitude</Label><Input value={form.longitude} onChange={(e) => setForm({ ...form, longitude: e.target.value })} placeholder="72.8777" className="rounded-none num" data-testid="fence-lng" /></div>

@@ -4344,7 +4344,7 @@ async def delete_staff(sid: str, _=Depends(require_role("admin", "hr"))):
 @api.post("/staff/{sid}/verify-bank")
 async def verify_staff_bank(sid: str, user=Depends(require_role("admin", "hr"))):
     """HR/Admin marks a staff's bank details as verified after manual check."""
-    s = await db.staff.find_one({"id": sid}, {"_id": 0, "bank_account_no": 1, "ifsc": 1})
+    s = await db.staff.find_one({"id": sid}, {"_id": 0, "bank_account_no": 1, "ifsc": 1, "user_id": 1, "name": 1})
     if not s:
         raise HTTPException(404, "Staff not found")
     if not s.get("bank_account_no") or not s.get("ifsc"):
@@ -4353,7 +4353,187 @@ async def verify_staff_bank(sid: str, user=Depends(require_role("admin", "hr")))
     await db.staff.update_one({"id": sid}, {"$set": {
         "bank_verified": True, "bank_verified_at": now, "bank_verified_by": user["id"],
     }})
+    # Notify the staff their bank details were approved.
+    if s.get("user_id"):
+        await _notify(
+            s["user_id"], f"Your bank details have been approved by HR.",
+            ntype="bank_verified", ref_id=sid, link="/me/profile",
+        )
     return {"ok": True, "verified_at": now}
+
+
+@api.post("/staff/{sid}/generate-login")
+async def generate_staff_login(
+    sid: str,
+    user=Depends(require_role("admin", "hr")),
+    send_email: bool = True,
+    force_reset: bool = False,
+):
+    """Phase 35 — Create (or reset) the login account for an existing staff row
+    and email the credentials via Resend.
+
+    - Idempotent: if the staff already has a linked user account and `force_reset=false`,
+      the existing user is returned; use `force_reset=true` to rotate the password.
+    - Requires the staff to have an `email` on the row.
+    - Assigns role `center_staff` by default; admin can promote later.
+    """
+    from email_utils import generate_password, send_credentials_email
+    staff = await db.staff.find_one({"id": sid}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+    login_email = (staff.get("email") or "").strip().lower()
+    if not login_email:
+        raise HTTPException(400, "Staff has no email — please add one first")
+
+    existing_user = await db.users.find_one({"email": login_email}, {"_id": 0})
+    generated_password: Optional[str] = None
+    if existing_user and not force_reset:
+        # Link only — no new password
+        if not staff.get("user_id"):
+            await db.staff.update_one({"id": sid}, {"$set": {"user_id": existing_user["id"]}})
+        already_linked_msg = "Existing account linked; no new password generated. Pass force_reset=true to rotate."
+        return {"ok": True, "user_id": existing_user["id"], "linked": True, "password_rotated": False, "email_sent": False, "note": already_linked_msg}
+
+    new_password = generate_password(12)
+    generated_password = new_password
+    now = datetime.now(timezone.utc).isoformat()
+    if existing_user and force_reset:
+        # Rotate password on the existing user record
+        await db.users.update_one(
+            {"id": existing_user["id"]},
+            {"$set": {"password_hash": hash_password(new_password), "password_reset_at": now}},
+        )
+        user_id = existing_user["id"]
+        if not staff.get("user_id"):
+            await db.staff.update_one({"id": sid}, {"$set": {"user_id": user_id}})
+    else:
+        user_doc = {
+            "id": str(uuid.uuid4()),
+            "name": staff.get("name") or login_email,
+            "email": login_email,
+            "password_hash": hash_password(new_password),
+            "role": "center_staff",
+            "mobile": staff.get("mobile"),
+            "assigned_center_ids": [staff.get("center_id")] if staff.get("center_id") else [],
+            "assigned_partner_id": None,
+            "created_at": now,
+        }
+        await db.users.insert_one(user_doc)
+        user_id = user_doc["id"]
+        await db.staff.update_one({"id": sid}, {"$set": {"user_id": user_id}})
+
+    email_sent = False
+    email_reason = None
+    if send_email:
+        try:
+            public_url = os.environ.get("PUBLIC_APP_URL", "").rstrip("/")
+            check_in_url = (public_url + "/check-in") if public_url else "/check-in"
+            r = await send_credentials_email(
+                to_email=login_email, name=staff.get("name") or login_email,
+                password=new_password, check_in_url=check_in_url,
+            )
+            email_sent = bool((r or {}).get("sent"))
+            email_reason = (r or {}).get("reason")
+        except Exception as e:
+            logger.exception("Failed to send credentials email for staff %s", sid)
+            email_reason = str(e)[:200]
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "linked": bool(existing_user),
+        "password_rotated": bool(existing_user and force_reset),
+        "email_sent": email_sent,
+        "email_reason": email_reason,
+        # Only echo the password back if email failed AND caller is admin — HR can copy it manually.
+        "password": (new_password if (not email_sent and user.get("role") == "admin") else None),
+    }
+
+
+@api.get("/me/staff-profile")
+async def get_my_staff_profile(user=Depends(get_current_user)):
+    """Return the calling user's linked staff row (for the self-service "My Profile" page)."""
+    s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Your account is not linked to any staff record. Ask HR to link.")
+    return s
+
+
+class SelfStaffProfileIn(BaseModel):
+    """Self-service fields a staff member can edit for their own profile.
+    Explicitly EXCLUDES role/salary/center — those are HR-only.
+    """
+    model_config = ConfigDict(extra="ignore")
+    mobile: Optional[str] = None
+    address: Optional[str] = None
+    photo_url: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    ifsc: Optional[str] = None
+    account_holder_name: Optional[str] = None
+    upi_id: Optional[str] = None
+
+
+@api.put("/me/staff-profile")
+async def update_my_staff_profile(body: SelfStaffProfileIn, user=Depends(get_current_user)):
+    """Staff self-fill: update mobile/address/photo AND submit bank details for HR approval.
+
+    Any bank field change automatically **unverifies** the bank so HR must re-approve
+    via `/staff/{sid}/verify-bank`. This lets staff fix typos without needing HR to
+    manually reset the flag.
+    """
+    s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Your account is not linked to any staff record.")
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    bank_fields = {"bank_name", "bank_account_no", "ifsc", "account_holder_name"}
+    bank_changed = any(k in update and (update[k] or "") != (s.get(k) or "") for k in bank_fields)
+    if bank_changed:
+        update["bank_verified"] = False
+        update["bank_verified_at"] = None
+        update["bank_verified_by"] = None
+        update["bank_submitted_at"] = datetime.now(timezone.utc).isoformat()
+    # Sync mobile onto the linked user record too so login lookups stay consistent.
+    if update.get("mobile"):
+        await db.users.update_one({"id": user["id"]}, {"$set": {"mobile": update["mobile"]}})
+    res = await db.staff.find_one_and_update({"id": s["id"]}, {"$set": update}, return_document=True)
+    if not res:
+        raise HTTPException(500, "Update failed")
+    res.pop("_id", None)
+    # Ping HR when bank details submitted / changed so they can approve.
+    if bank_changed:
+        hr_users = await db.users.find(
+            {"role": {"$in": ["admin", "hr"]}}, {"_id": 0, "id": 1},
+        ).to_list(100)
+        for hr in hr_users:
+            await _notify(
+                hr["id"],
+                f"{s.get('name', 'A staff member')} has submitted bank details for approval.",
+                ntype="bank_submitted", ref_id=s["id"], link="/hrms",
+            )
+    return res
+
+
+@api.post("/me/staff-profile/photo")
+async def upload_my_profile_photo(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Staff self-upload their profile photo. Stores in object storage and updates `photo_url` on the staff row."""
+    s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not s:
+        raise HTTPException(404, "Your account is not linked to any staff record.")
+    raw = await file.read()
+    if len(raw) > 3 * 1024 * 1024:
+        raise HTTPException(400, "Photo must be under 3 MB")
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(400, "File must be an image")
+    ext = (file.filename or "photo.jpg").split(".")[-1][:5].lower() or "jpg"
+    key = f"staff-photos/{s['id']}.{ext}"
+    try:
+        _put_object(key, raw, content_type=file.content_type or "image/jpeg")
+    except Exception as e:
+        logger.exception("photo upload failed")
+        raise HTTPException(502, f"Storage upload failed: {e}")
+    url = _public_object_url(key) if callable(globals().get("_public_object_url")) else f"/api/objects/{key}"
+    await db.staff.update_one({"id": s["id"]}, {"$set": {"photo_url": url, "photo_key": key}})
+    return {"ok": True, "photo_url": url}
 
 
 @api.post("/staff/{sid}/unverify-bank")
