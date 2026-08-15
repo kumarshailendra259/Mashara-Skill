@@ -305,7 +305,366 @@ function GeofencesTab() {
     </div>
   );
 }
+import React, { useEffect, useState } from "react";
+import { api, formatError } from "@/lib/api";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { FileText, Upload, Trash2, Download } from "lucide-react";
 
+export default function StaffDocumentsTab() {
+  const [staff, setStaff] = useState([]);
+  const [documents, setDocuments] = useState([]);
+  const [selectedStaff, setSelectedStaff] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [form, setForm] = useState({
+    document_type: "",
+    document_name: "",
+    file: null,
+  });
+
+  const loadStaff = async () => {
+    try {
+      const res = await api.get("/entities/staff");
+      setStaff(res.data || []);
+    } catch (e) {
+      toast.error(formatError(e));
+    }
+  };
+
+  const loadDocuments = async (staffId) => {
+    if (!staffId) {
+      setDocuments([]);
+      return;
+    }
+
+    try {
+      const res = await api.get(`/staff/${staffId}/documents`);
+      setDocuments(res.data || []);
+    } catch (e) {
+      toast.error(formatError(e));
+    }
+  };
+
+  useEffect(() => {
+    loadStaff();
+  }, []);
+
+  useEffect(() => {
+    loadDocuments(selectedStaff);
+  }, [selectedStaff]);
+
+  const uploadDocument = async () => {
+    if (!selectedStaff) {
+      toast.error("Please select staff");
+      return;
+    }
+
+    if (!form.document_type) {
+      toast.error("Please select document type");
+      return;
+    }
+
+    if (!form.file) {
+      toast.error("Please select a file");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const data = new FormData();
+
+      data.append("staff_id", selectedStaff);
+      data.append("document_type", form.document_type);
+      data.append("document_name", form.document_name || form.file.name);
+      data.append("file", form.file);
+
+      await api.post("/staff-documents", data);
+
+      toast.success("Document uploaded successfully");
+
+      setForm({
+        document_type: "",
+        document_name: "",
+        file: null,
+      });
+
+      loadDocuments(selectedStaff);
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deleteDocument = async (id) => {
+    if (!window.confirm("Delete this document?")) return;
+
+    try {
+      await api.delete(`/staff-documents/${id}`);
+      toast.success("Document deleted");
+      loadDocuments(selectedStaff);
+    } catch (e) {
+      toast.error(formatError(e));
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+
+      <div className="swiss-card p-4">
+        <div className="overline mb-2">
+          Select Staff
+        </div>
+
+        <Select
+          value={selectedStaff}
+          onValueChange={setSelectedStaff}
+        >
+          <SelectTrigger className="rounded-none">
+            <SelectValue placeholder="Select employee" />
+          </SelectTrigger>
+
+          <SelectContent>
+            {staff.map((employee) => (
+              <SelectItem
+                key={employee.id}
+                value={employee.id}
+              >
+                {employee.name}
+                {employee.employee_code
+                  ? ` (${employee.employee_code})`
+                  : ""}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {selectedStaff && (
+        <div className="swiss-card p-4 space-y-4">
+
+          <div className="font-heading font-bold">
+            Upload Staff Document
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+
+            <div>
+              <Label>Document Type</Label>
+
+              <Select
+                value={form.document_type}
+                onValueChange={(value) =>
+                  setForm({
+                    ...form,
+                    document_type: value,
+                  })
+                }
+              >
+                <SelectTrigger className="rounded-none">
+                  <SelectValue placeholder="Select type" />
+                </SelectTrigger>
+
+                <SelectContent>
+                  <SelectItem value="aadhaar">
+                    Aadhaar Card
+                  </SelectItem>
+
+                  <SelectItem value="pan">
+                    PAN Card
+                  </SelectItem>
+
+                  <SelectItem value="photo">
+                    Photograph
+                  </SelectItem>
+
+                  <SelectItem value="joining_letter">
+                    Joining Letter
+                  </SelectItem>
+
+                  <SelectItem value="offer_letter">
+                    Offer Letter
+                  </SelectItem>
+
+                  <SelectItem value="certificate">
+                    Certificate
+                  </SelectItem>
+
+                  <SelectItem value="bank_document">
+                    Bank Document
+                  </SelectItem>
+
+                  <SelectItem value="other">
+                    Other
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div>
+              <Label>Document Name</Label>
+
+              <Input
+                value={form.document_name}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    document_name: e.target.value,
+                  })
+                }
+                placeholder="Document name"
+                className="rounded-none"
+              />
+            </div>
+
+            <div>
+              <Label>File</Label>
+
+              <Input
+                type="file"
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    file: e.target.files?.[0] || null,
+                  })
+                }
+                className="rounded-none"
+              />
+            </div>
+
+          </div>
+
+          <Button
+            onClick={uploadDocument}
+            disabled={loading}
+            className="brand-btn rounded-none gap-2"
+          >
+            <Upload size={15} />
+
+            {loading
+              ? "Uploading..."
+              : "Upload Document"}
+          </Button>
+
+        </div>
+      )}
+
+      {selectedStaff && (
+        <div className="swiss-card overflow-x-auto">
+
+          <table className="w-full text-sm">
+
+            <thead>
+              <tr className="border-b border-[var(--border)] overline bg-gray-50">
+                <th className="text-left p-3">
+                  Document
+                </th>
+
+                <th className="text-left p-3">
+                  Type
+                </th>
+
+                <th className="text-left p-3">
+                  Uploaded
+                </th>
+
+                <th className="text-right p-3">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+
+            <tbody>
+
+              {documents.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={4}
+                    className="text-center py-8 overline"
+                  >
+                    No documents uploaded
+                  </td>
+                </tr>
+              ) : (
+                documents.map((doc) => (
+                  <tr
+                    key={doc.id}
+                    className="border-b border-[var(--border)]"
+                  >
+
+                    <td className="p-3">
+                      <div className="flex items-center gap-2">
+                        <FileText size={15} />
+                        {doc.document_name}
+                      </div>
+                    </td>
+
+                    <td className="p-3 capitalize">
+                      {doc.document_type}
+                    </td>
+
+                    <td className="p-3">
+                      {doc.created_at
+                        ? new Date(
+                            doc.created_at
+                          ).toLocaleDateString()
+                        : "—"}
+                    </td>
+
+                    <td className="p-3 text-right">
+
+                      <div className="flex justify-end gap-1">
+
+                        {doc.file_url && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="rounded-none"
+                            onClick={() =>
+                              window.open(
+                                doc.file_url,
+                                "_blank"
+                              )
+                            }
+                          >
+                            <Download size={14} />
+                          </Button>
+                        )}
+
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="rounded-none text-[var(--danger)]"
+                          onClick={() =>
+                            deleteDocument(doc.id)
+                          }
+                        >
+                          <Trash2 size={14} />
+                        </Button>
+
+                      </div>
+
+                    </td>
+
+                  </tr>
+                ))
+              )}
+
+            </tbody>
+
+          </table>
+
+        </div>
+      )}
+
+    </div>
+  );
+}
 /* ============================================================ SHIFTS ============================================================ */
 function ShiftsTab() {
   const [list, setList] = useState([]);
