@@ -43,6 +43,7 @@ export default function HrSettings() {
           <TabsTrigger value="announcements" data-testid="tab-announcements"><Megaphone size={14} className="mr-2" /> Announcements</TabsTrigger>
           <TabsTrigger value="leave_allocation" data-testid="tab-leave-allocation"><Wallet size={14} className="mr-2" /> Leave Allocation</TabsTrigger>
           <TabsTrigger value="geofences" data-testid="tab-geofences"><MapPin size={14} className="mr-2" /> Geofences</TabsTrigger>
+          <TabsTrigger value="staff_documents" data-testid="tab-staff_documents"><FileText size={14} className="mr-2" /> Staff Documents</TabsTrigger>
           <TabsTrigger value="shifts" data-testid="tab-shifts"><Clock size={14} className="mr-2" /> Shifts</TabsTrigger>
           <TabsTrigger value="offer_letters" data-testid="tab-offer-letters"><FileText size={14} className="mr-2" /> Offer Letters</TabsTrigger>
           <TabsTrigger value="salary_slips" data-testid="tab-salary-slips"><Receipt size={14} className="mr-2" /> Salary Slips</TabsTrigger>
@@ -52,7 +53,7 @@ export default function HrSettings() {
         <TabsContent value="announcements" className="mt-4"><AnnouncementsTab canEdit={canEdit} /></TabsContent>
         <TabsContent value="leave_allocation" className="mt-4"><LeaveAllocationTab /></TabsContent>
         <TabsContent value="geofences" className="mt-4"><GeofencesTab /></TabsContent>
-        <TabsContent value="Staff's_Documents" className="mt-4"><Staff'sDocumentsTab /></TabsContent>
+        <TabsContent value="staff_documents" className="mt-4"><StaffDocumentsTab /></TabsContent>
         <TabsContent value="shifts" className="mt-4"><ShiftsTab /></TabsContent>
         <TabsContent value="offer_letters" className="mt-4"><OfferLetterTemplatesTab /></TabsContent>
         <TabsContent value="salary_slips" className="mt-4"><SalarySlipTemplatesTab /></TabsContent>
