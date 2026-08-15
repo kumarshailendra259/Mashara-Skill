@@ -305,6 +305,8 @@ function GeofencesTab() {
     </div>
   );
 }
+/* ============================================================ Staff Documents ============================================================ */
+function StaffDocumentsTab() {
 import React, { useEffect, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { toast } from "sonner";
