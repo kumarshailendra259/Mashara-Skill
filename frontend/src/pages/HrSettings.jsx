@@ -15,6 +15,7 @@ import { Plus, Trash2, Pencil, Check, X, MapPin, Calendar, Clock, AlertCircle, W
 import PrintButton from "@/components/PrintButton";
 import LeaveAllocationTab from "@/components/LeaveAllocationTab";
 import MapPicker from "@/components/MapPicker";
+import StaffDocumentsTab from "@/components/StaffDocumentsTab";
 import OfferLetterTemplatesTab from "@/components/OfferLetterTemplatesTab";
 import SalarySlipTemplatesTab from "@/components/SalarySlipTemplatesTab";
 
