@@ -34,7 +34,7 @@ export default function HrSettings() {
           <h1 className="font-heading font-black text-4xl mt-1">HR Settings</h1>
           <p className="text-sm text-[var(--muted)] mt-1 max-w-2xl">Manage holidays, geofences (check-in zones), shifts (timing &amp; penalty rules), and review attendance regularisation requests.</p>
         </div>
-        <PrintButton title="HR Settings" />
+        <PrintButton title="HRD Settings" />
       </div>
 
       <Tabs defaultValue="holidays">
