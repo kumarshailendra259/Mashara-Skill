@@ -754,7 +754,7 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Frontend `/app/frontend/src/pages/CheckIn.jsx`** (Staff App → Claims tab):
   - Loads active templates via `/reimbursement-templates?active_only=true` and shows a "Claim Form Templates" download card above the New Claim form.
   - Each claim in "My Claims" now has a clickable "View N attachments" button that opens an attachments preview modal (image inline / PDF iframe / download link).
-- **Google Maps replacement (Geofences)**: DEFERRED — user does not have a Google Maps JavaScript API key. To be picked up once user provides `GOOGLE_MAPS_API_KEY` in backend/.env; will use `@react-google-maps/api` with red pin + turquoise circle for existing radius; existing Leaflet code untouched for now.
+- **Google Maps replacement (Geofences)**: DONE (Option B — key-free). `MapPicker.jsx` swapped OpenStreetMap tiles for **CartoDB Voyager** (`basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png`) which gives Google-Maps-style roads/buildings/labels without any API key or billing. Default blue Leaflet pin replaced with an inline SVG red teardrop pin (Google Maps look, tip-anchored). Radius preview circle repainted turquoise (`#14b8a6`, 22% fillOpacity, 2px stroke). Verified visually — 1 marker + 1 circle render, drag/click/zoom/pan preserved. Real Google Maps (Option A) can still be added later when the user provides `GOOGLE_MAPS_API_KEY`.
 
 
    Programs.jsx, Dashboard.jsx, Entities.jsx, Transactions.jsx, HRMS.jsx, Stock.jsx
