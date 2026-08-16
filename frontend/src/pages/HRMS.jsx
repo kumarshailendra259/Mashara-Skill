@@ -104,6 +104,15 @@ export default function HRMS() {
   const [rForm, setRForm] = useState({ staff_id: "", amount: "", date: new Date().toISOString().slice(0,10), category: "", description: "", attachments: [] });
   const reimbFileRef = useRef(null);
   const [reimbUploading, setReimbUploading] = useState(false);
+  // Reimbursement templates (HR-managed manual forms) + attachments viewer
+  const [reimbTemplates, setReimbTemplates] = useState([]);
+  const [openTplUpload, setOpenTplUpload] = useState(false);
+  const [tplForm, setTplForm] = useState({ name: "", description: "", category: "", file: null });
+  const [tplUploading, setTplUploading] = useState(false);
+  const tplFileRef = useRef(null);
+  const [viewAttachments, setViewAttachments] = useState(null); // reimbursement row or null
+  const isHR = user?.role === "hr";
+  const canManageTemplates = isAdmin || isHR;
 
   const [pMonth, setPMonth] = useState(new Date().getMonth() + 1);
   const [pYear, setPYear] = useState(new Date().getFullYear());
@@ -340,9 +349,11 @@ export default function HRMS() {
     api.get("/entities/center"),
     api.get("/shifts").catch(() => ({ data: [] })),
     api.get("/leave-types").catch(() => ({ data: [] })),
-  ]).then(([, r, , lv, c, sh, lt]) => {
+    api.get("/reimbursement-templates").catch(() => ({ data: [] })),
+  ]).then(([, r, , lv, c, sh, lt, tpl]) => {
     setReimbs(r.data); setLeaves(lv.data);
     setCenters(c.data); setShifts(sh.data); setLeaveTypes(lt.data);
+    setReimbTemplates(tpl.data || []);
   });
 
   useEffect(() => { loadAll(); }, []);
@@ -733,6 +744,44 @@ export default function HRMS() {
 
   const removeReimbAttachment = (id) => setRForm((s) => ({ ...s, attachments: s.attachments.filter((a) => a.id !== id) }));
 
+  // --- Reimbursement Template management (HR / Admin only) ---
+  const uploadTemplate = async () => {
+    if (!tplForm.name.trim()) { toast.error("Template name is required"); return; }
+    if (!tplForm.file) { toast.error("Please choose a file"); return; }
+    setTplUploading(true);
+    try {
+      const fd = new FormData(); fd.append("file", tplForm.file);
+      const params = new URLSearchParams({ name: tplForm.name.trim() });
+      if (tplForm.description) params.set("description", tplForm.description.trim());
+      if (tplForm.category) params.set("category", tplForm.category.trim());
+      const { data } = await api.post(`/reimbursement-templates?${params.toString()}`, fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setReimbTemplates((prev) => [data, ...prev]);
+      setTplForm({ name: "", description: "", category: "", file: null });
+      if (tplFileRef.current) tplFileRef.current.value = "";
+      setOpenTplUpload(false);
+      toast.success("Template uploaded");
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setTplUploading(false); }
+  };
+
+  const deleteTemplate = async (tid) => {
+    if (!window.confirm("Delete this template?")) return;
+    try {
+      await api.delete(`/reimbursement-templates/${tid}`);
+      setReimbTemplates((prev) => prev.filter((t) => t.id !== tid));
+      toast.success("Template deleted");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const toggleTemplateActive = async (t) => {
+    try {
+      const { data } = await api.patch(`/reimbursement-templates/${t.id}`, { is_active: !t.is_active });
+      setReimbTemplates((prev) => prev.map((x) => (x.id === t.id ? data : x)));
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   const act = async (rid, action) => {
     try {
       if (action === "reject") {
@@ -778,6 +827,76 @@ export default function HRMS() {
 
         {/* Reimbursements */}
         <TabsContent value="reimb" className="mt-4 space-y-4">
+          {/* Claim Form Templates — HR/Admin manages, everyone can download */}
+          <div className="swiss-card p-4" data-testid="reimb-templates-panel">
+            <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+              <div>
+                <div className="overline">HR · Claim Form Templates</div>
+                <div className="text-sm text-[var(--muted)]">Pre-designed formats (PDF/DOCX/XLSX) staff can download and fill manually before uploading.</div>
+              </div>
+              {canManageTemplates && (
+                <Dialog open={openTplUpload} onOpenChange={setOpenTplUpload}>
+                  <DialogTrigger asChild>
+                    <Button className="brand-btn rounded-none gap-2" data-testid="btn-upload-tpl"><Upload size={14} /> Upload Template</Button>
+                  </DialogTrigger>
+                  <DialogContent className="rounded-none max-w-md">
+                    <DialogHeader><DialogTitle className="font-heading">Upload Claim Template</DialogTitle></DialogHeader>
+                    <div className="space-y-3">
+                      <div><Label>Template Name *</Label><Input value={tplForm.name} onChange={(e) => setTplForm({ ...tplForm, name: e.target.value })} placeholder="e.g. Travel Claim Form" className="rounded-none" data-testid="tpl-name" /></div>
+                      <div><Label>Category (optional)</Label><Input value={tplForm.category} onChange={(e) => setTplForm({ ...tplForm, category: e.target.value })} placeholder="Travel, Fuel, Food…" className="rounded-none" data-testid="tpl-category" /></div>
+                      <div><Label>Description (optional)</Label><Textarea value={tplForm.description} onChange={(e) => setTplForm({ ...tplForm, description: e.target.value })} className="rounded-none" rows={2} data-testid="tpl-description" /></div>
+                      <div>
+                        <Label>File * <span className="text-[10px] text-[var(--muted)]">(PDF / DOCX / XLSX — max 10MB)</span></Label>
+                        <input ref={tplFileRef} type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,image/*" onChange={(e) => setTplForm({ ...tplForm, file: e.target.files?.[0] || null })} className="block w-full text-sm mt-1" data-testid="tpl-file" />
+                        {tplForm.file && <div className="text-xs text-[var(--brand)] mt-1">{tplForm.file.name} · {(tplForm.file.size / 1024).toFixed(0)} KB</div>}
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <Button variant="outline" onClick={() => setOpenTplUpload(false)} className="rounded-none">Cancel</Button>
+                      <Button onClick={uploadTemplate} disabled={tplUploading} className="brand-btn rounded-none" data-testid="tpl-upload-submit">{tplUploading ? "Uploading…" : "Upload"}</Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              )}
+            </div>
+            {reimbTemplates.length === 0 ? (
+              <div className="overline text-center py-4 border border-dashed border-[var(--border)] text-xs">
+                {canManageTemplates ? "No templates uploaded yet — click 'Upload Template' to add one." : "No templates available."}
+              </div>
+            ) : (
+              <ul className="grid grid-cols-1 md:grid-cols-2 gap-2" data-testid="reimb-templates-list">
+                {reimbTemplates.map((t) => (
+                  <li key={t.id} className={`border border-[var(--border)] px-3 py-2 text-sm flex items-center gap-3 ${t.is_active ? "" : "opacity-60"}`} data-testid={`tpl-row-${t.id}`}>
+                    <FileText size={18} className="text-[var(--brand)] shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{t.name}{!t.is_active && <span className="ml-2 text-[10px] uppercase bg-gray-200 text-[var(--muted)] px-1">Archived</span>}</div>
+                      <div className="text-xs text-[var(--muted)] truncate">{t.category ? `${t.category} · ` : ""}{t.filename} · {(t.size / 1024).toFixed(0)} KB</div>
+                      {t.description && <div className="text-[10px] text-[var(--muted)] mt-0.5 line-clamp-1">{t.description}</div>}
+                    </div>
+                    <a
+                      href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(t.file_path)}`}
+                      target="_blank" rel="noreferrer"
+                      className="text-[var(--brand)] hover:underline text-xs inline-flex items-center gap-1"
+                      data-testid={`tpl-download-${t.id}`}
+                    >
+                      <Download size={12} /> Download
+                    </a>
+                    {canManageTemplates && (
+                      <>
+                        <Button size="icon" variant="ghost" onClick={() => toggleTemplateActive(t)} className="h-7 w-7 rounded-none" title={t.is_active ? "Archive" : "Restore"} data-testid={`tpl-toggle-${t.id}`}>
+                          <Archive size={13} />
+                        </Button>
+                        <Button size="icon" variant="ghost" onClick={() => deleteTemplate(t.id)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]" title="Delete" data-testid={`tpl-delete-${t.id}`}>
+                          <Trash2 size={13} />
+                        </Button>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           <div className="flex justify-end">
             <Dialog open={openR} onOpenChange={setOpenR}>
               <DialogTrigger asChild>
@@ -849,7 +968,17 @@ export default function HRMS() {
                     <td className="p-3 num">{r.date}</td>
                     <td className="p-3">{sName(r.staff_id)}</td>
                     <td className="p-3 num font-medium">{inr(r.amount)}</td>
-                    <td className="p-3 text-[var(--muted)]">{r.category || "—"}{r.attachments?.length ? <span className="ml-2 inline-flex items-center gap-1 text-xs text-[var(--brand)] border border-[var(--brand)] px-1 py-0.5" title={`${r.attachments.length} attachments`}><Paperclip size={10} /> {r.attachments.length}</span> : null}</td>
+                    <td className="p-3 text-[var(--muted)]">{r.category || "—"}{r.attachments?.length ? (
+                      <button
+                        type="button"
+                        onClick={() => setViewAttachments(r)}
+                        className="ml-2 inline-flex items-center gap-1 text-xs text-[var(--brand)] border border-[var(--brand)] px-1 py-0.5 hover:bg-blue-50"
+                        title={`View ${r.attachments.length} attachment(s)`}
+                        data-testid={`view-attach-${r.id}`}
+                      >
+                        <Paperclip size={10} /> {r.attachments.length}
+                      </button>
+                    ) : null}</td>
                     <td className="p-3"><Stepper status={r.status} /></td>
                     <td className="p-3 text-right">
                       <div className="inline-flex gap-1 flex-wrap justify-end">
@@ -1798,6 +1927,58 @@ export default function HRMS() {
         onConfirm={bulkArchiveStaff}
         warning="Linked login access will be disabled. Attendance, payroll & leave history are preserved for reports."
       />
+
+      {/* Attachments viewer — opened by clicking the paperclip chip on any reimbursement row */}
+      <Dialog open={!!viewAttachments} onOpenChange={(o) => !o && setViewAttachments(null)}>
+        <DialogContent className="rounded-none max-w-2xl" data-testid="reimb-attach-modal">
+          <DialogHeader>
+            <DialogTitle className="font-heading">
+              Attachments — {viewAttachments && sName(viewAttachments.staff_id)} · {viewAttachments ? inr(viewAttachments.amount) : ""}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 max-h-[70vh] overflow-y-auto">
+            {viewAttachments?.description && (
+              <div className="text-xs bg-gray-50 border border-[var(--border)] p-2">
+                <div className="overline">Description</div>
+                <div className="mt-1">{viewAttachments.description}</div>
+              </div>
+            )}
+            {(viewAttachments?.attachments || []).length === 0 ? (
+              <div className="text-sm text-[var(--muted)] py-6 text-center">No attachments</div>
+            ) : (
+              <ul className="space-y-2">
+                {viewAttachments.attachments.map((a) => {
+                  const url = `${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`;
+                  const isImg = (a.content_type || "").startsWith("image/");
+                  const isPdf = (a.content_type || "").includes("pdf") || (a.filename || "").toLowerCase().endsWith(".pdf");
+                  return (
+                    <li key={a.id} className="border border-[var(--border)] p-2" data-testid={`view-attach-item-${a.id}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <a href={url} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline text-sm inline-flex items-center gap-2 truncate">
+                          <Paperclip size={12} /> {a.filename}
+                        </a>
+                        <div className="flex items-center gap-3">
+                          <span className="text-[10px] text-[var(--muted)]">{(a.size / 1024).toFixed(0)} KB</span>
+                          <a href={url} target="_blank" rel="noreferrer" className="text-xs text-[var(--brand)] hover:underline inline-flex items-center gap-1"><Download size={12} /> Download</a>
+                        </div>
+                      </div>
+                      {isImg && (
+                        <img src={url} alt={a.filename} className="mt-2 max-h-72 border border-[var(--border)] object-contain w-full bg-gray-50" />
+                      )}
+                      {isPdf && (
+                        <iframe src={url} title={a.filename} className="mt-2 w-full h-72 border border-[var(--border)] bg-white" />
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setViewAttachments(null)} className="rounded-none" data-testid="reimb-attach-close">Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

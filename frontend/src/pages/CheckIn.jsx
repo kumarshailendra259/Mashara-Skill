@@ -1522,14 +1522,23 @@ function LeaveTab({ staffId }) {
    ============================================================ */
 function ReimburseTab({ staffId }) {
   const [list, setList] = useState([]);
+  const [templates, setTemplates] = useState([]);
   const [form, setForm] = useState({ amount: "", date: new Date().toISOString().slice(0, 10), category: "", description: "", attachments: [] });
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [trackId, setTrackId] = useState(null);
+  const [viewAtt, setViewAtt] = useState(null); // claim row whose attachments to view
   const fileRef = useRef(null);
 
   const load = async () => {
-    try { const { data } = await api.get("/reimbursements/my"); setList(data || []); } catch {/* best-effort */}
+    try {
+      const [{ data: claims }, { data: tpls }] = await Promise.all([
+        api.get("/reimbursements/my"),
+        api.get("/reimbursement-templates?active_only=true").catch(() => ({ data: [] })),
+      ]);
+      setList(claims || []);
+      setTemplates(tpls || []);
+    } catch {/* best-effort */}
   };
   useEffect(() => { load(); }, []);
 
@@ -1561,6 +1570,35 @@ function ReimburseTab({ staffId }) {
 
   return (
     <div className="space-y-4">
+      {/* Downloadable HR-managed claim templates */}
+      {templates.length > 0 && (
+        <div className="swiss-card p-4" data-testid="reimb-templates-card">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="font-heading font-bold text-sm">Claim Form Templates</div>
+            <span className="text-[10px] text-[var(--muted)]">Download &amp; fill offline</span>
+          </div>
+          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {templates.map((t) => (
+              <li key={t.id} className="flex items-center gap-3 border border-[var(--border)] px-3 py-2 text-sm hover:bg-gray-50" data-testid={`tpl-item-${t.id}`}>
+                <div className="h-8 w-8 bg-blue-50 text-[var(--brand)] flex items-center justify-center text-lg">📄</div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-medium truncate">{t.name}</div>
+                  <div className="text-[10px] text-[var(--muted)] truncate">{t.category ? `${t.category} · ` : ""}{t.filename}</div>
+                </div>
+                <a
+                  href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(t.file_path)}`}
+                  target="_blank" rel="noreferrer"
+                  className="text-xs text-[var(--brand)] hover:underline font-medium"
+                  data-testid={`tpl-dl-${t.id}`}
+                >
+                  Download
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="swiss-card p-4">
         <div className="font-heading font-bold text-lg">New Reimbursement Claim</div>
         <div className="space-y-3 mt-3">
@@ -1605,7 +1643,14 @@ function ReimburseTab({ staffId }) {
                     <div className="text-xs text-[var(--muted)] mt-0.5">{new Date(r.date).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" })}</div>
                     {r.description && <div className="text-xs mt-1">{r.description}</div>}
                     {(r.attachments || []).length > 0 && (
-                      <div className="text-[10px] text-blue-700 mt-1">📎 {r.attachments.length} attachment(s)</div>
+                      <button
+                        type="button"
+                        onClick={() => setViewAtt(r)}
+                        className="text-[10px] text-blue-700 mt-1 font-medium hover:underline inline-flex items-center gap-1"
+                        data-testid={`claim-view-attach-${r.id}`}
+                      >
+                        📎 View {r.attachments.length} attachment{r.attachments.length > 1 ? "s" : ""}
+                      </button>
                     )}
                     {inFlight && (r.pending_with || []).length > 0 && (
                       <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`claim-pending-${r.id}`}>
@@ -1640,6 +1685,35 @@ function ReimburseTab({ staffId }) {
       </div>
 
       <ApprovalTimelineModal type="reimbursement" requestId={trackId} onClose={() => setTrackId(null)} />
+
+      {/* Attachments viewer modal — image preview, PDF iframe, download links */}
+      <Dialog open={!!viewAtt} onOpenChange={(o) => !o && setViewAtt(null)}>
+        <DialogContent className="rounded-none max-w-lg" data-testid="claim-attach-modal">
+          <DialogHeader>
+            <DialogTitle className="font-heading">Claim Attachments</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 max-h-[65vh] overflow-y-auto">
+            {viewAtt?.description && (
+              <div className="text-xs bg-gray-50 border border-[var(--border)] p-2">{viewAtt.description}</div>
+            )}
+            {(viewAtt?.attachments || []).map((a) => {
+              const url = `${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`;
+              const isImg = (a.content_type || "").startsWith("image/");
+              const isPdf = (a.content_type || "").includes("pdf") || (a.filename || "").toLowerCase().endsWith(".pdf");
+              return (
+                <div key={a.id} className="border border-[var(--border)] p-2" data-testid={`claim-attach-${a.id}`}>
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <a href={url} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate">📎 {a.filename}</a>
+                    <a href={url} target="_blank" rel="noreferrer" className="text-xs text-[var(--brand)] hover:underline">Download</a>
+                  </div>
+                  {isImg && <img src={url} alt={a.filename} className="mt-2 max-h-56 border object-contain w-full bg-gray-50" />}
+                  {isPdf && <iframe src={url} title={a.filename} className="mt-2 w-full h-56 border bg-white" />}
+                </div>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

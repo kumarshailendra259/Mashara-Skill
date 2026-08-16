@@ -738,6 +738,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 
    LoginHistory.jsx           # Audit page
+
+### Reimbursement Attachments + HR Templates (Done, Feb 2026)
+- **User asked**: (a) Reimbursement rows me attached documents dikhne chahiye (list + detail modal), (b) Reimbursement submenu me HR ke liye ek admin section jahan manual claim-format templates upload/edit/delete kar sakein.
+- **Backend `/app/backend/server.py`**:
+  - New `reimbursement_templates` collection + endpoints:
+    - `POST /api/reimbursement-templates?name=…&category=…&description=…` (file upload, HR/admin only, max 10MB)
+    - `GET /api/reimbursement-templates?active_only=true` (all authenticated users; non-HR sees only active)
+    - `PATCH /api/reimbursement-templates/{tid}` (HR/admin — rename, toggle `is_active`, edit category/description)
+    - `DELETE /api/reimbursement-templates/{tid}` (HR/admin)
+  - Uploaded template also registered in shared `db.files` so `/api/files/view?path=…` streams it just like every other attachment.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`** (Reimbursements tab):
+  - New "HR · Claim Form Templates" panel above the reimbursement table: HR/Admin sees Upload + Archive/Delete controls; other roles see only Download links.
+  - Paperclip chip in every row now clickable → opens **View Attachments modal** with inline image preview (`<img>`) or PDF iframe (`<iframe>`) plus Download links.
+- **Frontend `/app/frontend/src/pages/CheckIn.jsx`** (Staff App → Claims tab):
+  - Loads active templates via `/reimbursement-templates?active_only=true` and shows a "Claim Form Templates" download card above the New Claim form.
+  - Each claim in "My Claims" now has a clickable "View N attachments" button that opens an attachments preview modal (image inline / PDF iframe / download link).
+- **Google Maps replacement (Geofences)**: DEFERRED — user does not have a Google Maps JavaScript API key. To be picked up once user provides `GOOGLE_MAPS_API_KEY` in backend/.env; will use `@react-google-maps/api` with red pin + turquoise circle for existing radius; existing Leaflet code untouched for now.
+
+
    Programs.jsx, Dashboard.jsx, Entities.jsx, Transactions.jsx, HRMS.jsx, Stock.jsx
 /app/frontend/src/components/
    FoodingTab.jsx

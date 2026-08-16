@@ -6357,6 +6357,128 @@ async def approval_timeline(request_type: str, request_id: str, _=Depends(get_cu
     }
 
 
+# ---------- Reimbursement Claim Templates (HR-managed) ----------
+# HR/Admin uploads pre-designed claim format files (PDF/DOCX/XLSX) that staff can
+# download from the Reimbursement submenu when preparing manual bills/formats.
+class ReimbursementTemplateOut(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    filename: str
+    file_path: str
+    content_type: str
+    size: int
+    uploaded_by: Optional[str] = None
+    uploaded_by_name: Optional[str] = None
+    uploaded_at: str
+    is_active: bool = True
+
+
+class ReimbursementTemplatePatchIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+@api.post("/reimbursement-templates", response_model=ReimbursementTemplateOut, status_code=201)
+async def upload_reimbursement_template(
+    file: UploadFile = File(...),
+    name: str = Query(..., min_length=1),
+    description: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    user=Depends(require_role("admin", "hr")),
+):
+    """HR-only: upload a manual claim-form template (PDF/DOCX/XLSX/etc.).
+    Staff will see active templates and can download them when raising claims."""
+    if not file.filename:
+        raise HTTPException(400, "Missing filename")
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
+    if len(ext) > 10:
+        ext = "bin"
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(413, "Template too large (max 10MB)")
+    tid = str(uuid.uuid4())
+    path = f"{APP_STORAGE_PREFIX}/reimbursement-templates/{tid}.{ext}"
+    content_type = file.content_type or "application/octet-stream"
+    try:
+        _put_object(path, data, content_type)
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage upload failed: {e}")
+    # Also register in the shared /files collection so /files/view can stream it.
+    await db.files.insert_one({
+        "id": tid,
+        "path": path,
+        "filename": file.filename,
+        "content_type": content_type,
+        "size": len(data),
+        "uploaded_by": user["id"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_deleted": False,
+    })
+    doc = {
+        "id": tid,
+        "name": name.strip(),
+        "description": (description or "").strip() or None,
+        "category": (category or "").strip() or None,
+        "filename": file.filename,
+        "file_path": path,
+        "content_type": content_type,
+        "size": len(data),
+        "uploaded_by": user["id"],
+        "uploaded_by_name": user.get("name") or user.get("email"),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "is_active": True,
+    }
+    await db.reimbursement_templates.insert_one(doc)
+    return ReimbursementTemplateOut(**doc)
+
+
+@api.get("/reimbursement-templates", response_model=List[ReimbursementTemplateOut])
+async def list_reimbursement_templates(
+    active_only: bool = Query(False),
+    user=Depends(get_current_user),
+):
+    """Any authenticated user can browse templates (staff need this to download
+    forms). HR/Admin can toggle `active_only=false` in the manage view to see
+    archived templates too."""
+    q: dict = {}
+    if active_only or user.get("role") not in ("admin", "hr"):
+        q["is_active"] = True
+    docs = await db.reimbursement_templates.find(q, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+    return [ReimbursementTemplateOut(**d) for d in docs]
+
+
+@api.patch("/reimbursement-templates/{tid}", response_model=ReimbursementTemplateOut)
+async def update_reimbursement_template(
+    tid: str,
+    body: ReimbursementTemplatePatchIn,
+    _=Depends(require_role("admin", "hr")),
+):
+    upd = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not upd:
+        raise HTTPException(400, "No fields to update")
+    r = await db.reimbursement_templates.update_one({"id": tid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Template not found")
+    doc = await db.reimbursement_templates.find_one({"id": tid}, {"_id": 0})
+    return ReimbursementTemplateOut(**doc)
+
+
+@api.delete("/reimbursement-templates/{tid}", status_code=204)
+async def delete_reimbursement_template(tid: str, _=Depends(require_role("admin", "hr"))):
+    doc = await db.reimbursement_templates.find_one({"id": tid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Template not found")
+    # Soft-remove the underlying object reference; keep the file for audit trail.
+    await db.reimbursement_templates.delete_one({"id": tid})
+    return None
+
+
+
 # -------- Reimbursements (3-stage approval) --------
 @api.post("/reimbursements")
 async def submit_reimbursement(body: ReimbursementIn, user=Depends(get_current_user)):
