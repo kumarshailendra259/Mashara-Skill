@@ -73,6 +73,13 @@ export default function MyProfile() {
         <h1 className="font-heading text-3xl font-bold">My Profile</h1>
       </div>
 
+      {staff.is_user_only && (
+        <div className="border border-indigo-300 bg-indigo-50 text-indigo-800 px-3 py-2 text-sm rounded-none" data-testid="user-only-banner">
+          ℹ️ Aap ka account HR staff record se linked nahi hai (role-based access). Fir bhi aap yahaan
+          apna <b>photo, mobile, address aur bank details</b> save kar sakte ho.
+        </div>
+      )}
+
       {/* Identity + photo */}
       <div className="swiss-card p-5 flex items-center gap-4">
         <div className="w-20 h-20 border border-[var(--border)] flex-shrink-0 overflow-hidden">

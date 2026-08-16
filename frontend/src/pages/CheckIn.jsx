@@ -11,6 +11,7 @@ import {
   Camera, MapPin, CheckCircle2, LogOut, RefreshCw, Home, CalendarDays, Plane,
   Receipt, Wallet, Plus, Clock, LogIn as LogInIcon, Calendar, AlertCircle, Trash2,
   Bell, ChevronLeft, ChevronRight, Megaphone, Menu, Users, Inbox, XCircle, RotateCcw, Phone, Mail,
+  UserCog, ShieldCheck, ShieldAlert, Upload as UploadIcon,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import {
@@ -50,6 +51,8 @@ const SIDEBAR_ITEMS = [
   { v: "leave", label: "Leave", icon: Plane },
   { v: "reimburse", label: "Claims", icon: Receipt },
   { v: "salary", label: "Salary", icon: Wallet },
+  { v: "holidays", label: "Holidays", icon: Calendar },
+  { v: "profile", label: "My Profile", icon: UserCog },
 ];
 
 const inr = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n || 0);
@@ -431,6 +434,8 @@ export default function CheckIn() {
         {tab === "leave" && <LeaveTab staffId={summary?.staff?.id} />}
         {tab === "reimburse" && <ReimburseTab staffId={summary?.staff?.id} />}
         {tab === "salary" && <SalaryTab />}
+        {tab === "holidays" && <HolidaysTab summary={summary} />}
+        {tab === "profile" && <ProfileTab />}
         {tab === "myteam" && <MyTeamTab />}
         {tab === "approvals" && <PendingApprovalsTab />}
       </div>
@@ -639,7 +644,7 @@ function HomeTab({ summary, reload, setTab }) {
             <QAction icon={<Receipt size={16} className="text-amber-600" />} bg="bg-amber-50" label="Raise Claim" onClick={() => setTab("reimburse")} testid="qa-claim" />
             <QAction icon={<CalendarDays size={16} className="text-blue-600" />} bg="bg-blue-50" label="Attendance" onClick={() => setTab("attendance")} testid="qa-att" />
             <QAction icon={<Wallet size={16} className="text-violet-600" />} bg="bg-violet-50" label="Salary Slip" onClick={() => setTab("salary")} testid="qa-salary" />
-            <QAction icon={<Calendar size={16} className="text-pink-600" />} bg="bg-pink-50" label="Holidays" onClick={() => setShowAllHolidays(true)} testid="qa-holidays" />
+            <QAction icon={<Calendar size={16} className="text-pink-600" />} bg="bg-pink-50" label="Holidays" onClick={() => setTab("holidays")} testid="qa-holidays" />
             <QAction icon={<AlertCircle size={16} className="text-red-600" />} bg="bg-red-50" label="Help" onClick={() => toast.info("Contact HR for help")} testid="qa-help" />
           </div>
         </div>
@@ -2176,3 +2181,298 @@ function PendingApprovalsTab() {
 
 
 /* ApprovalTimelineModal moved to /components/ApprovalTimelineModal.jsx for reuse */
+
+/* ============================================================
+   HOLIDAYS TAB — Weekly Off card + Full year holidays list
+   ============================================================ */
+function HolidaysTab({ summary }) {
+  const [all, setAll] = useState([]);
+  const [weeklyOff, setWeeklyOff] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        // Prefer freshly-fetched data so this tab always reflects the latest
+        // HR-policy + holiday additions even when the parent summary is stale.
+        const [{ data: sum }, { data: hols }] = await Promise.all([
+          api.get("/me/summary").catch(() => ({ data: null })),
+          api.get("/holidays").catch(() => ({ data: [] })),
+        ]);
+        setWeeklyOff(sum?.weekly_off_days || summary?.weekly_off_days || ["sunday"]);
+        setAll(hols || sum?.all_holidays || []);
+      } finally { setLoading(false); }
+    })();
+  }, []);
+
+  const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = all.filter((h) => h.date >= today).sort((a, b) => a.date.localeCompare(b.date));
+  const past = all.filter((h) => h.date < today).sort((a, b) => b.date.localeCompare(a.date));
+
+  return (
+    <div className="space-y-4" data-testid="holidays-tab">
+      <div>
+        <div className="overline">Staff App · Time-Off</div>
+        <h1 className="font-heading text-2xl md:text-3xl font-black">Holidays &amp; Weekly Off</h1>
+      </div>
+
+      {/* Weekly Off card */}
+      <div className="swiss-card p-5" data-testid="weekly-off-card">
+        <div className="flex items-center gap-2 mb-2">
+          <div className="h-8 w-8 bg-blue-100 text-[var(--brand)] flex items-center justify-center">
+            <CalendarDays size={16} />
+          </div>
+          <div className="font-heading font-bold text-base">Weekly Off Days</div>
+        </div>
+        <p className="text-xs text-[var(--muted)] mb-3">
+          Yeh din aap ki weekly off hote hain. Company policy ke tehat in dino par salary deduction nahi hoti.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].map((d) => {
+            const off = weeklyOff.includes(d);
+            return (
+              <span
+                key={d}
+                className={`px-3 py-1.5 text-xs font-semibold border ${off ? "bg-emerald-50 text-emerald-700 border-emerald-300" : "bg-gray-50 text-[var(--muted)] border-[var(--border)]"}`}
+                data-testid={`wo-${d}`}
+              >
+                {cap(d).slice(0, 3)}
+                {off && <span className="ml-1 text-[10px]">✓ Off</span>}
+              </span>
+            );
+          })}
+        </div>
+        <div className="mt-3 text-[11px] text-[var(--muted)]">
+          To change these, ask HR/Admin to update the HR Policy.
+        </div>
+      </div>
+
+      {/* Upcoming holidays */}
+      <div className="swiss-card p-5" data-testid="upcoming-holidays-card">
+        <div className="flex items-center justify-between mb-3">
+          <div className="font-heading font-bold text-base flex items-center gap-2">
+            <Calendar size={14} className="text-[var(--brand)]" /> Upcoming Holidays
+          </div>
+          <span className="text-[10px] text-[var(--muted)]">{upcoming.length} scheduled</span>
+        </div>
+        {loading ? (
+          <div className="text-sm text-[var(--muted)] py-6 text-center">Loading…</div>
+        ) : upcoming.length === 0 ? (
+          <div className="text-sm text-[var(--muted)] py-6 text-center">No upcoming holidays configured.</div>
+        ) : (
+          <ul className="space-y-2">
+            {upcoming.map((h) => {
+              const d = new Date(h.date);
+              const dayName = d.toLocaleDateString(undefined, { weekday: "long" });
+              return (
+                <li key={h.id} className="flex items-start gap-3 p-2 hover:bg-gray-50 border-l-4 border-[var(--brand)]" data-testid={`up-hol-${h.id}`}>
+                  <div className="bg-[var(--brand)] text-white text-[10px] font-bold uppercase px-2 py-1 leading-tight text-center min-w-[46px]">
+                    <div>{d.toLocaleDateString(undefined, { month: "short" })}</div>
+                    <div className="text-base leading-none mt-0.5">{d.getDate()}</div>
+                  </div>
+                  <div className="flex-1">
+                    <div className="font-semibold text-sm">{h.name}</div>
+                    <div className="text-[11px] text-[var(--muted)]">
+                      {dayName} · <span className="capitalize">{h.type || "holiday"}</span>
+                      {h.is_recurring ? " · Recurring" : ""}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      {/* Past holidays (collapsed) */}
+      {past.length > 0 && (
+        <div className="swiss-card p-5" data-testid="past-holidays-card">
+          <div className="font-heading font-bold text-base mb-3 text-[var(--muted)]">Past Holidays (this year)</div>
+          <ul className="space-y-1.5">
+            {past.map((h) => {
+              const d = new Date(h.date);
+              return (
+                <li key={h.id} className="flex items-center gap-3 text-xs opacity-70">
+                  <span className="num w-20 text-[var(--muted)]">{d.toLocaleDateString(undefined, { day: "2-digit", month: "short" })}</span>
+                  <span className="flex-1">{h.name}</span>
+                  <span className="capitalize text-[10px] text-[var(--muted)]">{h.type || "holiday"}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   PROFILE TAB — Self-service profile edit (photo, contact, bank)
+   ============================================================ */
+function ProfileTab() {
+  const [staff, setStaff] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [form, setForm] = useState({});
+  const fileRef = useRef(null);
+
+  const load = () =>
+    api.get("/me/staff-profile")
+      .then((r) => {
+        setStaff(r.data);
+        setForm({
+          mobile: r.data.mobile || "",
+          address: r.data.address || "",
+          bank_name: r.data.bank_name || "",
+          bank_account_no: r.data.bank_account_no || "",
+          ifsc: r.data.ifsc || "",
+          account_holder_name: r.data.account_holder_name || "",
+          upi_id: r.data.upi_id || "",
+        });
+      })
+      .catch((e) => toast.error(formatError(e)))
+      .finally(() => setLoading(false));
+
+  useEffect(() => { load(); }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const r = await api.put("/me/staff-profile", form);
+      setStaff(r.data);
+      toast.success("Profile saved. HR will verify your bank details.");
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setSaving(false); }
+  };
+
+  const uploadPhoto = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    if (f.size > 3 * 1024 * 1024) { toast.error("Photo must be under 3 MB"); return; }
+    setUploading(true);
+    const fd = new FormData();
+    fd.append("file", f);
+    try {
+      const r = await api.post("/me/staff-profile/photo", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setStaff((s) => ({ ...(s || {}), photo_url: r.data.photo_url }));
+      toast.success("Photo uploaded");
+    } catch (err) { toast.error(formatError(err)); }
+    finally { setUploading(false); }
+  };
+
+  if (loading) return <div className="swiss-card p-6 text-sm text-[var(--muted)]" data-testid="profile-loading">Loading…</div>;
+  if (!staff) return null;
+
+  return (
+    <div className="max-w-3xl space-y-4" data-testid="profile-tab">
+      <div>
+        <div className="overline">Staff App · Self Service</div>
+        <h1 className="font-heading text-2xl md:text-3xl font-black">My Profile</h1>
+      </div>
+
+      {staff.is_user_only && (
+        <div className="border border-indigo-300 bg-indigo-50 text-indigo-800 px-3 py-2 text-sm" data-testid="profile-user-only-banner">
+          ℹ️ Aap ka account HR staff record se linked nahi hai (role-based access). Fir bhi aap yahaan
+          apna <b>photo, mobile, address aur bank details</b> save kar sakte ho.
+        </div>
+      )}
+
+      {/* Identity + photo */}
+      <div className="swiss-card p-5 flex items-center gap-4">
+        <div className="w-20 h-20 border border-[var(--border)] flex-shrink-0 overflow-hidden">
+          {staff.photo_url ? (
+            <img src={staff.photo_url} alt={staff.name} className="w-full h-full object-cover" />
+          ) : (
+            <div className="w-full h-full bg-gray-100 flex items-center justify-center text-2xl font-bold text-[var(--muted)]">
+              {(staff.name || "?").split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join("")}
+            </div>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-heading text-xl font-bold truncate">{staff.name}</div>
+          <div className="text-sm text-[var(--muted)]">{staff.designation || "—"}</div>
+          {staff.employee_code && (
+            <div className="text-xs font-mono text-[var(--brand)] mt-0.5">{staff.employee_code}</div>
+          )}
+        </div>
+        <div>
+          <input ref={fileRef} type="file" accept="image/*" onChange={uploadPhoto} className="hidden" data-testid="profile-upload-photo-input" />
+          <Button variant="outline" className="rounded-none gap-2" onClick={() => fileRef.current?.click()} disabled={uploading} data-testid="profile-upload-photo-btn">
+            <UploadIcon size={14} /> {uploading ? "Uploading…" : (staff.photo_url ? "Change Photo" : "Add Photo")}
+          </Button>
+        </div>
+      </div>
+
+      {/* Contact */}
+      <div className="swiss-card p-5 space-y-3">
+        <div className="font-heading font-bold">Contact Details</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <Label className="overline">Mobile</Label>
+            <Input value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })}
+              className="rounded-none" data-testid="profile-mobile" />
+          </div>
+          <div className="sm:col-span-2">
+            <Label className="overline">Address</Label>
+            <Input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })}
+              className="rounded-none" data-testid="profile-address" />
+          </div>
+        </div>
+      </div>
+
+      {/* Bank Details */}
+      <div className="swiss-card p-5 space-y-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="font-heading font-bold">Bank Details</div>
+          {staff.bank_verified ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase border bg-emerald-50 text-emerald-700 border-emerald-300" data-testid="profile-bank-verified">
+              <ShieldCheck size={12} /> Verified
+            </span>
+          ) : (form.bank_account_no || staff.bank_account_no) ? (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase border bg-amber-50 text-amber-700 border-amber-300" data-testid="profile-bank-pending">
+              <ShieldAlert size={12} /> Pending HR Approval
+            </span>
+          ) : (
+            <span className="text-xs text-[var(--muted)]">Fill in and submit — HR will approve.</span>
+          )}
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <Label className="overline">Account Holder Name</Label>
+            <Input value={form.account_holder_name} onChange={(e) => setForm({ ...form, account_holder_name: e.target.value })}
+              className="rounded-none" data-testid="profile-holder" />
+          </div>
+          <div>
+            <Label className="overline">Bank Name</Label>
+            <Input value={form.bank_name} onChange={(e) => setForm({ ...form, bank_name: e.target.value })}
+              className="rounded-none" data-testid="profile-bank-name" />
+          </div>
+          <div>
+            <Label className="overline">Account Number</Label>
+            <Input value={form.bank_account_no} onChange={(e) => setForm({ ...form, bank_account_no: e.target.value })}
+              className="rounded-none font-mono" data-testid="profile-account-no" />
+          </div>
+          <div>
+            <Label className="overline">IFSC</Label>
+            <Input value={form.ifsc} onChange={(e) => setForm({ ...form, ifsc: e.target.value.toUpperCase() })}
+              className="rounded-none font-mono uppercase" data-testid="profile-ifsc" />
+          </div>
+          <div className="sm:col-span-2">
+            <Label className="overline">UPI ID (optional)</Label>
+            <Input value={form.upi_id} onChange={(e) => setForm({ ...form, upi_id: e.target.value })}
+              className="rounded-none" data-testid="profile-upi" placeholder="yourname@paytm" />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex justify-end">
+        <Button onClick={save} disabled={saving} className="brand-btn rounded-none" data-testid="profile-save">
+          {saving ? "Saving…" : "Save Changes"}
+        </Button>
+      </div>
+    </div>
+  );
+}

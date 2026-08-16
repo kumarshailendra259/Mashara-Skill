@@ -282,6 +282,8 @@ export default function HRMS() {
   // Attendance state
   const [attDate, setAttDate] = useState(new Date().toISOString().slice(0,10));
   const [attMap, setAttMap] = useState({}); // staff_id -> status
+  // Phase 37 — paid-off info for current date (weekly-off + holiday)
+  const [dayPaidOff, setDayPaidOff] = useState({ isWeeklyOff: false, isHoliday: false });
   const [attRecent, setAttRecent] = useState([]);
 
   // Calendar view state
@@ -356,6 +358,15 @@ export default function HRMS() {
       (res.data || []).forEach((a) => { m[a.staff_id] = a.status; });
       setAttMap(m);
     }).catch(() => {});
+    // Phase 37 — figure out if this date is a Weekly Off / Holiday
+    api.get(`/attendance/paid-off-days?start=${attDate}&end=${attDate}`).then((res) => {
+      const d = res.data || {};
+      const wd = new Date(attDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
+      setDayPaidOff({
+        isHoliday: (d.paid_off_dates || []).includes(attDate),
+        isWeeklyOff: (d.weekly_off_weekdays || []).includes(wd),
+      });
+    }).catch(() => setDayPaidOff({ isWeeklyOff: false, isHoliday: false }));
     // Recent attendance (last 30 days)
     const end = attDate;
     const startDt = new Date(attDate); startDt.setDate(startDt.getDate() - 29);
@@ -1218,30 +1229,58 @@ export default function HRMS() {
           </div>
 
           <div className="swiss-card p-4">
+            {(dayPaidOff.isHoliday || dayPaidOff.isWeeklyOff) && (
+              <div
+                className={`mb-3 px-3 py-2 border rounded-none flex items-center gap-2 text-sm ${dayPaidOff.isHoliday ? "bg-indigo-50 border-indigo-300 text-indigo-800" : "bg-purple-50 border-purple-300 text-purple-800"}`}
+                data-testid="paid-off-banner"
+              >
+                <span className="font-bold uppercase text-xs">
+                  {dayPaidOff.isHoliday ? "🎉 Holiday" : "🏖 Weekly Off"}
+                </span>
+                <span>
+                  {attDate} — Paid day. Attendance mark karne ki zaroorat nahi hai. Salary deduction nahi hogi.
+                </span>
+              </div>
+            )}
             {staff.length === 0 ? (
               <div className="text-center py-12 overline">No staff yet</div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3" data-testid="att-thumbnail-grid">
                 {staff.map((s) => {
-                  const status = attMap[s.id] || "";
+                  // Phase 37 — Weekly Off / Holiday auto-overrides the status
+                  // so admins can't accidentally mark absent on paid days.
+                  const paidOffKind = dayPaidOff.isHoliday ? "holiday" : dayPaidOff.isWeeklyOff ? "weekly_off" : null;
+                  const status = paidOffKind || attMap[s.id] || "";
                   const badgeCls = {
-                    present: "bg-emerald-50 text-emerald-700 border-emerald-300",
-                    absent:  "bg-red-50 text-red-700 border-red-300",
-                    half:    "bg-amber-50 text-amber-700 border-amber-300",
-                    leave:   "bg-blue-50 text-blue-700 border-blue-300",
+                    present:    "bg-emerald-50 text-emerald-700 border-emerald-300",
+                    absent:     "bg-red-50 text-red-700 border-red-300",
+                    half:       "bg-amber-50 text-amber-700 border-amber-300",
+                    leave:      "bg-blue-50 text-blue-700 border-blue-300",
+                    weekly_off: "bg-purple-50 text-purple-700 border-purple-300",
+                    holiday:    "bg-indigo-50 text-indigo-700 border-indigo-300",
                   }[status] || "bg-gray-50 text-[var(--muted)] border-[var(--border)]";
+                  const statusLabel = {
+                    present: "Present", absent: "Absent", half: "Half Day", leave: "Leave",
+                    weekly_off: "Weekly Off", holiday: "Holiday",
+                  }[status] || "—";
                   const initials = (s.name || "?").split(/\s+/).filter(Boolean).slice(0,2).map(w => w[0]?.toUpperCase()).join("");
                   const avatarBg = {
-                    present: "bg-emerald-100 text-emerald-700",
-                    absent:  "bg-red-100 text-red-700",
-                    half:    "bg-amber-100 text-amber-700",
-                    leave:   "bg-blue-100 text-blue-700",
+                    present:    "bg-emerald-100 text-emerald-700",
+                    absent:     "bg-red-100 text-red-700",
+                    half:       "bg-amber-100 text-amber-700",
+                    leave:      "bg-blue-100 text-blue-700",
+                    weekly_off: "bg-purple-100 text-purple-700",
+                    holiday:    "bg-indigo-100 text-indigo-700",
                   }[status] || "bg-gray-100 text-[var(--brand)]";
+                  const stripeColor = {
+                    present: "#10b981", absent: "#ef4444", half: "#f59e0b", leave: "#3b82f6",
+                    weekly_off: "#a855f7", holiday: "#6366f1",
+                  }[status];
                   return (
                     <div
                       key={s.id}
                       className={`border rounded-none p-3 flex items-center gap-3 hover:shadow-sm transition-shadow ${status ? "border-l-4" : "border-l-4 border-l-transparent"}`}
-                      style={status ? { borderLeftColor: status === "present" ? "#10b981" : status === "absent" ? "#ef4444" : status === "leave" ? "#3b82f6" : "#f59e0b" } : undefined}
+                      style={stripeColor ? { borderLeftColor: stripeColor } : undefined}
                       data-testid={`att-card-${s.id}`}
                     >
                       <div className={`w-11 h-11 flex items-center justify-center font-bold text-sm ${avatarBg} rounded-none flex-shrink-0`}>
@@ -1255,8 +1294,12 @@ export default function HRMS() {
                         )}
                       </div>
                       <div className="flex-shrink-0 min-w-[100px]">
-                        {canMarkAttendance ? (
-                          <Select value={status} onValueChange={(v) => setAtt(s.id, v)}>
+                        {paidOffKind ? (
+                          <span className={`inline-block w-full text-center text-[10px] font-bold uppercase px-2 py-1 border ${badgeCls}`} data-testid={`att-paidoff-${s.id}`}>
+                            {statusLabel}
+                          </span>
+                        ) : canMarkAttendance ? (
+                          <Select value={attMap[s.id] || ""} onValueChange={(v) => setAtt(s.id, v)}>
                             <SelectTrigger
                               className={`rounded-none h-9 text-xs font-semibold border ${badgeCls}`}
                               data-testid={`att-status-${s.id}`}
@@ -1267,12 +1310,13 @@ export default function HRMS() {
                               <SelectItem value="present">🟢 Present</SelectItem>
                               <SelectItem value="absent">🔴 Absent</SelectItem>
                               <SelectItem value="half">🟡 Half Day</SelectItem>
-                              <SelectItem value="leave">🔵 Leave</SelectItem>
+                              <SelectItem value="leave">🔵 Leave (Paid)</SelectItem>
+                              <SelectItem value="unpaid_leave">⚪ Unpaid Leave</SelectItem>
                             </SelectContent>
                           </Select>
                         ) : (
                           <span className={`inline-block w-full text-center text-[10px] font-bold uppercase px-2 py-1 border ${badgeCls}`}>
-                            {status || "—"}
+                            {statusLabel}
                           </span>
                         )}
                       </div>

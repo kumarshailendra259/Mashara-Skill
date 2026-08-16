@@ -38,7 +38,7 @@ const navItems = [
   { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
   { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
   { to: "/hrms", key: "HRMS", icon: Users },
-  { to: "/me/profile", key: "my_profile", icon: UserCog, staffOnly: true },
+  { to: "/me/profile", key: "my_profile", icon: UserCog },
   { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
   { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
   { to: "/partner-associations", key: "partner_associations", icon: Link2, adminManagerOnly: true },

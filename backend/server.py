@@ -4451,11 +4451,36 @@ async def generate_staff_login(
 
 @api.get("/me/staff-profile")
 async def get_my_staff_profile(user=Depends(get_current_user)):
-    """Return the calling user's linked staff row (for the self-service "My Profile" page)."""
+    """Return the calling user's linked staff row (for the self-service "My Profile" page).
+
+    Phase 37 — if no staff record is linked (e.g. admins, partners), return a
+    lightweight stub built from the user record so the profile page still
+    renders instead of showing an error.
+    """
     s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
-    if not s:
-        raise HTTPException(404, "Your account is not linked to any staff record. Ask HR to link.")
-    return s
+    if s:
+        return s
+    # Fallback stub — same shape so the frontend doesn't need to branch.
+    return {
+        "id": None,
+        "user_id": user["id"],
+        "name": user.get("name") or user.get("email"),
+        "email": user.get("email"),
+        "mobile": user.get("mobile"),
+        "designation": {"admin": "Administrator", "hr": "HR Manager", "manager": "Manager",
+                        "senior_manager": "Senior Manager", "accountant": "Accountant",
+                        "partner": "Partner", "center_manager": "Center Manager",
+                        "center_staff": "Center Staff"}.get(user.get("role"), user.get("role")),
+        "employee_code": None,
+        "photo_url": user.get("photo_url"),
+        "bank_name": user.get("bank_name"),
+        "bank_account_no": user.get("bank_account_no"),
+        "ifsc": user.get("ifsc"),
+        "account_holder_name": user.get("account_holder_name"),
+        "upi_id": user.get("upi_id"),
+        "bank_verified": bool(user.get("bank_verified")),
+        "is_user_only": True,   # marker so UI can show a friendly hint
+    }
 
 
 class SelfStaffProfileIn(BaseModel):
@@ -4480,11 +4505,23 @@ async def update_my_staff_profile(body: SelfStaffProfileIn, user=Depends(get_cur
     Any bank field change automatically **unverifies** the bank so HR must re-approve
     via `/staff/{sid}/verify-bank`. This lets staff fix typos without needing HR to
     manually reset the flag.
+
+    Phase 37 — if the user is NOT linked to a staff record (admin/partner), the
+    fields are stored on the `users` collection instead so profile page still works.
     """
-    s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
-    if not s:
-        raise HTTPException(404, "Your account is not linked to any staff record.")
     update = {k: v for k, v in body.model_dump().items() if v is not None}
+    s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0})
+
+    # Sync mobile onto the linked user record so login lookups stay consistent.
+    if update.get("mobile"):
+        await db.users.update_one({"id": user["id"]}, {"$set": {"mobile": update["mobile"]}})
+
+    if not s:
+        # No linked staff — persist to user row and return a stub.
+        await db.users.update_one({"id": user["id"]}, {"$set": update})
+        u = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0})
+        return {**(u or {}), "is_user_only": True}
+
     bank_fields = {"bank_name", "bank_account_no", "ifsc", "account_holder_name"}
     bank_changed = any(k in update and (update[k] or "") != (s.get(k) or "") for k in bank_fields)
     if bank_changed:
@@ -4492,9 +4529,6 @@ async def update_my_staff_profile(body: SelfStaffProfileIn, user=Depends(get_cur
         update["bank_verified_at"] = None
         update["bank_verified_by"] = None
         update["bank_submitted_at"] = datetime.now(timezone.utc).isoformat()
-    # Sync mobile onto the linked user record too so login lookups stay consistent.
-    if update.get("mobile"):
-        await db.users.update_one({"id": user["id"]}, {"$set": {"mobile": update["mobile"]}})
     res = await db.staff.find_one_and_update({"id": s["id"]}, {"$set": update}, return_document=True)
     if not res:
         raise HTTPException(500, "Update failed")
@@ -4515,24 +4549,26 @@ async def update_my_staff_profile(body: SelfStaffProfileIn, user=Depends(get_cur
 
 @api.post("/me/staff-profile/photo")
 async def upload_my_profile_photo(file: UploadFile = File(...), user=Depends(get_current_user)):
-    """Staff self-upload their profile photo. Stores in object storage and updates `photo_url` on the staff row."""
+    """Staff self-upload their profile photo. Stores in object storage and updates `photo_url` on the staff row (or user row if not linked)."""
     s = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
-    if not s:
-        raise HTTPException(404, "Your account is not linked to any staff record.")
     raw = await file.read()
     if len(raw) > 3 * 1024 * 1024:
         raise HTTPException(400, "Photo must be under 3 MB")
     if not (file.content_type or "").startswith("image/"):
         raise HTTPException(400, "File must be an image")
     ext = (file.filename or "photo.jpg").split(".")[-1][:5].lower() or "jpg"
-    key = f"staff-photos/{s['id']}.{ext}"
+    subject_id = (s or {}).get("id") or f"user-{user['id']}"
+    key = f"staff-photos/{subject_id}.{ext}"
     try:
         _put_object(key, raw, content_type=file.content_type or "image/jpeg")
     except Exception as e:
         logger.exception("photo upload failed")
         raise HTTPException(502, f"Storage upload failed: {e}")
     url = _public_object_url(key) if callable(globals().get("_public_object_url")) else f"/api/objects/{key}"
-    await db.staff.update_one({"id": s["id"]}, {"$set": {"photo_url": url, "photo_key": key}})
+    if s:
+        await db.staff.update_one({"id": s["id"]}, {"$set": {"photo_url": url, "photo_key": key}})
+    else:
+        await db.users.update_one({"id": user["id"]}, {"$set": {"photo_url": url, "photo_key": key}})
     return {"ok": True, "photo_url": url}
 
 
@@ -4691,6 +4727,19 @@ async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin",
             raise HTTPException(403, "You can only mark attendance for staff at your assigned centers")
     if not doc.get("marked_at"):
         doc["marked_at"] = datetime.now(timezone.utc).isoformat()
+    # PHASE 37 — reject absent/half on weekly-off + holiday dates so a mistake
+    # can't create a bogus salary deduction on a paid non-working day.
+    if doc.get("status") in ("absent", "half", "unpaid_leave"):
+        d = doc["date"]
+        paid_offs, wo_days = await _paid_off_dates_in(d, d)
+        if d in paid_offs:
+            raise HTTPException(400, "Cannot mark absent/half on a Holiday. It's a paid day.")
+        try:
+            wname = datetime.strptime(d, "%Y-%m-%d").strftime("%A").lower()
+        except Exception:
+            wname = ""
+        if wname in wo_days:
+            raise HTTPException(400, "Cannot mark absent/half on a Weekly Off. It's a paid day.")
     # Force server-authoritative source — no client-side spoofing of "self".
     doc["marked_via"] = "admin"
     doc["marked_by"] = user["id"]
@@ -4904,6 +4953,22 @@ async def list_attendance(
         else:
             d["effective_status"] = s or "absent"
     return docs
+
+
+@api.get("/attendance/paid-off-days")
+async def attendance_paid_off_days(
+    start: str, end: str, _=Depends(get_current_user),
+):
+    """Phase 37 — return the paid-off calendar for a date window.
+    Response: `{ weekly_off_weekdays: ["sunday"], paid_off_dates: ["2026-08-15", ...] }`.
+    Used by the Attendance UI to auto-set the status chip to "Weekly Off" /
+    "Holiday" and to disable the dropdown so those days can't be marked absent.
+    """
+    paid_offs, weekly_off = await _paid_off_dates_in(start, end)
+    return {
+        "weekly_off_weekdays": sorted(weekly_off),
+        "paid_off_dates": sorted(paid_offs),
+    }
 
 
 # -------- Leaves --------
@@ -6598,6 +6663,12 @@ async def payroll_run(
       - <2h late  → minor: every 3 minor counts = 1 day deducted
       - 2h-6h     → half-day (0.5 day deducted)
       - ≥6h       → full-day (1 day deducted)
+
+    PHASE 37 — Weekly Off + Holidays are now PAID days that do NOT reduce salary.
+    Working Days = Total Days − Weekly Off − Holidays (info-only).
+    Salary deduction happens ONLY for `absent` and `unpaid_leave`, plus the
+    late-penalty above. Paid `leave` / `weekly_off` / `holiday` statuses cost
+    zero.
     """
     import calendar
     last_day = calendar.monthrange(year, month)[1]
@@ -6611,6 +6682,9 @@ async def payroll_run(
             return None
     month_start_d = datetime.strptime(start, "%Y-%m-%d").date()
     month_end_d = datetime.strptime(end, "%Y-%m-%d").date()
+
+    # PHASE 37 — Load holiday + weekly-off dates for the month ONCE.
+    paid_off_dates, weekly_off_weekdays = await _paid_off_dates_in(start, end)
 
     staff_docs = await db.staff.find({"active": {"$ne": False}}, {"_id": 0}).to_list(5000)
     created: list = []
@@ -6628,10 +6702,27 @@ async def payroll_run(
         # Effective employment window inside the calendar month
         eff_start = max(joining, month_start_d) if joining else month_start_d
         eff_end = min(exit_dt, month_end_d) if exit_dt else month_end_d
-        working_days = (eff_end - eff_start).days + 1  # inclusive
-        if working_days <= 0:
+        total_days = (eff_end - eff_start).days + 1  # calendar days in window
+        if total_days <= 0:
             skipped_not_employed += 1
             continue
+        # PHASE 37 — Split calendar days: weekly off + holiday = paid off (working
+        # days are what remain). Salary math: paid on ALL days except absent /
+        # unpaid_leave / late-penalty deductions.
+        window_off_dates = {d for d in paid_off_dates if eff_start.isoformat() <= d <= eff_end.isoformat()}
+        weekly_off_count = 0
+        holiday_count = 0
+        cur = eff_start
+        while cur <= eff_end:
+            iso = cur.isoformat()
+            is_hol = iso in window_off_dates
+            is_wo = cur.strftime("%A").lower() in weekly_off_weekdays
+            if is_hol:
+                holiday_count += 1
+            elif is_wo:
+                weekly_off_count += 1
+            cur = cur + timedelta(days=1)
+        working_days = total_days - weekly_off_count - holiday_count
         # Only count attendance rows within the effective window.
         att_start = eff_start.isoformat()
         att_end = eff_end.isoformat()
@@ -6639,26 +6730,39 @@ async def payroll_run(
             {"staff_id": s["id"], "date": {"$gte": att_start, "$lte": att_end}},
             {"_id": 0},
         ).to_list(1000)
-        days_present = 0.0
+        days_present = 0.0     # attendance-confirmed present days
+        absent_days = 0.0      # legit absent (deducted)
+        unpaid_leave_days = 0.0
         for r in rows:
             st = r.get("status")
             if st == "present":
                 days_present += 1
             elif st == "half":
                 days_present += 0.5
+                absent_days += 0.5  # half-day = 0.5 day deducted
+            elif st == "absent":
+                absent_days += 1
+            elif st == "unpaid_leave":
+                unpaid_leave_days += 1
+            # "leave" (paid), "weekly_off", "holiday" → no deduction
         # Late penalty
         shift = None
         if s.get("shift_id"):
             shift = await db.shifts.find_one({"id": s["shift_id"]}, {"_id": 0})
         buckets = _compute_late_buckets(rows, shift)
         late_days = (buckets["minor"] // 3) + 0.5 * buckets["half_day"] + 1.0 * buckets["full_day"]
-        per_day = s.get("per_day_rate", 0) or ((s.get("monthly_salary", 0) or 0) / working_days if working_days else 0)
+        # PHASE 37 — per-day rate is based on TOTAL DAYS in the window (not
+        # working days) so weekly-off + holidays are effectively fully paid.
+        per_day = s.get("per_day_rate", 0) or ((s.get("monthly_salary", 0) or 0) / total_days if total_days else 0)
         late_deduction = round(late_days * per_day, 2)
-        # Base (basic only; HRA/DA/etc. start at 0 and HR can configure later)
-        if s.get("per_day_rate", 0) and days_present > 0:
-            basic = s["per_day_rate"] * days_present
-        elif s.get("monthly_salary", 0) and days_present > 0:
-            basic = (s["monthly_salary"] or 0) * (days_present / working_days)
+        # Paid days = total − absent − unpaid_leave. Weekly Off + Holidays +
+        # Paid Leaves are all counted as paid automatically.
+        paid_days = max(0.0, total_days - absent_days - unpaid_leave_days)
+        if s.get("per_day_rate", 0):
+            basic = s["per_day_rate"] * paid_days
+        elif s.get("monthly_salary", 0):
+            # Prorate to paid_days out of total_days
+            basic = (s["monthly_salary"] or 0) * (paid_days / total_days) if total_days else 0
         else:
             basic = 0
 
@@ -6700,6 +6804,12 @@ async def payroll_run(
             "month": month, "year": year,
             "days_present": days_present,
             "working_days": working_days,
+            "total_days": total_days,
+            "weekly_off_days": weekly_off_count,
+            "holiday_days": holiday_count,
+            "absent_days": round(absent_days, 2),
+            "unpaid_leave_days": round(unpaid_leave_days, 2),
+            "paid_days": round(paid_days, 2),
             "employment_window": {"start": att_start, "end": att_end},
             "is_partial_month": working_days < last_day,
             "base_salary": s.get("monthly_salary", 0),
@@ -7397,6 +7507,77 @@ async def download_slip(pid: str, user=Depends(get_current_user)):
 
 
 # -------- Holidays --------
+
+async def _paid_off_dates_in(start: str, end: str) -> tuple[set[str], set[str]]:
+    """Phase 37 helper — return `(paid_off_dates, weekly_off_weekdays)` for a
+    date window (inclusive YYYY-MM-DD strings).
+
+    `paid_off_dates` = every date in the window that is a declared holiday
+    (from the `holidays` collection, including recurring ones matched by
+    MM-DD).
+    `weekly_off_weekdays` = lower-case weekday names configured in HR policy
+    (`hr_policy.weekly_off_days`, default `{'sunday'}`).
+    """
+    weekly_default = {"sunday"}
+    pol = await db.hr_policy.find_one({"id": "singleton"}, {"_id": 0, "weekly_off_days": 1})
+    if pol and isinstance(pol.get("weekly_off_days"), list) and pol["weekly_off_days"]:
+        weekly_off_weekdays = {str(d).lower() for d in pol["weekly_off_days"]}
+    else:
+        weekly_off_weekdays = weekly_default
+
+    docs = await db.holidays.find({}, {"_id": 0, "date": 1, "is_recurring": 1}).to_list(1000)
+    paid_off: set[str] = set()
+    # window bounds for lightweight comparison
+    try:
+        start_d = datetime.strptime(start, "%Y-%m-%d").date()
+        end_d = datetime.strptime(end, "%Y-%m-%d").date()
+    except Exception:
+        return set(), weekly_off_weekdays
+    for d in docs:
+        raw = (d.get("date") or "")[:10]
+        if not raw or len(raw) != 10:
+            continue
+        if d.get("is_recurring"):
+            # Add every year within the window that matches MM-DD
+            mmdd = raw[5:]
+            for yr in range(start_d.year, end_d.year + 1):
+                iso = f"{yr:04d}-{mmdd}"
+                if start <= iso <= end:
+                    paid_off.add(iso)
+        else:
+            if start <= raw <= end:
+                paid_off.add(raw)
+    return paid_off, weekly_off_weekdays
+
+
+class HrPolicyIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    weekly_off_days: List[str] = Field(default_factory=lambda: ["sunday"])
+
+
+@api.get("/hr-policy")
+async def get_hr_policy(_=Depends(get_current_user)):
+    """Return the singleton HR policy (weekly-off configuration, etc.).
+    Defaults are returned when the document doesn't exist yet."""
+    doc = await db.hr_policy.find_one({"id": "singleton"}, {"_id": 0}) or {}
+    doc.setdefault("weekly_off_days", ["sunday"])
+    return doc
+
+
+@api.put("/hr-policy")
+async def update_hr_policy(body: HrPolicyIn, user=Depends(require_role("admin", "hr"))):
+    """Update the HR policy singleton (admin/hr only). Values are lower-cased
+    weekday names, e.g. `["sunday"]` or `["saturday", "sunday"]`."""
+    days = [str(x).lower() for x in (body.weekly_off_days or ["sunday"]) if x]
+    now = datetime.now(timezone.utc).isoformat()
+    await db.hr_policy.update_one(
+        {"id": "singleton"},
+        {"$set": {"id": "singleton", "weekly_off_days": days, "updated_at": now, "updated_by": user["id"]}},
+        upsert=True,
+    )
+    return {"weekly_off_days": days, "updated_at": now}
+
+
 @api.get("/holidays")
 async def list_holidays(year: Optional[int] = None, _=Depends(get_current_user)):
     docs = await db.holidays.find({}, {"_id": 0}).sort("date", 1).to_list(500)
@@ -8503,6 +8684,7 @@ async def my_summary(user=Depends(get_current_user)):
         return {
             "staff": None, "today": None, "month_stats": {}, "pending_counts": {},
             "upcoming_holidays": [], "all_holidays": [], "leave_balances": [],
+            "weekly_off_days": ["sunday"],
         }
     today = datetime.now(timezone.utc).date().isoformat()
     today_row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
@@ -8581,6 +8763,13 @@ async def my_summary(user=Depends(get_current_user)):
         ))
     except Exception:
         approver_configured = False
+    # Weekly-off weekdays configured in HR policy (default: Sunday).
+    weekly_default = ["sunday"]
+    pol = await db.hr_policy.find_one({"id": "singleton"}, {"_id": 0, "weekly_off_days": 1})
+    if pol and isinstance(pol.get("weekly_off_days"), list) and pol["weekly_off_days"]:
+        weekly_off_days = sorted({str(d).lower() for d in pol["weekly_off_days"]})
+    else:
+        weekly_off_days = weekly_default
     return {
         "staff": {**{k: staff.get(k) for k in ("id", "name", "designation", "monthly_salary", "per_day_rate", "joining_date", "center_id", "bank_name", "shift_id")}, "center_name": center_name},
         "shift": shift,
@@ -8594,6 +8783,7 @@ async def my_summary(user=Depends(get_current_user)):
         "is_manager": is_manager,
         "team_size": team_size,
         "is_approver": approver_configured or is_manager,
+        "weekly_off_days": weekly_off_days,
     }
 
 

@@ -726,6 +726,17 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 /app/backend/email_utils.py   # Resend integration
 /app/frontend/src/pages/
    PendingApprovals.jsx       # Unified approval inbox
+
+### Staff App — Profile & Holidays Tabs (Done, Feb 2026)
+- **User asked**: Staff App me Profile section aur Holidays / Weekly Off ka option add karo.
+- **Backend `/app/backend/server.py`**: `/me/summary` response me new `weekly_off_days: string[]` field added (reads `hr_policy.weekly_off_days`, defaults to `["sunday"]`). Non-staff fallback also returns default.
+- **Frontend `/app/frontend/src/pages/CheckIn.jsx`**:
+  - `SIDEBAR_ITEMS` me `holidays` (Calendar icon) + `profile` (UserCog icon) entries added; mobile drawer inherits via `sidebarEntries`.
+  - New `HolidaysTab` — Weekly Off badge grid (Mon–Sun with green "✓ Off" for configured days) + Upcoming holidays list + Past holidays block.
+  - New `ProfileTab` — self-service edit for photo/mobile/address/bank details (embedded inside Staff App shell). Uses `/me/staff-profile` GET/PUT + `/me/staff-profile/photo` POST.
+  - Quick action "Holidays" now navigates to Holidays tab instead of just toggling.
+
+
    LoginHistory.jsx           # Audit page
    Programs.jsx, Dashboard.jsx, Entities.jsx, Transactions.jsx, HRMS.jsx, Stock.jsx
 /app/frontend/src/components/
