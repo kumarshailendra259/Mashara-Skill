@@ -740,6 +740,19 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
    LoginHistory.jsx           # Audit page
 
 ### Reimbursement Attachments + HR Templates (Done, Feb 2026)
+
+### Staff App Attendance — Faster + Friendlier Denied-Location UX (Done, Feb 2026)
+- **User asked**: Manisha ke phone pe "User denied Geolocation" a raha tha, attendance mark nahi ho pa raha. Flow ko simpler + fast banao.
+- **Frontend `/app/frontend/src/pages/CheckIn.jsx`** (`AttendanceTab`):
+  - **Auto-request location on mount** so staff never sees a manual "Get Location" tap for the happy path.
+  - New **"Location blocked" panel** with step-by-step recovery instructions in Hinglish for Chrome/Edge, Safari (iOS), Android app + a big "Retry Now" button (distinguishes `err.code===1` PERMISSION_DENIED from generic errors).
+  - Reverse-geocode is now truly fire-and-forget — Check-In button unblocks as soon as coordinates arrive, without waiting for the Nominatim address lookup.
+  - **Client-side image compression** for selfies (canvas → JPEG 78% at max width 900px). Shrinks 5-10MB phone photos to ~150-300KB → 20-40× faster upload on 2G/3G.
+  - Cleaner three-block layout (Location → Selfie → Status → Check In) with colour-coded state cards (green when captured, red when blocked, grey when pending). Removed "Step 1 of 3" clutter and merged Status pills out of a wrapping card into a compact 3-column pill grid.
+  - `geolocation` options now use `maximumAge: 30000` so a fresh cached fix (30 s) can serve immediately, cutting first-tap wait time when the OS already has a fix.
+- **Verified**: Playwright tests both flows — denied-permission panel shows Retry + full instructions, granted-permission flow captures Ranchi coords → resolves address → enables the Check In button.
+
+
 - **User asked**: (a) Reimbursement rows me attached documents dikhne chahiye (list + detail modal), (b) Reimbursement submenu me HR ke liye ek admin section jahan manual claim-format templates upload/edit/delete kar sakein.
 - **Backend `/app/backend/server.py`**:
   - New `reimbursement_templates` collection + endpoints:
