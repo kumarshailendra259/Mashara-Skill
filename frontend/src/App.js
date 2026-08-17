@@ -31,6 +31,7 @@ import EmployeeTransfers from "@/pages/EmployeeTransfers";
 import CenterManagerDashboard from "@/pages/CenterManagerDashboard";
 import Quotations from "@/pages/Quotations";
 import Vendors from "@/pages/Vendors";
+import Candidates from "@/pages/Candidates";
 import PaymentDashboard from "@/pages/PaymentDashboard";
 import BankReconciliation from "@/pages/BankReconciliation";
 import { useAuth } from "@/context/AuthContext";
@@ -85,6 +86,7 @@ function App() {
             <Route path="/payment-dashboard" element={<ProtectedRoute requireFinance><Shell><PaymentDashboard /></Shell></ProtectedRoute>} />
             <Route path="/bank-reconciliation" element={<ProtectedRoute><Shell><BankReconciliation /></Shell></ProtectedRoute>} />
             <Route path="/vendors" element={<ProtectedRoute><Shell><Vendors /></Shell></ProtectedRoute>} />
+            <Route path="/candidates" element={<ProtectedRoute><Shell><Candidates /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

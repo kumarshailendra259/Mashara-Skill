@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,7 @@ const navItems = [
   { to: "/stock", key: "stock", icon: Package },
   { to: "/assets", key: "assets", icon: Box },
   { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
+  { to: "/candidates", key: "candidates", icon: UserPlus, candidateAccess: true },
   { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
   { to: "/payment-dashboard", key: "payment_dashboard", icon: PieChart, financeOnly: true },
   { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
@@ -182,6 +183,7 @@ export default function Layout({ children }) {
       if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
       if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
       if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
+      if (it.candidateAccess && !["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role)) return false;
       if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
       if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
       if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;

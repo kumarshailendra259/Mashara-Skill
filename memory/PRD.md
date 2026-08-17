@@ -755,6 +755,32 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 
 - **User asked**: (a) Reimbursement rows me attached documents dikhne chahiye (list + detail modal), (b) Reimbursement submenu me HR ke liye ek admin section jahan manual claim-format templates upload/edit/delete kar sakein.
 - **Backend `/app/backend/server.py`**:
+
+### Candidate Data Management (BOCWW / JSDMS) (Done, Feb 2026)
+- **User asked**: Project-wise Candidate Data Management module — BOCWW (27 fields incl. labour registration meta) + JSDMS (11 fields) with per-project forms, filters, bulk Excel upload/download with row-level validation, duplicate detection, soft-delete.
+- **Access**: admin, hr, manager, center_manager, partner. Enforced via `require_role(*CANDIDATE_ROLES)` on every endpoint and via `candidateAccess` flag on the sidebar entry.
+- **Backend `/app/backend/server.py`** — new `db.candidates` collection + endpoints:
+  - `POST /api/candidates` — create with required-field + duplicate check
+  - `GET /api/candidates` — list with filters (project, batch, district, course, search, date_from/to, include_deleted, pagination)
+  - `GET /api/candidates/filter-options?project=` — distinct batch/district/course values for dropdowns
+  - `GET /api/candidates/sample-excel?project=BOCWW|JSDMS` — download strict-format template with one seeded sample row
+  - `POST /api/candidates/bulk-upload?project=…` — strict-header Excel upload; returns `{uploaded, failed, duplicate, total_rows, errors[]}`
+  - `GET /api/candidates/export?…filters…` — filtered Excel export
+  - `GET /api/candidates/{id}`, `PATCH /api/candidates/{id}`, `DELETE /api/candidates/{id}` (soft), `PATCH /api/candidates/{id}/restore`
+- **Duplicate detection**: **per project** on `aadhaar` (both) and `candidate_id` (BOCWW only). Also blocks intra-file duplicates during bulk upload.
+- **Normalisation**: strips whitespace, normalises Aadhaar/mobile to digits-only, canonicalises Gender to M/F/T and Physically Handicapped to Yes/No before insert.
+- **Excel headers strict** (case-sensitive, exact match to spec). Missing headers → HTTP 400 with the list of missing columns.
+- **Frontend `/app/frontend/src/pages/Candidates.jsx`** (new page, route `/candidates`, sidebar entry "Candidate Data"):
+  - Big project switcher (BOCWW / JSDMS) → forms + table columns reconfigure automatically
+  - Filter bar: Batch / District / Course dropdowns (populated from `filter-options` endpoint), search box, date range, include-archived toggle
+  - Action bar: Sample Format · Export Excel · Bulk Upload · Add Candidate
+  - Data table with View / Edit / Delete / Restore per-row actions and archived-row styling
+  - Add/Edit modal: BOCWW form separates the Batch/Course meta block from the candidate detail block; JSDMS form is one clean grid. Fields respect required, digits-only, max-length, select-with-options.
+  - Bulk-upload modal: shows sample-download button, file input, and post-upload summary with `Rows / Uploaded / Duplicate / Failed` counters plus a row-level error list.
+- **Verified**: curl-tested create + duplicate 409 + list-with-filter; bulk upload of 3 JSDMS rows returned `uploaded:2, duplicate:1` as expected; UI screenshots confirm both project layouts, form, and table render correctly. All existing modules untouched (Attendance, Reimbursements, Payroll etc.).
+- **Dependencies**: added `openpyxl==3.1.5` to `requirements.txt`.
+
+
   - New `reimbursement_templates` collection + endpoints:
     - `POST /api/reimbursement-templates?name=…&category=…&description=…` (file upload, HR/admin only, max 10MB)
     - `GET /api/reimbursement-templates?active_only=true` (all authenticated users; non-HR sees only active)

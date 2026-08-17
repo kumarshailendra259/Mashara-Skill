@@ -28,7 +28,7 @@ def _today_ist() -> str:
     return datetime.now(BUSINESS_TZ).date().isoformat()
 from typing import Optional, List, Literal
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr, ConfigDict, field_validator
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -12546,6 +12546,485 @@ async def _require_bank_account_if_configured(bank_account_id: Optional[str]) ->
     if not acct:
         raise HTTPException(400, "Selected bank account not found or inactive")
     return acct
+
+
+# =====================================================================
+#                CANDIDATE DATA MANAGEMENT (BOCWW / JSDMS)
+# =====================================================================
+# Project-wise candidate CRUD + bulk Excel upload/download + soft-delete.
+# Access: admin, hr, manager, center_manager, partner.
+# Duplicate check: per project on (aadhaar) and per project on (candidate_id).
+
+from openpyxl import Workbook, load_workbook  # noqa: E402
+from openpyxl.styles import Font, PatternFill, Alignment  # noqa: E402
+from io import BytesIO  # noqa: E402
+
+CANDIDATE_ROLES = ("admin", "hr", "manager", "center_manager", "partner")
+
+# (field_key, excel_header) — order = column order.
+BOCWW_COLUMNS = [
+    ("s_no", "S.No."),
+    ("batch_id", "Batch ID"),
+    ("candidate_id", "Candidate ID"),
+    ("name", "Candidate Name"),
+    ("father_or_husband_name", "Father's Name / Husband Name"),
+    ("mother_name", "Mother's Name"),
+    ("aadhaar", "Candidate Aadhaar No."),
+    ("registered_labour_name", "Registered Labour Name"),
+    ("registered_labour_aadhaar", "Registered Labour Aadhaar No."),
+    ("relation_with_labour", "Relation with Candidate & Registered Labour"),
+    ("labour_reg_no", "Labour Registration No."),
+    ("id_card_valid_upto", "ID Card Valid Upto"),
+    ("labour_card_issue_date", "Labour Card Issue Date"),
+    ("date_of_birth", "Date of Birth"),
+    ("gender", "Gender"),
+    ("category", "Category"),
+    ("address", "Full Address"),
+    ("mobile", "Mobile No."),
+    ("education", "Education"),
+    ("physically_handicapped", "Physically Handicapped"),
+    ("course_code", "Course Code"),
+    ("course_duration_hours", "Course Duration (Hours)"),
+    ("end_time", "End Time"),
+    ("state", "State"),
+    ("district", "District"),
+    ("batch", "Batch"),
+    ("course", "Course"),
+]
+
+JSDMS_COLUMNS = [
+    ("name", "Candidate Name"),
+    ("father_name", "Father's Name"),
+    ("aadhaar", "Aadhaar Number"),
+    ("mobile", "Mobile Number"),
+    ("aadhaar_linked_mobile", "Aadhaar Linked Mobile Number"),
+    ("date_of_birth", "Date of Birth"),
+    ("course_name", "Course Name"),
+    ("education", "Education"),
+    ("address", "Full Address"),
+    ("batch", "Batch"),
+    ("district", "District"),
+]
+
+REQUIRED_FIELDS = {
+    "BOCWW": {"name", "aadhaar", "candidate_id"},
+    "JSDMS": {"name", "aadhaar"},
+}
+
+
+def _cand_columns(project: str) -> list:
+    if project == "BOCWW":
+        return BOCWW_COLUMNS
+    if project == "JSDMS":
+        return JSDMS_COLUMNS
+    raise HTTPException(400, "Unsupported project. Use BOCWW or JSDMS.")
+
+
+def _stringify_cell(v) -> str:
+    """Best-effort convert an openpyxl cell value to a clean string."""
+    if v is None:
+        return ""
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if hasattr(v, "isoformat"):
+        try:
+            return v.isoformat()
+        except Exception:
+            pass
+    return str(v).strip()
+
+
+def _normalise_candidate_payload(project: str, data: dict) -> dict:
+    """Strip whitespace on string fields and normalise digits-only fields
+    (aadhaar / mobile) to numbers-only. Kept lenient — do NOT reject on length
+    to allow HR to upload messy legacy data; but expose validation warnings."""
+    out = {}
+    for k, v in (data or {}).items():
+        if isinstance(v, str):
+            out[k] = v.strip()
+        else:
+            out[k] = v
+    for f in ("aadhaar", "mobile", "registered_labour_aadhaar", "aadhaar_linked_mobile"):
+        if out.get(f):
+            out[f] = "".join(ch for ch in str(out[f]) if ch.isdigit())
+    if project == "BOCWW":
+        # BOCWW-specific soft normalisation
+        g = (out.get("gender") or "").upper().strip()
+        if g in ("MALE", "M"): out["gender"] = "M"
+        elif g in ("FEMALE", "F"): out["gender"] = "F"
+        elif g in ("TRANSGENDER", "T", "TRANS"): out["gender"] = "T"
+        ph = str(out.get("physically_handicapped") or "").strip().lower()
+        if ph in ("yes", "y", "true", "1"): out["physically_handicapped"] = "Yes"
+        elif ph in ("no", "n", "false", "0", ""): out["physically_handicapped"] = "No"
+    return out
+
+
+class _CandDupResult(BaseModel):
+    duplicate: bool
+    on: Optional[str] = None  # "aadhaar" | "candidate_id"
+
+
+async def _find_duplicate(project: str, payload: dict, exclude_id: Optional[str] = None) -> _CandDupResult:
+    """Check duplicates PER PROJECT on aadhaar + candidate_id (BOCWW-only)."""
+    aadhaar = (payload.get("aadhaar") or "").strip()
+    cid = (payload.get("candidate_id") or "").strip()
+    q_base = {"project": project, "is_deleted": {"$ne": True}}
+    if exclude_id:
+        q_base["id"] = {"$ne": exclude_id}
+    if aadhaar:
+        hit = await db.candidates.find_one({**q_base, "aadhaar": aadhaar}, {"_id": 0, "id": 1})
+        if hit:
+            return _CandDupResult(duplicate=True, on="aadhaar")
+    if project == "BOCWW" and cid:
+        hit = await db.candidates.find_one({**q_base, "candidate_id": cid}, {"_id": 0, "id": 1})
+        if hit:
+            return _CandDupResult(duplicate=True, on="candidate_id")
+    return _CandDupResult(duplicate=False)
+
+
+@api.post("/candidates", status_code=201)
+async def create_candidate(payload: dict = Body(...), user=Depends(require_role(*CANDIDATE_ROLES))):
+    project = (payload.get("project") or "").upper()
+    if project not in ("BOCWW", "JSDMS"):
+        raise HTTPException(400, "project must be BOCWW or JSDMS")
+    data = _normalise_candidate_payload(project, payload)
+    # Required-field check
+    missing = [f for f in REQUIRED_FIELDS[project] if not data.get(f)]
+    if missing:
+        raise HTTPException(400, f"Missing required fields: {', '.join(missing)}")
+    dup = await _find_duplicate(project, data)
+    if dup.duplicate:
+        raise HTTPException(409, f"Duplicate candidate — same {dup.on} already exists in {project}")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        **{k: data.get(k) for k, _ in _cand_columns(project) if data.get(k) is not None},
+        "id": str(uuid.uuid4()),
+        "project": project,
+        "created_by": user["id"],
+        "created_at": now,
+        "updated_at": now,
+        "is_deleted": False,
+    }
+    await db.candidates.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/candidates")
+async def list_candidates(
+    project: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    course: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    include_deleted: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    _=Depends(require_role(*CANDIDATE_ROLES)),
+):
+    q: dict = {}
+    if not include_deleted:
+        q["is_deleted"] = {"$ne": True}
+    if project:
+        q["project"] = project.upper()
+    if batch:
+        q["batch"] = batch
+    if district:
+        q["district"] = district
+    if course:
+        q["$or"] = [{"course": course}, {"course_name": course}, {"course_code": course}]
+    if date_from or date_to:
+        rng: dict = {}
+        if date_from: rng["$gte"] = date_from
+        if date_to: rng["$lte"] = date_to + "T23:59:59"
+        q["created_at"] = rng
+    if search:
+        s = search.strip()
+        s_or = [
+            {"name": {"$regex": s, "$options": "i"}},
+            {"father_name": {"$regex": s, "$options": "i"}},
+            {"father_or_husband_name": {"$regex": s, "$options": "i"}},
+            {"mother_name": {"$regex": s, "$options": "i"}},
+            {"candidate_id": {"$regex": s, "$options": "i"}},
+            {"aadhaar": {"$regex": s, "$options": "i"}},
+            {"mobile": {"$regex": s, "$options": "i"}},
+            {"batch_id": {"$regex": s, "$options": "i"}},
+        ]
+        # merge with existing $or from course (project=all case). Use $and to combine.
+        if "$or" in q:
+            q = {"$and": [{"$or": q.pop("$or")}, {"$or": s_or}], **q}
+        else:
+            q["$or"] = s_or
+    total = await db.candidates.count_documents(q)
+    docs = await db.candidates.find(q, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
+    return {"total": total, "page": page, "page_size": page_size, "items": docs}
+
+
+@api.get("/candidates/filter-options")
+async def candidate_filter_options(
+    project: Optional[str] = Query(None),
+    _=Depends(require_role(*CANDIDATE_ROLES)),
+):
+    """Return distinct batches / districts / courses so the UI's filter dropdowns
+    can be populated from real data (free-text fields, so we just distinct)."""
+    q: dict = {"is_deleted": {"$ne": True}}
+    if project: q["project"] = project.upper()
+    batches = await db.candidates.distinct("batch", q)
+    districts = await db.candidates.distinct("district", q)
+    courses1 = await db.candidates.distinct("course", q)
+    courses2 = await db.candidates.distinct("course_name", q)
+    return {
+        "batches": sorted([b for b in batches if b]),
+        "districts": sorted([d for d in districts if d]),
+        "courses": sorted({c for c in courses1 + courses2 if c}),
+    }
+
+
+@api.get("/candidates/sample-excel")
+async def candidate_sample_excel(
+    project: str = Query(...),
+    _=Depends(require_role(*CANDIDATE_ROLES)),
+):
+    project = project.upper()
+    cols = _cand_columns(project)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"{project}-Sample"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    for idx, (_key, header) in enumerate(cols, start=1):
+        cell = ws.cell(row=1, column=idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[cell.column_letter].width = max(14, len(header) + 4)
+    # Add a sample row with placeholder guidance
+    if project == "BOCWW":
+        sample = ["1", "BATCH-01", "CAND-0001", "Rahul Kumar", "Ramesh Kumar", "Sita Devi",
+                  "123412341234", "Ramesh Kumar", "987698769876", "Father", "LR-0001",
+                  "2027-12-31", "2024-01-15", "2002-05-15", "M", "General",
+                  "Village Xyz, Ranchi, Jharkhand", "9876543210", "12th", "No",
+                  "CC-EL-01", "300", "18:00", "Jharkhand", "Ranchi", "BATCH-01", "Electrician"]
+    else:
+        sample = ["Anita Devi", "Suresh Yadav", "112211221122", "9876543210", "9876543210",
+                  "2000-07-20", "Data Entry Operator", "12th", "Village Abc, Gumla", "JSDMS-BATCH-01", "Gumla"]
+    for i, v in enumerate(sample, start=1):
+        ws.cell(row=2, column=i, value=v)
+    ws.freeze_panes = "A2"
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"{project}_candidate_sample.xlsx"
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@api.post("/candidates/bulk-upload")
+async def candidate_bulk_upload(
+    project: str = Query(...),
+    file: UploadFile = File(...),
+    user=Depends(require_role(*CANDIDATE_ROLES)),
+):
+    project = project.upper()
+    cols = _cand_columns(project)
+    header_to_key = {header: key for key, header in cols}
+    data_bytes = await file.read()
+    if len(data_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 20MB)")
+    try:
+        wb = load_workbook(BytesIO(data_bytes), data_only=True, read_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid Excel file: {e}")
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration:
+        raise HTTPException(400, "Excel is empty")
+    headers = [(_stringify_cell(h) if h is not None else "") for h in header_row]
+    # STRICT: every expected header must be present (case-sensitive, exact)
+    expected = [h for _, h in cols]
+    missing_headers = [h for h in expected if h not in headers]
+    if missing_headers:
+        raise HTTPException(400, f"Missing columns in Excel: {', '.join(missing_headers)}")
+    header_index = {h: i for i, h in enumerate(headers)}
+    now = datetime.now(timezone.utc).isoformat()
+    summary = {"uploaded": 0, "failed": 0, "duplicate": 0, "total_rows": 0, "errors": []}
+    to_insert: list = []
+    seen_within_file: set = set()  # to catch duplicate aadhaar within same file
+    for r_i, row in enumerate(rows_iter, start=2):
+        # skip fully empty rows
+        if not row or all(c is None or _stringify_cell(c) == "" for c in row):
+            continue
+        summary["total_rows"] += 1
+        rec: dict = {}
+        for key, header in cols:
+            idx = header_index.get(header)
+            if idx is None or idx >= len(row):
+                rec[key] = ""
+            else:
+                rec[key] = _stringify_cell(row[idx])
+        rec = _normalise_candidate_payload(project, rec)
+        # Required fields
+        missing = [f for f in REQUIRED_FIELDS[project] if not rec.get(f)]
+        if missing:
+            summary["failed"] += 1
+            summary["errors"].append({"row": r_i, "reason": f"Missing required: {', '.join(missing)}"})
+            continue
+        # Duplicate within same file
+        aadhaar = rec.get("aadhaar") or ""
+        cid = rec.get("candidate_id") or ""
+        dup_key = (project, aadhaar, cid)
+        if aadhaar and dup_key in seen_within_file:
+            summary["duplicate"] += 1
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate within upload (aadhaar={aadhaar})"})
+            continue
+        # Duplicate against DB
+        dup_db = await _find_duplicate(project, rec)
+        if dup_db.duplicate:
+            summary["duplicate"] += 1
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate in DB on {dup_db.on}"})
+            continue
+        rec["id"] = str(uuid.uuid4())
+        rec["project"] = project
+        rec["created_by"] = user["id"]
+        rec["created_at"] = now
+        rec["updated_at"] = now
+        rec["is_deleted"] = False
+        to_insert.append(rec)
+        if aadhaar: seen_within_file.add(dup_key)
+    if to_insert:
+        await db.candidates.insert_many(to_insert)
+    summary["uploaded"] = len(to_insert)
+    # Truncate very long error lists so response stays small
+    summary["errors"] = summary["errors"][:200]
+    return summary
+
+
+@api.get("/candidates/export")
+async def candidate_export_excel(
+    project: Optional[str] = Query(None),
+    batch: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    course: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    _=Depends(require_role(*CANDIDATE_ROLES)),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    proj_key = (project or "").upper() if project else None
+    if proj_key: q["project"] = proj_key
+    if batch: q["batch"] = batch
+    if district: q["district"] = district
+    if course: q["$or"] = [{"course": course}, {"course_name": course}, {"course_code": course}]
+    if date_from or date_to:
+        rng: dict = {}
+        if date_from: rng["$gte"] = date_from
+        if date_to: rng["$lte"] = date_to + "T23:59:59"
+        q["created_at"] = rng
+    if search:
+        s = search.strip()
+        s_or = [
+            {"name": {"$regex": s, "$options": "i"}},
+            {"candidate_id": {"$regex": s, "$options": "i"}},
+            {"aadhaar": {"$regex": s, "$options": "i"}},
+            {"mobile": {"$regex": s, "$options": "i"}},
+        ]
+        if "$or" in q:
+            q = {"$and": [{"$or": q.pop("$or")}, {"$or": s_or}], **q}
+        else:
+            q["$or"] = s_or
+    docs = await db.candidates.find(q, {"_id": 0}).sort("created_at", -1).to_list(10000)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Candidates"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    if proj_key in ("BOCWW", "JSDMS"):
+        cols = _cand_columns(proj_key)
+    else:
+        # Union view — include an extra Project column at the front
+        cols = [("project", "Project")] + BOCWW_COLUMNS  # BOCWW has all fields
+    for idx, (_k, header) in enumerate(cols, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = header_font
+        c.fill = header_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(14, len(header) + 4)
+    for r_i, d in enumerate(docs, start=2):
+        for c_i, (key, _h) in enumerate(cols, start=1):
+            ws.cell(row=r_i, column=c_i, value=d.get(key, ""))
+    ws.freeze_panes = "A2"
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    scope = (proj_key or "ALL").lower()
+    fname = f"candidates_{scope}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@api.get("/candidates/{cid}")
+async def get_candidate(cid: str, _=Depends(require_role(*CANDIDATE_ROLES))):
+    doc = await db.candidates.find_one({"id": cid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Candidate not found")
+    return doc
+
+
+@api.patch("/candidates/{cid}")
+async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(require_role(*CANDIDATE_ROLES))):
+    existing = await db.candidates.find_one({"id": cid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Candidate not found")
+    project = existing.get("project") or (payload.get("project") or "").upper()
+    if project not in ("BOCWW", "JSDMS"):
+        raise HTTPException(400, "Missing project")
+    data = _normalise_candidate_payload(project, payload)
+    # Duplicate check (exclude self)
+    dup = await _find_duplicate(project, data, exclude_id=cid)
+    if dup.duplicate:
+        raise HTTPException(409, f"Duplicate — same {dup.on} exists on another {project} candidate")
+    upd = {k: v for k, v in data.items() if k not in ("id", "project", "created_by", "created_at", "is_deleted")}
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    upd["updated_by"] = user["id"]
+    await db.candidates.update_one({"id": cid}, {"$set": upd})
+    doc = await db.candidates.find_one({"id": cid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/candidates/{cid}", status_code=204)
+async def delete_candidate(cid: str, user=Depends(require_role(*CANDIDATE_ROLES))):
+    r = await db.candidates.update_one(
+        {"id": cid, "is_deleted": {"$ne": True}},
+        {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat(), "deleted_by": user["id"]}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Candidate not found or already deleted")
+    return None
+
+
+@api.patch("/candidates/{cid}/restore")
+async def restore_candidate(cid: str, _=Depends(require_role(*CANDIDATE_ROLES))):
+    r = await db.candidates.update_one(
+        {"id": cid, "is_deleted": True},
+        {"$set": {"is_deleted": False}, "$unset": {"deleted_at": "", "deleted_by": ""}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Candidate not found or not deleted")
+    doc = await db.candidates.find_one({"id": cid}, {"_id": 0})
+    return doc
+
+
 
 
 # ---------- Register router + CORS ----------
