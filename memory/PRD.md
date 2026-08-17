@@ -778,6 +778,21 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
   - Add/Edit modal: BOCWW form separates the Batch/Course meta block from the candidate detail block; JSDMS form is one clean grid. Fields respect required, digits-only, max-length, select-with-options.
   - Bulk-upload modal: shows sample-download button, file input, and post-upload summary with `Rows / Uploaded / Duplicate / Failed` counters plus a row-level error list.
 - **Verified**: curl-tested create + duplicate 409 + list-with-filter; bulk upload of 3 JSDMS rows returned `uploaded:2, duplicate:1` as expected; UI screenshots confirm both project layouts, form, and table render correctly. All existing modules untouched (Attendance, Reimbursements, Payroll etc.).
+
+### Candidate Data — Critical Duplicate Bug Fix + FY Field (Done, Feb 2026)
+- **Bug reported**: Same Aadhaar `356299759079` for "SAHIDA BIBI" was uploaded 3 times with different Candidate IDs — duplicate check should have blocked the extras but didn't.
+- **Root cause**: Bulk-upload in-file duplicate check used a composite key `(project, aadhaar, candidate_id)` — because Candidate IDs differed, the same-Aadhaar rows produced different tuples and slipped past the in-file guard, then all landed in the DB via a single `insert_many`.
+- **Fix `/app/backend/server.py`**:
+  - Split the in-file dup guard into three independent sets: `seen_aadhaar`, `seen_cid`, `seen_lrn`. First key match = block subsequent rows with a clear reason.
+  - Extended `_find_duplicate` to also check `labour_reg_no` (the BOCWW Registration Number) for BOCWW; any of `aadhaar` / `candidate_id` / `labour_reg_no` matching a live record blocks the insert with a specific reason.
+  - Bulk-upload error messages now name the exact conflicting field ("same Aadhaar", "same Candidate ID", "same BOCWW Registration No.").
+- **FY (Financial Year) added everywhere as requested**:
+  - Backend: `fy` is the first column in both `BOCWW_COLUMNS` and `JSDMS_COLUMNS`; sample Excel seeded with `"2024-25"`.
+  - Backend: `/candidates` and `/candidates/export` accept a `fy=` query param; `/candidates/filter-options` returns distinct `fys[]`; free-text search now also matches `fy` and `labour_reg_no`.
+  - Frontend `/app/frontend/src/pages/Candidates.jsx`: FY filter dropdown placed first in the filter bar (before Batch); FY column shown as the first column in the results table; search placeholder updated; export/list URLs include the FY param.
+- **Verified**: Test upload of 3 rows with same Aadhaar `356299759079` and different Candidate IDs → response `uploaded:1, duplicate:2` with reasons like "Duplicate within upload — same Aadhaar (356299759079) already in row above". Second test with different Aadhaars but same `labour_reg_no=LR-777` → `uploaded:1, duplicate:1` with reason "same BOCWW Registration No.". Fix confirmed working end-to-end.
+
+
 - **Dependencies**: added `openpyxl==3.1.5` to `requirements.txt`.
 
 

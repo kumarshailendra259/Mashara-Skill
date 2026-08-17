@@ -12563,6 +12563,7 @@ CANDIDATE_ROLES = ("admin", "hr", "manager", "center_manager", "partner")
 
 # (field_key, excel_header) — order = column order.
 BOCWW_COLUMNS = [
+    ("fy", "Financial Year"),
     ("s_no", "S.No."),
     ("batch_id", "Batch ID"),
     ("candidate_id", "Candidate ID"),
@@ -12593,6 +12594,7 @@ BOCWW_COLUMNS = [
 ]
 
 JSDMS_COLUMNS = [
+    ("fy", "Financial Year"),
     ("name", "Candidate Name"),
     ("father_name", "Father's Name"),
     ("aadhaar", "Aadhaar Number"),
@@ -12665,9 +12667,14 @@ class _CandDupResult(BaseModel):
 
 
 async def _find_duplicate(project: str, payload: dict, exclude_id: Optional[str] = None) -> _CandDupResult:
-    """Check duplicates PER PROJECT on aadhaar + candidate_id (BOCWW-only)."""
+    """Check duplicates PER PROJECT on:
+       - aadhaar (both projects)
+       - candidate_id (BOCWW only)
+       - labour_reg_no  (BOCWW only — BOCWW Registration Number)
+    Any single match blocks the record."""
     aadhaar = (payload.get("aadhaar") or "").strip()
     cid = (payload.get("candidate_id") or "").strip()
+    lrn = (payload.get("labour_reg_no") or "").strip()
     q_base = {"project": project, "is_deleted": {"$ne": True}}
     if exclude_id:
         q_base["id"] = {"$ne": exclude_id}
@@ -12675,10 +12682,15 @@ async def _find_duplicate(project: str, payload: dict, exclude_id: Optional[str]
         hit = await db.candidates.find_one({**q_base, "aadhaar": aadhaar}, {"_id": 0, "id": 1})
         if hit:
             return _CandDupResult(duplicate=True, on="aadhaar")
-    if project == "BOCWW" and cid:
-        hit = await db.candidates.find_one({**q_base, "candidate_id": cid}, {"_id": 0, "id": 1})
-        if hit:
-            return _CandDupResult(duplicate=True, on="candidate_id")
+    if project == "BOCWW":
+        if cid:
+            hit = await db.candidates.find_one({**q_base, "candidate_id": cid}, {"_id": 0, "id": 1})
+            if hit:
+                return _CandDupResult(duplicate=True, on="candidate_id")
+        if lrn:
+            hit = await db.candidates.find_one({**q_base, "labour_reg_no": lrn}, {"_id": 0, "id": 1})
+            if hit:
+                return _CandDupResult(duplicate=True, on="labour_reg_no")
     return _CandDupResult(duplicate=False)
 
 
@@ -12716,6 +12728,7 @@ async def list_candidates(
     batch: Optional[str] = Query(None),
     district: Optional[str] = Query(None),
     course: Optional[str] = Query(None),
+    fy: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
@@ -12733,6 +12746,8 @@ async def list_candidates(
         q["batch"] = batch
     if district:
         q["district"] = district
+    if fy:
+        q["fy"] = fy
     if course:
         q["$or"] = [{"course": course}, {"course_name": course}, {"course_code": course}]
     if date_from or date_to:
@@ -12751,6 +12766,8 @@ async def list_candidates(
             {"aadhaar": {"$regex": s, "$options": "i"}},
             {"mobile": {"$regex": s, "$options": "i"}},
             {"batch_id": {"$regex": s, "$options": "i"}},
+            {"fy": {"$regex": s, "$options": "i"}},
+            {"labour_reg_no": {"$regex": s, "$options": "i"}},
         ]
         # merge with existing $or from course (project=all case). Use $and to combine.
         if "$or" in q:
@@ -12775,10 +12792,12 @@ async def candidate_filter_options(
     districts = await db.candidates.distinct("district", q)
     courses1 = await db.candidates.distinct("course", q)
     courses2 = await db.candidates.distinct("course_name", q)
+    fys = await db.candidates.distinct("fy", q)
     return {
         "batches": sorted([b for b in batches if b]),
         "districts": sorted([d for d in districts if d]),
         "courses": sorted({c for c in courses1 + courses2 if c}),
+        "fys": sorted([f for f in fys if f]),
     }
 
 
@@ -12802,13 +12821,13 @@ async def candidate_sample_excel(
         ws.column_dimensions[cell.column_letter].width = max(14, len(header) + 4)
     # Add a sample row with placeholder guidance
     if project == "BOCWW":
-        sample = ["1", "BATCH-01", "CAND-0001", "Rahul Kumar", "Ramesh Kumar", "Sita Devi",
+        sample = ["2024-25", "1", "BATCH-01", "CAND-0001", "Rahul Kumar", "Ramesh Kumar", "Sita Devi",
                   "123412341234", "Ramesh Kumar", "987698769876", "Father", "LR-0001",
                   "2027-12-31", "2024-01-15", "2002-05-15", "M", "General",
                   "Village Xyz, Ranchi, Jharkhand", "9876543210", "12th", "No",
                   "CC-EL-01", "300", "18:00", "Jharkhand", "Ranchi", "BATCH-01", "Electrician"]
     else:
-        sample = ["Anita Devi", "Suresh Yadav", "112211221122", "9876543210", "9876543210",
+        sample = ["2024-25", "Anita Devi", "Suresh Yadav", "112211221122", "9876543210", "9876543210",
                   "2000-07-20", "Data Entry Operator", "12th", "Village Abc, Gumla", "JSDMS-BATCH-01", "Gumla"]
     for i, v in enumerate(sample, start=1):
         ws.cell(row=2, column=i, value=v)
@@ -12856,7 +12875,11 @@ async def candidate_bulk_upload(
     now = datetime.now(timezone.utc).isoformat()
     summary = {"uploaded": 0, "failed": 0, "duplicate": 0, "total_rows": 0, "errors": []}
     to_insert: list = []
-    seen_within_file: set = set()  # to catch duplicate aadhaar within same file
+    # Track keys that already appear in this same file so we block repeats
+    # inside a single upload (in addition to the DB check).
+    seen_aadhaar: set = set()
+    seen_cid: set = set()      # BOCWW only
+    seen_lrn: set = set()      # BOCWW only (labour_reg_no)
     for r_i, row in enumerate(rows_iter, start=2):
         # skip fully empty rows
         if not row or all(c is None or _stringify_cell(c) == "" for c in row):
@@ -12876,19 +12899,28 @@ async def candidate_bulk_upload(
             summary["failed"] += 1
             summary["errors"].append({"row": r_i, "reason": f"Missing required: {', '.join(missing)}"})
             continue
-        # Duplicate within same file
         aadhaar = rec.get("aadhaar") or ""
         cid = rec.get("candidate_id") or ""
-        dup_key = (project, aadhaar, cid)
-        if aadhaar and dup_key in seen_within_file:
+        lrn = rec.get("labour_reg_no") or ""
+        # In-file duplicate — key-wise
+        if aadhaar and aadhaar in seen_aadhaar:
             summary["duplicate"] += 1
-            summary["errors"].append({"row": r_i, "reason": f"Duplicate within upload (aadhaar={aadhaar})"})
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate within upload — same Aadhaar ({aadhaar}) already in row above"})
+            continue
+        if project == "BOCWW" and cid and cid in seen_cid:
+            summary["duplicate"] += 1
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate within upload — same Candidate ID ({cid}) already in row above"})
+            continue
+        if project == "BOCWW" and lrn and lrn in seen_lrn:
+            summary["duplicate"] += 1
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate within upload — same BOCWW Registration No. ({lrn}) already in row above"})
             continue
         # Duplicate against DB
         dup_db = await _find_duplicate(project, rec)
         if dup_db.duplicate:
+            hint = {"aadhaar": "Aadhaar", "candidate_id": "Candidate ID", "labour_reg_no": "BOCWW Registration No."}.get(dup_db.on, dup_db.on)
             summary["duplicate"] += 1
-            summary["errors"].append({"row": r_i, "reason": f"Duplicate in DB on {dup_db.on}"})
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate in database — same {hint} already exists in {project}"})
             continue
         rec["id"] = str(uuid.uuid4())
         rec["project"] = project
@@ -12897,7 +12929,10 @@ async def candidate_bulk_upload(
         rec["updated_at"] = now
         rec["is_deleted"] = False
         to_insert.append(rec)
-        if aadhaar: seen_within_file.add(dup_key)
+        if aadhaar: seen_aadhaar.add(aadhaar)
+        if project == "BOCWW":
+            if cid: seen_cid.add(cid)
+            if lrn: seen_lrn.add(lrn)
     if to_insert:
         await db.candidates.insert_many(to_insert)
     summary["uploaded"] = len(to_insert)
@@ -12912,6 +12947,7 @@ async def candidate_export_excel(
     batch: Optional[str] = Query(None),
     district: Optional[str] = Query(None),
     course: Optional[str] = Query(None),
+    fy: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
@@ -12922,6 +12958,7 @@ async def candidate_export_excel(
     if proj_key: q["project"] = proj_key
     if batch: q["batch"] = batch
     if district: q["district"] = district
+    if fy: q["fy"] = fy
     if course: q["$or"] = [{"course": course}, {"course_name": course}, {"course_code": course}]
     if date_from or date_to:
         rng: dict = {}

@@ -21,6 +21,7 @@ import {
    Adding required=true flag drives the * marker + client-side check.
    ------------------------------------------------------------------ */
 const BOCWW_FIELDS = [
+  { key: "fy", label: "Financial Year", required: true, placeholder: "2024-25" },
   { key: "s_no", label: "S.No.", required: true },
   { key: "batch_id", label: "Batch ID", required: true },
   { key: "candidate_id", label: "Candidate ID", required: true },
@@ -55,6 +56,7 @@ const BOCWW_FIELDS = [
 ];
 
 const JSDMS_FIELDS = [
+  { key: "fy", label: "Financial Year", required: true, placeholder: "2024-25" },
   { key: "name", label: "Candidate Name", required: true },
   { key: "father_name", label: "Father's Name", required: true },
   { key: "aadhaar", label: "Aadhaar Number", required: true, digits: true, len: 12 },
@@ -88,6 +90,7 @@ export default function Candidates() {
   const [batch, setBatch] = useState("all");
   const [district, setDistrict] = useState("all");
   const [course, setCourse] = useState("all");
+  const [fy, setFy] = useState("all");
   const [search, setSearch] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -98,7 +101,7 @@ export default function Candidates() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [options, setOptions] = useState({ batches: [], districts: [], courses: [] });
+  const [options, setOptions] = useState({ batches: [], districts: [], courses: [], fys: [] });
 
   // Dialog state
   const [openForm, setOpenForm] = useState(false);
@@ -122,6 +125,7 @@ export default function Candidates() {
       if (batch !== "all") params.set("batch", batch);
       if (district !== "all") params.set("district", district);
       if (course !== "all") params.set("course", course);
+      if (fy !== "all") params.set("fy", fy);
       if (search) params.set("search", search);
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
@@ -130,16 +134,16 @@ export default function Candidates() {
       setTotal(data.total || 0);
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
-  }, [project, batch, district, course, search, dateFrom, dateTo, includeDeleted, page, pageSize]);
+  }, [project, batch, district, course, fy, search, dateFrom, dateTo, includeDeleted, page, pageSize]);
 
   const loadOptions = useCallback(async () => {
     try {
       const { data } = await api.get(`/candidates/filter-options?project=${project}`);
-      setOptions({ batches: data.batches || [], districts: data.districts || [], courses: data.courses || [] });
+      setOptions({ batches: data.batches || [], districts: data.districts || [], courses: data.courses || [], fys: data.fys || [] });
     } catch { /* soft-fail */ }
   }, [project]);
 
-  useEffect(() => { setPage(1); }, [project, batch, district, course, dateFrom, dateTo, includeDeleted]);
+  useEffect(() => { setPage(1); }, [project, batch, district, course, fy, dateFrom, dateTo, includeDeleted]);
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => { loadOptions(); }, [loadOptions]);
 
@@ -204,6 +208,7 @@ export default function Candidates() {
       if (batch !== "all") params.set("batch", batch);
       if (district !== "all") params.set("district", district);
       if (course !== "all") params.set("course", course);
+      if (fy !== "all") params.set("fy", fy);
       if (search) params.set("search", search);
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
@@ -238,7 +243,7 @@ export default function Candidates() {
   };
 
   const resetFilters = () => {
-    setBatch("all"); setDistrict("all"); setCourse("all"); setSearch(""); setDateFrom(""); setDateTo("");
+    setBatch("all"); setDistrict("all"); setCourse("all"); setFy("all"); setSearch(""); setDateFrom(""); setDateTo("");
   };
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -299,6 +304,16 @@ export default function Candidates() {
       <div className="swiss-card p-4">
         <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3">
           <div>
+            <Label className="overline">FY</Label>
+            <Select value={fy} onValueChange={setFy}>
+              <SelectTrigger className="rounded-none" data-testid="filter-fy"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All FYs</SelectItem>
+                {options.fys.map((f) => <SelectItem key={f} value={f}>{f}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
             <Label className="overline">Batch</Label>
             <Select value={batch} onValueChange={setBatch}>
               <SelectTrigger className="rounded-none" data-testid="filter-batch"><SelectValue /></SelectTrigger>
@@ -328,11 +343,11 @@ export default function Candidates() {
               </SelectContent>
             </Select>
           </div>
-          <div className="lg:col-span-2">
+          <div>
             <Label className="overline">Search</Label>
             <div className="relative">
               <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
-              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name / Aadhaar / Mobile / ID" className="rounded-none pl-7" data-testid="filter-search" />
+              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Name / Aadhaar / Mobile / ID / FY / Reg No." className="rounded-none pl-7" data-testid="filter-search" />
             </div>
           </div>
           <div className="flex items-end">
@@ -370,9 +385,11 @@ export default function Candidates() {
             <tr className="border-b border-[var(--border)] overline">
               {project === "BOCWW" ? (
                 <>
+                  <th className="text-left p-3">FY</th>
                   <th className="text-left p-3">Candidate ID</th>
                   <th className="text-left p-3">Name</th>
                   <th className="text-left p-3">Aadhaar</th>
+                  <th className="text-left p-3">Reg No.</th>
                   <th className="text-left p-3">Mobile</th>
                   <th className="text-left p-3">Batch</th>
                   <th className="text-left p-3">District</th>
@@ -380,6 +397,7 @@ export default function Candidates() {
                 </>
               ) : (
                 <>
+                  <th className="text-left p-3">FY</th>
                   <th className="text-left p-3">Name</th>
                   <th className="text-left p-3">Aadhaar</th>
                   <th className="text-left p-3">Mobile</th>
@@ -393,16 +411,18 @@ export default function Candidates() {
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={8} className="text-center py-10 text-[var(--muted)] text-xs">
+              <tr><td colSpan={10} className="text-center py-10 text-[var(--muted)] text-xs">
                 {loading ? "Loading candidates…" : "No candidates found — try clearing filters or add a new one."}
               </td></tr>
             ) : rows.map((r) => (
               <tr key={r.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${r.is_deleted ? "opacity-60 italic" : ""}`} data-testid={`row-${r.id}`}>
                 {project === "BOCWW" ? (
                   <>
+                    <td className="p-3 font-mono text-xs">{r.fy || "—"}</td>
                     <td className="p-3 font-mono text-xs">{r.candidate_id || "—"}</td>
                     <td className="p-3 font-medium">{r.name}</td>
                     <td className="p-3 font-mono text-xs">{r.aadhaar || "—"}</td>
+                    <td className="p-3 font-mono text-xs">{r.labour_reg_no || "—"}</td>
                     <td className="p-3 num">{r.mobile || "—"}</td>
                     <td className="p-3">{r.batch || "—"}</td>
                     <td className="p-3">{r.district || "—"}</td>
@@ -410,6 +430,7 @@ export default function Candidates() {
                   </>
                 ) : (
                   <>
+                    <td className="p-3 font-mono text-xs">{r.fy || "—"}</td>
                     <td className="p-3 font-medium">{r.name}</td>
                     <td className="p-3 font-mono text-xs">{r.aadhaar || "—"}</td>
                     <td className="p-3 num">{r.mobile || "—"}</td>
@@ -614,6 +635,7 @@ function FieldRenderer({ f, value, onChange }) {
       <Label className="overline">{f.label}{f.required && <span className="text-[var(--danger)]">*</span>}</Label>
       <Input
         value={value}
+        placeholder={f.placeholder || ""}
         onChange={(e) => {
           let v = e.target.value;
           if (f.digits) v = v.replace(/\D+/g, "");
