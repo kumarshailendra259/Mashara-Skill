@@ -12607,8 +12607,8 @@ JSDMS_COLUMNS = [
 ]
 
 REQUIRED_FIELDS = {
-    "BOCWW": {"name", "aadhaar", "candidate_id"},
-    "JSDMS": {"name", "aadhaar"},
+    "BOCWW": {k for k, _ in BOCWW_COLUMNS},
+    "JSDMS": {k for k, _ in JSDMS_COLUMNS},
 }
 
 
