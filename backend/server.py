@@ -12667,14 +12667,17 @@ class _CandDupResult(BaseModel):
 
 
 async def _find_duplicate(project: str, payload: dict, exclude_id: Optional[str] = None) -> _CandDupResult:
-    """Check duplicates PER PROJECT on:
-       - aadhaar (both projects)
-       - candidate_id (BOCWW only)
-       - labour_reg_no  (BOCWW only — BOCWW Registration Number)
-    Any single match blocks the record."""
+    """Duplicate rules PER PROJECT:
+       - aadhaar (candidate aadhaar): NEVER repeat (both projects)
+       - candidate_id: NEVER repeat (BOCWW only)
+       - labour_reg_no (BOCWW Reg No.): NEVER repeat (BOCWW only)
+       - registered_labour_aadhaar (labour's own aadhaar): allowed for at most 2
+         candidates under the same labour; the 3rd is blocked (BOCWW only).
+    """
     aadhaar = (payload.get("aadhaar") or "").strip()
     cid = (payload.get("candidate_id") or "").strip()
     lrn = (payload.get("labour_reg_no") or "").strip()
+    laa = (payload.get("registered_labour_aadhaar") or "").strip()
     q_base = {"project": project, "is_deleted": {"$ne": True}}
     if exclude_id:
         q_base["id"] = {"$ne": exclude_id}
@@ -12691,6 +12694,11 @@ async def _find_duplicate(project: str, payload: dict, exclude_id: Optional[str]
             hit = await db.candidates.find_one({**q_base, "labour_reg_no": lrn}, {"_id": 0, "id": 1})
             if hit:
                 return _CandDupResult(duplicate=True, on="labour_reg_no")
+        if laa:
+            # Max 2 candidates per registered labour aadhaar.
+            count = await db.candidates.count_documents({**q_base, "registered_labour_aadhaar": laa})
+            if count >= 2:
+                return _CandDupResult(duplicate=True, on="registered_labour_aadhaar_limit_2")
     return _CandDupResult(duplicate=False)
 
 
@@ -12706,7 +12714,13 @@ async def create_candidate(payload: dict = Body(...), user=Depends(require_role(
         raise HTTPException(400, f"Missing required fields: {', '.join(missing)}")
     dup = await _find_duplicate(project, data)
     if dup.duplicate:
-        raise HTTPException(409, f"Duplicate candidate — same {dup.on} already exists in {project}")
+        friendly = {
+            "aadhaar": "same Candidate Aadhaar",
+            "candidate_id": "same Candidate ID",
+            "labour_reg_no": "same BOCWW Registration No.",
+            "registered_labour_aadhaar_limit_2": "Labour Aadhaar already has 2 candidates — 3rd not allowed",
+        }.get(dup.on, dup.on)
+        raise HTTPException(409, f"Duplicate candidate — {friendly} in {project}")
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         **{k: data.get(k) for k, _ in _cand_columns(project) if data.get(k) is not None},
@@ -12880,6 +12894,11 @@ async def candidate_bulk_upload(
     seen_aadhaar: set = set()
     seen_cid: set = set()      # BOCWW only
     seen_lrn: set = set()      # BOCWW only (labour_reg_no)
+    # Labour Aadhaar allows up to 2 candidates — track a running counter that
+    # combines DB count + rows already accepted in this same file.
+    from collections import defaultdict
+    seen_laa_count: dict = defaultdict(int)  # BOCWW only
+    db_laa_count_cache: dict = {}            # laa -> initial DB count (cached per upload)
     for r_i, row in enumerate(rows_iter, start=2):
         # skip fully empty rows
         if not row or all(c is None or _stringify_cell(c) == "" for c in row):
@@ -12902,6 +12921,7 @@ async def candidate_bulk_upload(
         aadhaar = rec.get("aadhaar") or ""
         cid = rec.get("candidate_id") or ""
         lrn = rec.get("labour_reg_no") or ""
+        laa = rec.get("registered_labour_aadhaar") or ""
         # In-file duplicate — key-wise
         if aadhaar and aadhaar in seen_aadhaar:
             summary["duplicate"] += 1
@@ -12918,10 +12938,26 @@ async def candidate_bulk_upload(
         # Duplicate against DB
         dup_db = await _find_duplicate(project, rec)
         if dup_db.duplicate:
-            hint = {"aadhaar": "Aadhaar", "candidate_id": "Candidate ID", "labour_reg_no": "BOCWW Registration No."}.get(dup_db.on, dup_db.on)
+            hint = {
+                "aadhaar": "Aadhaar",
+                "candidate_id": "Candidate ID",
+                "labour_reg_no": "BOCWW Registration No.",
+                "registered_labour_aadhaar_limit_2": "Labour Aadhaar (max 2 candidates allowed)",
+            }.get(dup_db.on, dup_db.on)
             summary["duplicate"] += 1
-            summary["errors"].append({"row": r_i, "reason": f"Duplicate in database — same {hint} already exists in {project}"})
+            summary["errors"].append({"row": r_i, "reason": f"Duplicate in database — {hint} limit reached in {project}"})
             continue
+        # Labour Aadhaar cumulative cap of 2 across DB + rows already accepted in this file.
+        if project == "BOCWW" and laa:
+            if laa not in db_laa_count_cache:
+                db_laa_count_cache[laa] = await db.candidates.count_documents({
+                    "project": "BOCWW", "is_deleted": {"$ne": True}, "registered_labour_aadhaar": laa,
+                })
+            projected = db_laa_count_cache[laa] + seen_laa_count[laa]
+            if projected >= 2:
+                summary["duplicate"] += 1
+                summary["errors"].append({"row": r_i, "reason": f"Labour Aadhaar ({laa}) already has 2 candidates — 3rd not allowed"})
+                continue
         rec["id"] = str(uuid.uuid4())
         rec["project"] = project
         rec["created_by"] = user["id"]
@@ -12933,6 +12969,7 @@ async def candidate_bulk_upload(
         if project == "BOCWW":
             if cid: seen_cid.add(cid)
             if lrn: seen_lrn.add(lrn)
+            if laa: seen_laa_count[laa] += 1
     if to_insert:
         await db.candidates.insert_many(to_insert)
     summary["uploaded"] = len(to_insert)
@@ -13030,7 +13067,13 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
     # Duplicate check (exclude self)
     dup = await _find_duplicate(project, data, exclude_id=cid)
     if dup.duplicate:
-        raise HTTPException(409, f"Duplicate — same {dup.on} exists on another {project} candidate")
+        friendly = {
+            "aadhaar": "same Candidate Aadhaar",
+            "candidate_id": "same Candidate ID",
+            "labour_reg_no": "same BOCWW Registration No.",
+            "registered_labour_aadhaar_limit_2": "Labour Aadhaar already has 2 candidates — 3rd not allowed",
+        }.get(dup.on, dup.on)
+        raise HTTPException(409, f"Duplicate — {friendly} in {project}")
     upd = {k: v for k, v in data.items() if k not in ("id", "project", "created_by", "created_at", "is_deleted")}
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     upd["updated_by"] = user["id"]

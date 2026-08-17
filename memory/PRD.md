@@ -805,6 +805,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Frontend `/app/frontend/src/pages/HRMS.jsx`** (Reimbursements tab):
   - New "HR · Claim Form Templates" panel above the reimbursement table: HR/Admin sees Upload + Archive/Delete controls; other roles see only Download links.
   - Paperclip chip in every row now clickable → opens **View Attachments modal** with inline image preview (`<img>`) or PDF iframe (`<iframe>`) plus Download links.
+
+### Candidate Data — Full-Row Excel View + Labour Aadhaar Cap of 2 (Done, Feb 2026)
+- **User asked**: All 27 BOCWW / 11 JSDMS fields should be visible in the table (right-scroll to see rest). Also: Candidate Aadhaar must NEVER repeat, but Registered Labour Aadhaar CAN repeat — max 2 candidates per single labour, 3rd is blocked.
+- **Frontend `/app/frontend/src/pages/Candidates.jsx`**:
+  - Table now iterates over the active project's field spec and renders **every column** with `whitespace-nowrap`. Overflow-x-auto wrapper enables horizontal scroll. Header shows "← scroll right for more →" hint.
+  - **Actions column pinned sticky-left** so View/Edit/Delete always remains visible while user scrolls right through 27 BOCWW columns.
+  - Cell styling adapts by field type: digit fields (Aadhaar, mobile, registration numbers) render in monospace, Name renders bold, `multi`-line fields (Full Address) get truncated with title-tooltip.
+- **Backend `/app/backend/server.py`**:
+  - `_find_duplicate` now enforces `registered_labour_aadhaar` cap of 2 (BOCWW only): counts existing live records with the same labour aadhaar; if `count >= 2`, returns `duplicate=True, on="registered_labour_aadhaar_limit_2"`.
+  - Bulk upload maintains a per-file `seen_laa_count` counter plus a cached DB count per labour aadhaar (`db_laa_count_cache`); projected total (`db_count + in_file_count`) is checked before accepting each row.
+  - Duplicate error messages refined for humans on both manual POST and bulk upload paths (e.g. "Labour Aadhaar (999988887777) already has 2 candidates — 3rd not allowed").
+- **Verified**:
+  - Uploaded 3 rows all with `registered_labour_aadhaar=999988887777`, different Candidate Aadhaars/IDs → response `uploaded:2, duplicate:1` with reason mentioning the "3rd not allowed" limit.
+  - Manual POST attempting to create a 3rd candidate for the same labour → HTTP 409 with clean error text.
+  - Screenshot confirms all 27 BOCWW columns render and Actions column stays sticky while scrolling.
+
+
 - **Frontend `/app/frontend/src/pages/CheckIn.jsx`** (Staff App → Claims tab):
   - Loads active templates via `/reimbursement-templates?active_only=true` and shows a "Claim Form Templates" download card above the New Claim form.
   - Each claim in "My Claims" now has a clickable "View N attachments" button that opens an attachments preview modal (image inline / PDF iframe / download link).

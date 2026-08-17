@@ -370,7 +370,7 @@ export default function Candidates() {
         </div>
       </div>
 
-      {/* Results table */}
+      {/* Results table — ALL project fields shown; horizontal scroll on smaller widths */}
       <div className="swiss-card overflow-x-auto">
         <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border)]">
           <div className="overline flex items-center gap-2">
@@ -378,81 +378,51 @@ export default function Candidates() {
           </div>
           <div className="text-xs text-[var(--muted)] num">
             {loading ? "Loading…" : `${total} record${total === 1 ? "" : "s"}`}
+            <span className="ml-2 text-[10px] italic">← scroll right for more →</span>
           </div>
         </div>
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50">
+        <table className="text-sm whitespace-nowrap" data-testid="candidates-table">
+          <thead className="bg-gray-50 sticky top-0">
             <tr className="border-b border-[var(--border)] overline">
-              {project === "BOCWW" ? (
-                <>
-                  <th className="text-left p-3">FY</th>
-                  <th className="text-left p-3">Candidate ID</th>
-                  <th className="text-left p-3">Name</th>
-                  <th className="text-left p-3">Aadhaar</th>
-                  <th className="text-left p-3">Reg No.</th>
-                  <th className="text-left p-3">Mobile</th>
-                  <th className="text-left p-3">Batch</th>
-                  <th className="text-left p-3">District</th>
-                  <th className="text-left p-3">Course</th>
-                </>
-              ) : (
-                <>
-                  <th className="text-left p-3">FY</th>
-                  <th className="text-left p-3">Name</th>
-                  <th className="text-left p-3">Aadhaar</th>
-                  <th className="text-left p-3">Mobile</th>
-                  <th className="text-left p-3">Course</th>
-                  <th className="text-left p-3">Batch</th>
-                  <th className="text-left p-3">District</th>
-                </>
-              )}
-              <th className="text-right p-3 w-52 no-print">Actions</th>
+              <th className="text-right p-3 sticky left-0 bg-gray-50 z-10 w-32 no-print border-r border-[var(--border)]">Actions</th>
+              {activeFields.map((f) => (
+                <th key={f.key} className="text-left p-3">{f.label}</th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={10} className="text-center py-10 text-[var(--muted)] text-xs">
-                {loading ? "Loading candidates…" : "No candidates found — try clearing filters or add a new one."}
-              </td></tr>
+              <tr>
+                <td colSpan={activeFields.length + 1} className="text-center py-10 text-[var(--muted)] text-xs">
+                  {loading ? "Loading candidates…" : "No candidates found — try clearing filters or add a new one."}
+                </td>
+              </tr>
             ) : rows.map((r) => (
               <tr key={r.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${r.is_deleted ? "opacity-60 italic" : ""}`} data-testid={`row-${r.id}`}>
-                {project === "BOCWW" ? (
-                  <>
-                    <td className="p-3 font-mono text-xs">{r.fy || "—"}</td>
-                    <td className="p-3 font-mono text-xs">{r.candidate_id || "—"}</td>
-                    <td className="p-3 font-medium">{r.name}</td>
-                    <td className="p-3 font-mono text-xs">{r.aadhaar || "—"}</td>
-                    <td className="p-3 font-mono text-xs">{r.labour_reg_no || "—"}</td>
-                    <td className="p-3 num">{r.mobile || "—"}</td>
-                    <td className="p-3">{r.batch || "—"}</td>
-                    <td className="p-3">{r.district || "—"}</td>
-                    <td className="p-3">{r.course || r.course_name || "—"}</td>
-                  </>
-                ) : (
-                  <>
-                    <td className="p-3 font-mono text-xs">{r.fy || "—"}</td>
-                    <td className="p-3 font-medium">{r.name}</td>
-                    <td className="p-3 font-mono text-xs">{r.aadhaar || "—"}</td>
-                    <td className="p-3 num">{r.mobile || "—"}</td>
-                    <td className="p-3">{r.course_name || "—"}</td>
-                    <td className="p-3">{r.batch || "—"}</td>
-                    <td className="p-3">{r.district || "—"}</td>
-                  </>
-                )}
-                <td className="p-3 text-right">
-                  <div className="inline-flex gap-1 justify-end">
-                    <Button size="icon" variant="ghost" onClick={() => setViewing(r)} className="h-8 w-8 rounded-none" title="View" data-testid={`view-${r.id}`}><Eye size={14} /></Button>
+                {/* Sticky actions column so it stays visible while user scrolls right */}
+                <td className="p-2 text-right sticky left-0 bg-white z-[1] border-r border-[var(--border)]">
+                  <div className="inline-flex gap-0.5 justify-end">
+                    <Button size="icon" variant="ghost" onClick={() => setViewing(r)} className="h-7 w-7 rounded-none" title="View" data-testid={`view-${r.id}`}><Eye size={13} /></Button>
                     {canManage && !r.is_deleted && (
-                      <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-8 w-8 rounded-none" title="Edit" data-testid={`edit-${r.id}`}><Edit3 size={14} /></Button>
+                      <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit" data-testid={`edit-${r.id}`}><Edit3 size={13} /></Button>
                     )}
                     {canManage && r.is_deleted && (
-                      <Button size="icon" variant="ghost" onClick={() => restoreCandidate(r)} className="h-8 w-8 rounded-none text-emerald-600" title="Restore" data-testid={`restore-${r.id}`}><ArchiveRestore size={14} /></Button>
+                      <Button size="icon" variant="ghost" onClick={() => restoreCandidate(r)} className="h-7 w-7 rounded-none text-emerald-600" title="Restore" data-testid={`restore-${r.id}`}><ArchiveRestore size={13} /></Button>
                     )}
                     {canManage && !r.is_deleted && (
-                      <Button size="icon" variant="ghost" onClick={() => removeCandidate(r)} className="h-8 w-8 rounded-none hover:text-[var(--danger)]" title="Delete" data-testid={`del-${r.id}`}><Trash2 size={14} /></Button>
+                      <Button size="icon" variant="ghost" onClick={() => removeCandidate(r)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]" title="Delete" data-testid={`del-${r.id}`}><Trash2 size={13} /></Button>
                     )}
                   </div>
                 </td>
+                {activeFields.map((f) => (
+                  <td
+                    key={f.key}
+                    className={`p-3 ${f.digits ? "font-mono text-xs" : ""} ${f.key === "name" ? "font-medium" : ""} ${f.multi ? "max-w-xs truncate" : ""}`}
+                    title={f.multi ? (r[f.key] || "") : undefined}
+                  >
+                    {r[f.key] || "—"}
+                  </td>
+                ))}
               </tr>
             ))}
           </tbody>
