@@ -22,6 +22,7 @@ import {
    ------------------------------------------------------------------ */
 const BOCWW_FIELDS = [
   { key: "fy", label: "Financial Year", required: true, placeholder: "2024-25" },
+  { key: "center_id", label: "Center", type: "center", required: false /* enforced server-side per role */ },
   { key: "s_no", label: "S.No.", required: true },
   { key: "batch_id", label: "Batch ID", required: true },
   { key: "candidate_id", label: "Candidate ID", required: true },
@@ -57,6 +58,7 @@ const BOCWW_FIELDS = [
 
 const JSDMS_FIELDS = [
   { key: "fy", label: "Financial Year", required: true, placeholder: "2024-25" },
+  { key: "center_id", label: "Center", type: "center", required: false },
   { key: "name", label: "Candidate Name", required: true },
   { key: "father_name", label: "Father's Name", required: true },
   { key: "aadhaar", label: "Aadhaar Number", required: true, digits: true, len: 12 },
@@ -84,6 +86,8 @@ const downloadBlob = (blob, filename) => {
 export default function Candidates() {
   const { user } = useAuth();
   const canManage = ["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role);
+  const canDelete = ["admin", "hr"].includes(user?.role);
+  const isCenterScoped = ["center_manager", "center_staff", "partner"].includes(user?.role);
 
   // Filters + list state
   const [project, setProject] = useState("BOCWW");
@@ -91,6 +95,7 @@ export default function Candidates() {
   const [district, setDistrict] = useState("all");
   const [course, setCourse] = useState("all");
   const [fy, setFy] = useState("all");
+  const [centerFilter, setCenterFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -102,6 +107,17 @@ export default function Candidates() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [options, setOptions] = useState({ batches: [], districts: [], courses: [], fys: [] });
+  const [centers, setCenters] = useState([]);
+  // Load center master list once so we can (a) populate the Center dropdowns and
+  // (b) map center_id → readable center name in the table.
+  useEffect(() => {
+    api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => setCenters([]));
+  }, []);
+  const centerNameById = React.useMemo(() => {
+    const m = new Map();
+    for (const c of centers) m.set(c.id, c.name || c.id);
+    return m;
+  }, [centers]);
 
   // Dialog state
   const [openForm, setOpenForm] = useState(false);
@@ -126,6 +142,7 @@ export default function Candidates() {
       if (district !== "all") params.set("district", district);
       if (course !== "all") params.set("course", course);
       if (fy !== "all") params.set("fy", fy);
+      if (centerFilter !== "all") params.set("center_id", centerFilter);
       if (search) params.set("search", search);
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
@@ -134,7 +151,7 @@ export default function Candidates() {
       setTotal(data.total || 0);
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
-  }, [project, batch, district, course, fy, search, dateFrom, dateTo, includeDeleted, page, pageSize]);
+  }, [project, batch, district, course, fy, centerFilter, search, dateFrom, dateTo, includeDeleted, page, pageSize]);
 
   const loadOptions = useCallback(async () => {
     try {
@@ -143,7 +160,7 @@ export default function Candidates() {
     } catch { /* soft-fail */ }
   }, [project]);
 
-  useEffect(() => { setPage(1); }, [project, batch, district, course, fy, dateFrom, dateTo, includeDeleted]);
+  useEffect(() => { setPage(1); }, [project, batch, district, course, fy, centerFilter, dateFrom, dateTo, includeDeleted]);
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => { loadOptions(); }, [loadOptions]);
 
@@ -158,6 +175,19 @@ export default function Candidates() {
     const missing = activeFields.filter((f) => f.required && !String(editing?.[f.key] || "").trim());
     if (missing.length) {
       toast.error(`Please fill: ${missing.map((f) => f.label).join(", ")}`);
+      return;
+    }
+    // Relation: cannot enrol labour's spouse (BOCWW only)
+    if (project === "BOCWW") {
+      const rel = String(editing?.relation_with_labour || "").trim().toLowerCase();
+      if (rel === "wife" || rel === "husband") {
+        toast.error(`Relation cannot be '${rel}' — candidate cannot be the labour's spouse`);
+        return;
+      }
+    }
+    // Center is required for scoped roles
+    if (isCenterScoped && !String(editing?.center_id || "").trim()) {
+      toast.error("Please select a Center");
       return;
     }
     // Aadhaar / mobile length checks (warn only if provided)
@@ -201,6 +231,27 @@ export default function Candidates() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  /* ---------- Cleanup duplicates (admin only) ---------- */
+  const cleanupDuplicates = async () => {
+    try {
+      // Dry-run first — show the user what will be archived and let them confirm.
+      const params = new URLSearchParams({ dry_run: "true" });
+      if (project) params.set("project", project);
+      const preview = await api.post(`/candidates/cleanup-duplicates?${params.toString()}`);
+      const { duplicate_groups, candidates_to_archive } = preview.data;
+      if (!candidates_to_archive) {
+        toast.success("No duplicate Aadhaars found — nothing to clean up.");
+        return;
+      }
+      if (!window.confirm(
+        `Found ${duplicate_groups} duplicate Aadhaar group(s) — ${candidates_to_archive} row(s) will be archived (earliest one kept per Aadhaar).\n\nProceed?`
+      )) return;
+      const run = await api.post(`/candidates/cleanup-duplicates?dry_run=false&${new URLSearchParams({ project }).toString()}`);
+      toast.success(`Archived ${run.data.archived} duplicate row(s). Enable "Include archived" to review.`);
+      loadList(); loadOptions();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   /* ---------- Export ---------- */
   const exportExcel = async () => {
     try {
@@ -209,6 +260,7 @@ export default function Candidates() {
       if (district !== "all") params.set("district", district);
       if (course !== "all") params.set("course", course);
       if (fy !== "all") params.set("fy", fy);
+      if (centerFilter !== "all") params.set("center_id", centerFilter);
       if (search) params.set("search", search);
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
@@ -243,7 +295,7 @@ export default function Candidates() {
   };
 
   const resetFilters = () => {
-    setBatch("all"); setDistrict("all"); setCourse("all"); setFy("all"); setSearch(""); setDateFrom(""); setDateTo("");
+    setBatch("all"); setDistrict("all"); setCourse("all"); setFy("all"); setCenterFilter("all"); setSearch(""); setDateFrom(""); setDateTo("");
   };
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -270,6 +322,11 @@ export default function Candidates() {
             <Button variant="outline" onClick={() => { setBulkResult(null); setBulkFile(null); setOpenBulk(true); }} className="rounded-none gap-2" data-testid="btn-bulk-upload">
               <Upload size={14} /> Bulk Upload
             </Button>
+            {user?.role === "admin" && (
+              <Button variant="outline" onClick={cleanupDuplicates} className="rounded-none gap-2 text-amber-700 border-amber-400" data-testid="btn-cleanup-duplicates" title="Archive duplicate rows keeping the earliest one for each Aadhaar">
+                <RotateCcw size={14} /> Cleanup Duplicates
+              </Button>
+            )}
             <Button onClick={openAdd} className="brand-btn rounded-none gap-2" data-testid="btn-add-candidate">
               <Plus size={16} /> Add Candidate
             </Button>
@@ -310,6 +367,16 @@ export default function Candidates() {
               <SelectContent>
                 <SelectItem value="all">All FYs</SelectItem>
                 {options.fys.map((f) => <SelectItem key={f} value={f}>{f}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label className="overline">Center</Label>
+            <Select value={centerFilter} onValueChange={setCenterFilter}>
+              <SelectTrigger className="rounded-none" data-testid="filter-center"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Centers</SelectItem>
+                {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -406,10 +473,10 @@ export default function Candidates() {
                     {canManage && !r.is_deleted && (
                       <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit" data-testid={`edit-${r.id}`}><Edit3 size={13} /></Button>
                     )}
-                    {canManage && r.is_deleted && (
+                    {canDelete && r.is_deleted && (
                       <Button size="icon" variant="ghost" onClick={() => restoreCandidate(r)} className="h-7 w-7 rounded-none text-emerald-600" title="Restore" data-testid={`restore-${r.id}`}><ArchiveRestore size={13} /></Button>
                     )}
-                    {canManage && !r.is_deleted && (
+                    {canDelete && !r.is_deleted && (
                       <Button size="icon" variant="ghost" onClick={() => removeCandidate(r)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]" title="Delete" data-testid={`del-${r.id}`}><Trash2 size={13} /></Button>
                     )}
                   </div>
@@ -420,7 +487,9 @@ export default function Candidates() {
                     className={`p-3 ${f.digits ? "font-mono text-xs" : ""} ${f.key === "name" ? "font-medium" : ""} ${f.multi ? "max-w-xs truncate" : ""}`}
                     title={f.multi ? (r[f.key] || "") : undefined}
                   >
-                    {r[f.key] || "—"}
+                    {f.key === "center_id"
+                      ? (r.center_id ? (centerNameById.get(r.center_id) || r.center_id) : "—")
+                      : (r[f.key] || "—")}
                   </td>
                 ))}
               </tr>
@@ -455,14 +524,14 @@ export default function Candidates() {
                   <div className="overline mb-2">Batch / Course Meta</div>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                     {activeFields.filter((f) => f.section === "course").map((f) => (
-                      <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} />
+                      <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} centers={centers} />
                     ))}
                   </div>
                 </div>
               )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {activeFields.filter((f) => f.section !== "course").map((f) => (
-                  <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} />
+                  <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} centers={centers} />
                 ))}
               </div>
             </div>
@@ -570,7 +639,23 @@ export default function Candidates() {
 }
 
 /* ---------------- Field renderer for form ---------------- */
-function FieldRenderer({ f, value, onChange }) {
+function FieldRenderer({ f, value, onChange, centers }) {
+  if (f.type === "center") {
+    return (
+      <div>
+        <Label className="overline">{f.label}{f.required && <span className="text-[var(--danger)]">*</span>}</Label>
+        <Select value={value || ""} onValueChange={(v) => onChange(v === "__none__" ? "" : v)}>
+          <SelectTrigger className="rounded-none" data-testid={`field-${f.key}`}>
+            <SelectValue placeholder="Select center…" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__none__">— Not selected —</SelectItem>
+            {(centers || []).map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </div>
+    );
+  }
   if (f.type === "select") {
     return (
       <div>

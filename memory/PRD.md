@@ -828,6 +828,34 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Google Maps replacement (Geofences)**: DONE (Option B — key-free). `MapPicker.jsx` swapped OpenStreetMap tiles for **CartoDB Voyager** (`basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png`) which gives Google-Maps-style roads/buildings/labels without any API key or billing. Default blue Leaflet pin replaced with an inline SVG red teardrop pin (Google Maps look, tip-anchored). Radius preview circle repainted turquoise (`#14b8a6`, 22% fillOpacity, 2px stroke). Verified visually — 1 marker + 1 circle render, drag/click/zoom/pan preserved. Real Google Maps (Option A) can still be added later when the user provides `GOOGLE_MAPS_API_KEY`.
 
 
+
+### Candidate Data — Cleanup, Relation Guard, Delete Restriction, Center Scoping (Done, Feb 2026)
+- **User asked**: (1) archive existing rows with duplicate Candidate Aadhaar keeping 1; (2) block Relation = "wife" / "husband"; (3) delete allowed only for Admin + HR; (4) partner / center_manager should only see data for their center + add a Center ID option.
+- **Backend `/app/backend/server.py`**:
+  - New `_validate_relation()` helper — case-insensitive block of relation values in `BLOCKED_RELATIONS = {"wife", "husband"}` on both `POST /candidates` and `PATCH /candidates/{id}` and every bulk-upload row.
+  - New `_candidate_scope_filter(user)` — returns Mongo scope query based on role:
+    - `admin / hr / manager / senior_manager`: `{}` (see everything)
+    - `center_manager / center_staff`: `center_id ∈ assigned_center_ids`
+    - `partner`: `center_id ∈ _associated_center_ids`
+    - anyone else: sees nothing.
+  - `_user_scoped_center_ids(user)` — used to enforce that a scoped role can only add/edit/bulk-upload rows within their own centers.
+  - `GET /candidates`, `GET /candidates/filter-options`, `GET /candidates/export` all apply the scope filter now.
+  - `DELETE /candidates/{id}` and `PATCH /candidates/{id}/restore` reduced to `require_role("admin", "hr")`.
+  - New `Center ID` column added at the beginning of both `BOCWW_COLUMNS` and `JSDMS_COLUMNS` (optional field so imports pre-Center-scoping still work; scoped roles get a 400 if they omit it).
+  - New `POST /candidates/cleanup-duplicates?project=&dry_run=true|false` (admin/hr) — groups live candidates by (project, aadhaar), keeps the earliest one and soft-deletes the rest. Returns a preview report + archived count.
+- **Frontend `/app/frontend/src/pages/Candidates.jsx`**:
+  - Fetches `/entities/center` once and shows a **Center dropdown** in the filter bar and in the Add/Edit form (via new `FieldRenderer` type `center`).
+  - Table cell for `center_id` now renders human-readable center name via a `Map<id → name>` lookup.
+  - Client-side blocks Relation = "wife" / "husband" before submit; also blocks empty Center for center-scoped roles.
+  - Delete / Restore action icons now only render when `canDelete = ["admin", "hr"].includes(user.role)`.
+  - New amber **Cleanup Duplicates** button (admin only) — does dry-run first, shows count in confirm dialog, then archives on OK.
+- **Verified**:
+  - Manual POST with `relation_with_labour="Husband"` → HTTP 400 with clean message. Same for `"wife"`.
+  - `cleanup-duplicates` endpoint returns `{"duplicate_groups": N, "archived": M}` correctly on an empty DB (0/0) and on seeded duplicates.
+  - Screenshot confirms Center dropdown in form + filter bar and Cleanup Duplicates button appear.
+- **Prod cleanup instructions**: After deploy, admin can click "Cleanup Duplicates" on the Candidate Data page → dry-run shows count → confirm → archives extras (soft delete; recoverable via Include-archived toggle).
+
+
    Programs.jsx, Dashboard.jsx, Entities.jsx, Transactions.jsx, HRMS.jsx, Stock.jsx
 /app/frontend/src/components/
    FoodingTab.jsx

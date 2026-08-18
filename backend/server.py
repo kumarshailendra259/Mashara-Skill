@@ -12564,6 +12564,7 @@ CANDIDATE_ROLES = ("admin", "hr", "manager", "center_manager", "partner")
 # (field_key, excel_header) — order = column order.
 BOCWW_COLUMNS = [
     ("fy", "Financial Year"),
+    ("center_id", "Center ID"),
     ("s_no", "S.No."),
     ("batch_id", "Batch ID"),
     ("candidate_id", "Candidate ID"),
@@ -12595,6 +12596,7 @@ BOCWW_COLUMNS = [
 
 JSDMS_COLUMNS = [
     ("fy", "Financial Year"),
+    ("center_id", "Center ID"),
     ("name", "Candidate Name"),
     ("father_name", "Father's Name"),
     ("aadhaar", "Aadhaar Number"),
@@ -12609,9 +12611,53 @@ JSDMS_COLUMNS = [
 ]
 
 REQUIRED_FIELDS = {
-    "BOCWW": {k for k, _ in BOCWW_COLUMNS},
-    "JSDMS": {k for k, _ in JSDMS_COLUMNS},
+    "BOCWW": {k for k, _ in BOCWW_COLUMNS} - {"center_id"},
+    "JSDMS": {k for k, _ in JSDMS_COLUMNS} - {"center_id"},
 }
+
+# Relation values that indicate the candidate IS the spouse of the registered
+# labour. Business rule: such candidates should NOT be enrolled — reject with a
+# human-friendly error at both the manual-add and bulk-upload paths.
+BLOCKED_RELATIONS = {"wife", "husband"}
+
+
+def _validate_relation(payload: dict) -> Optional[str]:
+    """Return an error string if the BOCWW relation is 'wife' or 'husband'
+    (case-insensitive, exact word). Otherwise None."""
+    rel = str(payload.get("relation_with_labour") or "").strip().lower()
+    if rel in BLOCKED_RELATIONS:
+        return f"Relation cannot be '{rel.title()}' — candidate cannot be the labour's spouse"
+    return None
+
+
+async def _candidate_scope_filter(user: dict) -> dict:
+    """Center-scope filter for candidate reads.
+       - admin / hr / manager / senior_manager: see everything
+       - center_manager / center_staff: only records in assigned_center_ids
+       - partner: only records at centers where the partner is associated
+    """
+    role = user.get("role")
+    if role in ("admin", "hr", "manager", "senior_manager"):
+        return {}
+    if role in ("center_manager", "center_staff"):
+        return {"center_id": {"$in": user.get("assigned_center_ids") or ["__none__"]}}
+    if role == "partner":
+        centers = user.get("_associated_center_ids")
+        if not centers:
+            return {"_never_": True}
+        return {"center_id": {"$in": list(centers)}}
+    return {"_never_": True}
+
+
+def _user_scoped_center_ids(user: dict) -> list:
+    """Small helper — used by the create endpoint to enforce that a partner /
+    center_manager can only create candidates for a center they own."""
+    role = user.get("role")
+    if role in ("center_manager", "center_staff"):
+        return user.get("assigned_center_ids") or []
+    if role == "partner":
+        return list(user.get("_associated_center_ids") or [])
+    return []  # admin/hr/manager/senior_manager — no restriction
 
 
 def _cand_columns(project: str) -> list:
@@ -12712,6 +12758,21 @@ async def create_candidate(payload: dict = Body(...), user=Depends(require_role(
     missing = [f for f in REQUIRED_FIELDS[project] if not data.get(f)]
     if missing:
         raise HTTPException(400, f"Missing required fields: {', '.join(missing)}")
+    # Relation validation — BOCWW cannot enrol the labour's spouse
+    if project == "BOCWW":
+        rel_err = _validate_relation(data)
+        if rel_err:
+            raise HTTPException(400, rel_err)
+    # Center scoping — enforce that partner / center_manager can only add to
+    # their own centers.
+    await _enrich_user_with_associations(user)
+    scoped = _user_scoped_center_ids(user)
+    if scoped:
+        cid = str(data.get("center_id") or "").strip()
+        if not cid:
+            raise HTTPException(400, "Center is required for your role")
+        if cid not in scoped:
+            raise HTTPException(403, "You can only add candidates for your assigned center(s)")
     dup = await _find_duplicate(project, data)
     if dup.duplicate:
         friendly = {
@@ -12749,9 +12810,13 @@ async def list_candidates(
     include_deleted: bool = Query(False),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
-    _=Depends(require_role(*CANDIDATE_ROLES)),
+    user=Depends(require_role(*CANDIDATE_ROLES)),
 ):
-    q: dict = {}
+    await _enrich_user_with_associations(user)
+    scope = await _candidate_scope_filter(user)
+    if scope.get("_never_"):
+        return {"total": 0, "page": page, "page_size": page_size, "items": []}
+    q: dict = dict(scope)
     if not include_deleted:
         q["is_deleted"] = {"$ne": True}
     if project:
@@ -12796,11 +12861,15 @@ async def list_candidates(
 @api.get("/candidates/filter-options")
 async def candidate_filter_options(
     project: Optional[str] = Query(None),
-    _=Depends(require_role(*CANDIDATE_ROLES)),
+    user=Depends(require_role(*CANDIDATE_ROLES)),
 ):
-    """Return distinct batches / districts / courses so the UI's filter dropdowns
+    """Return distinct batches / districts / courses / fys so the UI's filter dropdowns
     can be populated from real data (free-text fields, so we just distinct)."""
-    q: dict = {"is_deleted": {"$ne": True}}
+    await _enrich_user_with_associations(user)
+    scope = await _candidate_scope_filter(user)
+    if scope.get("_never_"):
+        return {"batches": [], "districts": [], "courses": [], "fys": []}
+    q: dict = {**scope, "is_deleted": {"$ne": True}}
     if project: q["project"] = project.upper()
     batches = await db.candidates.distinct("batch", q)
     districts = await db.candidates.distinct("district", q)
@@ -12835,13 +12904,13 @@ async def candidate_sample_excel(
         ws.column_dimensions[cell.column_letter].width = max(14, len(header) + 4)
     # Add a sample row with placeholder guidance
     if project == "BOCWW":
-        sample = ["2024-25", "1", "BATCH-01", "CAND-0001", "Rahul Kumar", "Ramesh Kumar", "Sita Devi",
+        sample = ["2024-25", "", "1", "BATCH-01", "CAND-0001", "Rahul Kumar", "Ramesh Kumar", "Sita Devi",
                   "123412341234", "Ramesh Kumar", "987698769876", "Father", "LR-0001",
                   "2027-12-31", "2024-01-15", "2002-05-15", "M", "General",
                   "Village Xyz, Ranchi, Jharkhand", "9876543210", "12th", "No",
                   "CC-EL-01", "300", "18:00", "Jharkhand", "Ranchi", "BATCH-01", "Electrician"]
     else:
-        sample = ["2024-25", "Anita Devi", "Suresh Yadav", "112211221122", "9876543210", "9876543210",
+        sample = ["2024-25", "", "Anita Devi", "Suresh Yadav", "112211221122", "9876543210", "9876543210",
                   "2000-07-20", "Data Entry Operator", "12th", "Village Abc, Gumla", "JSDMS-BATCH-01", "Gumla"]
     for i, v in enumerate(sample, start=1):
         ws.cell(row=2, column=i, value=v)
@@ -12889,6 +12958,10 @@ async def candidate_bulk_upload(
     now = datetime.now(timezone.utc).isoformat()
     summary = {"uploaded": 0, "failed": 0, "duplicate": 0, "total_rows": 0, "errors": []}
     to_insert: list = []
+    # Compute the user's scoped center list ONCE — partner / center_manager
+    # bulk uploads must stay within their own centers.
+    await _enrich_user_with_associations(user)
+    scoped_center_ids = set(_user_scoped_center_ids(user))
     # Track keys that already appear in this same file so we block repeats
     # inside a single upload (in addition to the DB check).
     seen_aadhaar: set = set()
@@ -12918,6 +12991,25 @@ async def candidate_bulk_upload(
             summary["failed"] += 1
             summary["errors"].append({"row": r_i, "reason": f"Missing required: {', '.join(missing)}"})
             continue
+        # Relation validation (BOCWW only) — cannot enrol labour's spouse
+        if project == "BOCWW":
+            rel_err = _validate_relation(rec)
+            if rel_err:
+                summary["failed"] += 1
+                summary["errors"].append({"row": r_i, "reason": rel_err})
+                continue
+        # Center scoping enforcement — partner / center_manager can't upload
+        # rows for centers they don't own.
+        if scoped_center_ids:
+            row_center = str(rec.get("center_id") or "").strip()
+            if not row_center:
+                summary["failed"] += 1
+                summary["errors"].append({"row": r_i, "reason": "Center ID is required for your role"})
+                continue
+            if row_center not in scoped_center_ids:
+                summary["failed"] += 1
+                summary["errors"].append({"row": r_i, "reason": f"Center ID '{row_center}' is not in your assigned centers"})
+                continue
         aadhaar = rec.get("aadhaar") or ""
         cid = rec.get("candidate_id") or ""
         lrn = rec.get("labour_reg_no") or ""
@@ -12988,9 +13080,18 @@ async def candidate_export_excel(
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
-    _=Depends(require_role(*CANDIDATE_ROLES)),
+    user=Depends(require_role(*CANDIDATE_ROLES)),
 ):
-    q: dict = {"is_deleted": {"$ne": True}}
+    await _enrich_user_with_associations(user)
+    scope = await _candidate_scope_filter(user)
+    if scope.get("_never_"):
+        # Return an empty spreadsheet if the user's scope resolves to nothing.
+        wb0 = Workbook(); ws0 = wb0.active; ws0.title = "Candidates"
+        buf0 = BytesIO(); wb0.save(buf0); buf0.seek(0)
+        return Response(content=buf0.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="candidates_empty.xlsx"'})
+    q: dict = {**scope, "is_deleted": {"$ne": True}}
     proj_key = (project or "").upper() if project else None
     if proj_key: q["project"] = proj_key
     if batch: q["batch"] = batch
@@ -13063,7 +13164,16 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
     project = existing.get("project") or (payload.get("project") or "").upper()
     if project not in ("BOCWW", "JSDMS"):
         raise HTTPException(400, "Missing project")
+    # Scope check — partner / center_manager can only edit within their centers.
+    await _enrich_user_with_associations(user)
+    scoped = _user_scoped_center_ids(user)
+    if scoped and existing.get("center_id") not in scoped:
+        raise HTTPException(403, "You can only edit candidates for your assigned center(s)")
     data = _normalise_candidate_payload(project, payload)
+    if project == "BOCWW":
+        rel_err = _validate_relation({**existing, **data})
+        if rel_err:
+            raise HTTPException(400, rel_err)
     # Duplicate check (exclude self)
     dup = await _find_duplicate(project, data, exclude_id=cid)
     if dup.duplicate:
@@ -13082,8 +13192,59 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
     return doc
 
 
-@api.delete("/candidates/{cid}", status_code=204)
-async def delete_candidate(cid: str, user=Depends(require_role(*CANDIDATE_ROLES))):
+@api.post("/candidates/cleanup-duplicates")
+async def candidate_cleanup_duplicates(
+    project: Optional[str] = Query(None),
+    dry_run: bool = Query(True),
+    _=Depends(require_role("admin", "hr")),
+):
+    """Admin-only utility: for every project+aadhaar combo that has 2+ rows,
+    keep the earliest live record and soft-delete the rest.
+    Set `dry_run=false` to actually archive."""
+    match: dict = {"is_deleted": {"$ne": True}, "aadhaar": {"$nin": [None, ""]}}
+    if project: match["project"] = project.upper()
+    pipeline = [
+        {"$match": match},
+        {"$group": {"_id": {"project": "$project", "aadhaar": "$aadhaar"},
+                    "count": {"$sum": 1},
+                    "items": {"$push": {"id": "$id", "name": "$name", "candidate_id": "$candidate_id",
+                                        "created_at": "$created_at"}}}},
+        {"$match": {"count": {"$gt": 1}}},
+        {"$sort": {"count": -1}},
+    ]
+    groups = await db.candidates.aggregate(pipeline).to_list(2000)
+    to_archive_ids: list = []
+    report: list = []
+    for g in groups:
+        items = sorted(g["items"], key=lambda x: x.get("created_at") or "")
+        keep = items[0]
+        drop = items[1:]
+        to_archive_ids.extend([x["id"] for x in drop])
+        report.append({
+            "project": g["_id"]["project"], "aadhaar": g["_id"]["aadhaar"],
+            "count": g["count"], "keep_id": keep["id"], "keep_name": keep.get("name"),
+            "archive_ids": [x["id"] for x in drop],
+        })
+    if not dry_run and to_archive_ids:
+        r = await db.candidates.update_many(
+            {"id": {"$in": to_archive_ids}},
+            {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat(),
+                      "deleted_reason": "auto-cleanup: duplicate candidate aadhaar"}},
+        )
+        archived = r.modified_count
+    else:
+        archived = 0
+    return {
+        "duplicate_groups": len(groups),
+        "candidates_to_archive": len(to_archive_ids),
+        "archived": archived,
+        "dry_run": dry_run,
+        "groups": report[:200],
+    }
+
+
+
+async def delete_candidate(cid: str, user=Depends(require_role("admin", "hr"))):
     r = await db.candidates.update_one(
         {"id": cid, "is_deleted": {"$ne": True}},
         {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat(), "deleted_by": user["id"]}},
@@ -13094,7 +13255,7 @@ async def delete_candidate(cid: str, user=Depends(require_role(*CANDIDATE_ROLES)
 
 
 @api.patch("/candidates/{cid}/restore")
-async def restore_candidate(cid: str, _=Depends(require_role(*CANDIDATE_ROLES))):
+async def restore_candidate(cid: str, _=Depends(require_role("admin", "hr"))):
     r = await db.candidates.update_one(
         {"id": cid, "is_deleted": True},
         {"$set": {"is_deleted": False}, "$unset": {"deleted_at": "", "deleted_by": ""}},
