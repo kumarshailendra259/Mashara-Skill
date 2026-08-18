@@ -13268,6 +13268,176 @@ async def restore_candidate(cid: str, _=Depends(require_role("admin", "hr"))):
 
 
 
+# =====================================================================
+#                    BANK GUARANTEE TRACKING
+# =====================================================================
+BG_ROLES = ("admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner")
+BG_WRITE_ROLES = ("admin", "hr", "manager", "senior_manager", "accountant")
+
+
+@api.post("/bank-guarantees", status_code=201)
+async def create_bank_guarantee(
+    letter_of_intent_no: Optional[str] = Query(None),
+    work_order_no: Optional[str] = Query(None),
+    in_favour_of: Optional[str] = Query(None),
+    applicant: Optional[str] = Query(None),
+    issued_by: str = Query(...),
+    bg_number: str = Query(...),
+    amount: float = Query(...),
+    date_of_issuance: str = Query(...),
+    valid_till: str = Query(...),
+    bg_claim_expiry_date: str = Query(...),
+    center_id: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remarks: Optional[str] = Query(None),
+    file: Optional[UploadFile] = File(None),
+    user=Depends(require_role(*BG_WRITE_ROLES)),
+):
+    bg_id = str(uuid.uuid4())
+    attachment = None
+    if file and file.filename:
+        data = await file.read()
+        if len(data) > 2 * 1024 * 1024:
+            raise HTTPException(413, "Attachment must be less than 2MB")
+        ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
+        path = f"{APP_STORAGE_PREFIX}/bank-guarantees/{bg_id}.{ext}"
+        ct = file.content_type or "application/octet-stream"
+        try:
+            _put_object(path, data, ct)
+        except requests.HTTPError as e:
+            raise HTTPException(502, f"Storage upload failed: {e}")
+        await db.files.insert_one({
+            "id": bg_id, "path": path, "filename": file.filename,
+            "content_type": ct, "size": len(data),
+            "uploaded_by": user["id"], "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            "is_deleted": False,
+        })
+        attachment = {"path": path, "filename": file.filename, "content_type": ct, "size": len(data)}
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": bg_id,
+        "letter_of_intent_no": (letter_of_intent_no or "").strip() or None,
+        "work_order_no": (work_order_no or "").strip() or None,
+        "in_favour_of": (in_favour_of or "").strip() or None,
+        "applicant": (applicant or "").strip() or None,
+        "issued_by": issued_by.strip(),
+        "bg_number": bg_number.strip(),
+        "amount": float(amount),
+        "date_of_issuance": date_of_issuance,
+        "valid_till": valid_till,
+        "bg_claim_expiry_date": bg_claim_expiry_date,
+        "center_id": (center_id or "").strip() or None,
+        "location": (location or "").strip() or None,
+        "remarks": (remarks or "").strip() or None,
+        "attachment": attachment,
+        "is_renewed": False,
+        "is_deleted": False,
+        "created_by": user["id"],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.bank_guarantees.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/bank-guarantees")
+async def list_bank_guarantees(
+    search: Optional[str] = Query(None),
+    center_id: Optional[str] = Query(None),
+    include_deleted: bool = Query(False),
+    include_renewed: bool = Query(True),
+    _=Depends(require_role(*BG_ROLES)),
+):
+    q: dict = {}
+    if not include_deleted:
+        q["is_deleted"] = {"$ne": True}
+    if not include_renewed:
+        q["is_renewed"] = {"$ne": True}
+    if center_id:
+        q["center_id"] = center_id
+    if search:
+        s = search.strip()
+        q["$or"] = [
+            {"bg_number": {"$regex": s, "$options": "i"}},
+            {"letter_of_intent_no": {"$regex": s, "$options": "i"}},
+            {"work_order_no": {"$regex": s, "$options": "i"}},
+            {"in_favour_of": {"$regex": s, "$options": "i"}},
+            {"applicant": {"$regex": s, "$options": "i"}},
+            {"issued_by": {"$regex": s, "$options": "i"}},
+            {"location": {"$regex": s, "$options": "i"}},
+        ]
+    docs = await db.bank_guarantees.find(q, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(1000)
+    return docs
+
+
+@api.get("/bank-guarantees/expiring-soon")
+async def bg_expiring_soon(
+    days: int = Query(30, ge=1, le=365),
+    _=Depends(require_role(*BG_ROLES)),
+):
+    """Return BGs whose bg_claim_expiry_date falls within [today, today+days] and are
+    not yet marked renewed. Used by the Dashboard alert popup."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today().isoformat()
+    horizon = (_date.today() + _td(days=days)).isoformat()
+    q = {
+        "is_deleted": {"$ne": True},
+        "is_renewed": {"$ne": True},
+        "bg_claim_expiry_date": {"$gte": today, "$lte": horizon},
+    }
+    docs = await db.bank_guarantees.find(q, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(200)
+    # Also include already-expired ones so we don't silently drop them from the alert.
+    q_exp = {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}, "bg_claim_expiry_date": {"$lt": today}}
+    expired = await db.bank_guarantees.find(q_exp, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(200)
+    return {"expiring": docs, "expired": expired, "days": days, "today": today}
+
+
+@api.patch("/bank-guarantees/{bid}")
+async def update_bank_guarantee(
+    bid: str, payload: dict = Body(...),
+    _=Depends(require_role(*BG_WRITE_ROLES)),
+):
+    existing = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Bank guarantee not found")
+    allowed = {"letter_of_intent_no", "work_order_no", "in_favour_of", "applicant", "issued_by",
+               "bg_number", "amount", "date_of_issuance", "valid_till", "bg_claim_expiry_date",
+               "center_id", "location", "remarks", "is_renewed"}
+    upd = {k: v for k, v in payload.items() if k in allowed}
+    if not upd:
+        raise HTTPException(400, "No updatable fields provided")
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.bank_guarantees.update_one({"id": bid}, {"$set": upd})
+    doc = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
+    return doc
+
+
+@api.patch("/bank-guarantees/{bid}/renew")
+async def renew_bank_guarantee(bid: str, _=Depends(require_role(*BG_WRITE_ROLES))):
+    """Mark a bank guarantee as renewed — silences the dashboard expiry popup."""
+    r = await db.bank_guarantees.update_one(
+        {"id": bid, "is_deleted": {"$ne": True}},
+        {"$set": {"is_renewed": True, "renewed_at": datetime.now(timezone.utc).isoformat()}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Bank guarantee not found")
+    return {"ok": True}
+
+
+@api.delete("/bank-guarantees/{bid}", status_code=204)
+async def delete_bank_guarantee(bid: str, user=Depends(require_role("admin", "hr"))):
+    r = await db.bank_guarantees.update_one(
+        {"id": bid, "is_deleted": {"$ne": True}},
+        {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat(), "deleted_by": user["id"]}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Bank guarantee not found")
+    return None
+
+
+
+
 # ---------- Register router + CORS ----------
 app.include_router(api)
 

@@ -868,6 +868,30 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 See `/app/memory/test_credentials.md`
 
 ## Notes for Future Agents
+
+### Bank Guarantee Tracking + Dashboard Expiry Alert (Done, Feb 2026)
+- **User asked**: new Bank Guarantee tracking module with the fields from screenshot (LoI No, Work Order No, In Favour Of, Applicant, Issued By, BG Number, Amount, Attachment <2MB, Date of Issuance, Valid Till, BG Claim Expiry Date) + Center + Location; plus a Dashboard popup that starts 30 days before BG expiry in red bold and stays until a new BG is updated.
+- **Backend `/app/backend/server.py`**:
+  - New `db.bank_guarantees` collection + endpoints:
+    - `POST /bank-guarantees` — multipart upload (attachment mandatory <2MB); stores file in `finance-tracker/bank-guarantees/{id}.{ext}` and registers in shared `db.files`.
+    - `GET /bank-guarantees` — list with search + center filter + include_renewed toggle.
+    - `GET /bank-guarantees/expiring-soon?days=30` — returns `{expiring:[…], expired:[…]}`; used by dashboard alert.
+    - `PATCH /bank-guarantees/{id}` — edit any updatable field.
+    - `PATCH /bank-guarantees/{id}/renew` — flips `is_renewed=true`, silences the alert.
+    - `DELETE /bank-guarantees/{id}` — soft delete (admin/hr only).
+  - Access roles: `BG_ROLES` for read (admin/hr/manager/senior_manager/accountant/center_manager/partner); `BG_WRITE_ROLES` for create/update/renew.
+- **Frontend `/app/frontend/src/pages/BankGuarantees.jsx`** (new page, route `/bank-guarantees`, sidebar entry "Bank Guarantees"):
+  - Filter bar (search, center, show-renewed toggle) + Add form modal implementing every field from the screenshot + Center dropdown + Location + Remarks + <2MB validation.
+  - Table row status chip: green **Active**, red bold **EXPIRED**, red bold `Nd left` when within 30 days, grey **Renewed**.
+  - Row actions: View / Edit / **Mark Renewed** (green shield icon, only when expiring/expired) / Delete (admin+hr only). Renewed rows hide edit.
+  - Viewer modal shows every field + attachment download link.
+- **Dashboard alert `BGExpiryAlert`** (exported from same page and used in `Dashboard.jsx`):
+  - Pulses at the top of Dashboard whenever any live BG's claim expiry is within 30 days or already expired.
+  - Big red-bordered banner with `AlertTriangle` icon, bold heading "BANK GUARANTEE EXPIRY ALERT", one row per BG (up to 6 shown), CTA link to `/bank-guarantees`, and hint "Alert stays until each BG is marked as renewed."
+  - Auto-hides when the API returns zero expiring + zero expired (all renewed or none exist).
+- **Verified**: POST with 15-day-out expiry → showed in `/expiring-soon`; Dashboard screenshot confirms the red banner with the BG row + green CTA; sidebar shows "Bank Guarantees" entry visible for admin.
+
+
 - DO NOT refactor `server.py` `compute_milestones` / `receive_batch_payment` — extremely delicate math
 - DO NOT modify React hook `[]` mount patterns flagged by lint as "missing deps" — they're intentional
 - ALL 3rd-party integrations go via `integration_playbook_expert_v2`

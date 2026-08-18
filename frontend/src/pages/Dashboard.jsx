@@ -5,6 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import { inr } from "@/lib/i18n";
 import KpiCard from "@/components/KpiCard";
 import PrintButton from "@/components/PrintButton";
+import { BGExpiryAlert } from "@/pages/BankGuarantees";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -90,6 +91,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6" data-testid="dashboard-page">
+      {/* Prominent BG expiry alert — auto-hidden when nothing expiring or all renewed. */}
+      <BGExpiryAlert />
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <div className="overline">{t("dashboard")}</div>
