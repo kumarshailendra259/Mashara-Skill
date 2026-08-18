@@ -50,6 +50,22 @@ export default function BankGuarantees() {
   const [saving, setSaving] = useState(false);
   const fileRef = useRef(null);
   const [viewing, setViewing] = useState(null);
+  const [renewsBgId, setRenewsBgId] = useState("");
+  const [runningAlerts, setRunningAlerts] = useState(false);
+  const [chain, setChain] = useState(null);
+  useEffect(() => {
+    if (!viewing) { setChain(null); return; }
+    // Only fetch the chain when the BG is either part of a renewal or has been renewed.
+    if (viewing.renews_bg_id || viewing.renewed_by_bg_id) {
+      api.get(`/bank-guarantees/${viewing.id}/chain`).then((r) => setChain(r.data)).catch(() => setChain(null));
+    } else {
+      setChain(null);
+    }
+  }, [viewing]);
+
+  // Active BGs are candidates that can be renewed by a new BG. Pre-filter so
+  // the dropdown only shows non-renewed / non-deleted BGs.
+  const renewableBgs = useMemo(() => rows.filter((r) => !r.is_renewed && !r.is_deleted), [rows]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -72,8 +88,8 @@ export default function BankGuarantees() {
     const m = new Map(); (centers || []).forEach((c) => m.set(c.id, c.name || c.id)); return m;
   }, [centers]);
 
-  const openAdd = () => { setEditing({ ...EMPTY }); setFile(null); setOpenForm(true); };
-  const openEdit = (row) => { setEditing({ ...EMPTY, ...row }); setFile(null); setOpenForm(true); };
+  const openAdd = () => { setEditing({ ...EMPTY }); setFile(null); setRenewsBgId(""); setOpenForm(true); };
+  const openEdit = (row) => { setEditing({ ...EMPTY, ...row }); setFile(null); setRenewsBgId(""); setOpenForm(true); };
 
   const save = async () => {
     const missing = FIELDS.filter((f) => f.required && !String(editing?.[f.key] || "").trim());
@@ -97,13 +113,14 @@ export default function BankGuarantees() {
         await api.patch(`/bank-guarantees/${editing.id}`, body);
         toast.success("Bank guarantee updated");
       } else {
+        if (renewsBgId) params.set("renews_bg_id", renewsBgId);
         const fd = new FormData(); if (file) fd.append("file", file);
         await api.post(`/bank-guarantees?${params.toString()}`, fd, {
           headers: { "Content-Type": "multipart/form-data" },
         });
-        toast.success("Bank guarantee added");
+        toast.success(renewsBgId ? "New BG added — previous one marked Renewed." : "Bank guarantee added");
       }
-      setOpenForm(false); setEditing(null); setFile(null);
+      setOpenForm(false); setEditing(null); setFile(null); setRenewsBgId("");
       if (fileRef.current) fileRef.current.value = "";
       load();
     } catch (e) { toast.error(formatError(e)); }
@@ -145,7 +162,21 @@ export default function BankGuarantees() {
           <div className="text-sm text-[var(--muted)] mt-1">Attach BG PDFs, track claim expiry, and get a dashboard alert 30 days before expiry.</div>
         </div>
         {canWrite && (
-          <Button onClick={openAdd} className="brand-btn rounded-none gap-2" data-testid="btn-add-bg"><Plus size={16} /> Add Bank Guarantee</Button>
+          <div className="flex flex-wrap gap-2">
+            {user?.role === "admin" && (
+              <Button variant="outline" onClick={async () => {
+                setRunningAlerts(true);
+                try {
+                  const { data } = await api.post("/bank-guarantees/run-alerts?force=true");
+                  toast.success(`Alerts sent to ${data.recipients?.length || 0} recipient(s) for ${data.sent} BG(s)`);
+                } catch (e) { toast.error(formatError(e)); }
+                finally { setRunningAlerts(false); }
+              }} disabled={runningAlerts} className="rounded-none gap-2 text-red-700 border-red-400" data-testid="btn-run-alerts" title="Manually send Day-30/15/7/0 email alerts">
+                <AlertTriangle size={14} /> {runningAlerts ? "Sending…" : "Send Alerts Now"}
+              </Button>
+            )}
+            <Button onClick={openAdd} className="brand-btn rounded-none gap-2" data-testid="btn-add-bg"><Plus size={16} /> Add Bank Guarantee</Button>
+          </div>
         )}
       </div>
 
@@ -243,6 +274,28 @@ export default function BankGuarantees() {
           <DialogHeader><DialogTitle className="font-heading">{editing?.id ? "Edit" : "Add"} Bank Guarantee</DialogTitle></DialogHeader>
           {editing && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Renewal chain — only shown when creating a new BG. Picking one
+                  auto-flips the referenced BG to Renewed on submit and stitches
+                  the audit trail. */}
+              {!editing.id && renewableBgs.length > 0 && (
+                <div className="md:col-span-2 border-l-4 border-emerald-500 bg-emerald-50/60 p-3">
+                  <Label className="overline text-emerald-800">Renews BG (optional)</Label>
+                  <Select value={renewsBgId || ""} onValueChange={(v) => setRenewsBgId(v === "__none__" ? "" : v)}>
+                    <SelectTrigger className="rounded-none" data-testid="bg-field-renews_bg_id">
+                      <SelectValue placeholder="Not a renewal — leave empty" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">— Not a renewal —</SelectItem>
+                      {renewableBgs.map((b) => (
+                        <SelectItem key={b.id} value={b.id}>
+                          {b.bg_number} · {b.issued_by} · expires {b.bg_claim_expiry_date}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="text-[10px] text-emerald-800 mt-1">Selected BG will auto-mark as <b>Renewed</b> and get linked as its successor.</div>
+                </div>
+              )}
               {FIELDS.map((f) => (
                 <div key={f.key} className={f.key === "letter_of_intent_no" ? "md:col-span-2" : ""}>
                   <Label className="overline">{f.label}{f.required && <span className="text-[var(--danger)]">*</span>}</Label>
@@ -327,6 +380,27 @@ export default function BankGuarantees() {
                     >
                       <Download size={12} /> {viewing.attachment.filename}
                     </a>
+                  </div>
+                )}
+                {chain && chain.chain?.length > 1 && (
+                  <div className="md:col-span-2 border-t border-[var(--border)] pt-3" data-testid="bg-chain">
+                    <div className="overline text-[10px] mb-2">Renewal Audit Chain ({chain.count})</div>
+                    <ol className="space-y-1 text-xs">
+                      {chain.chain.map((b, i) => {
+                        const isCurrent = b.id === viewing.id;
+                        const isLast = i === chain.chain.length - 1;
+                        return (
+                          <li key={b.id} className="flex items-center gap-2">
+                            <span className={`inline-flex items-center justify-center h-5 w-5 text-[10px] font-bold ${isCurrent ? "bg-[var(--brand)] text-white" : "bg-gray-200 text-[var(--muted)]"}`}>{i + 1}</span>
+                            <span className={`font-mono ${isCurrent ? "font-bold text-[var(--brand)]" : ""}`}>{b.bg_number}</span>
+                            <span className="text-[var(--muted)]">· {b.issued_by} · exp {b.bg_claim_expiry_date}</span>
+                            {b.is_renewed && <span className="ml-1 text-[10px] uppercase text-emerald-700">Renewed</span>}
+                            {isCurrent && <span className="ml-1 text-[10px] uppercase text-[var(--brand)]">Current</span>}
+                            {!isLast && <span className="text-[var(--muted)]">→</span>}
+                          </li>
+                        );
+                      })}
+                    </ol>
                   </div>
                 )}
               </div>

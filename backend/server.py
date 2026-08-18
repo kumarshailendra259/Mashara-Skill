@@ -1029,6 +1029,8 @@ async def on_startup():
     # or the install fails, the offer-letter service already falls back to
     # emailing the rendered .docx instead — no user-facing failure either way.
     asyncio.create_task(_ensure_libreoffice_installed())
+    # Daily BG expiry scheduler — fires at ~08:15 IST once a day.
+    asyncio.create_task(_bg_alert_scheduler())
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -13290,6 +13292,7 @@ async def create_bank_guarantee(
     center_id: Optional[str] = Query(None),
     location: Optional[str] = Query(None),
     remarks: Optional[str] = Query(None),
+    renews_bg_id: Optional[str] = Query(None),
     file: Optional[UploadFile] = File(None),
     user=Depends(require_role(*BG_WRITE_ROLES)),
 ):
@@ -13314,6 +13317,13 @@ async def create_bank_guarantee(
         })
         attachment = {"path": path, "filename": file.filename, "content_type": ct, "size": len(data)}
     now = datetime.now(timezone.utc).isoformat()
+    # Renewal chain — validate that the referenced BG exists and belongs to this system.
+    renews_bg_number = None
+    if renews_bg_id:
+        old = await db.bank_guarantees.find_one({"id": renews_bg_id, "is_deleted": {"$ne": True}}, {"_id": 0, "bg_number": 1})
+        if not old:
+            raise HTTPException(404, "Referenced BG (renews_bg_id) not found")
+        renews_bg_number = old.get("bg_number")
     doc = {
         "id": bg_id,
         "letter_of_intent_no": (letter_of_intent_no or "").strip() or None,
@@ -13332,11 +13342,26 @@ async def create_bank_guarantee(
         "attachment": attachment,
         "is_renewed": False,
         "is_deleted": False,
+        "renews_bg_id": renews_bg_id or None,
+        "renews_bg_number": renews_bg_number,
         "created_by": user["id"],
         "created_at": now,
         "updated_at": now,
     }
     await db.bank_guarantees.insert_one(doc)
+    # If this new BG renews an old one, flip the old to renewed and stitch the
+    # audit chain (`renewed_by_bg_id` on the old row) so history is preserved.
+    if renews_bg_id:
+        await db.bank_guarantees.update_one(
+            {"id": renews_bg_id},
+            {"$set": {
+                "is_renewed": True,
+                "renewed_at": now,
+                "renewed_by_bg_id": bg_id,
+                "renewed_by_bg_number": bg_number.strip(),
+                "renewed_by_user": user["id"],
+            }},
+        )
     doc.pop("_id", None)
     return doc
 
@@ -13374,21 +13399,38 @@ async def list_bank_guarantees(
 @api.get("/bank-guarantees/expiring-soon")
 async def bg_expiring_soon(
     days: int = Query(30, ge=1, le=365),
-    _=Depends(require_role(*BG_ROLES)),
+    user=Depends(require_role(*BG_ROLES)),
 ):
     """Return BGs whose bg_claim_expiry_date falls within [today, today+days] and are
-    not yet marked renewed. Used by the Dashboard alert popup."""
+    not yet marked renewed. Used by the Dashboard alert popup.
+    Center-scoped: admin/hr/manager/senior_manager/accountant see all BGs;
+    partner/center_manager/center_staff only see BGs of their own centers."""
     from datetime import date as _date, timedelta as _td
     today = _date.today().isoformat()
     horizon = (_date.today() + _td(days=days)).isoformat()
-    q = {
-        "is_deleted": {"$ne": True},
-        "is_renewed": {"$ne": True},
-        "bg_claim_expiry_date": {"$gte": today, "$lte": horizon},
-    }
+
+    # Determine center scope. Admins + accounts get everything (line-item and
+    # even BGs that aren't attached to a center are visible to them).
+    await _enrich_user_with_associations(user)
+    role = user.get("role")
+    all_visible = role in ("admin", "hr", "manager", "senior_manager", "accountant")
+    scope_center_ids = None
+    if not all_visible:
+        if role in ("center_manager", "center_staff"):
+            scope_center_ids = list(user.get("assigned_center_ids") or [])
+        elif role == "partner":
+            scope_center_ids = list(user.get("_associated_center_ids") or [])
+        else:
+            scope_center_ids = []
+        if not scope_center_ids:
+            return {"expiring": [], "expired": [], "days": days, "today": today}
+
+    q_base = {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}}
+    if not all_visible:
+        q_base["center_id"] = {"$in": scope_center_ids}
+    q = {**q_base, "bg_claim_expiry_date": {"$gte": today, "$lte": horizon}}
     docs = await db.bank_guarantees.find(q, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(200)
-    # Also include already-expired ones so we don't silently drop them from the alert.
-    q_exp = {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}, "bg_claim_expiry_date": {"$lt": today}}
+    q_exp = {**q_base, "bg_claim_expiry_date": {"$lt": today}}
     expired = await db.bank_guarantees.find(q_exp, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(200)
     return {"expiring": docs, "expired": expired, "days": days, "today": today}
 
@@ -13434,6 +13476,188 @@ async def delete_bank_guarantee(bid: str, user=Depends(require_role("admin", "hr
     if r.matched_count == 0:
         raise HTTPException(404, "Bank guarantee not found")
     return None
+
+
+@api.get("/bank-guarantees/{bid}/chain")
+async def bg_renewal_chain(bid: str, _=Depends(require_role(*BG_ROLES))):
+    """Walk backwards + forwards along `renews_bg_id`/`renewed_by_bg_id` links so
+    HR can see the full audit history of renewals for a given BG."""
+    seed = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
+    if not seed:
+        raise HTTPException(404, "BG not found")
+    chain = [seed]
+    # Walk backwards through previous BGs this one renewed.
+    cur = seed
+    seen = {seed["id"]}
+    while cur.get("renews_bg_id") and cur["renews_bg_id"] not in seen:
+        prev = await db.bank_guarantees.find_one({"id": cur["renews_bg_id"]}, {"_id": 0})
+        if not prev: break
+        seen.add(prev["id"]); chain.insert(0, prev); cur = prev
+    # Walk forwards through successors.
+    cur = seed
+    while cur.get("renewed_by_bg_id") and cur["renewed_by_bg_id"] not in seen:
+        nxt = await db.bank_guarantees.find_one({"id": cur["renewed_by_bg_id"]}, {"_id": 0})
+        if not nxt: break
+        seen.add(nxt["id"]); chain.append(nxt); cur = nxt
+    return {"count": len(chain), "chain": chain}
+
+
+@api.post("/bank-guarantees/run-alerts")
+async def bg_run_alerts(
+    force: bool = Query(False, description="Send even if already sent today (idempotency bypass)"),
+    _=Depends(require_role("admin")),
+):
+    """Send BG expiry email alerts for BGs at Day-30 / Day-15 / Day-7 / Day-0
+    (and every day past due). Idempotent per (bg_id, day, date). Also called by
+    the daily scheduler below."""
+    return await _bg_dispatch_alerts(force=force)
+
+
+async def _bg_alert_scheduler():
+    """Runs forever — every 6 hours checks if 'today' hasn't already fired the
+    BG expiry emails, and if not, sends them once. Idempotency comes from the
+    `bg_alert_log` markers written by `_bg_dispatch_alerts`."""
+    await asyncio.sleep(60)  # small warmup after boot
+    while True:
+        try:
+            await _bg_dispatch_alerts(force=False)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("BG alert scheduler tick failed: %s", e)
+        await asyncio.sleep(6 * 3600)
+
+
+async def _bg_dispatch_alerts(force: bool = False) -> dict:
+    """Internal helper used by both the manual endpoint + daily scheduler."""
+    from datetime import date as _date, timedelta as _td
+    from email_utils import send_bg_expiry_alert  # local import — module already loaded elsewhere
+
+    today = _date.today()
+    tstr = today.isoformat()
+    # Windows: Day-30, Day-15, Day-7, Day-0. Also always ping "expired" (past due) daily.
+    milestone_days = [30, 15, 7, 0]
+    q = {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}}
+    live = await db.bank_guarantees.find(q, {"_id": 0}).to_list(2000)
+    # Filter to BGs whose bg_claim_expiry_date is either a milestone match or already past due.
+    triggered: list = []
+    days_left_map: dict = {}
+    for bg in live:
+        exp = bg.get("bg_claim_expiry_date")
+        if not exp: continue
+        try:
+            expd = _date.fromisoformat(exp[:10])
+        except Exception:
+            continue
+        delta = (expd - today).days
+        if delta in milestone_days or delta < 0:
+            triggered.append(bg); days_left_map[bg["id"]] = delta
+    if not triggered:
+        return {"sent": 0, "reason": "no_triggered_bgs", "today": tstr}
+    # Idempotency — record (day-marker, bg_id) so we don't repeatedly ping the
+    # same milestone in the same day. `force=True` bypasses this guard.
+    dispatch_log_ids = []
+    to_send_bgs = []
+    for bg in triggered:
+        d = days_left_map[bg["id"]]
+        marker = f"{tstr}:{bg['id']}:{d}"
+        if not force:
+            existing = await db.bg_alert_log.find_one({"marker": marker}, {"_id": 0, "marker": 1})
+            if existing: continue
+        to_send_bgs.append(bg); dispatch_log_ids.append(marker)
+    if not to_send_bgs:
+        return {"sent": 0, "reason": "already_sent_today", "today": tstr, "triggered": len(triggered)}
+
+    # ---------- Recipient resolution (center-scoped) ----------
+    # Broadcast to every active admin + accountant globally.
+    global_users = await db.users.find(
+        {"role": {"$in": ["admin", "accountant"]}, "is_active": {"$ne": False},
+         "email": {"$exists": True, "$ne": None}},
+        {"_id": 0, "email": 1, "id": 1, "assigned_center_ids": 1, "role": 1},
+    ).to_list(500)
+    # For each unique center in triggered BGs, resolve center-linked users (partner
+    # + accountant + center_manager assigned to that center).
+    triggered_centers = {b.get("center_id") for b in to_send_bgs if b.get("center_id")}
+    center_users_map: dict = {}  # center_id -> list of user rows
+    for cid in triggered_centers:
+        # (a) center-assigned users (center_manager, center_staff, accountant, partner
+        # sometimes uses assigned_center_ids too)
+        assigned = await db.users.find(
+            {"assigned_center_ids": cid, "is_active": {"$ne": False},
+             "email": {"$exists": True, "$ne": None}},
+            {"_id": 0, "email": 1, "id": 1, "role": 1, "assigned_partner_id": 1},
+        ).to_list(200)
+        # (b) partners associated with the center via batches / transactions.
+        center_partner_ids: set = set()
+        async for _b in db.batches.find({"center_id": cid, "partner_ids": {"$exists": True, "$ne": []}},
+                                        {"_id": 0, "partner_ids": 1}):
+            for pid in (_b.get("partner_ids") or []):
+                if pid: center_partner_ids.add(pid)
+        if center_partner_ids:
+            partner_users = await db.users.find(
+                {"assigned_partner_id": {"$in": list(center_partner_ids)},
+                 "role": "partner", "is_active": {"$ne": False},
+                 "email": {"$exists": True, "$ne": None}},
+                {"_id": 0, "email": 1, "id": 1, "role": 1},
+            ).to_list(200)
+            assigned.extend(partner_users)
+        center_users_map[cid] = assigned
+
+    # Filter out obvious test / seed / disposable emails.
+    _bad = ("example.com", "example.org", "testfin.dev", "testfin.local",
+            "test.local", "@x.com", "finance.app")
+    def _clean_email(e: str) -> Optional[str]:
+        e = (e or "").strip().lower()
+        if not e or "@" not in e: return None
+        if any(bad in e for bad in _bad): return None
+        return e
+
+    # Build recipient_email -> [bgs] map so each recipient gets one email with
+    # only the BGs they're allowed to see.
+    per_recipient: dict = {}
+    for bg in to_send_bgs:
+        recipients_for_bg: set = set()
+        # Global admins + accountants get every triggered BG.
+        for u in global_users:
+            ce = _clean_email(u.get("email"))
+            if ce: recipients_for_bg.add(ce)
+        # Center-scoped users (partner / accountant / center_manager linked to
+        # bg.center_id) get only this BG.
+        cid = bg.get("center_id")
+        if cid and cid in center_users_map:
+            for u in center_users_map[cid]:
+                ce = _clean_email(u.get("email"))
+                if ce: recipients_for_bg.add(ce)
+        for rcpt in recipients_for_bg:
+            per_recipient.setdefault(rcpt, []).append(bg)
+
+    if not per_recipient:
+        return {"sent": 0, "reason": "no_valid_recipients", "today": tstr,
+                "triggered": len(to_send_bgs)}
+
+    portal_url = os.environ.get("CHECK_IN_URL") or os.environ.get("APP_URL") or "https://finance.masharaskills.com"
+    portal_url = portal_url.rstrip("/")
+    if portal_url.endswith("/check-in"):
+        portal_url = portal_url[:-len("/check-in")]
+
+    sends_ok = 0
+    email_results = []
+    for rcpt, bgs_for_user in per_recipient.items():
+        r = await send_bg_expiry_alert([rcpt], bgs_for_user, days_left_map, portal_url)
+        email_results.append({"to": rcpt, "count": len(bgs_for_user), "sent": r.get("sent"), "id": r.get("id"), "reason": r.get("reason")})
+        if r.get("sent"): sends_ok += 1
+
+    if sends_ok:
+        # Record markers to prevent re-sends today.
+        for m in dispatch_log_ids:
+            await db.bg_alert_log.insert_one({"marker": m, "sent_at": datetime.now(timezone.utc).isoformat()})
+    return {
+        "sent": sends_ok,
+        "recipients": list(per_recipient.keys()),
+        "email_results": email_results,
+        "triggered_bgs": [{"id": b["id"], "bg_number": b.get("bg_number"),
+                          "days_left": days_left_map[b["id"]], "center_id": b.get("center_id")}
+                         for b in to_send_bgs],
+        "today": tstr,
+    }
 
 
 

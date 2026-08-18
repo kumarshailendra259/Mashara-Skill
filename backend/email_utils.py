@@ -210,3 +210,74 @@ async def send_email_with_attachment(
     except Exception as e:  # noqa: BLE001
         logger.error("Attachment email failed for %s: %s", to, e)
         return {"sent": False, "reason": str(e)[:250]}
+
+
+
+async def send_bg_expiry_alert(
+    to_emails: list,
+    bgs: list,
+    days_left_by_bg: dict,
+    portal_url: str,
+) -> dict:
+    """Send a red-bold-styled expiry alert to `to_emails` for the given BGs."""
+    if not _client_ready():
+        return {"sent": False, "reason": "resend_not_configured"}
+    if not to_emails or not bgs:
+        return {"sent": False, "reason": "no_recipients_or_bgs"}
+    sender = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev").strip() or "onboarding@resend.dev"
+    rows_html = ""
+    any_expired = False
+    for bg in bgs:
+        d = days_left_by_bg.get(bg["id"])
+        label = f"{d} day(s) left" if d is not None and d >= 0 else "EXPIRED"
+        if d is not None and d < 0: any_expired = True
+        rows_html += f"""
+<tr>
+  <td style="padding:8px;border:1px solid #f5c2c7;font-family:monospace;font-weight:700;color:#842029;">{bg.get('bg_number','')}</td>
+  <td style="padding:8px;border:1px solid #f5c2c7;color:#842029;">{bg.get('issued_by','—')}</td>
+  <td style="padding:8px;border:1px solid #f5c2c7;color:#842029;">{bg.get('in_favour_of') or '—'}</td>
+  <td style="padding:8px;border:1px solid #f5c2c7;color:#842029;font-weight:700;">{bg.get('bg_claim_expiry_date','')}</td>
+  <td style="padding:8px;border:1px solid #f5c2c7;color:#a11313;font-weight:900;text-transform:uppercase;">{label}</td>
+</tr>"""
+    header = "⚠️ BANK GUARANTEE EXPIRED" if any_expired else "⏳ BANK GUARANTEE EXPIRY REMINDER"
+    html = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:#fff5f5;font-family:Arial,Helvetica,sans-serif;color:#111;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="640" cellspacing="0" cellpadding="0" border="0" style="background:#ffffff;border:2px solid #c81e1e;">
+        <tr><td style="background:#c81e1e;color:#ffffff;padding:16px 24px;font-weight:900;font-size:18px;letter-spacing:0.03em;">{header}</td></tr>
+        <tr><td style="padding:20px 24px 8px;font-size:14px;line-height:1.55;color:#842029;">
+          <p style="margin:0 0 8px;font-weight:700;">Action required: renew the Bank Guarantee(s) below before expiry.</p>
+          <p style="margin:0 0 4px;">This automated alert will keep sending on <b>Day-30, Day-15, Day-7 and Day-0</b> until each BG is marked as renewed.</p>
+        </td></tr>
+        <tr><td style="padding:12px 24px 8px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-collapse:collapse;font-size:13px;">
+            <thead><tr style="background:#f8d7da;color:#842029;">
+              <th style="padding:8px;border:1px solid #f5c2c7;text-align:left;">BG Number</th>
+              <th style="padding:8px;border:1px solid #f5c2c7;text-align:left;">Issued By</th>
+              <th style="padding:8px;border:1px solid #f5c2c7;text-align:left;">In Favour Of</th>
+              <th style="padding:8px;border:1px solid #f5c2c7;text-align:left;">Claim Expiry</th>
+              <th style="padding:8px;border:1px solid #f5c2c7;text-align:left;">Status</th>
+            </tr></thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </td></tr>
+        <tr><td style="padding:16px 24px 24px;">
+          <a href="{portal_url}/bank-guarantees" style="display:inline-block;background:#c81e1e;color:#fff;padding:10px 18px;font-weight:700;text-decoration:none;">Open Bank Guarantee Tracking →</a>
+        </td></tr>
+      </table>
+      <div style="margin:10px 0;color:#8b6f6f;font-size:11px;">Mashara Finance · Automated BG Alert</div>
+    </td></tr></table></body></html>"""
+    params = {
+        "from": sender,
+        "to": list(dict.fromkeys(to_emails)),
+        "subject": f"[{header.replace('⚠️ ','').replace('⏳ ','')}] {len(bgs)} Bank Guarantee(s) need attention",
+        "html": html,
+    }
+    try:
+        res = await asyncio.to_thread(resend.Emails.send, params)
+        return {"sent": True, "id": res.get("id") if isinstance(res, dict) else None}
+    except Exception as e:  # noqa: BLE001
+        logger.error("BG expiry email failed: %s", e)
+        return {"sent": False, "reason": str(e)[:250]}

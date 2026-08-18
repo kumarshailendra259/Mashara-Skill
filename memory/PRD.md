@@ -897,3 +897,17 @@ See `/app/memory/test_credentials.md`
 - ALL 3rd-party integrations go via `integration_playbook_expert_v2`
 - Resend domain `masharaskills.com` is fully verified; daily quota limits apply on free tier
 - Production env vars sync via `.env` files during deployment
+
+
+### Bank Guarantee — Renewal Chain + Email Alerts (Done, Feb 2026)
+- **Renewal Chain**: `POST /bank-guarantees?renews_bg_id=…` validates the reference, inserts the new BG, then atomically flips the old row to `is_renewed=true, renewed_by_bg_id, renewed_by_bg_number, renewed_at, renewed_by_user`. New BG stores `renews_bg_id` + `renews_bg_number` for a bidirectional link. `GET /bank-guarantees/{id}/chain` returns the full ordered chain. Frontend Add form has a green "Renews BG (optional)" dropdown (only when there are renewable BGs); Viewer modal shows numbered audit trail with Current/Renewed tags.
+- **Email Alerts**: `email_utils.send_bg_expiry_alert()` renders a red-bold HTML with a BG table + CTA. `_bg_dispatch_alerts()` triggers on `days_to_expiry ∈ {30,15,7,0}` or past-due; dedupes via `bg_alert_log` markers (idempotent per today+bg+day). Recipients: active admin+hr users, with test/seed domains auto-filtered so Resend doesn't reject the whole batch. Endpoint `POST /bank-guarantees/run-alerts?force=true` (admin-only) + red "Send Alerts Now" button in the BG page header. Background `_bg_alert_scheduler()` ticks every 6 hours after startup.
+- **Verified**: BG-A → BG-B(renews_bg_id=BG-A) → BG-A auto-marked renewed with backlink; chain returned both. `run-alerts?force=true` for a Day-30 BG returned Resend id `6ea41f45-…` and delivered to `masharaenterprises@gmail.com`.
+- **WhatsApp alerts**: NOT YET IMPLEMENTED — requires Twilio / Meta Cloud API credentials. Follow-up ask sent to user.
+
+
+### Bank Guarantee — Center-Scoped Alerts (Done + Verified, Feb 2026)
+- **GET `/bank-guarantees/expiring-soon`**: role-scoped. admin/hr/manager/senior_manager/accountant see every BG; partner sees only BGs at centers linked via `batches.partner_ids` (`_centers_for_partner`); center_manager/center_staff see only their `assigned_center_ids`. Others → empty.
+- **`_bg_dispatch_alerts()`**: builds a per-recipient `{email → [bgs]}` map. Every active admin + accountant receives every triggered BG (global). Center-linked partners / center_managers / center_staff receive only the BGs of the centers they're mapped to (via `assigned_center_ids` or `batches.partner_ids`). Removed the earlier legacy admin/hr-only early-bail so center-scoped recipients still get emailed when no global admin/hr has a valid email.
+- **CenterManagerDashboard.jsx**: now also renders `<BGExpiryAlert />` at the top so CMs see the same red pulsing banner (scoped to their centers).
+- **Verified via seeded fixtures**: 5 BGs across 2 centers + 1 without center. admin & accountant listed all 5; center_manager A saw only 2 (Center-A BGs); center_manager B saw only 2 (Center-B BGs including expired one); partner linked to Center-A via batch saw only its 2 BGs. `run-alerts?force=true` fanned out 33 individually-scoped emails: `test_bg_cm_a` got 2, `test_bg_cm_b` got 2, `test_bg_partner_a` got 2, real accountants got all 5. Test seed rows cleaned up post-verification.

@@ -4,6 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { BGExpiryAlert } from "@/pages/BankGuarantees";
 import {
   Users, UserCheck, UserX, AlertCircle, Plane, Layers, ShieldCheck, RefreshCw,
   Calendar, Inbox, ChevronRight, MapPin, Activity,
@@ -40,6 +41,8 @@ export default function CenterManagerDashboard() {
 
   return (
     <div className="space-y-6" data-testid="center-manager-dashboard">
+      {/* BG expiry alert — center-scoped so only BGs at this CM's centers show. */}
+      <BGExpiryAlert />
       {/* Header */}
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
