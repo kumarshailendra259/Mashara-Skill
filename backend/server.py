@@ -14623,6 +14623,228 @@ async def mis_pjt_export(
 
 
 
+# ============================================================================
+# ============  MIS  ·  JSDMS  PROJECT  TRACKER  (Phase 3)  ==================
+# ============================================================================
+# 20-column JSDMS tracker with FY-wise target achievement + trainer gap.
+
+JSDMS_FIELDS_MAP = [
+    ("serial_no",           "Sl. No."),
+    ("bg_status",           "BG Status"),
+    ("centre_name",         "Centre Name"),
+    ("job_role",            "Job Role"),
+    ("target_received",     "Target Received Work Order"),
+    ("achieved_21_22",      "Target Achieved 21-22"),
+    ("achieved_22_23",      "Target Achieved 22-23"),
+    ("achieved_23_24",      "Target Achieved 23-24"),
+    ("achieved_24_25",      "Target Achieved 24-25"),
+    ("num_batches",         "No. of Batches"),
+    ("total_hours",         "Total Hour"),
+    ("duration_months",     "Training Duration in Months"),
+    ("per_hour",            "Training Per Hour"),
+    ("center_status",       "Center Status"),
+    ("job_role_status",     "Job Role Status"),
+    ("not_approved_reason", "If Not approved then Reason"),
+    ("total_enrolled",      "Total Enrolled"),
+    ("certified_trainers",  "No of Certified Trainer at center"),
+    ("tot_aligned",         "No. Of Trainers TOT Aligned"),
+    ("tot_renew_aligned",   "No. Of TOT Renew Aligned"),
+    ("trainers_required",   "No. Of Trainers Required at Center"),
+]
+JSDMS_KEY_BY_HEADER = {h: k for k, h in JSDMS_FIELDS_MAP}
+JSDMS_NUM_FIELDS = {"serial_no", "target_received", "achieved_21_22", "achieved_22_23",
+                     "achieved_23_24", "achieved_24_25", "num_batches", "total_hours",
+                     "duration_months", "per_hour", "total_enrolled", "certified_trainers",
+                     "tot_aligned", "tot_renew_aligned", "trainers_required"}
+
+
+def _jsdms_from_payload(p: dict) -> dict:
+    out = {}
+    for k, _h in JSDMS_FIELDS_MAP:
+        v = p.get(k)
+        out[k] = _mis_num(v) if k in JSDMS_NUM_FIELDS else _mis_norm(v)
+    return out
+
+
+def _jsdms_compute(rec: dict) -> dict:
+    """Auto-calc: total achieved, remaining target, achievement %, trainer gap."""
+    achieved = sum([(rec.get(k) or 0) for k in
+                   ("achieved_21_22", "achieved_22_23", "achieved_23_24", "achieved_24_25")])
+    tgt = rec.get("target_received") or 0
+    aligned = (rec.get("tot_aligned") or 0) + (rec.get("tot_renew_aligned") or 0)
+    required = rec.get("trainers_required") or 0
+    enrolled = rec.get("total_enrolled") or 0
+    return {
+        **rec,
+        "total_achieved": int(achieved),
+        "remaining_target": max(0, int(tgt - achieved)) if tgt else 0,
+        "achievement_pct": round((achieved / tgt * 100) if tgt else 0, 2),
+        "trainer_gap": max(0, int(required - aligned)),
+        "trainer_readiness_pct": round((aligned / required * 100) if required else 0, 2),
+        "enrolled_vs_target_pct": round((enrolled / tgt * 100) if tgt else 0, 2),
+    }
+
+
+@api.post("/mis/jsdms", status_code=201)
+async def mis_jsdms_create(payload: dict = Body(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+    data = _jsdms_from_payload(payload)
+    if not data["centre_name"] and not data["job_role"]:
+        raise HTTPException(400, "Centre Name or Job Role is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **data, "is_deleted": False,
+           "created_by": user["id"], "created_at": now, "updated_at": now}
+    await db.mis_jsdms.insert_one(doc)
+    doc.pop("_id", None)
+    return _jsdms_compute(doc)
+
+
+@api.get("/mis/jsdms")
+async def mis_jsdms_list(
+    search: Optional[str] = Query(None),
+    centre: Optional[str] = Query(None),
+    job_role: Optional[str] = Query(None),
+    bg_status: Optional[str] = Query(None),
+    _=Depends(require_role(*MIS_READ_ROLES)),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    if centre and centre != "all":       q["centre_name"] = {"$regex": f"^{centre}$", "$options": "i"}
+    if job_role and job_role != "all":   q["job_role"] = {"$regex": f"^{job_role}$", "$options": "i"}
+    if bg_status and bg_status != "all": q["bg_status"] = {"$regex": f"^{bg_status}$", "$options": "i"}
+    if search:
+        s = search.strip()
+        q["$or"] = [
+            {"centre_name": {"$regex": s, "$options": "i"}},
+            {"job_role":    {"$regex": s, "$options": "i"}},
+            {"bg_status":   {"$regex": s, "$options": "i"}},
+        ]
+    docs = await db.mis_jsdms.find(q, {"_id": 0}).sort([("centre_name", 1), ("serial_no", 1)]).to_list(5000)
+    return [_jsdms_compute(d) for d in docs]
+
+
+@api.get("/mis/jsdms/filter-options")
+async def mis_jsdms_filter_options(_=Depends(require_role(*MIS_READ_ROLES))):
+    q = {"is_deleted": {"$ne": True}}
+    centres = await db.mis_jsdms.distinct("centre_name", q)
+    roles = await db.mis_jsdms.distinct("job_role", q)
+    bg_statuses = await db.mis_jsdms.distinct("bg_status", q)
+    return {
+        "centres": sorted([c for c in centres if c]),
+        "job_roles": sorted([r for r in roles if r]),
+        "bg_statuses": sorted([b for b in bg_statuses if b]),
+    }
+
+
+@api.patch("/mis/jsdms/{jid}")
+async def mis_jsdms_update(jid: str, payload: dict = Body(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+    existing = await db.mis_jsdms.find_one({"id": jid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "JSDMS row not found")
+    upd = _jsdms_from_payload({**existing, **payload})
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.mis_jsdms.update_one({"id": jid}, {"$set": upd})
+    doc = await db.mis_jsdms.find_one({"id": jid}, {"_id": 0})
+    return _jsdms_compute(doc)
+
+
+@api.delete("/mis/jsdms/{jid}", status_code=204)
+async def mis_jsdms_delete(jid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.mis_jsdms.update_one({"id": jid}, {"$set": {
+        "is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat()}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "JSDMS row not found")
+    return Response(status_code=204)
+
+
+@api.get("/mis/jsdms/sample-excel")
+async def mis_jsdms_sample_excel(_=Depends(require_role(*MIS_WRITE_ROLES))):
+    wb = Workbook(); ws = wb.active; ws.title = "JSDMS-Project"
+    hf = Font(bold=True, color="FFFFFF")
+    hp = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    for idx, (_k, header) in enumerate(JSDMS_FIELDS_MAP, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = hf; c.fill = hp
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(16, len(header) + 4)
+    ws.append([1, "Submitted", "Birsa Bharno", "Self Employed Tailor",
+               800, 120, 180, 220, 60, 25, 600, 4, 150,
+               "Approved", "Approved", "", 580, 3, 2, 1, 4])
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="jsdms_project_template.xlsx"'})
+
+
+async def _jsdms_validate_rows(rows_iter, header_index: dict) -> dict:
+    valid: list = []; errors: list = []
+    for r_i, row in enumerate(rows_iter, start=2):
+        if not row or all(c is None or _mis_norm(c) == "" for c in row):
+            continue
+        rec: dict = {}
+        for header, key in JSDMS_KEY_BY_HEADER.items():
+            idx = header_index.get(header)
+            if idx is not None and idx < len(row):
+                rec[key] = row[idx]
+        cleaned = _jsdms_from_payload(rec)
+        preview = {k: _mis_norm(v) for k, v in cleaned.items()}
+        if not cleaned["centre_name"] and not cleaned["job_role"]:
+            errors.append({"row": r_i, "reason": "Missing Centre Name and Job Role", "data": preview}); continue
+        valid.append({"row": r_i, "data": cleaned})
+    return {"valid_rows": valid, "errors": errors}
+
+
+@api.post("/mis/jsdms/bulk-preview")
+async def mis_jsdms_bulk_preview(file: UploadFile = File(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+    rows, hi = await _mis_read_workbook(file, [h for _, h in JSDMS_FIELDS_MAP])
+    result = await _jsdms_validate_rows(iter(rows), hi)
+    return {"total_rows": len(result["valid_rows"]) + len(result["errors"]),
+            "valid": len(result["valid_rows"]), "failed": len(result["errors"]),
+            "valid_rows": result["valid_rows"], "errors": result["errors"]}
+
+
+@api.post("/mis/jsdms/bulk-upload")
+async def mis_jsdms_bulk_upload(file: UploadFile = File(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+    rows, hi = await _mis_read_workbook(file, [h for _, h in JSDMS_FIELDS_MAP])
+    result = await _jsdms_validate_rows(iter(rows), hi)
+    now = datetime.now(timezone.utc).isoformat()
+    docs = [{"id": str(uuid.uuid4()), **vr["data"], "is_deleted": False,
+             "created_by": user["id"], "created_at": now, "updated_at": now}
+            for vr in result["valid_rows"]]
+    if docs: await db.mis_jsdms.insert_many(docs)
+    return {"uploaded": len(docs), "failed": len(result["errors"]),
+            "total_rows": len(docs) + len(result["errors"]), "errors": result["errors"]}
+
+
+@api.get("/mis/jsdms/export")
+async def mis_jsdms_export(_=Depends(require_role(*MIS_READ_ROLES))):
+    docs = await db.mis_jsdms.find({"is_deleted": {"$ne": True}}, {"_id": 0}).sort("centre_name", 1).to_list(20000)
+    wb = Workbook(); ws = wb.active; ws.title = "JSDMS-Project"
+    hf = Font(bold=True, color="FFFFFF")
+    hp = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    extra = [("total_achieved", "Total Achieved"),
+             ("remaining_target", "Remaining Target"),
+             ("achievement_pct", "Achievement %"),
+             ("trainer_gap", "Trainer Gap"),
+             ("trainer_readiness_pct", "Trainer Readiness %")]
+    all_cols = JSDMS_FIELDS_MAP + extra
+    for idx, (_k, header) in enumerate(all_cols, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = hf; c.fill = hp
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(16, len(header) + 4)
+    for d in docs:
+        computed = _jsdms_compute(d)
+        ws.append([computed.get(k) for k, _ in all_cols])
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="jsdms_project_{stamp}.xlsx"'})
+
+
+
+
 
 
 

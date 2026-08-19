@@ -10,6 +10,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import SIPStatusTab from "./SIPStatusTab";
 import ProjectSummaryTab from "./ProjectSummaryTab";
+import JSDMSTab from "./JSDMSTab";
 
 /**
  * Jharkhand Skills — Daily Report / MIS Dashboard
@@ -161,12 +162,7 @@ export default function MISDashboard() {
           <ProjectSummaryTab canWrite={canWrite} onChange={loadOverview} />
         </TabsContent>
         <TabsContent value="jsdms" className="pt-4">
-          <ComingSoon
-            title="JSDMS Project Summary"
-            phase="Phase 3"
-            hint="20-column JSDMS tracker: BG Status, FY-wise target achieved, TOT alignment, trainer gap."
-            icon={Landmark}
-          />
+          <JSDMSTab canWrite={canWrite} onChange={loadOverview} />
         </TabsContent>
         <TabsContent value="mob" className="pt-4">
           <ComingSoon

@@ -1022,3 +1022,31 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - Overview updates: total_batches=26, total_enrolled=780, total_certified=355, placement_pct=38.33%, certification_pct=45.51%
 - Rollups aggregate: by_project "Birsa" — 26 batches, 2280 target, 780 enrolled, 355 certified
 - Frontend screenshot confirms color-coded % table, filters, KPI strip, bulk-upload flow — existing modules untouched
+
+## MIS · Phase 3 — JSDMS Project Tracker (Done + Verified, Feb 2026)
+
+### Backend
+- Collection: `mis_jsdms`
+- 21 stored fields (20 from Excel + `achieved_24_25` for the current FY)
+- Endpoints (all under `/api/mis/jsdms/*`): CRUD, filter-options, sample-excel, bulk-preview, bulk-upload, export
+- **Auto-calc fields** (computed on read):
+  - `total_achieved`         = achieved_21_22 + achieved_22_23 + achieved_23_24 + achieved_24_25
+  - `remaining_target`       = max(0, target_received - total_achieved)
+  - `achievement_pct`        = total_achieved / target_received × 100
+  - `trainer_gap`            = max(0, trainers_required - (tot_aligned + tot_renew_aligned))
+  - `trainer_readiness_pct`  = (tot_aligned + tot_renew_aligned) / trainers_required × 100
+  - `enrolled_vs_target_pct` = total_enrolled / target_received × 100
+
+### Frontend (`/app/frontend/src/pages/mis/JSDMSTab.jsx`)
+- 6-KPI summary (rows, target received, total achieved, enrolled, achievement %, trainer gap — gap turns red when > 0)
+- 4-filter bar: search, Centre, Job Role, BG Status
+- **17-column table** with color-coded auto-calcs (achievement % green ≥60%, amber otherwise; trainer gap red when positive)
+- **Add/Edit form** grouped into Basic / FY-wise / Training Delivery / Trainer Roster + live preview panel (Total Achieved, Remaining, Achievement %, Trainer Gap, Trainer Readiness %) that recomputes as user types
+- **View modal** highlights 5 auto-calc KPIs on top
+- **Bulk Upload** — 3-step dialog with template download + colour-coded preview
+- BG Status chip colours: Submitted=blue, Approved=green, Pending=amber, Rejected/Expired=red
+
+### Verified E2E
+- Manual create with target=800, FY splits 120/180/220/60, req=4, aligned=2, renew=1, certified=3 → total_achieved=580, remaining=220, ach%=72.5, trainer_gap=1, readiness%=75 ✅
+- Template download + bulk upload of own template roundtrip works
+- Frontend screenshot confirms KPI strip + table + BG chips render with real auto-calc values
