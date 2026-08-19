@@ -10885,16 +10885,10 @@ def _iter_dates(start: str, end: str):
         cur = cur + _t(days=1)
 
 
-@api.get("/batches/{bid}/attendance")
-async def get_batch_attendance(
-    bid: str,
-    from_date: Optional[str] = Query(None),
-    to_date: Optional[str] = Query(None),
-    _=Depends(require_role(*ATT_ROLES, "accountant")),
-):
+async def _build_attendance_grid(bid: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    """Internal grid builder — used by both the HTTP endpoint and CSV export."""
     b = await db.batches.find_one({"id": bid}, {"_id": 0})
     if not b: raise HTTPException(404, "Batch not found")
-    # Default range = batch window
     f = from_date or b.get("start_date") or datetime.now(timezone.utc).date().isoformat()
     t = to_date or b.get("end_date") or f
     candidates = await db.candidates.find(
@@ -10905,7 +10899,6 @@ async def get_batch_attendance(
         {"batch_id": bid, "date": {"$gte": f, "$lte": t}},
         {"_id": 0}
     ).to_list(200000)
-    # Build a matrix: candidate_id -> date -> status
     matrix: dict = {}
     for a in att:
         matrix.setdefault(a["candidate_id"], {})[a["date"]] = a.get("status") or "A"
@@ -10915,10 +10908,18 @@ async def get_batch_attendance(
                   "end_date": b.get("end_date"),
                   "total_beneficiaries": b.get("total_beneficiaries")},
         "from_date": f, "to_date": t, "dates": dates,
-        "candidates": candidates,
-        "matrix": matrix,
-        "training_days": len(dates),
+        "candidates": candidates, "matrix": matrix, "training_days": len(dates),
     }
+
+
+@api.get("/batches/{bid}/attendance")
+async def get_batch_attendance(
+    bid: str,
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    _=Depends(require_role(*ATT_ROLES, "accountant")),
+):
+    return await _build_attendance_grid(bid, from_date, to_date)
 
 
 def _validate_att_window(batch: dict, dates: List[str]) -> None:
@@ -11017,6 +11018,286 @@ async def batch_attendance_summary(bid: str, _=Depends(require_role(*ATT_ROLES, 
             "presents": presents, "absents": absents, "holidays": holidays,
             "overall_pct": round(presents / max(1, presents + absents) * 100, 2),
             "per_candidate": cand_map}
+
+
+@api.get("/batches/{bid}/attendance/export.csv")
+async def export_attendance_csv(bid: str, from_date: Optional[str] = Query(None), to_date: Optional[str] = Query(None), _=Depends(require_role(*ATT_ROLES, "accountant"))):
+    """CSV export: rows = candidates, columns = dates + Present% + Absent%."""
+    grid = await _build_attendance_grid(bid, from_date, to_date)
+    import io, csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    header = ["Candidate ID", "Name", "Mobile"] + grid["dates"] + ["Present", "Absent", "Holiday", "Present %"]
+    w.writerow(header)
+    for c in grid["candidates"]:
+        row_att = grid["matrix"].get(c["id"], {})
+        cells = [row_att.get(d, "") for d in grid["dates"]]
+        p = sum(1 for v in cells if v == "P")
+        a = sum(1 for v in cells if v == "A")
+        h = sum(1 for v in cells if v == "H")
+        pct = round(p / max(1, p + a) * 100, 2)
+        w.writerow([c.get("candidate_id") or c["id"][:8], c.get("name", ""), c.get("mobile", ""),
+                    *cells, p, a, h, f"{pct}%"])
+    filename = f"attendance_{grid['batch'].get('name') or bid}_{grid['from_date']}_to_{grid['to_date']}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ============================================================================
+# ==========  BATCH MANAGEMENT · Stage 5 · Assessment & Certification  =======
+# ============================================================================
+# Per-candidate: assessment_status = present/passed/failed/absent + certified bool.
+# Per-batch: sdms_batch_id, assessment_agency, assessor_name, assessor_contact,
+# assessment_date, assessment_status (batch-level workflow status).
+
+ASSESS_ROLES = ("admin", "manager", "senior_manager", "hr", "center_manager")
+
+BATCH_ASSESSMENT_STATUSES = [
+    "SDMS Not Received", "More Than 20%", "Assessment Done Result Pending",
+    "SDMS Done Assessment not Done", "Bill Generated",
+    "Completed But Bill Not Generated",
+]
+
+
+class BatchAssessmentIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    sdms_batch_id: Optional[str] = ""
+    assessment_agency: Optional[str] = ""
+    assessor_name: Optional[str] = ""
+    assessor_contact: Optional[str] = ""
+    assessment_date: Optional[str] = ""
+    assessment_status: Optional[str] = ""
+
+
+class CandidateAssessmentIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    # per-candidate outcome. `status` in {absent, present, passed, failed}
+    status: str = Field(min_length=1)
+    certified: Optional[bool] = None
+    marks: Optional[float] = None
+    remarks: Optional[str] = ""
+
+
+@api.patch("/batches/{bid}/assessment")
+async def update_batch_assessment(bid: str, body: BatchAssessmentIn, user=Depends(require_role(*ASSESS_ROLES))):
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if b.get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only edit own-batch assessment")
+    upd = {k: v for k, v in body.model_dump().items() if v is not None and v != ""}
+    upd["assessment_updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.batches.find_one_and_update({"id": bid}, {"$set": upd}, return_document=True)
+    res.pop("_id", None)
+    return BatchOut(**res)
+
+
+@api.post("/batches/{bid}/candidates/{cid}/assessment")
+async def set_candidate_assessment(bid: str, cid: str, body: CandidateAssessmentIn, user=Depends(require_role(*ASSESS_ROLES))):
+    c = await db.candidates.find_one({"id": cid, "batch_id": bid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not c: raise HTTPException(404, "Candidate not found in this batch")
+    b = await db.batches.find_one({"id": bid}, {"_id": 0, "center_id": 1})
+    if user.get("role") == "center_manager":
+        if b.get("center_id") not in set(user.get("assigned_center_ids") or []):
+            raise HTTPException(403, "Center manager can only update own-batch candidates")
+    upd = {
+        "assessment_status": body.status,
+        "certified": bool(body.certified) if body.certified is not None else (body.status == "passed"),
+        "assessment_updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if body.marks is not None: upd["assessment_marks"] = float(body.marks)
+    if body.remarks: upd["assessment_remarks"] = body.remarks
+    await db.candidates.update_one({"id": cid}, {"$set": upd})
+    # Sync batch counters based on aggregated candidate outcomes.
+    await _resync_batch_assessment_counters(bid)
+    doc = await db.candidates.find_one({"id": cid}, {"_id": 0})
+    return doc
+
+
+@api.post("/batches/{bid}/candidates/assessment/bulk")
+async def bulk_assess_candidates(bid: str, payload: dict = Body(...), user=Depends(require_role(*ASSESS_ROLES))):
+    """payload = {rows:[{candidate_id, status, certified?, marks?, remarks?}, ...]}
+    Bulk-set candidate outcomes and resync counters."""
+    b = await db.batches.find_one({"id": bid}, {"_id": 0, "center_id": 1})
+    if not b: raise HTTPException(404, "Batch not found")
+    if user.get("role") == "center_manager":
+        if b.get("center_id") not in set(user.get("assigned_center_ids") or []):
+            raise HTTPException(403, "Center manager can only update own-batch candidates")
+    rows = payload.get("rows") or []
+    if not rows: raise HTTPException(400, "rows[] is required")
+    from pymongo import UpdateOne
+    ops = []
+    now = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        cid = r.get("candidate_id")
+        st = r.get("status")
+        if not cid or not st: continue
+        upd = {"assessment_status": st,
+               "certified": bool(r.get("certified")) if r.get("certified") is not None else (st == "passed"),
+               "assessment_updated_at": now}
+        if r.get("marks") is not None: upd["assessment_marks"] = float(r["marks"])
+        if r.get("remarks"): upd["assessment_remarks"] = r["remarks"]
+        ops.append(UpdateOne({"id": cid, "batch_id": bid, "is_deleted": {"$ne": True}}, {"$set": upd}))
+    if not ops: return {"updated": 0}
+    res = await db.candidates.bulk_write(ops, ordered=False)
+    await _resync_batch_assessment_counters(bid)
+    return {"updated": res.modified_count, "matched": res.matched_count}
+
+
+async def _resync_batch_assessment_counters(bid: str) -> None:
+    """Recompute actual_present / pass_count / fail_count / absent_count /
+    total_certified / passed_candidates on the batch based on candidate rows."""
+    pipe = [{"$match": {"batch_id": bid, "is_deleted": {"$ne": True}}},
+            {"$group": {"_id": "$assessment_status", "n": {"$sum": 1},
+                         "certified": {"$sum": {"$cond": ["$certified", 1, 0]}}}}]
+    buckets = {r["_id"] or "": r for r in await db.candidates.aggregate(pipe).to_list(20)}
+    present = int(buckets.get("present", {}).get("n", 0)) + int(buckets.get("passed", {}).get("n", 0)) + int(buckets.get("failed", {}).get("n", 0))
+    passed = int(buckets.get("passed", {}).get("n", 0))
+    failed = int(buckets.get("failed", {}).get("n", 0))
+    absent = int(buckets.get("absent", {}).get("n", 0))
+    certified = sum(int(b.get("certified") or 0) for b in buckets.values())
+    await db.batches.update_one({"id": bid}, {"$set": {
+        "actual_present": present, "pass_count": passed, "fail_count": failed,
+        "absent_count": absent, "total_certified": certified,
+        "passed_candidates": passed,
+    }})
+
+
+@api.get("/batches/{bid}/assessment/summary")
+async def batch_assessment_summary(bid: str, _=Depends(require_role(*ASSESS_ROLES, "accountant"))):
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    total_enrolled = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}})
+    pipe = [{"$match": {"batch_id": bid, "is_deleted": {"$ne": True}}},
+            {"$group": {"_id": "$assessment_status", "n": {"$sum": 1}}}]
+    counts = {(r["_id"] or "unmarked"): int(r["n"] or 0) for r in await db.candidates.aggregate(pipe).to_list(20)}
+    certified = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "certified": True})
+    present = counts.get("present", 0) + counts.get("passed", 0) + counts.get("failed", 0)
+    return {
+        "batch": {"id": bid, "name": b.get("name"), "sdms_batch_id": b.get("sdms_batch_id"),
+                  "assessment_agency": b.get("assessment_agency"),
+                  "assessor_name": b.get("assessor_name"),
+                  "assessor_contact": b.get("assessor_contact"),
+                  "assessment_date": b.get("assessment_date"),
+                  "assessment_status": b.get("assessment_status")},
+        "total_enrolled": total_enrolled,
+        "unmarked": counts.get("unmarked", 0),
+        "present": present, "absent": counts.get("absent", 0),
+        "passed": counts.get("passed", 0), "failed": counts.get("failed", 0),
+        "certified": certified,
+        "certification_pct": round(certified / max(1, total_enrolled) * 100, 2),
+        "pass_pct": round(counts.get("passed", 0) / max(1, present) * 100, 2),
+    }
+
+
+# ============================================================================
+# ==========  BATCH MANAGEMENT · Stage 6 · Placement Management  =============
+# ============================================================================
+
+class CandidatePlacementIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    placement_status: str = Field(min_length=1)  # placed / pending / self-employed / declined
+    employer: Optional[str] = ""
+    job_location: Optional[str] = ""
+    designation: Optional[str] = ""
+    joining_date: Optional[str] = ""
+    ctc: Optional[float] = 0
+    retention_month_1: Optional[str] = ""       # retained / not-retained / pending
+    retention_month_2: Optional[str] = ""
+    retention_month_3: Optional[str] = ""
+    remarks: Optional[str] = ""
+
+
+PLACE_ROLES = ("admin", "manager", "senior_manager", "hr", "center_manager")
+
+
+@api.patch("/batches/{bid}/candidates/{cid}/placement")
+async def set_candidate_placement(bid: str, cid: str, body: CandidatePlacementIn, user=Depends(require_role(*PLACE_ROLES))):
+    c = await db.candidates.find_one({"id": cid, "batch_id": bid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not c: raise HTTPException(404, "Candidate not found in this batch")
+    b = await db.batches.find_one({"id": bid}, {"_id": 0, "center_id": 1})
+    if user.get("role") == "center_manager":
+        if b.get("center_id") not in set(user.get("assigned_center_ids") or []):
+            raise HTTPException(403, "Center manager can only update own-batch candidates")
+    upd = {**body.model_dump(),
+           "placement_updated_at": datetime.now(timezone.utc).isoformat()}
+    # Placement is only allowed for certified candidates (business rule).
+    if body.placement_status == "placed" and not c.get("certified"):
+        raise HTTPException(400, "Only certified candidates can be marked as placed. Update assessment first.")
+    await db.candidates.update_one({"id": cid}, {"$set": upd})
+    await _resync_batch_placement_counters(bid)
+    return await db.candidates.find_one({"id": cid}, {"_id": 0})
+
+
+@api.post("/batches/{bid}/candidates/placement/bulk")
+async def bulk_place_candidates(bid: str, payload: dict = Body(...), user=Depends(require_role(*PLACE_ROLES))):
+    b = await db.batches.find_one({"id": bid}, {"_id": 0, "center_id": 1})
+    if not b: raise HTTPException(404, "Batch not found")
+    if user.get("role") == "center_manager":
+        if b.get("center_id") not in set(user.get("assigned_center_ids") or []):
+            raise HTTPException(403, "Center manager can only update own-batch candidates")
+    rows = payload.get("rows") or []
+    if not rows: raise HTTPException(400, "rows[] is required")
+    from pymongo import UpdateOne
+    now = datetime.now(timezone.utc).isoformat()
+    ops = []
+    for r in rows:
+        cid = r.get("candidate_id")
+        if not cid: continue
+        # certified check
+        c = await db.candidates.find_one({"id": cid, "batch_id": bid, "is_deleted": {"$ne": True}}, {"_id": 0, "certified": 1})
+        if not c: continue
+        if r.get("placement_status") == "placed" and not c.get("certified"):
+            continue  # silently skip; caller should validate
+        upd = {k: v for k, v in r.items() if k != "candidate_id" and v is not None}
+        upd["placement_updated_at"] = now
+        ops.append(UpdateOne({"id": cid, "batch_id": bid}, {"$set": upd}))
+    if not ops: return {"updated": 0}
+    res = await db.candidates.bulk_write(ops, ordered=False)
+    await _resync_batch_placement_counters(bid)
+    return {"updated": res.modified_count}
+
+
+async def _resync_batch_placement_counters(bid: str) -> None:
+    placed = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "placement_status": "placed"})
+    await db.batches.update_one({"id": bid}, {"$set": {
+        "placed_candidates": placed, "num_placement": placed,
+        "placement_updated_at": datetime.now(timezone.utc).isoformat(),
+    }})
+
+
+@api.get("/batches/{bid}/placement/summary")
+async def batch_placement_summary(bid: str, _=Depends(require_role(*PLACE_ROLES, "accountant"))):
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    total_enrolled = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}})
+    certified = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "certified": True})
+    placed = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "placement_status": "placed"})
+    # Retention chips per month
+    ret1 = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "retention_month_1": "retained"})
+    ret2 = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "retention_month_2": "retained"})
+    ret3 = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}, "retention_month_3": "retained"})
+    pipe = [{"$match": {"batch_id": bid, "is_deleted": {"$ne": True}, "placement_status": "placed", "ctc": {"$gt": 0}}},
+            {"$group": {"_id": None, "avg_ctc": {"$avg": "$ctc"}, "max_ctc": {"$max": "$ctc"}, "min_ctc": {"$min": "$ctc"}}}]
+    ctc = await db.candidates.aggregate(pipe).to_list(1)
+    ctc_stats = ctc[0] if ctc else {"avg_ctc": 0, "max_ctc": 0, "min_ctc": 0}
+    return {
+        "batch": {"id": bid, "name": b.get("name")},
+        "total_enrolled": total_enrolled, "certified": certified, "placed": placed,
+        "placement_pct": round(placed / max(1, certified) * 100, 2),
+        "pending_placement": max(0, certified - placed),
+        "retention": {"month_1": ret1, "month_2": ret2, "month_3": ret3,
+                       "month_1_pct": round(ret1 / max(1, placed) * 100, 2),
+                       "month_2_pct": round(ret2 / max(1, placed) * 100, 2),
+                       "month_3_pct": round(ret3 / max(1, placed) * 100, 2)},
+        "ctc": {"avg": round(float(ctc_stats.get("avg_ctc") or 0), 2),
+                 "min": float(ctc_stats.get("min_ctc") or 0),
+                 "max": float(ctc_stats.get("max_ctc") or 0)},
+    }
 
 
 # ============================================================================

@@ -18,6 +18,8 @@ import {
 } from "lucide-react";
 import EnrollmentStage from "@/pages/bm/EnrollmentStage";
 import AttendanceStage from "@/pages/bm/AttendanceStage";
+import AssessmentStage from "@/pages/bm/AssessmentStage";
+import PlacementStage from "@/pages/bm/PlacementStage";
 import ClosureStage from "@/pages/bm/ClosureStage";
 
 /**
@@ -322,8 +324,8 @@ export default function BatchManagement() {
           <TabsTrigger value="batches" className="rounded-none" data-testid="bm-tab-batches">2 · Batch Creation</TabsTrigger>
           <TabsTrigger value="enroll" className="rounded-none" data-testid="bm-tab-enroll">3 · Enrollment</TabsTrigger>
           <TabsTrigger value="attendance" className="rounded-none" data-testid="bm-tab-attendance">4 · Attendance</TabsTrigger>
-          <TabsTrigger value="assessment" className="rounded-none" data-testid="bm-tab-assessment" disabled>5 · Assessment</TabsTrigger>
-          <TabsTrigger value="placement" className="rounded-none" data-testid="bm-tab-placement" disabled>6 · Placement</TabsTrigger>
+          <TabsTrigger value="assessment" className="rounded-none" data-testid="bm-tab-assessment">5 · Assessment</TabsTrigger>
+          <TabsTrigger value="placement" className="rounded-none" data-testid="bm-tab-placement">6 · Placement</TabsTrigger>
           <TabsTrigger value="closure" className="rounded-none" data-testid="bm-tab-closure">7 · Closure</TabsTrigger>
         </TabsList>
 
@@ -521,24 +523,20 @@ export default function BatchManagement() {
           <AttendanceStage batches={batches} canWrite={canManageBatches} />
         </TabsContent>
 
+        {/* ================== STAGE 5: ASSESSMENT ================== */}
+        <TabsContent value="assessment" className="pt-4">
+          <AssessmentStage batches={batches} canWrite={canManageBatches} />
+        </TabsContent>
+
+        {/* ================== STAGE 6: PLACEMENT ================== */}
+        <TabsContent value="placement" className="pt-4">
+          <PlacementStage batches={batches} canWrite={canManageBatches} />
+        </TabsContent>
+
         {/* ================== STAGE 7: CLOSURE + EXTENSIONS ================== */}
         <TabsContent value="closure" className="pt-4">
           <ClosureStage batches={batches} refreshBatches={loadBatches} />
         </TabsContent>
-
-        {/* ================== STAGES 5, 6 PLACEHOLDERS ================== */}
-        {["assessment", "placement"].map((k) => (
-          <TabsContent key={k} value={k} className="pt-8">
-            <div className="swiss-card p-8 text-center border-2 border-dashed border-[var(--muted)]/30" data-testid={`bm-placeholder-${k}`}>
-              <div className="font-heading font-black text-xl">Stage coming in next release</div>
-              <div className="text-sm text-[var(--muted)] mt-2 max-w-lg mx-auto">
-                This stage is scheduled for the next Batch Management rollout. Until then use
-                the existing MIS Project Summary tab for assessment / placement fields — data will be
-                migrated safely.
-              </div>
-            </div>
-          </TabsContent>
-        ))}
       </Tabs>
 
       {/* ==================== Target Allocation Dialog ==================== */}

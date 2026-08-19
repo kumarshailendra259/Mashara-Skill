@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Check, X, CalendarDays, Users, ListChecks } from "lucide-react";
+import { Check, X, CalendarDays, Users, ListChecks, Download } from "lucide-react";
 
 /**
  * Stage 4 — Attendance Grid
@@ -100,6 +100,28 @@ export default function AttendanceStage({ batches, canWrite }) {
 
   const eligibleBatches = useMemo(() => batches.filter((b) => b.start_date && b.end_date), [batches]);
 
+  const exportCsv = async () => {
+    if (!batchId) return;
+    try {
+      const params = new URLSearchParams();
+      if (from) params.set("from_date", from);
+      if (to) params.set("to_date", to);
+      // Use fetch with credentials so it can stream the CSV directly.
+      const url = `${process.env.REACT_APP_BACKEND_URL}/api/batches/${batchId}/attendance/export.csv?${params.toString()}`;
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const dl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = dl;
+      const safe = (activeBatch?.name || batchId).replace(/[^a-zA-Z0-9-_]/g, "_");
+      a.download = `attendance_${safe}_${from}_to_${to}.csv`;
+      a.click();
+      URL.revokeObjectURL(dl);
+      toast.success("Attendance CSV exported");
+    } catch (e) { toast.error(e.message || "Export failed"); }
+  };
+
   return (
     <div className="space-y-4" data-testid="bm-att-stage">
       {/* Batch + date range picker */}
@@ -130,6 +152,15 @@ export default function AttendanceStage({ batches, canWrite }) {
           )}
         </div>
       </div>
+
+      {/* Export button */}
+      {batchId && (
+        <div className="flex justify-end">
+          <Button onClick={exportCsv} variant="outline" className="rounded-none gap-1 text-xs" data-testid="bm-att-export">
+            <Download size={13} /> Export CSV
+          </Button>
+        </div>
+      )}
 
       {/* Summary chips */}
       {summary && batchId && (

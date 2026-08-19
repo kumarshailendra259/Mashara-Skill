@@ -26,7 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 37 · Phase 3 — Assessment + Placement + Attendance CSV (Done, Feb 2026)
+- **User asked**: Ship Assessment stage (SDMS + agency + present/pass/fail chips + live certification %), Placement stage (employer + CTC + M1/M2/M3 retention chips + live placement %), and CSV export for the attendance grid.
+- **Backend `/app/backend/server.py`** (~+280 LOC):
+  - **Assessment**: `PATCH /api/batches/{bid}/assessment` (batch-level SDMS/agency/date/assessor/status); `POST /api/batches/{bid}/candidates/{cid}/assessment` (per-candidate absent/present/passed/failed + certified auto-set on passed); `POST /api/batches/{bid}/candidates/assessment/bulk` (UpdateOne `bulk_write`); `GET /api/batches/{bid}/assessment/summary` (returns present/absent/passed/failed/certified counters + `certification_pct`, `pass_pct`). Helper `_resync_batch_assessment_counters` keeps batch.passed_candidates / total_certified / actual_present / pass_count / fail_count / absent_count in sync.
+  - **Placement**: `PATCH /api/batches/{bid}/candidates/{cid}/placement` (blocks `placed` status for non-certified with 400); `POST /api/batches/{bid}/candidates/placement/bulk` (silently skips non-certified); `GET /api/batches/{bid}/placement/summary` (total_enrolled, certified, placed, `placement_pct`, pending, per-month retention counts + %s, ctc min/avg/max). Helper `_resync_batch_placement_counters` keeps placed_candidates / num_placement in sync.
+  - **Attendance CSV**: refactored `get_batch_attendance` to reuse `_build_attendance_grid` helper; new `GET /api/batches/{bid}/attendance/export.csv?from_date&to_date` streams a CSV — headers = Candidate ID + Name + Mobile + <date columns> + Present + Absent + Holiday + Present %.
+  - RBAC: `ASSESS_ROLES`/`PLACE_ROLES` = (admin, manager, senior_manager, hr, center_manager); CSV export also allows accountant. Center-manager scoped to own centers throughout.
+- **Frontend** (2 new files + 1 enhancement):
+  - `/pages/bm/AssessmentStage.jsx` — batch metadata form with 6 batch-level fields + "Save Batch Info", 6-KPI summary strip with live certification %, 4-chip bulk-mark bar, per-candidate outcome chips (Absent / Present / Passed / Failed) with active-state ring highlight + Certified badge.
+  - `/pages/bm/PlacementStage.jsx` — 6-KPI strip (Enrolled / Certified / Placed / **Placement %** / Pending / Avg CTC), 3-card Retention snapshot (M1/M2/M3 counts + %s), certified-candidates-only table with per-row Edit dialog (status + employer + location + designation + joining + CTC + 3 retention selects + remarks).
+  - `/pages/bm/AttendanceStage.jsx` — added "Export CSV" button that streams via `fetch(url, {credentials:'include'})` and triggers a filename-sanitised download.
+  - `BatchManagement.jsx` — Stages 5 + 6 tabs now enabled. Placeholder section removed. **All 7 stages of Batch Management are now functional.**
+- **Verified iter-54**: 16/16 backend pytest + 100% Playwright frontend. Regression clean on /api/batches, /api/batch-targets, /api/mis/live/overview.
+- **Post-test fixes**: (1) Assessment meta initialised with 6 empty-string keys to kill React uncontrolled-to-controlled warnings; (2) Attendance CSV filename sanitised (regex `/[^a-zA-Z0-9-_]/g → _`).
+
 ### Phase 37 · Phase 2 — Batch Management Stages 3, 4, 7 (Done, Feb 2026)
+
 - **User asked**: Ship Enrollment (bulk CSV + capacity gate), Attendance Grid (date-range Mark-All-Present), and Auto-Closure + Extension approval.
 - **Backend `/app/backend/server.py`** (~+450 LOC):
   - **Enrollment**: `_batch_capacity_state(bid)` helper; `GET /api/batches/{bid}/candidates` returns capacity + rows; `POST /api/batches/{bid}/candidates` single-add with Aadhaar dedupe + full-capacity 400; `POST /api/batches/{bid}/candidates/bulk-upload` (multipart CSV/XLSX) returns `{valid, errors, counts, capacity_state}` — validates name, dedupes Aadhaar (in-batch + in-file), truncates overflow into errors; `POST /api/batches/{bid}/candidates/bulk-commit` atomically re-checks capacity + `insert_many`; `DELETE /api/batches/{bid}/candidates/{cid}` soft-deletes.
