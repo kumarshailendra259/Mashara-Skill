@@ -13,7 +13,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Plus, Search, Trash2, Edit3, Eye, Landmark, Paperclip, ShieldCheck, AlertTriangle, Download,
+  Plus, Search, Trash2, Edit3, Eye, Landmark, Paperclip, ShieldCheck, AlertTriangle, Download, Upload, FileSpreadsheet, X, CheckCircle2, XCircle,
 } from "lucide-react";
 
 const FIELDS = [
@@ -53,6 +53,12 @@ export default function BankGuarantees() {
   const [renewsBgId, setRenewsBgId] = useState("");
   const [runningAlerts, setRunningAlerts] = useState(false);
   const [chain, setChain] = useState(null);
+  // ---- Bulk Upload state ----
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFile, setBulkFile] = useState(null);
+  const [bulkPreview, setBulkPreview] = useState(null); // {valid, failed, total_rows, valid_rows, errors}
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const bulkFileRef = useRef(null);
   useEffect(() => {
     if (!viewing) { setChain(null); return; }
     // Only fetch the chain when the BG is either part of a renewal or has been renewed.
@@ -151,6 +157,54 @@ export default function BankGuarantees() {
     return Math.ceil((d - new Date()) / (1000 * 60 * 60 * 24));
   };
 
+  // ---- Bulk Upload helpers ----
+  const downloadTemplate = async () => {
+    try {
+      const r = await api.get("/bank-guarantees/sample-excel", { responseType: "blob" });
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = "bank_guarantee_bulk_upload_template.xlsx";
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const runBulkPreview = async () => {
+    if (!bulkFile) { toast.error("Please choose an Excel file"); return; }
+    setBulkBusy(true); setBulkPreview(null);
+    try {
+      const fd = new FormData(); fd.append("file", bulkFile);
+      const r = await api.post("/bank-guarantees/bulk-preview", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setBulkPreview(r.data);
+      if (r.data.valid === 0) toast.error("No valid rows found in file");
+      else toast.success(`${r.data.valid} valid, ${r.data.failed} failed — review before upload`);
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
+
+  const confirmBulkUpload = async () => {
+    if (!bulkFile || !bulkPreview || bulkPreview.valid === 0) return;
+    setBulkBusy(true);
+    try {
+      const fd = new FormData(); fd.append("file", bulkFile);
+      const r = await api.post("/bank-guarantees/bulk-upload", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast.success(`Uploaded ${r.data.uploaded} BG(s). ${r.data.failed} skipped.`);
+      setBulkOpen(false); setBulkFile(null); setBulkPreview(null);
+      if (bulkFileRef.current) bulkFileRef.current.value = "";
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
+
+  const closeBulk = () => {
+    setBulkOpen(false); setBulkFile(null); setBulkPreview(null);
+    if (bulkFileRef.current) bulkFileRef.current.value = "";
+  };
+
   return (
     <div className="space-y-4" data-testid="bg-page">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -175,6 +229,9 @@ export default function BankGuarantees() {
                 <AlertTriangle size={14} /> {runningAlerts ? "Sending…" : "Send Alerts Now"}
               </Button>
             )}
+            <Button variant="outline" onClick={() => setBulkOpen(true)} className="rounded-none gap-2" data-testid="btn-bulk-upload">
+              <Upload size={14} /> Bulk Upload
+            </Button>
             <Button onClick={openAdd} className="brand-btn rounded-none gap-2" data-testid="btn-add-bg"><Plus size={16} /> Add Bank Guarantee</Button>
           </div>
         )}
@@ -406,6 +463,134 @@ export default function BankGuarantees() {
               </div>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Upload dialog */}
+      <Dialog open={bulkOpen} onOpenChange={(o) => !o && closeBulk()}>
+        <DialogContent className="rounded-none max-w-4xl max-h-[90vh] overflow-y-auto" data-testid="bg-bulk-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-heading flex items-center gap-2">
+              <Upload size={18} className="text-[var(--brand)]" /> Bulk Upload — Bank Guarantees
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 text-sm">
+            {/* Step 1: template */}
+            <div className="border-l-4 border-[var(--brand)] bg-blue-50/40 p-3">
+              <div className="font-bold flex items-center gap-2"><FileSpreadsheet size={14} /> Step 1 · Download sample template</div>
+              <p className="text-xs text-[var(--muted)] mt-1">Excel me ye 10 columns hain — headers exactly same rakhein. First 6 columns mandatory hain (BG Number, Bank Name, BG Amount, Issue Date, Expiry Date, Beneficiary Name).</p>
+              <Button variant="outline" onClick={downloadTemplate} className="rounded-none gap-2 mt-2" data-testid="btn-bulk-template">
+                <Download size={12} /> Download Sample Excel
+              </Button>
+            </div>
+            {/* Step 2: choose file */}
+            <div className="border-l-4 border-gray-300 bg-gray-50 p-3">
+              <div className="font-bold flex items-center gap-2"><Upload size={14} /> Step 2 · Choose Excel file (.xlsx / .xls)</div>
+              <input
+                ref={bulkFileRef}
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={(e) => { setBulkFile(e.target.files?.[0] || null); setBulkPreview(null); }}
+                className="mt-2 block text-xs"
+                data-testid="input-bulk-file"
+              />
+              {bulkFile && (
+                <div className="text-xs text-[var(--muted)] mt-1">
+                  Selected: <span className="font-mono">{bulkFile.name}</span> ({Math.round(bulkFile.size / 1024)} KB)
+                </div>
+              )}
+              <div className="flex gap-2 mt-2">
+                <Button onClick={runBulkPreview} disabled={!bulkFile || bulkBusy} className="brand-btn rounded-none gap-1" data-testid="btn-bulk-preview">
+                  {bulkBusy && !bulkPreview ? "Validating…" : "Preview"}
+                </Button>
+                {bulkFile && (
+                  <Button variant="outline" onClick={() => { setBulkFile(null); setBulkPreview(null); if (bulkFileRef.current) bulkFileRef.current.value = ""; }} className="rounded-none gap-1">
+                    <X size={12} /> Clear
+                  </Button>
+                )}
+              </div>
+            </div>
+            {/* Step 3: preview */}
+            {bulkPreview && (
+              <div className="border-l-4 border-emerald-500 bg-emerald-50/40 p-3 space-y-2">
+                <div className="font-bold flex items-center gap-2 flex-wrap">
+                  <CheckCircle2 size={14} className="text-emerald-600" /> Step 3 · Preview
+                  <span className="text-xs font-normal ml-2">
+                    Total rows: <b>{bulkPreview.total_rows}</b> ·
+                    <span className="text-emerald-700 ml-1">Valid: <b>{bulkPreview.valid}</b></span> ·
+                    <span className="text-red-700 ml-1">Failed: <b>{bulkPreview.failed}</b></span>
+                  </span>
+                </div>
+                {/* Errors table */}
+                {bulkPreview.errors?.length > 0 && (
+                  <div className="mt-2" data-testid="bulk-errors">
+                    <div className="overline text-[10px] text-red-700 mb-1">Rows that will be skipped</div>
+                    <div className="overflow-x-auto border border-red-200 max-h-40 overflow-y-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="bg-red-100 sticky top-0"><tr>
+                          <th className="p-1.5 text-left">Row</th><th className="p-1.5 text-left">Reason</th><th className="p-1.5 text-left">BG Number</th>
+                        </tr></thead>
+                        <tbody>
+                          {bulkPreview.errors.map((er, i) => (
+                            <tr key={i} className="border-t border-red-100">
+                              <td className="p-1.5 font-mono">{er.row}</td>
+                              <td className="p-1.5 text-red-800"><XCircle size={11} className="inline mr-1" />{er.reason}</td>
+                              <td className="p-1.5 font-mono">{er.data?.bg_number || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {/* Valid rows table */}
+                {bulkPreview.valid_rows?.length > 0 && (
+                  <div className="mt-2" data-testid="bulk-valid-rows">
+                    <div className="overline text-[10px] text-emerald-700 mb-1">Rows that will be inserted</div>
+                    <div className="overflow-x-auto border border-emerald-200 max-h-56 overflow-y-auto">
+                      <table className="w-full text-[11px]">
+                        <thead className="bg-emerald-100 sticky top-0"><tr>
+                          <th className="p-1.5 text-left">Row</th>
+                          <th className="p-1.5 text-left">BG No</th>
+                          <th className="p-1.5 text-left">Bank</th>
+                          <th className="p-1.5 text-left">Amount</th>
+                          <th className="p-1.5 text-left">Issue</th>
+                          <th className="p-1.5 text-left">Expiry</th>
+                          <th className="p-1.5 text-left">Beneficiary</th>
+                          <th className="p-1.5 text-left">District</th>
+                        </tr></thead>
+                        <tbody>
+                          {bulkPreview.valid_rows.map((v) => (
+                            <tr key={v.row} className="border-t border-emerald-100">
+                              <td className="p-1.5 font-mono">{v.row}</td>
+                              <td className="p-1.5 font-mono font-bold">{v.data.bg_number}</td>
+                              <td className="p-1.5">{v.data.issued_by}</td>
+                              <td className="p-1.5">{inr(v.data.amount)}</td>
+                              <td className="p-1.5">{v.data.date_of_issuance}</td>
+                              <td className="p-1.5 font-bold">{v.data.bg_claim_expiry_date}</td>
+                              <td className="p-1.5">{v.data.in_favour_of}</td>
+                              <td className="p-1.5">{v.data.location || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <DialogFooter className="mt-3">
+            <Button variant="outline" onClick={closeBulk} className="rounded-none">Cancel</Button>
+            <Button
+              onClick={confirmBulkUpload}
+              disabled={!bulkPreview || bulkPreview.valid === 0 || bulkBusy}
+              className="brand-btn rounded-none gap-2"
+              data-testid="btn-bulk-confirm"
+            >
+              <Upload size={14} /> {bulkBusy && bulkPreview ? "Uploading…" : `Upload ${bulkPreview?.valid || 0} BG${(bulkPreview?.valid || 0) === 1 ? "" : "s"}`}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

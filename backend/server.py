@@ -13366,6 +13366,238 @@ async def create_bank_guarantee(
     return doc
 
 
+# ---------------- Bank Guarantee Bulk Upload ----------------
+BG_BULK_COLUMNS = [
+    ("bg_number", "BG Number"),
+    ("issued_by", "Bank Name"),
+    ("applicant", "Branch Name"),
+    ("amount", "BG Amount"),
+    ("date_of_issuance", "Issue Date"),
+    ("bg_claim_expiry_date", "Expiry Date"),
+    ("in_favour_of", "Beneficiary Name"),
+    ("work_order_no", "Project / Scheme Name"),
+    ("location", "District"),
+    ("remarks", "Remarks / Description"),
+]
+BG_BULK_COLUMNS_MAP = {k: h for k, h in BG_BULK_COLUMNS}
+BG_BULK_REQUIRED = {"bg_number", "issued_by", "amount", "date_of_issuance",
+                    "bg_claim_expiry_date", "in_favour_of"}
+
+
+def _parse_excel_date(v) -> Optional[str]:
+    """Accepts datetime, ISO, dd/mm/yyyy, dd-mm-yyyy, yyyy-mm-dd → ISO or None."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if hasattr(v, "isoformat"):
+        try: return v.isoformat()
+        except Exception: pass
+    s = str(v).strip()
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except Exception:
+            continue
+    return None
+
+
+def _parse_bg_amount(v) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(",", "").replace("\u20b9", "").replace("Rs.", "").replace("Rs", "").strip()
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+async def _bg_validate_bulk_rows(rows_iter, header_index: dict) -> dict:
+    """Return {valid_rows:[{row,data}], errors:[{row,reason,data}]}. Duplicate BG
+    numbers are checked both within the file and against the live DB."""
+    valid_rows: list = []
+    errors: list = []
+    seen_in_file: set = set()
+    existing_docs = await db.bank_guarantees.find(
+        {"is_deleted": {"$ne": True}}, {"_id": 0, "bg_number": 1}
+    ).to_list(20000)
+    db_bg_numbers = {(d.get("bg_number") or "").strip().lower()
+                     for d in existing_docs if d.get("bg_number")}
+
+    for r_i, row in enumerate(rows_iter, start=2):
+        if not row or all(c is None or _stringify_cell(c) == "" for c in row):
+            continue
+        rec: dict = {}
+        for key, header in BG_BULK_COLUMNS:
+            idx = header_index.get(header)
+            rec[key] = row[idx] if idx is not None and idx < len(row) else None
+        cleaned = {
+            "bg_number": _stringify_cell(rec.get("bg_number")),
+            "issued_by": _stringify_cell(rec.get("issued_by")),
+            "applicant": _stringify_cell(rec.get("applicant")),
+            "amount": _parse_bg_amount(rec.get("amount")),
+            "date_of_issuance": _parse_excel_date(rec.get("date_of_issuance")),
+            "bg_claim_expiry_date": _parse_excel_date(rec.get("bg_claim_expiry_date")),
+            "in_favour_of": _stringify_cell(rec.get("in_favour_of")),
+            "work_order_no": _stringify_cell(rec.get("work_order_no")),
+            "location": _stringify_cell(rec.get("location")),
+            "remarks": _stringify_cell(rec.get("remarks")),
+        }
+        preview_data = {k: _stringify_cell(v) for k, v in rec.items()}
+        missing = [BG_BULK_COLUMNS_MAP[k] for k in BG_BULK_REQUIRED if not cleaned.get(k)]
+        if missing:
+            errors.append({"row": r_i, "reason": f"Missing required: {', '.join(missing)}",
+                           "data": preview_data}); continue
+        if not cleaned["date_of_issuance"]:
+            errors.append({"row": r_i, "reason": "Invalid Issue Date (use YYYY-MM-DD or DD/MM/YYYY)",
+                           "data": preview_data}); continue
+        if not cleaned["bg_claim_expiry_date"]:
+            errors.append({"row": r_i, "reason": "Invalid Expiry Date (use YYYY-MM-DD or DD/MM/YYYY)",
+                           "data": preview_data}); continue
+        if cleaned["date_of_issuance"] > cleaned["bg_claim_expiry_date"]:
+            errors.append({"row": r_i, "reason": "Expiry Date must be after Issue Date",
+                           "data": preview_data}); continue
+        if cleaned["amount"] is None or cleaned["amount"] <= 0:
+            errors.append({"row": r_i, "reason": "BG Amount must be a positive number",
+                           "data": preview_data}); continue
+        bg_key = cleaned["bg_number"].lower()
+        if bg_key in seen_in_file:
+            errors.append({"row": r_i, "reason": f"Duplicate BG Number in this file: {cleaned['bg_number']}",
+                           "data": preview_data}); continue
+        if bg_key in db_bg_numbers:
+            errors.append({"row": r_i, "reason": f"BG Number already exists in system: {cleaned['bg_number']}",
+                           "data": preview_data}); continue
+        seen_in_file.add(bg_key)
+        cleaned["valid_till"] = cleaned["bg_claim_expiry_date"]
+        valid_rows.append({"row": r_i, "data": cleaned})
+    return {"valid_rows": valid_rows, "errors": errors}
+
+
+@api.get("/bank-guarantees/sample-excel")
+async def bg_sample_excel(_=Depends(require_role(*BG_WRITE_ROLES))):
+    """Download the BG bulk-upload template (headers + one example row)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "BG-Bulk-Upload"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    for idx, (_key, header) in enumerate(BG_BULK_COLUMNS, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = header_font; c.fill = header_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(18, len(header) + 4)
+    sample = ["BG-2025-001", "State Bank of India", "Ranchi Main", 500000,
+              "2025-04-01", "2026-03-31", "Jharkhand Skill Development Mission",
+              "PMKVY 4.0", "Ranchi", "5% performance BG"]
+    for i, v in enumerate(sample, start=1):
+        ws.cell(row=2, column=i, value=v)
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="bank_guarantee_bulk_upload_template.xlsx"'},
+    )
+
+
+async def _bg_read_uploaded_workbook(file: UploadFile) -> tuple:
+    data_bytes = await file.read()
+    if len(data_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 20MB)")
+    try:
+        wb = load_workbook(BytesIO(data_bytes), data_only=True, read_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid Excel file: {e}")
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration:
+        raise HTTPException(400, "Excel is empty")
+    headers = [(_stringify_cell(h) if h is not None else "") for h in header_row]
+    required_headers = {BG_BULK_COLUMNS_MAP[k] for k in BG_BULK_REQUIRED}
+    missing = [h for h in required_headers if h not in headers]
+    if missing:
+        raise HTTPException(400, f"Missing required columns: {', '.join(sorted(missing))}")
+    header_index = {h: i for i, h in enumerate(headers)}
+    return list(rows_iter), header_index
+
+
+@api.post("/bank-guarantees/bulk-preview")
+async def bg_bulk_preview(
+    file: UploadFile = File(...),
+    _=Depends(require_role(*BG_WRITE_ROLES)),
+):
+    """Validate WITHOUT persisting. Returns per-row errors + parsed valid rows
+    so the UI can render a preview table before the actual upload."""
+    rows, header_index = await _bg_read_uploaded_workbook(file)
+    result = await _bg_validate_bulk_rows(iter(rows), header_index)
+    return {
+        "total_rows": len(result["valid_rows"]) + len(result["errors"]),
+        "valid": len(result["valid_rows"]),
+        "failed": len(result["errors"]),
+        "valid_rows": result["valid_rows"],
+        "errors": result["errors"],
+    }
+
+
+@api.post("/bank-guarantees/bulk-upload")
+async def bg_bulk_upload(
+    file: UploadFile = File(...),
+    user=Depends(require_role(*BG_WRITE_ROLES)),
+):
+    """Re-validate and INSERT valid rows. The BG numbers seen in-file plus in-DB
+    at preview time are re-checked here to avoid TOCTOU duplicates."""
+    rows, header_index = await _bg_read_uploaded_workbook(file)
+    result = await _bg_validate_bulk_rows(iter(rows), header_index)
+    now = datetime.now(timezone.utc).isoformat()
+    to_insert: list = []
+    inserted: list = []
+    for vr in result["valid_rows"]:
+        d = vr["data"]
+        doc = {
+            "id": str(uuid.uuid4()),
+            "letter_of_intent_no": None,
+            "work_order_no": d.get("work_order_no") or None,
+            "in_favour_of": d.get("in_favour_of") or None,
+            "applicant": d.get("applicant") or None,
+            "issued_by": d.get("issued_by") or "",
+            "bg_number": d.get("bg_number") or "",
+            "amount": float(d.get("amount") or 0),
+            "date_of_issuance": d.get("date_of_issuance"),
+            "valid_till": d.get("valid_till"),
+            "bg_claim_expiry_date": d.get("bg_claim_expiry_date"),
+            "center_id": None,
+            "location": d.get("location") or None,
+            "remarks": d.get("remarks") or None,
+            "attachment": None,
+            "is_renewed": False,
+            "is_deleted": False,
+            "renews_bg_id": None,
+            "renews_bg_number": None,
+            "created_by": user["id"],
+            "created_at": now,
+            "updated_at": now,
+        }
+        to_insert.append(doc)
+        inserted.append({"row": vr["row"], "bg_number": doc["bg_number"], "id": doc["id"]})
+    if to_insert:
+        await db.bank_guarantees.insert_many(to_insert)
+    return {
+        "total_rows": len(to_insert) + len(result["errors"]),
+        "uploaded": len(to_insert),
+        "failed": len(result["errors"]),
+        "inserted": inserted,
+        "errors": result["errors"],
+    }
+
+
+
+
 @api.get("/bank-guarantees")
 async def list_bank_guarantees(
     search: Optional[str] = Query(None),
