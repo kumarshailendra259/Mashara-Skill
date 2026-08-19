@@ -13935,6 +13935,353 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
     }
 
 
+# ============================================================================
+# ============  JHARKHAND SKILLS  MIS  DASHBOARD  ============================
+# ============================================================================
+# Isolated module — new collections + endpoints, no interference with finance /
+# HR / attendance / candidates / BG / etc. Prefix: /api/mis/*
+#
+# Collections & indexes (created lazily on startup):
+#   mis_sip_centers      — SIP / Center Status (14 fields from Excel)
+#   mis_project_summary  — Project Wise Summary (batch-level rows, 38 fields)
+#   mis_jsdms            — JSDMS Project Summary (20 fields)
+#   mis_mobilization     — Daily Mobilization Report (multi-location per row)
+#
+# RBAC mapping (per user request — reuse existing roles):
+#   admin           -> Super Admin  (full read + write everywhere)
+#   senior_manager  -> State Head   (full read; write allowed)
+#   manager         -> Project Manager (full read; write allowed)
+#   hr / accountant -> read + write
+#   center_manager  -> read only (scoped to their assigned centers ideally)
+#   staff           -> Mobilizer (read own + create mobilization reports)
+#   partner         -> read only (no write)
+# ============================================================================
+
+MIS_READ_ROLES = ("admin", "hr", "manager", "senior_manager", "accountant",
+                  "center_manager", "partner", "staff", "center_staff")
+MIS_WRITE_ROLES = ("admin", "hr", "manager", "senior_manager", "accountant")
+
+
+async def _ensure_mis_indexes():
+    """Idempotent — create indexes for MIS collections on startup."""
+    try:
+        await db.mis_sip_centers.create_index("center_id_code", unique=False)
+        await db.mis_sip_centers.create_index([("state", 1), ("status", 1)])
+        await db.mis_sip_centers.create_index([("bg_validity_date", 1)])
+        await db.mis_project_summary.create_index([("project", 1), ("center_name", 1)])
+        await db.mis_project_summary.create_index([("batch_id", 1)])
+        await db.mis_project_summary.create_index([("target_year", 1), ("status", 1)])
+        await db.mis_jsdms.create_index([("center_name", 1), ("job_role", 1)])
+        await db.mis_mobilization.create_index([("branch", 1), ("report_date", -1)])
+        await db.mis_mobilization.create_index([("mobilizer_emp_id", 1), ("report_date", -1)])
+        log.info("MIS indexes ensured")
+    except Exception as e:  # noqa: BLE001
+        log.warning("MIS index setup failed: %s", e)
+
+
+# ---------- Helpers ----------
+def _mis_norm(v) -> str:
+    if v is None: return ""
+    if isinstance(v, datetime): return v.date().isoformat()
+    if hasattr(v, "isoformat"):
+        try: return v.isoformat()
+        except Exception: pass
+    return str(v).strip()
+
+
+def _mis_num(v) -> Optional[float]:
+    if v is None or v == "": return None
+    if isinstance(v, (int, float)): return float(v)
+    try:
+        s = str(v).strip().replace(",", "").replace("%", "")
+        return float(s) if s else None
+    except Exception:
+        return None
+
+
+def _mis_int(v) -> Optional[int]:
+    n = _mis_num(v)
+    return int(n) if n is not None else None
+
+
+# ---------- SIP / Center Status ----------
+SIP_FIELDS_MAP = [
+    ("serial_no", "S.No."),
+    ("center_name", "Center Name"),
+    ("center_id_code", "Center ID"),
+    ("state", "State"),
+    ("accreditation_date", "Accreditation Date"),
+    ("status", "Status"),
+    ("last_inspection_date", "Last Inspection Date"),
+    ("center_rating", "Center Rating"),
+    ("work_order_value", "Value of Work Order"),
+    ("bg_submitted_amount", "BG Submitted Total Amount"),
+    ("bg_validity_date", "BG Validity"),
+    ("branch_start_date", "Date of Branch Start"),
+    ("job_role_on_caaf", "Job Role on CAAF"),
+    ("job_role_to_be_added", "Job Role to be added"),
+]
+
+
+def _sip_from_payload(p: dict) -> dict:
+    """Normalise a SIP row (from Excel or JSON) into our stored shape."""
+    return {
+        "serial_no": _mis_int(p.get("serial_no")),
+        "center_name": _mis_norm(p.get("center_name")),
+        "center_id_code": _mis_norm(p.get("center_id_code")).upper(),
+        "state": _mis_norm(p.get("state")),
+        "accreditation_date": _parse_excel_date(p.get("accreditation_date")),
+        "status": _mis_norm(p.get("status")),
+        "last_inspection_date": _parse_excel_date(p.get("last_inspection_date")),
+        "center_rating": _mis_norm(p.get("center_rating")),
+        "work_order_value": _mis_num(p.get("work_order_value")),
+        "bg_submitted_amount": _mis_num(p.get("bg_submitted_amount")),
+        "bg_validity_date": _parse_excel_date(p.get("bg_validity_date")),
+        "branch_start_date": _parse_excel_date(p.get("branch_start_date")),
+        "job_role_on_caaf": _mis_norm(p.get("job_role_on_caaf")),
+        "job_role_to_be_added": _mis_norm(p.get("job_role_to_be_added")),
+    }
+
+
+@api.post("/mis/sip-centers", status_code=201)
+async def mis_sip_create(payload: dict = Body(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+    data = _sip_from_payload(payload)
+    if not data["center_name"]:
+        raise HTTPException(400, "Center Name is required")
+    if not data["center_id_code"]:
+        raise HTTPException(400, "Center ID is required")
+    # Duplicate check on Center ID (case-insensitive)
+    dup = await db.mis_sip_centers.find_one({"center_id_code": data["center_id_code"], "is_deleted": {"$ne": True}}, {"_id": 0, "id": 1})
+    if dup:
+        raise HTTPException(409, f"Center ID '{data['center_id_code']}' already exists")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **data, "is_deleted": False,
+           "created_by": user["id"], "created_at": now, "updated_at": now}
+    await db.mis_sip_centers.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/mis/sip-centers")
+async def mis_sip_list(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    _=Depends(require_role(*MIS_READ_ROLES)),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    if status and status != "all": q["status"] = {"$regex": f"^{status}$", "$options": "i"}
+    if state and state != "all": q["state"] = {"$regex": f"^{state}$", "$options": "i"}
+    if search:
+        s = search.strip()
+        q["$or"] = [
+            {"center_name": {"$regex": s, "$options": "i"}},
+            {"center_id_code": {"$regex": s, "$options": "i"}},
+            {"state": {"$regex": s, "$options": "i"}},
+            {"job_role_on_caaf": {"$regex": s, "$options": "i"}},
+        ]
+    docs = await db.mis_sip_centers.find(q, {"_id": 0}).sort("center_name", 1).to_list(2000)
+    return docs
+
+
+@api.patch("/mis/sip-centers/{sid}")
+async def mis_sip_update(sid: str, payload: dict = Body(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+    existing = await db.mis_sip_centers.find_one({"id": sid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "SIP Center not found")
+    upd = _sip_from_payload({**existing, **payload})
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.mis_sip_centers.update_one({"id": sid}, {"$set": upd})
+    doc = await db.mis_sip_centers.find_one({"id": sid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/mis/sip-centers/{sid}", status_code=204)
+async def mis_sip_delete(sid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.mis_sip_centers.update_one({"id": sid}, {"$set": {"is_deleted": True,
+        "deleted_at": datetime.now(timezone.utc).isoformat()}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "SIP Center not found")
+    return Response(status_code=204)
+
+
+@api.get("/mis/sip-centers/sample-excel")
+async def mis_sip_sample_excel(_=Depends(require_role(*MIS_WRITE_ROLES))):
+    """Downloadable template matching the SIP Status sheet in the reference workbook."""
+    wb = Workbook(); ws = wb.active; ws.title = "SIP-Status"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    for idx, (_k, header) in enumerate(SIP_FIELDS_MAP, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = header_font; c.fill = header_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(18, len(header) + 4)
+    ws.append([1, "Birsa Bharno", "TC214301", "Jharkhand", "2024-01-15", "Accredited",
+               "2024-06-10", "4 Star/38", 5000000, 200000, "2027-03-31", "2025-02-07",
+               "Self Employed Tailor (AMH/Q1947)", "Domestic Data Entry Operator (SSC/Q2212)"])
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="sip_status_template.xlsx"'})
+
+
+async def _sip_validate_rows(rows_iter, header_index: dict) -> dict:
+    valid: list = []; errors: list = []
+    seen: set = set()
+    existing = await db.mis_sip_centers.find({"is_deleted": {"$ne": True}}, {"_id": 0, "center_id_code": 1}).to_list(20000)
+    db_ids = {(d.get("center_id_code") or "").strip().upper() for d in existing}
+    for r_i, row in enumerate(rows_iter, start=2):
+        if not row or all(c is None or _mis_norm(c) == "" for c in row):
+            continue
+        rec = {k: (row[header_index[h]] if h in header_index and header_index[h] < len(row) else None)
+               for k, h in SIP_FIELDS_MAP}
+        cleaned = _sip_from_payload(rec)
+        preview = {k: _mis_norm(v) for k, v in cleaned.items()}
+        if not cleaned["center_name"]:
+            errors.append({"row": r_i, "reason": "Missing Center Name", "data": preview}); continue
+        if not cleaned["center_id_code"]:
+            errors.append({"row": r_i, "reason": "Missing Center ID", "data": preview}); continue
+        key = cleaned["center_id_code"]
+        if key in seen:
+            errors.append({"row": r_i, "reason": f"Duplicate Center ID in file: {key}", "data": preview}); continue
+        if key in db_ids:
+            errors.append({"row": r_i, "reason": f"Center ID already exists: {key}", "data": preview}); continue
+        seen.add(key)
+        valid.append({"row": r_i, "data": cleaned})
+    return {"valid_rows": valid, "errors": errors}
+
+
+async def _mis_read_workbook(file: UploadFile, expected_headers: list) -> tuple:
+    data_bytes = await file.read()
+    if len(data_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(413, "File too large (max 20MB)")
+    try:
+        wb = load_workbook(BytesIO(data_bytes), data_only=True, read_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid Excel file: {e}")
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        header_row = next(rows_iter)
+    except StopIteration:
+        raise HTTPException(400, "Excel is empty")
+    headers = [(_mis_norm(h) if h is not None else "") for h in header_row]
+    header_index = {h: i for i, h in enumerate(headers) if h}
+    return list(rows_iter), header_index
+
+
+@api.post("/mis/sip-centers/bulk-preview")
+async def mis_sip_bulk_preview(file: UploadFile = File(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+    rows, hi = await _mis_read_workbook(file, [h for _, h in SIP_FIELDS_MAP])
+    result = await _sip_validate_rows(iter(rows), hi)
+    return {"total_rows": len(result["valid_rows"]) + len(result["errors"]),
+            "valid": len(result["valid_rows"]), "failed": len(result["errors"]),
+            "valid_rows": result["valid_rows"], "errors": result["errors"]}
+
+
+@api.post("/mis/sip-centers/bulk-upload")
+async def mis_sip_bulk_upload(file: UploadFile = File(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+    rows, hi = await _mis_read_workbook(file, [h for _, h in SIP_FIELDS_MAP])
+    result = await _sip_validate_rows(iter(rows), hi)
+    now = datetime.now(timezone.utc).isoformat()
+    to_insert = []
+    for vr in result["valid_rows"]:
+        to_insert.append({"id": str(uuid.uuid4()), **vr["data"], "is_deleted": False,
+                          "created_by": user["id"], "created_at": now, "updated_at": now})
+    if to_insert:
+        await db.mis_sip_centers.insert_many(to_insert)
+    return {"uploaded": len(to_insert), "failed": len(result["errors"]),
+            "total_rows": len(to_insert) + len(result["errors"]),
+            "errors": result["errors"]}
+
+
+@api.get("/mis/sip-centers/export")
+async def mis_sip_export(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Export all live SIP rows as Excel — matches import template columns."""
+    docs = await db.mis_sip_centers.find({"is_deleted": {"$ne": True}}, {"_id": 0}).sort("center_name", 1).to_list(5000)
+    wb = Workbook(); ws = wb.active; ws.title = "SIP-Status"
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    for idx, (_k, header) in enumerate(SIP_FIELDS_MAP, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = header_font; c.fill = header_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(18, len(header) + 4)
+    for d in docs:
+        ws.append([d.get(k) for k, _ in SIP_FIELDS_MAP])
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="sip_status_export_{stamp}.xlsx"'})
+
+
+# ---------- MIS Overview (KPI cards) ----------
+@api.get("/mis/overview")
+async def mis_overview(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Consolidated KPI counters for the top of the MIS Dashboard."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    horizon_30 = (today + _td(days=30)).isoformat()
+
+    sip_total = await db.mis_sip_centers.count_documents({"is_deleted": {"$ne": True}})
+    sip_accredited = await db.mis_sip_centers.count_documents({"is_deleted": {"$ne": True}, "status": {"$regex": "^accredited$", "$options": "i"}})
+    bg_expiring = await db.mis_sip_centers.count_documents({
+        "is_deleted": {"$ne": True},
+        "bg_validity_date": {"$lte": horizon_30, "$gte": today.isoformat()},
+    })
+    bg_expired = await db.mis_sip_centers.count_documents({
+        "is_deleted": {"$ne": True},
+        "bg_validity_date": {"$lt": today.isoformat(), "$ne": None},
+    })
+    # Project summary aggregates (phase 3+ populated) — safe defaults for now.
+    pjt_batches = await db.mis_project_summary.count_documents({"is_deleted": {"$ne": True}})
+    pjt_active = await db.mis_project_summary.count_documents({"is_deleted": {"$ne": True}, "status": {"$regex": "^(active|running|ongoing)$", "$options": "i"}})
+    pjt_closed = await db.mis_project_summary.count_documents({"is_deleted": {"$ne": True}, "status": {"$regex": "^(closed|completed)$", "$options": "i"}})
+    # Simple totals via aggregation — zero-safe.
+    async def _sum(field):
+        pipe = [{"$match": {"is_deleted": {"$ne": True}}},
+                {"$group": {"_id": None, "s": {"$sum": {"$ifNull": [f"${field}", 0]}}}}]
+        res = await db.mis_project_summary.aggregate(pipe).to_list(1)
+        return int(res[0]["s"]) if res else 0
+    total_enrolled = await _sum("total_enrolled")
+    total_certified = await _sum("total_certified")
+    total_dropout = await _sum("total_dropout")
+    total_placement = await _sum("num_placement")
+    # Mobilization today aggregate (phase 5).
+    tstr = today.isoformat()
+    mob_today = await db.mis_mobilization.aggregate([
+        {"$match": {"report_date": tstr}},
+        {"$group": {"_id": None, "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                                 "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}}
+    ]).to_list(1)
+    mob_val = int(mob_today[0]["mob"]) if mob_today else 0
+    km_val = float(mob_today[0]["km"]) if mob_today else 0.0
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": tstr,
+        "sip": {"total_centers": sip_total, "accredited": sip_accredited,
+                 "bg_expiring_30d": bg_expiring, "bg_expired": bg_expired},
+        "projects": {"total_batches": pjt_batches, "active_batches": pjt_active, "closed_batches": pjt_closed,
+                      "total_enrolled": total_enrolled, "total_certified": total_certified,
+                      "total_dropout": total_dropout, "total_placement": total_placement,
+                      "placement_pct": round((total_placement / total_enrolled * 100) if total_enrolled else 0, 2),
+                      "certification_pct": round((total_certified / total_enrolled * 100) if total_enrolled else 0, 2),
+                      "dropout_pct": round((total_dropout / total_enrolled * 100) if total_enrolled else 0, 2)},
+        "mobilization": {"today_total": mob_val, "today_distance_km": km_val},
+    }
+
+
+# Trigger index creation on app startup (side-effect).
+@app.on_event("startup")
+async def _mis_startup():
+    await _ensure_mis_indexes()
+
+
+
 
 
 # ---------- Register router + CORS ----------

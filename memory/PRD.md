@@ -930,3 +930,56 @@ See `/app/memory/test_credentials.md`
 - **Sample Excel**: template now ships with user's example row (BG 1353NDLG00068126, ICICI Bank, Birsa Palojori, ₹1,74,636 etc.) so users can see the exact format at a glance.
 - **Preview table**: shows every one of the 14 columns (horizontally scrollable) with ₹ formatted amount + green tick on resolved Center name — users can verify every field before Confirm.
 - **Verified E2E**: uploaded user's exact example — all 14 fields persisted correctly (`fy=Birsa 25-26`, `letter_of_intent_no=LOI001722/26/02/2026`, `work_order_no=W002476/02/03/2026`, `applicant=Valeur Fabtex Pvt Ltd`, `center_id` resolved from name "Birsa Palojori", etc.). BG View modal displays all fields. Row-level errors work for unknown center + missing amount + expiry-before-issue + duplicate BG number.
+
+## Jharkhand Skills MIS Dashboard — Phase 1 (Foundation + SIP Status) — Done + Verified, Feb 2026
+
+### Scope Locked
+Full 12-section MIS module split into 5 phases to protect existing Finance/HR/Attendance/BG:
+- **Phase 1 (this session)**: Foundation — new isolated collections, routes, sidebar entry, tabbed MIS Dashboard page, and complete SIP / Center Status module with Excel bulk-upload + preview + export + BG expiry alert.
+- Phase 2: Project Wise Summary (38-col, batch-level, auto-calcs, Excel)
+- Phase 3: JSDMS Project Summary (20 cols + FY-wise targets)
+- Phase 4: Daily Mobilization Report (multi-location, GPS, photo)
+- Phase 5: Reports, drill-down analytics, Daily PDF export
+
+### RBAC Mapping (uses existing roles per user)
+- admin → Super Admin (full R/W)
+- senior_manager → State Head (R/W)
+- manager → Project Manager (R/W)
+- hr / accountant → R/W
+- center_manager / partner → Read-only
+- staff / center_staff → Read + create own mobilization (Phase 4)
+
+### Backend (`/app/backend/server.py` — new section at bottom)
+- Collections + indexes (created on startup via `_ensure_mis_indexes`):
+  `mis_sip_centers`, `mis_project_summary`, `mis_jsdms`, `mis_mobilization`
+- Endpoints:
+  - `GET  /api/mis/overview` — consolidated KPI counters (SIP totals, batch totals, placement %, today's mobilization etc.)
+  - `POST/GET/PATCH/DELETE /api/mis/sip-centers[/{id}]` — full CRUD with duplicate-Center-ID guard (409)
+  - `GET  /api/mis/sip-centers/sample-excel` — template download
+  - `POST /api/mis/sip-centers/bulk-preview` — dry-run validation with row-wise errors
+  - `POST /api/mis/sip-centers/bulk-upload` — batch insert with duplicate detection (in-file + DB)
+  - `GET  /api/mis/sip-centers/export` — full Excel export matching template columns
+- SIP schema (14 fields): serial_no, center_name, center_id_code, state, accreditation_date, status, last_inspection_date, center_rating, work_order_value, bg_submitted_amount, bg_validity_date, branch_start_date, job_role_on_caaf, job_role_to_be_added
+
+### Frontend
+- `/app/frontend/src/pages/mis/MISDashboard.jsx` — tabbed shell with 12 KPI cards + overview chart-bars (certification/placement/dropout %) + 6 tabs
+- `/app/frontend/src/pages/mis/SIPStatusTab.jsx` — full CRUD table with:
+  - Search + Status filter, Export / Bulk Upload / Add
+  - Status chip color coding (accredited=green, pending=amber, expired=red)
+  - BG validity urgency chip: red bold for <0d, amber bold for ≤30d, plain otherwise
+  - 3-step Bulk Upload dialog matching BG bulk upload pattern (template → file → color-coded preview → Confirm N Centers)
+  - Add/Edit modal with all 14 fields, View modal shows every field
+- Sidebar entry "MIS Dashboard" (BarChart3 icon, i18n key `mis_dashboard`), route `/mis`
+- Placeholder cards for Project Summary / JSDMS / Mobilization / Reports tabs — clearly labeled "Phase 2/3/4/5"
+
+### Verified E2E
+- Overview endpoint returns zero-safe aggregates when other collections are empty
+- Manual create → 201; duplicate Center ID → 409
+- Sample Excel download → 5.4 KB xlsx
+- Real SIP Status sheet imported from the user's reference workbook (`Daily report Jharkhand skills Own.xlsx`) → preview showed 2 valid + 3 blank-row errors; confirm inserted 2 centers; Overview then showed `total_centers=2, accredited=2`
+- Frontend screenshot confirms sidebar entry, 12 KPI cards, SIP tab table with 2 rows, status chips, action buttons — existing modules untouched
+
+### Reference Workbook Columns Captured (for Phase 2-4)
+- **Project Wise Summary** (38 cols): S.NO., State, Territory, Name Of Company, Center Name, Center Manager, Projects, Target year, Training Type, Total Target, Remaining Target, Total Target FY wise, Remaining Target FY Wise, Batch ID, Job Role, Total Enrolled, Start Date, End Date, Status, SDMS Batch ID, Attendance Percentage, Total Drop Out, Assessment Date, Billing Status, Total Certified, Status(2), Assessment Agency, Assessor Name, Assessor Contact Number, Total Actual Present Candidates, Pass, Fail, Absent, NO OF PLACEMENT, Offer Letter, Placement Status 1st/2nd/3rd Month
+- **JSDMS PROJECT** (20 cols): Sl.No., BG Status, Centre Name, Job Role, Target Received Work Order, Target Achieved 21-22/22-23/23-24, No. of Batches, Total Hour, Training Duration in Months, Training Per Hour, Center Status, Job Role Status, If Not approved then Reason, Total Enrolled, No of Certified Trainer at center, No. Of Trainers TOT Aligned, No. Of TOT Renew Aligned, No. Of Trainers Required at Center
+- **Mobilization Report** (up to 21 cols): BRANCH NAME, DATE, Project Name, MOBILIZATION AREA NAME 1-5 with DISTANCE/Total for each, Total Mobilisation, TOTAL DISTANCE, MOBILIZER NAME/EMP.ID/CONTACT, REMARKS
