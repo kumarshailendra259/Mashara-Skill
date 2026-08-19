@@ -1,0 +1,37 @@
+{
+  "summary": "Iter52 — Phase 37 Batch Management (Stage 1 Target Allocation + Stage 2 target-gated Batch Creation) fully verified. Backend: 20/20 pytest cases pass covering /api/batch-targets CRUD (create validates project FK, total_target=sum(job_role_targets), rejects total_target<=0, PATCH shrink guard), enrichment (project_name/center_name/company_name), list filters (only_available, project_id, target_year), target-gated batch creation (atomic consume of total_beneficiaries via find_one_and_update guard, insufficient→400, project coherence check, legacy grandfathered path with target_id=null), batch delete releases target counters, delete-target-with-allocated rejected, and 3-parallel-consume race (only 1 of 3 succeeds — atomic $inc holds). RBAC: unauth create+list → 403. Frontend: /batch-management renders, sidebar entry present, 7 KPI strip (Targets 1 → Total 25 → Allocated 5 → Remaining 20 → Utilization 20% → Total Batches 351→352 → Active 351→352 all reactive to DB). 7 tabs render with Targets+Batches enabled and Enroll/Attendance/Assessment/Placement/Closure disabled. Allocate Target dialog opens (bm-tgt-dialog), all 112 projects load in dropdown, job-role rows compute total live, save creates target with toast 'Target allocated'. Row 'Batch' quick button opens Create Batch dialog prefilled — project select correctly disabled after prefill. Over-capacity input triggers inline warning; save with capacity=5 succeeds, toast 'Batch created & target consumed', target.remaining decreases 25→20, allocated 0→5, utilization 0%→20%, both KPI+row+total-batches counters update. Programs /programs shows btn-goto-batch-management link (no inline create). MIS ProjectSummary Manual mode shows pjt-goto-batch-management link. Regression checked: /api/batches, /api/mis/live/overview still 200.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Batch Management / Create Batch dialog", "issues": ["Radix Dialog warning: 'Missing Description or aria-describedby={undefined} for {DialogContent}'. Both bm-tgt-dialog and bm-batch-dialog trigger this. Add <DialogDescription> (visually hidden if not needed) for a11y compliance."]},
+      {"screen": "Batch Management / target job-role select", "issues": ["React warning: 'Select is changing from uncontrolled to controlled'. Some Select components (likely bm-tgt-inp-training / bm-tgt-inp-center) don't have a defined default value so switch state mid-render. Initialise those state fields with '' or explicit defaults, or set value={x || ''}."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter52_batch_management.py",
+    "/app/test_reports/pytest/iter52.xml"
+  ],
+  "action_items": [
+    "(Low) Add DialogDescription (or aria-describedby) to both bm-tgt-dialog and bm-batch-dialog for a11y.",
+    "(Low) Fix 'uncontrolled → controlled' Select warning in Allocate Target dialog by providing explicit default values."
+  ],
+  "critical_code_review_comments": [
+    "server.py:10543-10545 — total_target mismatch check is skipped when job_role_targets is empty (`... and body.job_role_targets`). Combined with the total_target>0 check on the next line this is fine, but the intent should be documented — otherwise a user could post total_target=10 with no job_role_targets and it'd pass. Consider making job_role_targets non-empty for STT.",
+    "server.py:10574 — Center-manager scoping in list_batch_targets: when the caller passes center_id it *overrides* the assigned-centers restriction (`{'$in': assigned} if not center_id else center_id`). A center_manager could pass a foreign center_id and bypass the RBAC. Change to always AND: `q['center_id'] = {'$in': assigned}` and if center_id supplied, require it to be in assigned.",
+    "server.py:9587-9597 — Target-gated batch create: if two batches try to consume simultaneously, the FK read of the target happens before _consume_target's atomic $inc. The atomic guard still catches it (verified by test_concurrent_consume_no_over), but the initial `find_one` is redundant now and could be dropped — cleaner and slightly faster.",
+    "server.py:10606-10613 — DELETE target uses `require_role('admin')`. Good — matches admin-only spec. Missing: no soft-delete / archive flag, so once deleted the audit trail is gone. Consider `archived_at` in Phase 2.",
+    "BatchManagement.jsx:82 — canManageBatches includes 'center_manager' but backend create_batch also allows all four roles; parity is fine. Note bm-batch-add-btn is not gated on canManageBatches (only on availableTargets.length). If an accountant/hr views the page they see a clickable Create Batch button that will 403 on save. Add role check to disable + show 'not permitted' tooltip.",
+    "BatchManagement.jsx (line ~89) — Uses api.get('/entities/project') list with 112 projects — fine now, but if projects grow >500 this dropdown becomes unusable. Add typeahead search (Command component) later.",
+    "server.py — Batch Management adds ~200 LOC and pushes server.py to ~16,240 lines. This is a strong signal to split server.py into a package (routers/batch_management.py, routers/finance.py, etc). Testing agent flagged this in iter40 and iter51 already."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter52_batch_management.py"],
+  "success_rate": { "backend": "100% (20/20)", "frontend": "100%" },
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Test target + batch created during Playwright run were cleaned up (batch e972... and target c03b... DELETEd). Pytest fixtures auto-clean their own test data (TEST_BM_* prefix).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Endpoints: POST/GET/PATCH/DELETE /api/batch-targets, GET /api/batch-targets/{tid}, GET /api/batch-targets/{tid}/batches. BatchIn now has optional target_id. Batch create atomically consumes total_beneficiaries from target.remaining via find_one_and_update({remaining:{$gte:amount}}, $inc). Batch delete releases via _release_target. Legacy batches (target_id=null) still work. Roles: TARGET_ADMIN_ROLES=(admin,manager,senior_manager) can create/edit; accountant/hr/center_manager can list; only admin can delete. Frontend testids: bm-tab-{targets,batches,enroll,attendance,assessment,placement,closure}, bm-tgt-{add-btn,dialog,inp-project/center/company/year/fy/training/state/territory/remarks,add-jrt,jrt-role-{i}/jrt-count-{i}/jrt-del-{i},total,save,create-batch-{id},edit-{id},del-{id},search,filter-project,filter-year,row-{id}}, bm-batch-{add-btn,dialog,inp-target/project/center/company/name/capacity/status,save,search,status,row-{id}}, bm-no-target-warning, bm-placeholder-{enroll|attendance|assessment|placement|closure}, btn-goto-batch-management (Programs), pjt-goto-batch-management (MIS ProjectSummary Manual).",
+  "rca of the issue": "N/A — no bugs found. Design issues are minor a11y warnings on Dialog components and an uncontrolled/controlled Select warning; do not affect functionality."
+}

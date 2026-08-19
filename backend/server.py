@@ -9299,6 +9299,10 @@ class BatchIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     project_id: str
     center_id: Optional[str] = None
+    # Phase 37: link to the allocated target that seeded this batch. Legacy
+    # batches (created before Batch Management module) leave this None and are
+    # grandfathered. New batches created via /batch-management MUST supply this.
+    target_id: Optional[str] = None
     # Company under which this batch's company-share income will be tagged on every
     # milestone receive. Can be overridden at receive-time per milestone.
     company_id: Optional[str] = None
@@ -9575,10 +9579,32 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
         cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
         if cnt != len(set(body.partner_ids)):
             raise HTTPException(400, "one or more partner_ids do not exist")
+    # Phase 37: target-gated creation. If target_id is provided, we atomically
+    # consume `total_beneficiaries` (batch capacity) from the target's remaining
+    # counter. Insufficient target → 400. Legacy call without target_id still
+    # works (grandfathered).
+    consumed_target = None
+    if body.target_id:
+        tgt = await db.batch_targets.find_one({"id": body.target_id}, {"_id": 0})
+        if not tgt:
+            raise HTTPException(400, "target_id does not exist")
+        # Enforce project/center coherence with the target for data integrity.
+        if tgt.get("project_id") and tgt["project_id"] != body.project_id:
+            raise HTTPException(400, "Batch project_id must match the target's project_id")
+        if tgt.get("center_id") and body.center_id and tgt["center_id"] != body.center_id:
+            raise HTTPException(400, "Batch center_id must match the target's center_id")
+        # Atomic consume
+        consumed_target = await _consume_target(body.target_id, int(body.total_beneficiaries or 0))
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
-    await db.batches.insert_one(doc)
+    try:
+        await db.batches.insert_one(doc)
+    except Exception:
+        # Roll back the target consumption if the batch insert fails.
+        if consumed_target and body.target_id:
+            await _release_target(body.target_id, int(body.total_beneficiaries or 0))
+        raise
     return BatchOut(**doc)
 
 
@@ -9644,11 +9670,15 @@ async def delete_batch(bid: str, _=Depends(require_role("admin"))):
     # Cascade delete: auto-generated transactions (milestone income + recovery + assessment
     # fee + TDS) AND batch_payments — otherwise Milestone Income dashboard keeps
     # showing orphaned totals from deleted batches.
+    existing = await db.batches.find_one({"id": bid}, {"_id": 0, "target_id": 1, "total_beneficiaries": 1})
     txn_del = await db.transactions.delete_many({"batch_id": bid})
     await db.batch_payments.delete_many({"batch_id": bid})
     r = await db.batches.delete_one({"id": bid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
+    # Phase 37: release the seat count back to the target pool.
+    if existing and existing.get("target_id"):
+        await _release_target(existing["target_id"], int(existing.get("total_beneficiaries") or 0))
     return {"ok": True, "transactions_deleted": txn_del.deleted_count}
 
 
@@ -10444,6 +10474,188 @@ async def advance_batch_lifecycle(
 async def get_batch_lifecycle_states(_=Depends(get_current_user)):
     """Return the list of allowed lifecycle states for UI dropdowns."""
     return {"states": BATCH_LIFECYCLE_STATES}
+
+
+# ============================================================================
+# ============  BATCH  MANAGEMENT  ·  Stage 1 · Target Allocation  ===========
+# ============================================================================
+# Phase 37 (Feb 2026): centralised Batch Management module. Batches can only be
+# created against an allocated target. Target's `allocated` and `remaining`
+# counters auto-update on batch create/delete. Legacy batches (target_id=None)
+# stay grandfathered — no forced migration.
+
+class BatchTargetIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    state: Optional[str] = ""
+    territory: Optional[str] = ""           # District / Territory
+    company_id: Optional[str] = None
+    center_id: Optional[str] = None
+    project_id: str                          # required — everything ladders off project
+    target_year: str = Field(min_length=4)   # e.g. "2025-26" or "2025"
+    fy: Optional[str] = ""                   # Financial Year — separate from target_year if needed
+    training_type: Optional[str] = ""        # STT | RPL
+    job_role_targets: List[dict] = Field(default_factory=list)  # [{job_role, count}]
+    total_target: int = Field(ge=0)          # auto = sum(job_role_targets.count) — client sends the computed sum
+    remarks: Optional[str] = ""
+
+
+class BatchTargetOut(BatchTargetIn):
+    id: str
+    allocated: int = 0     # sum of `total_target` of batches attached
+    remaining: int = 0     # total_target - allocated
+    created_at: str
+    created_by: Optional[str] = None
+    updated_at: Optional[str] = None
+    # Enriched
+    project_name: Optional[str] = None
+    center_name: Optional[str] = None
+    company_name: Optional[str] = None
+
+
+TARGET_ADMIN_ROLES = ("admin", "manager", "senior_manager")
+
+
+async def _enrich_target(doc: dict) -> dict:
+    """Attach project/center/company names for UI display."""
+    out = dict(doc)
+    if doc.get("project_id"):
+        p = await db.projects.find_one({"id": doc["project_id"]}, {"_id": 0, "name": 1})
+        out["project_name"] = p["name"] if p else None
+    if doc.get("center_id"):
+        c = await db.centers.find_one({"id": doc["center_id"]}, {"_id": 0, "name": 1})
+        out["center_name"] = c["name"] if c else None
+    if doc.get("company_id"):
+        co = await db.companies.find_one({"id": doc["company_id"]}, {"_id": 0, "name": 1})
+        out["company_name"] = co["name"] if co else None
+    return out
+
+
+@api.post("/batch-targets", response_model=BatchTargetOut, status_code=201)
+async def create_batch_target(body: BatchTargetIn, user=Depends(require_role(*TARGET_ADMIN_ROLES))):
+    # Validate FKs
+    if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "project_id does not exist")
+    if body.center_id and not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "center_id does not exist")
+    if body.company_id and not await db.companies.find_one({"id": body.company_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "company_id does not exist")
+    # Validate total = sum(job_role_targets)
+    calc = sum(int(j.get("count") or 0) for j in (body.job_role_targets or []))
+    if body.total_target != calc and body.job_role_targets:
+        raise HTTPException(400, f"total_target ({body.total_target}) must equal sum of job_role_targets ({calc})")
+    if body.total_target <= 0:
+        raise HTTPException(400, "total_target must be > 0")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **body.model_dump(),
+           "allocated": 0, "remaining": body.total_target,
+           "created_by": user["id"], "created_at": now, "updated_at": now}
+    await db.batch_targets.insert_one(doc)
+    doc.pop("_id", None)
+    return BatchTargetOut(**await _enrich_target(doc))
+
+
+@api.get("/batch-targets", response_model=List[BatchTargetOut])
+async def list_batch_targets(
+    project_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    target_year: Optional[str] = None,
+    only_available: bool = Query(False, description="Return only targets with remaining>0"),
+    user=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager")),
+):
+    q: dict = {}
+    if project_id: q["project_id"] = project_id
+    if center_id:  q["center_id"] = center_id
+    if target_year: q["target_year"] = target_year
+    if only_available:
+        q["remaining"] = {"$gt": 0}
+    # Center manager sees only own centers — enforced regardless of the passed
+    # center_id filter to prevent a stale UI parameter from leaking foreign
+    # centers.
+    if user.get("role") == "center_manager":
+        assigned = user.get("assigned_center_ids") or ["__none__"]
+        if center_id:
+            if center_id not in assigned:
+                raise HTTPException(403, "Center manager can only view own assigned centers")
+            q["center_id"] = center_id
+        else:
+            q["center_id"] = {"$in": assigned}
+    docs = await db.batch_targets.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return [BatchTargetOut(**await _enrich_target(d)) for d in docs]
+
+
+@api.get("/batch-targets/{tid}", response_model=BatchTargetOut)
+async def get_batch_target(tid: str, _=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
+    doc = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
+    if not doc: raise HTTPException(404, "Target not found")
+    return BatchTargetOut(**await _enrich_target(doc))
+
+
+@api.patch("/batch-targets/{tid}", response_model=BatchTargetOut)
+async def update_batch_target(tid: str, body: BatchTargetIn, _=Depends(require_role(*TARGET_ADMIN_ROLES))):
+    existing = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
+    if not existing: raise HTTPException(404, "Target not found")
+    # Can't shrink total_target below already-allocated portion.
+    allocated = int(existing.get("allocated") or 0)
+    if body.total_target < allocated:
+        raise HTTPException(400, f"total_target cannot be less than already allocated ({allocated})")
+    calc = sum(int(j.get("count") or 0) for j in (body.job_role_targets or []))
+    if body.total_target != calc and body.job_role_targets:
+        raise HTTPException(400, f"total_target ({body.total_target}) must equal sum of job_role_targets ({calc})")
+    upd = body.model_dump()
+    upd["allocated"] = allocated
+    upd["remaining"] = body.total_target - allocated
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.batch_targets.find_one_and_update({"id": tid}, {"$set": upd}, return_document=True)
+    res.pop("_id", None)
+    return BatchTargetOut(**await _enrich_target(res))
+
+
+@api.delete("/batch-targets/{tid}", status_code=204)
+async def delete_batch_target(tid: str, _=Depends(require_role("admin"))):
+    existing = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
+    if not existing: raise HTTPException(404, "Target not found")
+    if int(existing.get("allocated") or 0) > 0:
+        raise HTTPException(400, "Cannot delete a target that has batches attached. Delete/detach batches first.")
+    await db.batch_targets.delete_one({"id": tid})
+    return Response(status_code=204)
+
+
+@api.get("/batch-targets/{tid}/batches", response_model=List[BatchOut])
+async def batches_under_target(tid: str, _=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
+    docs = await db.batches.find({"target_id": tid}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return [BatchOut(**d) for d in docs]
+
+
+async def _consume_target(tid: str, amount: int) -> dict:
+    """Atomically deduct `amount` from target.remaining. Returns updated doc or
+    raises 400 if insufficient / not found."""
+    if amount <= 0:
+        raise HTTPException(400, "Batch capacity must be > 0 to consume from target")
+    res = await db.batch_targets.find_one_and_update(
+        {"id": tid, "remaining": {"$gte": amount}},
+        {"$inc": {"allocated": amount, "remaining": -amount},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if not res:
+        # Check whether it's not-found vs insufficient.
+        cur = await db.batch_targets.find_one({"id": tid}, {"_id": 0, "remaining": 1})
+        if not cur:
+            raise HTTPException(404, "Target not found")
+        raise HTTPException(400, f"Insufficient target remaining ({cur.get('remaining', 0)}) for batch capacity {amount}")
+    res.pop("_id", None)
+    return res
+
+
+async def _release_target(tid: str, amount: int) -> None:
+    """Return `amount` back to the target (called on batch delete/detach)."""
+    if not tid or amount <= 0:
+        return
+    await db.batch_targets.update_one(
+        {"id": tid},
+        {"$inc": {"allocated": -amount, "remaining": amount},
+         "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
 
 
 # ---------- Fooding Income (per-month boarding cost × mandays) ----------

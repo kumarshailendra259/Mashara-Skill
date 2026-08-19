@@ -430,7 +430,11 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
         <div className="flex gap-2 ml-auto">
           <Button variant="outline" onClick={exportExcel} className="rounded-none gap-1" data-testid="pjt-export" disabled={liveMode} title={liveMode ? "Export available only in Manual mode" : ""}><Download size={13} /> Export</Button>
           {canWriteEffective && <Button variant="outline" onClick={() => setBulkOpen(true)} className="rounded-none gap-1" data-testid="pjt-bulk-btn"><Upload size={13} /> Bulk Upload</Button>}
-          {canWriteEffective && <Button onClick={openAdd} className="brand-btn rounded-none gap-1" data-testid="pjt-add-btn"><Plus size={13} /> Add Batch</Button>}
+          {canWriteEffective && (
+            <a href="/batch-management" className="brand-btn rounded-none gap-1 inline-flex items-center px-3 text-sm" data-testid="pjt-goto-batch-management" title="Batch creation is centralised in Batch Management (Phase 37).">
+              <Plus size={13} /> Add Batch →
+            </a>
+          )}
         </div>
       </div>
 

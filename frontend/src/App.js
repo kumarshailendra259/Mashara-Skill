@@ -20,6 +20,7 @@ import ApprovalLog from "@/pages/ApprovalLog";
 import ApprovalWorkflows from "@/pages/ApprovalWorkflows";
 import HrSettings from "@/pages/HrSettings";
 import Programs from "@/pages/Programs";
+import BatchManagement from "@/pages/BatchManagement";
 import CheckIn from "@/pages/CheckIn";
 import ForgotPassword from "@/pages/ForgotPassword";
 import PartnerAssociations from "@/pages/PartnerAssociations";
@@ -78,6 +79,7 @@ function App() {
             <Route path="/approval-workflows" element={<ProtectedRoute><Shell><ApprovalWorkflows /></Shell></ProtectedRoute>} />
             <Route path="/hr-settings" element={<ProtectedRoute><Shell><HrSettings /></Shell></ProtectedRoute>} />
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
+            <Route path="/batch-management" element={<ProtectedRoute><Shell><BatchManagement /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
             <Route path="/tds-register" element={<ProtectedRoute requireFinance><Shell><TdsRegister /></Shell></ProtectedRoute>} />
             <Route path="/pending-approvals" element={<ProtectedRoute><Shell><PendingApprovals /></Shell></ProtectedRoute>} />

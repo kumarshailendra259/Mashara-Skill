@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark,
-  Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3,
+  Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +25,7 @@ const navItems = [
   { to: "/centers", key: "centers", icon: MapPin },
   { to: "/projects", key: "projects", icon: Briefcase },
   { to: "/programs", key: "programs", icon: Layers, programsAccess: true },
+  { to: "/batch-management", key: "batch_management", icon: Target, batchMgmtAccess: true },
   { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
   { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
   { to: "/advances", key: "advances", icon: Wallet },
@@ -191,6 +192,7 @@ export default function Layout({ children }) {
       if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
       if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
       if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
+      if (it.batchMgmtAccess && !["admin", "manager", "senior_manager", "accountant", "hr", "center_manager"].includes(user?.role)) return false;
       if (it.nonPartner && user?.role === "partner") return false;
       if (it.staffOnly && !["center_staff", "center_manager", "hr", "manager", "senior_manager"].includes(user?.role)) return false;
       if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;

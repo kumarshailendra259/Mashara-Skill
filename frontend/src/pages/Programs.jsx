@@ -588,9 +588,9 @@ export default function Programs() {
                 </div>
                 <div className="flex items-end gap-2 no-print">
                   {canCreateBatch && (
-                    <Button onClick={openNewBatch} className="brand-btn rounded-none gap-1" data-testid="btn-new-batch">
-                      <Plus size={14} /> New Batch
-                    </Button>
+                    <a href="/batch-management" className="brand-btn rounded-none gap-1 inline-flex items-center px-3 py-2 text-sm" data-testid="btn-goto-batch-management" title="Batch creation is centralised in the new Batch Management module.">
+                      <Plus size={14} /> New Batch →
+                    </a>
                   )}
                   {activeBatch && canEditBatch && (
                     <>

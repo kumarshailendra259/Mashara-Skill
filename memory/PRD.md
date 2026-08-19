@@ -26,7 +26,27 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
-### Phase 36C — MIS Batch Lifecycle + Entity Dropdowns (Done, Feb 2026)
+### Phase 37 · Phase 1 — Batch Management Module (Stages 1 & 2) (Done, Feb 2026)
+- **User asked**: New dedicated "Batch Management" module = single centralised system for the batch lifecycle (Target Allocation → Batch Creation → Enrollment → Attendance → Assessment → Placement → Closure). Duplicate Add-Batch buttons removed from other modules. User approved (a) Phase 1 only, (d) admin-only for extension approvals in future, (f) grandfather legacy batches without target link.
+- **Backend `/app/backend/server.py`** (~+250 LOC around line 10450):
+  - New models `BatchTargetIn` / `BatchTargetOut` + `TARGET_ADMIN_ROLES` = (admin, manager, senior_manager). Fields: state/territory/company_id/center_id/project_id/target_year/fy/training_type/job_role_targets[]/total_target/remarks + auto-managed allocated/remaining.
+  - Endpoints: `POST /api/batch-targets` (validates FKs + sum(job_role_targets)=total_target + total>0), `GET /api/batch-targets` (filters project_id/center_id/target_year/only_available; center_manager scoped to `assigned_center_ids` with anti-bypass), `GET /api/batch-targets/{tid}`, `PATCH /api/batch-targets/{tid}` (rejects shrinking total below already-allocated), `DELETE /api/batch-targets/{tid}` (admin only; rejects when allocated>0), `GET /api/batch-targets/{tid}/batches`.
+  - Helpers `_consume_target(tid, amount)` — atomic `find_one_and_update({remaining:{$gte:amount}}, $inc)` guard; `_release_target(tid, amount)` for delete/detach.
+  - `BatchIn.target_id: Optional[str]` added. `create_batch` now consumes target seats atomically (with rollback on insert failure) and enforces project/center coherence with the target. `delete_batch` releases the seats back.
+  - Legacy batches (target_id=null) remain fully functional — no forced migration.
+- **Frontend `/app/frontend/src/pages/BatchManagement.jsx`** (~640 LOC, new file):
+  - Route `/batch-management` (App.js) + sidebar entry with Target icon + `batchMgmtAccess` role gate covering admin/manager/senior_manager/accountant/hr/center_manager.
+  - i18n label `batch_management` (EN + HI).
+  - 7-KPI header strip (Targets, Total Target, Allocated, Remaining, Utilization %, Total Batches, Active Batches).
+  - Tabs 1–7: Targets + Batches enabled; Enrollment / Attendance / Assessment / Placement / Closure disabled with "Coming in next release" placeholders.
+  - Stage 1 (Target Allocation): filters (search/project/year), CRUD table with progress bar per row and inline "Batch" quick-create button that prefills the Batch dialog.
+  - Stage 2 (Batch Creation): target dropdown lists only `only_available` targets; project/center auto-fill and lock when the target has them; capacity input clamps to remaining with inline validation; Legacy vs Linked badge on batch rows.
+  - Deprecated inline "New Batch" buttons in Programs (`btn-goto-batch-management`) and MIS ProjectSummaryTab Manual mode (`pjt-goto-batch-management`) — both redirect to `/batch-management`.
+- **Verified iter-52**: 20/20 pytest + 100% Playwright. Includes atomic 3-parallel-consume race test (only one wins), delete releases seats, insufficient→400, RBAC.
+- **Post-test fixes**: (1) Added `DialogDescription` for a11y on both dialogs; (2) role-gated Create Batch button (accountant/hr see "Read-only role" chip); (3) Center-manager list scoping now anti-bypass (previously a passed `center_id` could sidestep assigned-centers check).
+- **Deferred to Phase 2 & 3**: Stages 3–7 (Enrollment / Attendance / Assessment / Placement / Closure), extension request workflow (admin-only approval per user), auto-closure on End Date, Batch Details page with 9 tabs, audit log.
+
+
 - **User asked (Hinglish)**: "isme jo already created hai use dropdown me dikhaye jaise project center etc, iske alawa center manager jo dwara jo batch banaya ja raha hai usme ye sab option daliye aur baar samajhiye yadi ek baar batch ban gaya to o lock ho jayega uske baad attendance monitoring hoga, uske baad assessment status sirf upload hoga ye hone ke baad ye bhi lock matlab fir se edit nahi baad me placement status update kuch is trah se … Batch Status Auto-Update should support: Draft / Upcoming / Active / Training Completed / Assessment Pending / Assessment Completed / Certification Pending / Certified / Placement in Progress / Closed". User chose option (c) — enable lifecycle on BOTH Core ERP `db.batches` AND `mis_project_summary`, target Production.
 - **Backend `/app/backend/server.py`**:
   - Added `BATCH_LIFECYCLE_STATES` (10-state ordered list) + `_lifecycle_locks(status)` helper that returns `{basic_locked, attendance_locked, assessment_locked, placement_locked}` derived from the current status index.
