@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 const FIELDS = [
+  { key: "fy", label: "FY" },
   { key: "letter_of_intent_no", label: "Letter of Intent (LoI) No" },
   { key: "work_order_no", label: "Work Order No" },
   { key: "in_favour_of", label: "In Favour Of" },
@@ -478,7 +479,7 @@ export default function BankGuarantees() {
             {/* Step 1: template */}
             <div className="border-l-4 border-[var(--brand)] bg-blue-50/40 p-3">
               <div className="font-bold flex items-center gap-2"><FileSpreadsheet size={14} /> Step 1 · Download sample template</div>
-              <p className="text-xs text-[var(--muted)] mt-1">Excel me ye 10 columns hain — headers exactly same rakhein. First 6 columns mandatory hain (BG Number, Bank Name, BG Amount, Issue Date, Expiry Date, Beneficiary Name).</p>
+              <p className="text-xs text-[var(--muted)] mt-1">Excel me 14 columns hain — FY, LoI No, Work Order, In Favour Of, Applicant, Issued By, BG Number, Amount, Date of Issuance, Valid Till, BG Claim Expiry Date, Center (exact name), Location, Remarks. Mandatory: Issued By, BG Number, Amount, aur teenon dates. Center column me center ka exact naam likhein (case-insensitive).</p>
               <Button variant="outline" onClick={downloadTemplate} className="rounded-none gap-2 mt-2" data-testid="btn-bulk-template">
                 <Download size={12} /> Download Sample Excel
               </Button>
@@ -543,33 +544,47 @@ export default function BankGuarantees() {
                     </div>
                   </div>
                 )}
-                {/* Valid rows table */}
+                {/* Valid rows table — full detail view so users can verify every column pre-insert */}
                 {bulkPreview.valid_rows?.length > 0 && (
                   <div className="mt-2" data-testid="bulk-valid-rows">
-                    <div className="overline text-[10px] text-emerald-700 mb-1">Rows that will be inserted</div>
-                    <div className="overflow-x-auto border border-emerald-200 max-h-56 overflow-y-auto">
-                      <table className="w-full text-[11px]">
+                    <div className="overline text-[10px] text-emerald-700 mb-1">Rows that will be inserted (all fields)</div>
+                    <div className="overflow-x-auto border border-emerald-200 max-h-72 overflow-y-auto">
+                      <table className="w-max min-w-full text-[11px]">
                         <thead className="bg-emerald-100 sticky top-0"><tr>
                           <th className="p-1.5 text-left">Row</th>
-                          <th className="p-1.5 text-left">BG No</th>
-                          <th className="p-1.5 text-left">Bank</th>
+                          <th className="p-1.5 text-left">FY</th>
+                          <th className="p-1.5 text-left">LoI No</th>
+                          <th className="p-1.5 text-left">Work Order</th>
+                          <th className="p-1.5 text-left">In Favour Of</th>
+                          <th className="p-1.5 text-left">Applicant</th>
+                          <th className="p-1.5 text-left">Issued By</th>
+                          <th className="p-1.5 text-left">BG Number</th>
                           <th className="p-1.5 text-left">Amount</th>
-                          <th className="p-1.5 text-left">Issue</th>
-                          <th className="p-1.5 text-left">Expiry</th>
-                          <th className="p-1.5 text-left">Beneficiary</th>
-                          <th className="p-1.5 text-left">District</th>
+                          <th className="p-1.5 text-left">Issued</th>
+                          <th className="p-1.5 text-left">Valid Till</th>
+                          <th className="p-1.5 text-left">Claim Expiry</th>
+                          <th className="p-1.5 text-left">Center</th>
+                          <th className="p-1.5 text-left">Location</th>
+                          <th className="p-1.5 text-left">Remarks</th>
                         </tr></thead>
                         <tbody>
                           {bulkPreview.valid_rows.map((v) => (
-                            <tr key={v.row} className="border-t border-emerald-100">
+                            <tr key={v.row} className="border-t border-emerald-100 hover:bg-emerald-50">
                               <td className="p-1.5 font-mono">{v.row}</td>
-                              <td className="p-1.5 font-mono font-bold">{v.data.bg_number}</td>
+                              <td className="p-1.5">{v.data.fy || "—"}</td>
+                              <td className="p-1.5 font-mono">{v.data.letter_of_intent_no || "—"}</td>
+                              <td className="p-1.5 font-mono">{v.data.work_order_no || "—"}</td>
+                              <td className="p-1.5">{v.data.in_favour_of || "—"}</td>
+                              <td className="p-1.5">{v.data.applicant || "—"}</td>
                               <td className="p-1.5">{v.data.issued_by}</td>
+                              <td className="p-1.5 font-mono font-bold">{v.data.bg_number}</td>
                               <td className="p-1.5">{inr(v.data.amount)}</td>
                               <td className="p-1.5">{v.data.date_of_issuance}</td>
+                              <td className="p-1.5">{v.data.valid_till}</td>
                               <td className="p-1.5 font-bold">{v.data.bg_claim_expiry_date}</td>
-                              <td className="p-1.5">{v.data.in_favour_of}</td>
+                              <td className="p-1.5">{v.data.center_name ? <span className="text-emerald-700">✓ {v.data.center_name}</span> : "—"}</td>
                               <td className="p-1.5">{v.data.location || "—"}</td>
+                              <td className="p-1.5 max-w-[180px] truncate" title={v.data.remarks || ""}>{v.data.remarks || "—"}</td>
                             </tr>
                           ))}
                         </tbody>

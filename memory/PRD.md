@@ -919,3 +919,14 @@ See `/app/memory/test_credentials.md`
 - **Validation rules**: mandatory fields (BG Number, Bank Name, BG Amount, Issue Date, Expiry Date, Beneficiary Name); expiry must be after issue; amount must be > 0; BG Number duplicate check both inside the file and against live DB.
 - **Frontend `BankGuarantees.jsx`**: new "Bulk Upload" button in the header opens a 3-step dialog — (1) Download Sample Excel, (2) Choose file + Preview, (3) Preview shows a red skipped-rows table (with row + reason) and a green ready-to-insert table (formatted BG number, bank, amount ₹, dates, beneficiary, district). Confirm button reads "Upload N BGs".
 - **Verified end-to-end**: uploaded 7-row test file → preview showed 2 valid + 5 failed with correct row-wise reasons (missing Bank Name, missing BG Amount, expiry-before-issue, in-file duplicate, invalid date); Confirm inserted the 2 valid BGs (visible in the tracking table with correct status chips); a second attempt of the same file returned all rows as failures because BG numbers now exist in DB.
+
+### Bank Guarantee — Bulk Upload Full-Field Support (Done + Verified, Feb 2026)
+- **Extended to 14 columns** matching every field on the manual Add BG form (per user request):
+  FY, Letter of Intent (LoI) No, Work Order No, In Favour Of, Applicant, Issued By, Bank Guarantee Number, Amount, Date of Issuance, Valid Till, BG Claim Expiry Date, Center, Location, Remarks.
+- **New `fy` field** added to schema (optional free-text; wired into POST create, PATCH allowed list, GET list search, View modal, Add form). Bulk upload accepts it as first column.
+- **Center resolution**: Bulk upload's "Center" column takes the center's **name** and resolves it to `center_id` via a case-insensitive lookup of `centers` collection. Unknown names → row-level error "Center not found: '…' (check spelling)".
+- **Mandatory fields tightened**: Issued By, BG Number, Amount, Date of Issuance, Valid Till, BG Claim Expiry Date (6 required). FY / LoI / WO / In Favour Of / Applicant / Center / Location / Remarks remain optional.
+- **Extra validation**: Valid Till must also be after Date of Issuance (in addition to expiry-after-issuance).
+- **Sample Excel**: template now ships with user's example row (BG 1353NDLG00068126, ICICI Bank, Birsa Palojori, ₹1,74,636 etc.) so users can see the exact format at a glance.
+- **Preview table**: shows every one of the 14 columns (horizontally scrollable) with ₹ formatted amount + green tick on resolved Center name — users can verify every field before Confirm.
+- **Verified E2E**: uploaded user's exact example — all 14 fields persisted correctly (`fy=Birsa 25-26`, `letter_of_intent_no=LOI001722/26/02/2026`, `work_order_no=W002476/02/03/2026`, `applicant=Valeur Fabtex Pvt Ltd`, `center_id` resolved from name "Birsa Palojori", etc.). BG View modal displays all fields. Row-level errors work for unknown center + missing amount + expiry-before-issue + duplicate BG number.

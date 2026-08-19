@@ -13292,6 +13292,7 @@ async def create_bank_guarantee(
     center_id: Optional[str] = Query(None),
     location: Optional[str] = Query(None),
     remarks: Optional[str] = Query(None),
+    fy: Optional[str] = Query(None),
     renews_bg_id: Optional[str] = Query(None),
     file: Optional[UploadFile] = File(None),
     user=Depends(require_role(*BG_WRITE_ROLES)),
@@ -13326,6 +13327,7 @@ async def create_bank_guarantee(
         renews_bg_number = old.get("bg_number")
     doc = {
         "id": bg_id,
+        "fy": (fy or "").strip() or None,
         "letter_of_intent_no": (letter_of_intent_no or "").strip() or None,
         "work_order_no": (work_order_no or "").strip() or None,
         "in_favour_of": (in_favour_of or "").strip() or None,
@@ -13368,20 +13370,24 @@ async def create_bank_guarantee(
 
 # ---------------- Bank Guarantee Bulk Upload ----------------
 BG_BULK_COLUMNS = [
-    ("bg_number", "BG Number"),
-    ("issued_by", "Bank Name"),
-    ("applicant", "Branch Name"),
-    ("amount", "BG Amount"),
-    ("date_of_issuance", "Issue Date"),
-    ("bg_claim_expiry_date", "Expiry Date"),
-    ("in_favour_of", "Beneficiary Name"),
-    ("work_order_no", "Project / Scheme Name"),
-    ("location", "District"),
-    ("remarks", "Remarks / Description"),
+    ("fy", "FY"),
+    ("letter_of_intent_no", "Letter of Intent (LoI) No"),
+    ("work_order_no", "Work Order No"),
+    ("in_favour_of", "In Favour Of"),
+    ("applicant", "Applicant"),
+    ("issued_by", "Issued By"),
+    ("bg_number", "Bank Guarantee Number"),
+    ("amount", "Amount"),
+    ("date_of_issuance", "Date of Issuance"),
+    ("valid_till", "Valid Till"),
+    ("bg_claim_expiry_date", "BG Claim Expiry Date"),
+    ("center_name", "Center"),
+    ("location", "Location"),
+    ("remarks", "Remarks"),
 ]
 BG_BULK_COLUMNS_MAP = {k: h for k, h in BG_BULK_COLUMNS}
-BG_BULK_REQUIRED = {"bg_number", "issued_by", "amount", "date_of_issuance",
-                    "bg_claim_expiry_date", "in_favour_of"}
+BG_BULK_REQUIRED = {"issued_by", "bg_number", "amount", "date_of_issuance",
+                    "valid_till", "bg_claim_expiry_date"}
 
 
 def _parse_excel_date(v) -> Optional[str]:
@@ -13418,7 +13424,8 @@ def _parse_bg_amount(v) -> Optional[float]:
 
 async def _bg_validate_bulk_rows(rows_iter, header_index: dict) -> dict:
     """Return {valid_rows:[{row,data}], errors:[{row,reason,data}]}. Duplicate BG
-    numbers are checked both within the file and against the live DB."""
+    numbers are checked both within the file and against the live DB. Center
+    Name (if provided) is resolved to a center_id via case-insensitive lookup."""
     valid_rows: list = []
     errors: list = []
     seen_in_file: set = set()
@@ -13427,6 +13434,10 @@ async def _bg_validate_bulk_rows(rows_iter, header_index: dict) -> dict:
     ).to_list(20000)
     db_bg_numbers = {(d.get("bg_number") or "").strip().lower()
                      for d in existing_docs if d.get("bg_number")}
+    # Center lookup — build a lowercase name/city → id map once.
+    center_docs = await db.centers.find({"is_deleted": {"$ne": True}},
+                                        {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    center_map = {(c.get("name") or "").strip().lower(): c["id"] for c in center_docs if c.get("id")}
 
     for r_i, row in enumerate(rows_iter, start=2):
         if not row or all(c is None or _stringify_cell(c) == "" for c in row):
@@ -13436,14 +13447,18 @@ async def _bg_validate_bulk_rows(rows_iter, header_index: dict) -> dict:
             idx = header_index.get(header)
             rec[key] = row[idx] if idx is not None and idx < len(row) else None
         cleaned = {
-            "bg_number": _stringify_cell(rec.get("bg_number")),
-            "issued_by": _stringify_cell(rec.get("issued_by")),
+            "fy": _stringify_cell(rec.get("fy")),
+            "letter_of_intent_no": _stringify_cell(rec.get("letter_of_intent_no")),
+            "work_order_no": _stringify_cell(rec.get("work_order_no")),
+            "in_favour_of": _stringify_cell(rec.get("in_favour_of")),
             "applicant": _stringify_cell(rec.get("applicant")),
+            "issued_by": _stringify_cell(rec.get("issued_by")),
+            "bg_number": _stringify_cell(rec.get("bg_number")),
             "amount": _parse_bg_amount(rec.get("amount")),
             "date_of_issuance": _parse_excel_date(rec.get("date_of_issuance")),
+            "valid_till": _parse_excel_date(rec.get("valid_till")),
             "bg_claim_expiry_date": _parse_excel_date(rec.get("bg_claim_expiry_date")),
-            "in_favour_of": _stringify_cell(rec.get("in_favour_of")),
-            "work_order_no": _stringify_cell(rec.get("work_order_no")),
+            "center_name": _stringify_cell(rec.get("center_name")),
             "location": _stringify_cell(rec.get("location")),
             "remarks": _stringify_cell(rec.get("remarks")),
         }
@@ -13453,17 +13468,31 @@ async def _bg_validate_bulk_rows(rows_iter, header_index: dict) -> dict:
             errors.append({"row": r_i, "reason": f"Missing required: {', '.join(missing)}",
                            "data": preview_data}); continue
         if not cleaned["date_of_issuance"]:
-            errors.append({"row": r_i, "reason": "Invalid Issue Date (use YYYY-MM-DD or DD/MM/YYYY)",
+            errors.append({"row": r_i, "reason": "Invalid Date of Issuance (use YYYY-MM-DD or DD/MM/YYYY)",
+                           "data": preview_data}); continue
+        if not cleaned["valid_till"]:
+            errors.append({"row": r_i, "reason": "Invalid Valid Till (use YYYY-MM-DD or DD/MM/YYYY)",
                            "data": preview_data}); continue
         if not cleaned["bg_claim_expiry_date"]:
-            errors.append({"row": r_i, "reason": "Invalid Expiry Date (use YYYY-MM-DD or DD/MM/YYYY)",
+            errors.append({"row": r_i, "reason": "Invalid BG Claim Expiry Date (use YYYY-MM-DD or DD/MM/YYYY)",
                            "data": preview_data}); continue
         if cleaned["date_of_issuance"] > cleaned["bg_claim_expiry_date"]:
-            errors.append({"row": r_i, "reason": "Expiry Date must be after Issue Date",
+            errors.append({"row": r_i, "reason": "BG Claim Expiry must be after Date of Issuance",
+                           "data": preview_data}); continue
+        if cleaned["date_of_issuance"] > cleaned["valid_till"]:
+            errors.append({"row": r_i, "reason": "Valid Till must be after Date of Issuance",
                            "data": preview_data}); continue
         if cleaned["amount"] is None or cleaned["amount"] <= 0:
-            errors.append({"row": r_i, "reason": "BG Amount must be a positive number",
+            errors.append({"row": r_i, "reason": "Amount must be a positive number",
                            "data": preview_data}); continue
+        # Center name → id resolution (optional field)
+        cleaned["center_id"] = None
+        if cleaned["center_name"]:
+            cid = center_map.get(cleaned["center_name"].lower())
+            if not cid:
+                errors.append({"row": r_i, "reason": f"Center not found: '{cleaned['center_name']}' (check spelling)",
+                               "data": preview_data}); continue
+            cleaned["center_id"] = cid
         bg_key = cleaned["bg_number"].lower()
         if bg_key in seen_in_file:
             errors.append({"row": r_i, "reason": f"Duplicate BG Number in this file: {cleaned['bg_number']}",
@@ -13472,7 +13501,6 @@ async def _bg_validate_bulk_rows(rows_iter, header_index: dict) -> dict:
             errors.append({"row": r_i, "reason": f"BG Number already exists in system: {cleaned['bg_number']}",
                            "data": preview_data}); continue
         seen_in_file.add(bg_key)
-        cleaned["valid_till"] = cleaned["bg_claim_expiry_date"]
         valid_rows.append({"row": r_i, "data": cleaned})
     return {"valid_rows": valid_rows, "errors": errors}
 
@@ -13490,9 +13518,22 @@ async def bg_sample_excel(_=Depends(require_role(*BG_WRITE_ROLES))):
         c.font = header_font; c.fill = header_fill
         c.alignment = Alignment(horizontal="center", vertical="center")
         ws.column_dimensions[c.column_letter].width = max(18, len(header) + 4)
-    sample = ["BG-2025-001", "State Bank of India", "Ranchi Main", 500000,
-              "2025-04-01", "2026-03-31", "Jharkhand Skill Development Mission",
-              "PMKVY 4.0", "Ranchi", "5% performance BG"]
+    sample = [
+        "Birsa 25-26",                                # FY
+        "LOI001722/26/02/2026",                       # LoI
+        "W002476/02/03/2026",                         # Work Order
+        "Jharkhand Skill Development Mission",        # In Favour Of
+        "Valeur Fabtex Pvt Ltd",                      # Applicant
+        "ICICI Bank",                                 # Issued By
+        "1353NDLG00068126",                           # BG Number
+        174636,                                       # Amount
+        "2026-03-07",                                 # Date of Issuance
+        "2028-03-08",                                 # Valid Till
+        "2028-03-08",                                 # Claim Expiry
+        "Birsa Palojori",                             # Center (name — resolved to id)
+        "Deoghar",                                    # Location
+        "3% performance BG",                          # Remarks
+    ]
     for i, v in enumerate(sample, start=1):
         ws.cell(row=2, column=i, value=v)
     ws.freeze_panes = "A2"
@@ -13561,7 +13602,8 @@ async def bg_bulk_upload(
         d = vr["data"]
         doc = {
             "id": str(uuid.uuid4()),
-            "letter_of_intent_no": None,
+            "fy": d.get("fy") or None,
+            "letter_of_intent_no": d.get("letter_of_intent_no") or None,
             "work_order_no": d.get("work_order_no") or None,
             "in_favour_of": d.get("in_favour_of") or None,
             "applicant": d.get("applicant") or None,
@@ -13571,7 +13613,7 @@ async def bg_bulk_upload(
             "date_of_issuance": d.get("date_of_issuance"),
             "valid_till": d.get("valid_till"),
             "bg_claim_expiry_date": d.get("bg_claim_expiry_date"),
-            "center_id": None,
+            "center_id": d.get("center_id"),
             "location": d.get("location") or None,
             "remarks": d.get("remarks") or None,
             "attachment": None,
@@ -13623,6 +13665,7 @@ async def list_bank_guarantees(
             {"applicant": {"$regex": s, "$options": "i"}},
             {"issued_by": {"$regex": s, "$options": "i"}},
             {"location": {"$regex": s, "$options": "i"}},
+            {"fy": {"$regex": s, "$options": "i"}},
         ]
     docs = await db.bank_guarantees.find(q, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(1000)
     return docs
@@ -13677,7 +13720,7 @@ async def update_bank_guarantee(
         raise HTTPException(404, "Bank guarantee not found")
     allowed = {"letter_of_intent_no", "work_order_no", "in_favour_of", "applicant", "issued_by",
                "bg_number", "amount", "date_of_issuance", "valid_till", "bg_claim_expiry_date",
-               "center_id", "location", "remarks", "is_renewed"}
+               "center_id", "location", "remarks", "is_renewed", "fy"}
     upd = {k: v for k, v in payload.items() if k in allowed}
     if not upd:
         raise HTTPException(400, "No updatable fields provided")
