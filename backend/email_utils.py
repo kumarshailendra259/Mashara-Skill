@@ -281,3 +281,88 @@ async def send_bg_expiry_alert(
     except Exception as e:  # noqa: BLE001
         logger.error("BG expiry email failed: %s", e)
         return {"sent": False, "reason": str(e)[:250]}
+
+
+
+async def send_mis_weekly_digest(to_emails: list, digest: dict, portal_url: str) -> dict:
+    """Send a formatted MIS weekly digest with alerts + rollups. Silently returns
+    on missing Resend config so the scheduler stays healthy on dev environments."""
+    if not _client_ready():
+        return {"sent": False, "reason": "resend_not_configured"}
+    if not to_emails:
+        return {"sent": False, "reason": "no_recipients"}
+    sender = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev").strip() or "onboarding@resend.dev"
+
+    alerts = digest.get("alerts", [])
+    mob = digest.get("mobilization_week", {})
+    bg_top = digest.get("bg_top_upcoming", [])
+    week_range = digest.get("week_range", "")
+
+    alerts_rows = "".join(
+        f'<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;">{a["label"]}</td>'
+        f'<td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;">'
+        f'<b style="color:{"#b91c1c" if a["severity"]=="red" else "#b45309" if a["severity"]=="amber" else "#1d4ed8"};">'
+        f'{a["count"]}</b></td></tr>'
+        for a in alerts if a.get("count", 0) > 0
+    ) or '<tr><td colspan="2" style="padding:10px;text-align:center;color:#166534;">All clear — no open exceptions.</td></tr>'
+
+    bg_rows = "".join(
+        f'<tr><td style="padding:5px 10px;border-bottom:1px solid #eee;">{b.get("bg_number","")}</td>'
+        f'<td style="padding:5px 10px;border-bottom:1px solid #eee;">{b.get("issued_by","")}</td>'
+        f'<td style="padding:5px 10px;border-bottom:1px solid #eee;color:#b91c1c;"><b>{b.get("bg_claim_expiry_date","")}</b></td></tr>'
+        for b in bg_top
+    ) or '<tr><td colspan="3" style="padding:10px;text-align:center;color:#666;">No BG expiries in the next 30 days.</td></tr>'
+
+    html = f"""<html><body style="font-family:Arial,Helvetica,sans-serif;background:#f8fafc;padding:20px;">
+      <table width="720" style="margin:auto;background:#fff;border:1px solid #e5e7eb;border-collapse:collapse;">
+        <tr><td style="background:#1E4EAB;color:#fff;padding:18px 22px;">
+          <div style="font-size:11px;letter-spacing:2px;">MIS · JHARKHAND SKILLS</div>
+          <div style="font-size:22px;font-weight:800;margin-top:4px;">Weekly Digest</div>
+          <div style="font-size:12px;opacity:0.85;margin-top:2px;">{week_range}</div>
+        </td></tr>
+        <tr><td style="padding:22px;">
+          <h3 style="margin:0 0 10px 0;color:#111;">Open Exceptions</h3>
+          <table width="100%" style="border-collapse:collapse;border:1px solid #eee;font-size:13px;">
+            <thead><tr style="background:#f3f4f6;">
+              <th style="padding:8px 10px;text-align:left;">Category</th>
+              <th style="padding:8px 10px;text-align:right;">Open</th>
+            </tr></thead>
+            <tbody>{alerts_rows}</tbody>
+          </table>
+
+          <h3 style="margin:22px 0 10px 0;color:#111;">This Week&rsquo;s Mobilisation</h3>
+          <table width="100%" style="border-collapse:collapse;font-size:13px;">
+            <tr>
+              <td style="padding:8px 10px;background:#ecfdf5;">Total Mobilisation: <b>{mob.get("mob", 0):,}</b></td>
+              <td style="padding:8px 10px;background:#ecfdf5;">Total Distance: <b>{mob.get("km", 0)} km</b></td>
+              <td style="padding:8px 10px;background:#ecfdf5;">Reports: <b>{mob.get("reports", 0)}</b></td>
+            </tr>
+          </table>
+
+          <h3 style="margin:22px 0 10px 0;color:#111;">Upcoming BG Expiries (30 days)</h3>
+          <table width="100%" style="border-collapse:collapse;border:1px solid #eee;font-size:12px;">
+            <thead><tr style="background:#f3f4f6;">
+              <th style="padding:8px 10px;text-align:left;">BG Number</th>
+              <th style="padding:8px 10px;text-align:left;">Issued By</th>
+              <th style="padding:8px 10px;text-align:left;">Expiry</th>
+            </tr></thead>
+            <tbody>{bg_rows}</tbody>
+          </table>
+
+          <div style="margin-top:24px;text-align:center;">
+            <a href="{portal_url}/mis" style="display:inline-block;background:#1E4EAB;color:#fff;padding:10px 20px;text-decoration:none;font-weight:600;font-size:13px;">Open MIS Dashboard →</a>
+          </div>
+
+          <div style="margin-top:22px;color:#94a3b8;font-size:11px;text-align:center;">Mashara Finance · Automated Weekly Digest · Every Monday 08:00 IST</div>
+        </td></tr>
+      </table>
+    </body></html>"""
+
+    params = {"from": sender, "to": list(dict.fromkeys(to_emails)),
+              "subject": f"MIS Weekly Digest · {week_range}", "html": html}
+    try:
+        res = await asyncio.to_thread(resend.Emails.send, params)
+        return {"sent": True, "id": res.get("id") if isinstance(res, dict) else None}
+    except Exception as e:  # noqa: BLE001
+        logger.error("MIS weekly digest email failed: %s", e)
+        return {"sent": False, "reason": str(e)[:250]}

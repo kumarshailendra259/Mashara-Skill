@@ -13,6 +13,10 @@ import ProjectSummaryTab from "./ProjectSummaryTab";
 import JSDMSTab from "./JSDMSTab";
 import MobilizationTab from "./MobilizationTab";
 import AlertsPanel from "./AlertsPanel";
+import ReportsTab from "./ReportsTab";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 
 /**
  * Jharkhand Skills — Daily Report / MIS Dashboard
@@ -23,7 +27,7 @@ import AlertsPanel from "./AlertsPanel";
  * (Projects, JSDMS, Mobilization, Reports) that Phase 2+ will fill in.
  */
 
-const KPI = ({ label, value, icon: Icon, tone = "brand", suffix = "" }) => {
+const KPI = ({ label, value, icon: Icon, tone = "brand", suffix = "", drilldown, onDrilldown }) => {
   const toneCls = {
     brand: "text-[var(--brand)]",
     green: "text-emerald-700",
@@ -31,8 +35,14 @@ const KPI = ({ label, value, icon: Icon, tone = "brand", suffix = "" }) => {
     amber: "text-amber-700",
     muted: "text-[var(--muted)]",
   }[tone] || "text-[var(--brand)]";
+  const clickable = !!drilldown;
+  const Comp = clickable ? "button" : "div";
   return (
-    <div className="swiss-card p-4 border-l-4 border-[var(--brand)]/40 hover:border-[var(--brand)] transition-colors">
+    <Comp
+      onClick={clickable ? () => onDrilldown(drilldown, label) : undefined}
+      className={`swiss-card p-4 border-l-4 border-[var(--brand)]/40 hover:border-[var(--brand)] transition-colors text-left w-full ${clickable ? "cursor-pointer hover:shadow-md" : ""}`}
+      data-testid={clickable ? `mis-kpi-${drilldown}` : undefined}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="overline text-[10px]">{label}</div>
         {Icon && <Icon size={14} className={toneCls} />}
@@ -40,7 +50,7 @@ const KPI = ({ label, value, icon: Icon, tone = "brand", suffix = "" }) => {
       <div className={`font-heading font-black text-2xl mt-1 ${toneCls}`}>
         {typeof value === "number" ? value.toLocaleString("en-IN") : (value || "—")}{suffix}
       </div>
-    </div>
+    </Comp>
   );
 };
 
@@ -65,6 +75,15 @@ export default function MISDashboard() {
 
   const canWrite = ["admin", "hr", "manager", "senior_manager", "accountant"].includes(user?.role);
 
+  // KPI drill-down state
+  const [drill, setDrill] = useState(null); // { title, kind, rows }
+  const openDrill = async (key, title) => {
+    try {
+      const r = await api.get(`/mis/reports/drilldown/${key}`, { params: { limit: 100 } });
+      setDrill({ title, ...r.data });
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   return (
     <div className="space-y-5" data-testid="mis-dashboard">
       {/* Header */}
@@ -83,15 +102,15 @@ export default function MISDashboard() {
 
       {/* Overview KPI strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3" data-testid="mis-kpi-strip">
-        <KPI label="Total Centers"      value={sip.total_centers}      icon={MapPin}       tone="brand" />
+        <KPI label="Total Centers"      value={sip.total_centers}      icon={MapPin}       tone="brand" drilldown="centers"        onDrilldown={openDrill} />
         <KPI label="Accredited"         value={sip.accredited}         icon={BadgeCheck}   tone="green" />
         <KPI label="BG Expiring (30d)"  value={sip.bg_expiring_30d}    icon={AlertTriangle} tone="amber" />
         <KPI label="BG Expired"         value={sip.bg_expired}         icon={XCircle}       tone="red" />
         <KPI label="Total Batches"      value={p.total_batches}        icon={PackageOpen}   tone="brand" />
-        <KPI label="Active Batches"     value={p.active_batches}       icon={TrendingUp}    tone="green" />
-        <KPI label="Total Enrolled"     value={p.total_enrolled}       icon={Users}         tone="brand" />
-        <KPI label="Certified"          value={p.total_certified}      icon={GraduationCap} tone="green" />
-        <KPI label="Placement"          value={p.total_placement}      icon={BadgeCheck}    tone="green" />
+        <KPI label="Active Batches"     value={p.active_batches}       icon={TrendingUp}    tone="green" drilldown="active_batches" onDrilldown={openDrill} />
+        <KPI label="Total Enrolled"     value={p.total_enrolled}       icon={Users}         tone="brand" drilldown="enrolled"       onDrilldown={openDrill} />
+        <KPI label="Certified"          value={p.total_certified}      icon={GraduationCap} tone="green" drilldown="certified"      onDrilldown={openDrill} />
+        <KPI label="Placement"          value={p.total_placement}      icon={BadgeCheck}    tone="green" drilldown="placement"      onDrilldown={openDrill} />
         <KPI label="Placement %"        value={p.placement_pct}        suffix="%" tone="green" />
         <KPI label="Today Mobilisation" value={m.today_total}          icon={ClipboardList} tone="brand" />
         <KPI label="Today Distance"     value={m.today_distance_km}    suffix=" km" icon={RouteIcon} tone="brand" />
@@ -173,14 +192,84 @@ export default function MISDashboard() {
           <MobilizationTab canWrite={canWrite || user?.role === "staff" || user?.role === "center_staff" || user?.role === "center_manager"} onChange={loadOverview} />
         </TabsContent>
         <TabsContent value="reports" className="pt-4">
-          <ComingSoon
-            title="Reports & Analytics"
-            phase="Phase 5"
-            hint="Printable Daily Report, drill-down analytics, District-wise performance, PDF/Excel export."
-            icon={FileBarChart2}
-          />
+          <ReportsTab />
         </TabsContent>
       </Tabs>
+
+      {/* KPI Drill-down dialog */}
+      <Dialog open={!!drill} onOpenChange={(o) => !o && setDrill(null)}>
+        <DialogContent className="rounded-none max-w-5xl max-h-[85vh] overflow-y-auto" data-testid="mis-kpi-drill">
+          {drill && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="font-heading flex items-center gap-2">
+                  {drill.title}
+                  <span className="ml-auto text-sm font-normal text-[var(--muted)]">{drill.count} record{drill.count === 1 ? "" : "s"}</span>
+                </DialogTitle>
+              </DialogHeader>
+              {drill.kind === "batches" && (
+                <div className="overflow-x-auto border border-[var(--border)]">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50 border-b border-[var(--border)]">
+                      <tr className="[&>th]:p-2 [&>th]:text-left [&>th]:overline [&>th]:text-[10px]">
+                        <th>Batch ID</th><th>Center</th><th>Project</th><th>Job Role</th>
+                        <th className="text-right">Enrolled</th><th className="text-right">Certified</th>
+                        <th className="text-right">Placement</th><th className="text-right">Certif %</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(drill.rows || []).map((r) => (
+                        <tr key={r.id} className="border-b border-[var(--border)]/50 [&>td]:p-2 hover:bg-gray-50">
+                          <td className="font-mono">{r.batch_id || "—"}</td>
+                          <td className="font-semibold">{r.center_name}</td>
+                          <td>{r.project}</td>
+                          <td>{r.job_role || "—"}</td>
+                          <td className="text-right">{r.total_enrolled || 0}</td>
+                          <td className="text-right text-emerald-700 font-bold">{r.total_certified || 0}</td>
+                          <td className="text-right">{r.num_placement || 0}</td>
+                          <td className="text-right">{r.certification_pct}%</td>
+                          <td>{r.status || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {drill.kind === "sip_centers" && (
+                <div className="overflow-x-auto border border-[var(--border)]">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50 border-b border-[var(--border)]">
+                      <tr className="[&>th]:p-2 [&>th]:text-left [&>th]:overline [&>th]:text-[10px]">
+                        <th>Center</th><th>Center ID</th><th>State</th><th>Status</th>
+                        <th>Rating</th><th>BG Validity</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(drill.rows || []).map((r) => (
+                        <tr key={r.id} className="border-b border-[var(--border)]/50 [&>td]:p-2 hover:bg-gray-50">
+                          <td className="font-semibold">{r.center_name}</td>
+                          <td className="font-mono">{r.center_id_code}</td>
+                          <td>{r.state || "—"}</td>
+                          <td>{r.status || "—"}</td>
+                          <td>{r.center_rating || "—"}</td>
+                          <td>{r.bg_validity_date || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {(!drill.rows || drill.rows.length === 0) && (
+                <div className="text-sm text-[var(--muted)] p-3 text-center">No records for this KPI yet.</div>
+              )}
+              <div className="mt-3 flex justify-end">
+                <button onClick={() => setDrill(null)} className="border border-[var(--border)] px-3 py-1.5 text-xs hover:bg-gray-50">Close</button>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {loading && <div className="text-xs text-[var(--muted)]">Loading MIS overview…</div>}
     </div>

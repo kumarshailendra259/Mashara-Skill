@@ -1116,3 +1116,41 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - Seeded fixtures across SIP / Project / JSDMS collections to trigger every category → alerts endpoint returned all 8 counts correctly (BG Expiring=1, BG Expired=1, Accreditation Pending=1, Assessment Pending=2, Low Attendance=1, Placement Pending=1, Batches Ending=1, Trainer Gap=1).
 - Frontend screenshots confirm the panel renders on Overview with all 8 cards color-coded, and clicking "Low Attendance" opens a drill-down showing the offending batch with red 55% attendance.
 - No impact on existing Finance / HR / Attendance / BG / Candidate modules.
+
+## MIS · Phase 5 + KPI Drill-down + Weekly Digest (Done + Verified, Feb 2026)
+
+### Backend
+- **`GET /api/mis/reports/daily`** — one aggregated call returning executive summary (16 KPIs), by_project / by_center / by_district arrays for charts, monthly_mob_trend (last 30 days), and open_alerts list
+- **`GET /api/mis/reports/drilldown/{kpi}`** — filtered batch list for KPI card click-through (`enrolled` / `certified` / `placement` / `dropout` / `active_batches` / `centers`, all with limit)
+- **Weekly digest**:
+  - `_mis_build_weekly_digest()` — assembles alerts + 7-day mobilization totals + top 10 upcoming BG expiries
+  - `_mis_dispatch_weekly_digest(force)` — sends via Resend to admin + senior_manager + hr users, filters out demo emails, idempotent per ISO week (`mis_digest_log` marker)
+  - `_mis_digest_scheduler()` — background task that fires on Mondays every 4 hours, safe to re-run
+  - Manual trigger endpoint: `POST /api/mis/digest/run?force=true`
+- **`send_mis_weekly_digest()`** email helper in `email_utils.py` — HTML template with alerts table, week-mobilization strip, upcoming BG table, and "Open MIS Dashboard →" CTA
+
+### Frontend
+- **`/app/frontend/src/pages/mis/ReportsTab.jsx`** — full printable Daily Report:
+  - Header with Refresh + **Print / Save PDF** button (uses browser print dialog with print-only CSS so users can Save-as-PDF)
+  - 16-card Executive Summary
+  - **4 Recharts**:
+    1. Target vs Achievement · By Project (grouped bar: Target/Certified/Placement)
+    2. District-wise Performance (horizontal bar: Enrolled + Certified)
+    3. Center-wise Enrollment (Top 10, vertical bar)
+    4. Monthly Mobilization Trend (dual-axis line: Mobilisation + Distance)
+  - Project-wise Performance table (batches, target, enrolled, certified, placement, certif %, ach %)
+  - Center-wise Performance table (top 10)
+  - Exceptions & Alerts summary strip (auto-populates from `/mis/alerts`)
+  - Print-only CSS blocks: sidebar/action bar hidden; report area full-width
+- **KPI Drill-down on Overview**:
+  - `KPI` component in MISDashboard turned into an optional `<button>` when `drilldown` prop set; adds hover shadow + `cursor: pointer`
+  - Clickable KPIs: Total Centers, Active Batches, Total Enrolled, Certified, Placement
+  - Click → fetches `/mis/reports/drilldown/{key}` → opens a shadcn Dialog with a full batch/center table (Batch ID, Center, Project, Job Role, Enrolled, Certified, Placement, Certif %, Status)
+
+### Verified E2E
+- Seeded 6 batches across 3 projects (Birsa / Satgawan / Kairo) + 3 districts (Gumla / Koderma / Lohardaga) + 10 daily mobilization reports over last 10 days
+- `/mis/reports/daily` returned: 3 projects, 6 batches, 1940 enrolled, 1600 certified (82.47%), 1255 placement (78.44%), 100 dropout, 75.12% achievement
+- KPI drill: clicking "Total Enrolled (1940)" opened dialog showing all 6 batches with correct Certif % (80%, 86.84%, 82.86%, 85.29%, 81.48%, 75%)
+- Reports tab screenshots confirm all 4 charts render with real data + tooltips work (hover on Aug-18 shows Distance=15, Mobilisation=38)
+- Digest `POST /api/mis/digest/run?force=true` returned `sent:2` to real admin/HR users, filtered out `@x.io` / `@example.com` demo addresses
+- Scheduler task boots on app startup, safely idempotent per ISO week via `mis_digest_log`

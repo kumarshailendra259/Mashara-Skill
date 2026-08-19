@@ -15228,6 +15228,248 @@ async def mis_alerts(_=Depends(require_role(*MIS_READ_ROLES))):
     }
 
 
+# ============================================================================
+# ============  MIS  ·  REPORTS  &  DIGESTS  (Phase 5 + Digest)  =============
+# ============================================================================
+
+@api.get("/mis/reports/daily")
+async def mis_reports_daily(_=Depends(require_role(*MIS_READ_ROLES))):
+    """One consolidated call powering the Daily Report tab — executive summary,
+    project-wise & center-wise KPIs, mobilization for today, and open alerts."""
+    from datetime import date as _date
+    today = _date.today()
+    tstr = today.isoformat()
+
+    # SIP counts
+    sip_total = await db.mis_sip_centers.count_documents({"is_deleted": {"$ne": True}})
+    sip_accr  = await db.mis_sip_centers.count_documents({"is_deleted": {"$ne": True}, "status": {"$regex": "^accredited$", "$options": "i"}})
+
+    # Aggregates across all batches
+    async def _sum_field(field, extra_match=None):
+        m = {"is_deleted": {"$ne": True}}
+        if extra_match: m.update(extra_match)
+        r = await db.mis_project_summary.aggregate([{"$match": m},
+             {"$group": {"_id": None, "s": {"$sum": {"$ifNull": [f"${field}", 0]}}}}]).to_list(1)
+        return int(r[0]["s"]) if r else 0
+
+    total_target    = await _sum_field("total_target")
+    total_enrolled  = await _sum_field("total_enrolled")
+    total_certified = await _sum_field("total_certified")
+    total_placement = await _sum_field("num_placement")
+    total_dropout   = await _sum_field("total_dropout")
+    total_batches   = await db.mis_project_summary.count_documents({"is_deleted": {"$ne": True}})
+    active_batches  = await db.mis_project_summary.count_documents({"is_deleted": {"$ne": True},
+                        "status": {"$regex": "^(active|running|ongoing)$", "$options": "i"}})
+
+    # Mobilization today
+    mob = await db.mis_mobilization.aggregate([
+        {"$match": {"is_deleted": {"$ne": True}, "report_date": tstr}},
+        {"$group": {"_id": None, "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                                 "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}}
+    ]).to_list(1)
+    today_mob = int(mob[0]["mob"]) if mob else 0
+    today_km  = round(float(mob[0]["km"]) if mob else 0, 2)
+
+    # Project-wise + Center-wise + District-wise summaries
+    async def _bucket(field):
+        return await db.mis_project_summary.aggregate([
+            {"$match": {"is_deleted": {"$ne": True}}},
+            {"$group": {"_id": f"${field}",
+                        "target": {"$sum": {"$ifNull": ["$total_target", 0]}},
+                        "enrolled": {"$sum": {"$ifNull": ["$total_enrolled", 0]}},
+                        "certified": {"$sum": {"$ifNull": ["$total_certified", 0]}},
+                        "placement": {"$sum": {"$ifNull": ["$num_placement", 0]}},
+                        "batches": {"$sum": 1}}},
+            {"$sort": {"target": -1}}]).to_list(500)
+    def _shape(rows):
+        out = []
+        for r in rows:
+            if not r["_id"]: continue
+            enrolled = r["enrolled"] or 0; certified = r["certified"] or 0
+            target = r["target"] or 0; placement = r["placement"] or 0
+            out.append({"label": r["_id"], "batches": r["batches"],
+                        "target": int(target), "enrolled": int(enrolled),
+                        "certified": int(certified), "placement": int(placement),
+                        "certification_pct": round((certified / enrolled * 100) if enrolled else 0, 2),
+                        "achievement_pct":   round((certified / target * 100) if target else 0, 2),
+                        "placement_pct":     round((placement / certified * 100) if certified else 0, 2)})
+        return out
+
+    by_project   = _shape(await _bucket("project"))
+    by_center    = _shape(await _bucket("center_name"))
+    by_district  = _shape(await _bucket("territory"))
+
+    # Monthly mobilization trend — last 30 days
+    from datetime import timedelta as _td
+    thirty_ago = (today - _td(days=29)).isoformat()
+    trend = await db.mis_mobilization.aggregate([
+        {"$match": {"is_deleted": {"$ne": True}, "report_date": {"$gte": thirty_ago}}},
+        {"$group": {"_id": "$report_date",
+                    "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                    "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}},
+        {"$sort": {"_id": 1}}]).to_list(60)
+    monthly_trend = [{"date": r["_id"], "mobilisation": int(r["mob"] or 0),
+                      "distance_km": round(float(r["km"] or 0), 2)} for r in trend]
+
+    # Alerts summary — reuse alerts endpoint's logic on relevant categories only
+    alerts_data = await mis_alerts(_=None)  # noqa: reuse
+    open_alerts = [a for a in alerts_data["alerts"] if (a.get("count") or 0) > 0]
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": tstr,
+        "executive": {
+            "total_projects": len({r["label"] for r in by_project}),
+            "total_centers": sip_total,
+            "accredited_centers": sip_accr,
+            "total_target": total_target,
+            "target_achieved": total_certified,
+            "remaining_target": max(0, total_target - total_certified),
+            "total_batches": total_batches,
+            "active_batches": active_batches,
+            "total_enrolled": total_enrolled,
+            "total_certified": total_certified,
+            "total_placement": total_placement,
+            "total_dropout": total_dropout,
+            "today_mobilisation": today_mob,
+            "today_distance_km": today_km,
+            "achievement_pct":   round((total_certified / total_target * 100) if total_target else 0, 2),
+            "certification_pct": round((total_certified / total_enrolled * 100) if total_enrolled else 0, 2),
+            "placement_pct":     round((total_placement / total_certified * 100) if total_certified else 0, 2),
+        },
+        "by_project":  by_project,
+        "by_center":   by_center,
+        "by_district": by_district,
+        "monthly_mob_trend": monthly_trend,
+        "open_alerts": open_alerts,
+    }
+
+
+@api.get("/mis/reports/drilldown/{kpi}")
+async def mis_reports_drilldown(kpi: str, limit: int = 100, _=Depends(require_role(*MIS_READ_ROLES))):
+    """Filtered batch/center list for Overview KPI cards click-through.
+    kpi ∈ {enrolled, certified, placement, dropout, active_batches, centers}"""
+    if kpi in ("enrolled", "certified", "placement", "dropout", "active_batches"):
+        q = {"is_deleted": {"$ne": True}}
+        sort_field = "total_enrolled"
+        if kpi == "enrolled":   q["total_enrolled"]   = {"$gt": 0}; sort_field = "total_enrolled"
+        elif kpi == "certified": q["total_certified"] = {"$gt": 0}; sort_field = "total_certified"
+        elif kpi == "placement": q["num_placement"]   = {"$gt": 0}; sort_field = "num_placement"
+        elif kpi == "dropout":   q["total_dropout"]   = {"$gt": 0}; sort_field = "total_dropout"
+        elif kpi == "active_batches":
+            q["status"] = {"$regex": "^(active|running|ongoing)$", "$options": "i"}
+        docs = await db.mis_project_summary.find(q, {"_id": 0}).sort(sort_field, -1).limit(limit).to_list(limit)
+        return {"kind": "batches", "count": len(docs), "rows": [_pjt_compute(d) for d in docs]}
+    elif kpi == "centers":
+        docs = await db.mis_sip_centers.find({"is_deleted": {"$ne": True}}, {"_id": 0}).sort("center_name", 1).limit(limit).to_list(limit)
+        return {"kind": "sip_centers", "count": len(docs), "rows": docs}
+    else:
+        raise HTTPException(400, f"Unknown KPI '{kpi}'")
+
+
+# ---- Weekly digest scheduler & manual trigger ----
+
+async def _mis_build_weekly_digest() -> dict:
+    """Build the payload for the weekly digest email."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    week_start = today - _td(days=today.weekday())  # Monday of current week
+    week_range = f"{week_start.strftime('%d %b')} – {today.strftime('%d %b %Y')}"
+
+    # Reuse alerts endpoint
+    alerts_data = await mis_alerts(_=None)
+    alerts = alerts_data["alerts"]
+
+    # Last-7-days mobilization
+    seven_ago = (today - _td(days=6)).isoformat()
+    r = await db.mis_mobilization.aggregate([
+        {"$match": {"is_deleted": {"$ne": True}, "report_date": {"$gte": seven_ago}}},
+        {"$group": {"_id": None,
+                    "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                    "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}},
+                    "reports": {"$sum": 1}}}]).to_list(1)
+    mob = {"mob": int(r[0]["mob"] or 0) if r else 0,
+           "km":  round(float(r[0]["km"] or 0), 2) if r else 0,
+           "reports": r[0]["reports"] if r else 0}
+
+    # Upcoming BG expiries in 30 days from bank_guarantees
+    plus_30 = (today + _td(days=30)).isoformat()
+    bg_top = await db.bank_guarantees.find(
+        {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
+         "bg_claim_expiry_date": {"$gte": today.isoformat(), "$lte": plus_30}},
+        {"_id": 0, "bg_number": 1, "issued_by": 1, "bg_claim_expiry_date": 1}
+    ).sort("bg_claim_expiry_date", 1).limit(10).to_list(10)
+
+    return {"alerts": alerts, "mobilization_week": mob,
+            "bg_top_upcoming": bg_top, "week_range": week_range}
+
+
+@api.post("/mis/digest/run")
+async def mis_digest_run(force: bool = False, _=Depends(require_role("admin", "hr"))):
+    """Manually trigger the weekly digest email (helpful for QA)."""
+    return await _mis_dispatch_weekly_digest(force=force)
+
+
+async def _mis_dispatch_weekly_digest(force: bool = False) -> dict:
+    """Send the weekly digest to admin + senior_manager + hr users with valid
+    emails. Idempotent per ISO week — records marker in `mis_digest_log`."""
+    from datetime import date as _date
+    from email_utils import send_mis_weekly_digest
+    today = _date.today()
+    iso_year, iso_week, _iso_dow = today.isocalendar()
+    marker = f"weekly-{iso_year}-{iso_week:02d}"
+    if not force:
+        existing = await db.mis_digest_log.find_one({"marker": marker})
+        if existing:
+            return {"sent": 0, "reason": "already_sent_this_week", "marker": marker}
+
+    digest = await _mis_build_weekly_digest()
+    # Recipients
+    recipients_docs = await db.users.find(
+        {"role": {"$in": ["admin", "senior_manager", "hr"]},
+         "is_active": {"$ne": False},
+         "email": {"$exists": True, "$ne": None}},
+        {"_id": 0, "email": 1}).to_list(500)
+    _bad = ("example.com", "example.org", ".local", "test.local", "finance.app",
+            "@x.com", "@x.io", "bgtest.co")
+    recipients = sorted({(d.get("email") or "").strip().lower()
+                         for d in recipients_docs
+                         if d.get("email") and "@" in d["email"]
+                         and not any(b in d["email"].lower() for b in _bad)})
+    if not recipients:
+        return {"sent": 0, "reason": "no_recipients", "marker": marker}
+    portal_url = (os.environ.get("PUBLIC_APP_URL") or "https://finance.masharaskills.com").rstrip("/")
+    result = await send_mis_weekly_digest(recipients, digest, portal_url)
+    if result.get("sent"):
+        await db.mis_digest_log.insert_one({"marker": marker, "sent_at": datetime.now(timezone.utc).isoformat(),
+                                            "recipients": recipients, "email_id": result.get("id")})
+        return {"sent": len(recipients), "marker": marker, "recipients": recipients}
+    return {"sent": 0, "reason": result.get("reason", "email_failed"), "marker": marker}
+
+
+async def _mis_digest_scheduler():
+    """Runs forever — every 4 hours checks if today is Monday and current week's
+    digest hasn't fired yet. Idempotent via `mis_digest_log`."""
+    from datetime import date as _date
+    await asyncio.sleep(90)  # warmup
+    while True:
+        try:
+            today = _date.today()
+            # Monday = 0. Fire only on Mondays, and only after 8:00 IST equivalent.
+            if today.weekday() == 0:
+                await _mis_dispatch_weekly_digest(force=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning("MIS digest scheduler tick failed: %s", e)
+        await asyncio.sleep(4 * 3600)
+
+
+@app.on_event("startup")
+async def _mis_reports_startup():
+    asyncio.create_task(_mis_digest_scheduler())
+
+
+
+
 
 
 
