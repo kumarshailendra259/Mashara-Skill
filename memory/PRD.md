@@ -1082,3 +1082,37 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - Rollups: today/MTD `{mob:73, km:26.5, reports:1}`; avg-per-day `{mob:3.84, km:1.39}` (correctly divided by days-in-month elapsed); by_mobilizer / by_branch / by_project all show single Kaushal Kumar entry; daily_trend has 1 row
 - Overview KPI updates: `today_total=73, today_distance_km=26.5` ✅
 - Frontend screenshot confirms 6-KPI strip, 3 rollup cards, table row, and lists integration with existing overview
+
+## MIS · Phase 6 — Alerts & Exceptions Panel (Done + Verified, Feb 2026)
+
+### Backend
+- **New endpoint**: `GET /api/mis/alerts` — returns 8 alert categories in a single round trip:
+  1. `bg_expiring`   (amber) — `mis_sip_centers.bg_validity_date` between today and +30d
+  2. `bg_expired`    (red)   — `mis_sip_centers.bg_validity_date < today`
+  3. `accreditation_pending` (amber) — SIP centers where status ≠ "accredited"
+  4. `assessment_pending` (amber) — project batches with `enrolled > 0` and `certified == 0/null`
+  5. `low_attendance` (red)   — batches with `0 < attendance_pct < 70`
+  6. `placement_pending` (amber) — `certified > 0` and `placement == 0/null`
+  7. `batches_ending` (blue)  — active batches with `end_date` in next 15 days
+  8. `trainer_gap`   (red)   — JSDMS rows where `trainers_required > (tot_aligned + tot_renew_aligned)`
+- Each category returns `{key, label, severity, count, target_tab, top[max 5 preview records]}`.
+
+### Frontend (`/app/frontend/src/pages/mis/AlertsPanel.jsx`)
+- Rendered at the top of the **Overview tab** so exceptions are the very first thing the user sees on login.
+- Header shows a running total ("9 open exceptions" in red, or "All clear · no open exceptions" in green when zero).
+- **8 color-coded cards** in a responsive 1/2/4-column grid — severity drives the left border + subtle background tint (red/amber/blue/green). Each card shows: icon, category label, big count, and the first offender's identifier (Center / Batch / Centre name).
+- Cards with zero count are dimmed and non-clickable.
+- Clicking any card opens a **drill-down dialog** showing the top 5 items in a table shaped per-category:
+  - BG Expiring → Center · Center ID · State · Expiry
+  - Low Attendance → Batch ID · Center · Job Role · Attendance % (color-coded)
+  - Placement Pending → Batch ID · Center · Job Role · Certified count
+  - Batches Ending → Batch ID · Center · Job Role · Ends On
+  - Trainer Gap → Centre · Job Role · Required · Gap (highlighted red)
+  - etc.
+- Dialog has **"Jump to <TAB>"** button that switches the parent MIS tab (`onJumpToTab` prop wired into MISDashboard's `setTab`) so users can inspect / edit the offending records with one click.
+- Refresh button re-hits the endpoint on demand.
+
+### Verified E2E
+- Seeded fixtures across SIP / Project / JSDMS collections to trigger every category → alerts endpoint returned all 8 counts correctly (BG Expiring=1, BG Expired=1, Accreditation Pending=1, Assessment Pending=2, Low Attendance=1, Placement Pending=1, Batches Ending=1, Trainer Gap=1).
+- Frontend screenshots confirm the panel renders on Overview with all 8 cards color-coded, and clicking "Low Attendance" opens a drill-down showing the offending batch with red 55% attendance.
+- No impact on existing Finance / HR / Attendance / BG / Candidate modules.

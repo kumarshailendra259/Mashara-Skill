@@ -12,6 +12,7 @@ import SIPStatusTab from "./SIPStatusTab";
 import ProjectSummaryTab from "./ProjectSummaryTab";
 import JSDMSTab from "./JSDMSTab";
 import MobilizationTab from "./MobilizationTab";
+import AlertsPanel from "./AlertsPanel";
 
 /**
  * Jharkhand Skills — Daily Report / MIS Dashboard
@@ -109,6 +110,9 @@ export default function MISDashboard() {
 
         {/* -------- Overview -------- */}
         <TabsContent value="overview" className="pt-4 space-y-4">
+          {/* Alerts & Exceptions — Phase 6 */}
+          <AlertsPanel onJumpToTab={setTab} />
+
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div className="swiss-card p-4">
               <div className="overline">Certification vs Enrollment</div>

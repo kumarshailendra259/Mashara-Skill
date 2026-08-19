@@ -15106,6 +15106,129 @@ async def mis_mob_export(
 
 
 
+# ============================================================================
+# ============  MIS  ·  ALERTS  &  EXCEPTIONS  (Phase 6)  ====================
+# ============================================================================
+# Consolidated alert feed for the MIS Overview. Each category returns a count
+# plus a `top[]` array (max 5 preview items) — the UI shows the count on a
+# card and expands the top list into a click-through dialog.
+
+@api.get("/mis/alerts")
+async def mis_alerts(_=Depends(require_role(*MIS_READ_ROLES))):
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    tstr = today.isoformat()
+    plus_30 = (today + _td(days=30)).isoformat()
+    plus_15 = (today + _td(days=15)).isoformat()
+
+    async def _query(col, q, proj):
+        docs = await col.find(q, {"_id": 0, **proj}).limit(50).to_list(50)
+        return docs
+
+    # ---- BG Expiring (next 30d) — from mis_sip_centers ----
+    bg_exp_q = {"is_deleted": {"$ne": True},
+                "bg_validity_date": {"$gte": tstr, "$lte": plus_30}}
+    bg_exp_docs = await _query(db.mis_sip_centers, bg_exp_q,
+                               {"id": 1, "center_name": 1, "center_id_code": 1,
+                                "bg_validity_date": 1, "state": 1})
+    bg_exp_count = await db.mis_sip_centers.count_documents(bg_exp_q)
+
+    # ---- BG Expired — bg_validity_date < today ----
+    bg_expired_q = {"is_deleted": {"$ne": True},
+                    "bg_validity_date": {"$lt": tstr, "$ne": None, "$ne": ""}}
+    bg_expired_docs = await _query(db.mis_sip_centers, bg_expired_q,
+                                    {"id": 1, "center_name": 1, "center_id_code": 1,
+                                     "bg_validity_date": 1})
+    bg_expired_count = await db.mis_sip_centers.count_documents(bg_expired_q)
+
+    # ---- Accreditation Pending — status not 'accredited' ----
+    accr_q = {"is_deleted": {"$ne": True},
+              "status": {"$not": {"$regex": "^accredited$", "$options": "i"}}}
+    accr_docs = await _query(db.mis_sip_centers, accr_q,
+                              {"id": 1, "center_name": 1, "center_id_code": 1, "status": 1})
+    accr_count = await db.mis_sip_centers.count_documents(accr_q)
+
+    # ---- Assessment Pending — enrolled > 0 but total_certified == 0/None ----
+    asmt_pending_q = {"is_deleted": {"$ne": True},
+                      "total_enrolled": {"$gt": 0},
+                      "$or": [{"total_certified": {"$eq": None}},
+                              {"total_certified": {"$eq": 0}}]}
+    asmt_docs = await _query(db.mis_project_summary, asmt_pending_q,
+                              {"id": 1, "batch_id": 1, "center_name": 1, "project": 1,
+                               "total_enrolled": 1, "total_certified": 1, "end_date": 1})
+    asmt_count = await db.mis_project_summary.count_documents(asmt_pending_q)
+
+    # ---- Low Attendance — attendance_pct < 70 (and not null) ----
+    lo_att_q = {"is_deleted": {"$ne": True},
+                "attendance_pct": {"$lt": 70, "$gt": 0}}
+    lo_att_docs = await _query(db.mis_project_summary, lo_att_q,
+                                {"id": 1, "batch_id": 1, "center_name": 1,
+                                 "job_role": 1, "attendance_pct": 1})
+    lo_att_count = await db.mis_project_summary.count_documents(lo_att_q)
+
+    # ---- Placement Pending — certified > 0 but placement == 0/None ----
+    place_pending_q = {"is_deleted": {"$ne": True},
+                       "total_certified": {"$gt": 0},
+                       "$or": [{"num_placement": {"$eq": None}},
+                               {"num_placement": {"$eq": 0}}]}
+    place_docs = await _query(db.mis_project_summary, place_pending_q,
+                               {"id": 1, "batch_id": 1, "center_name": 1, "job_role": 1,
+                                "total_certified": 1, "num_placement": 1})
+    place_count = await db.mis_project_summary.count_documents(place_pending_q)
+
+    # ---- Batches ending in next 15 days & still active ----
+    ending_q = {"is_deleted": {"$ne": True},
+                "end_date": {"$gte": tstr, "$lte": plus_15},
+                "$or": [{"status": {"$regex": "^(active|running|ongoing)$", "$options": "i"}},
+                        {"status": {"$exists": False}}]}
+    ending_docs = await _query(db.mis_project_summary, ending_q,
+                                {"id": 1, "batch_id": 1, "center_name": 1,
+                                 "job_role": 1, "end_date": 1, "status": 1})
+    ending_count = await db.mis_project_summary.count_documents(ending_q)
+
+    # ---- Trainer Gap — JSDMS rows where required > aligned ----
+    # Requires client-side calc since compound field. Fetch and filter.
+    jsdms_all = await db.mis_jsdms.find({"is_deleted": {"$ne": True}},
+        {"_id": 0, "id": 1, "centre_name": 1, "job_role": 1,
+         "trainers_required": 1, "tot_aligned": 1, "tot_renew_aligned": 1}).to_list(5000)
+    trainer_gap_rows = []
+    for j in jsdms_all:
+        req = j.get("trainers_required") or 0
+        aligned = (j.get("tot_aligned") or 0) + (j.get("tot_renew_aligned") or 0)
+        if req > aligned:
+            trainer_gap_rows.append({**j, "trainer_gap": int(req - aligned)})
+    trainer_gap_rows.sort(key=lambda x: x["trainer_gap"], reverse=True)
+    trainer_gap_count = len(trainer_gap_rows)
+
+    def _shape(docs, take=5):
+        return [{k: v for k, v in d.items() if k != "_id"} for d in docs[:take]]
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": tstr,
+        "alerts": [
+            {"key": "bg_expiring", "label": "BG Expiring (30d)", "severity": "amber",
+             "count": bg_exp_count, "target_tab": "sip", "top": _shape(bg_exp_docs)},
+            {"key": "bg_expired", "label": "BG Expired", "severity": "red",
+             "count": bg_expired_count, "target_tab": "sip", "top": _shape(bg_expired_docs)},
+            {"key": "accreditation_pending", "label": "Accreditation Pending", "severity": "amber",
+             "count": accr_count, "target_tab": "sip", "top": _shape(accr_docs)},
+            {"key": "assessment_pending", "label": "Assessment Pending", "severity": "amber",
+             "count": asmt_count, "target_tab": "projects", "top": _shape(asmt_docs)},
+            {"key": "low_attendance", "label": "Low Attendance Batches (<70%)", "severity": "red",
+             "count": lo_att_count, "target_tab": "projects", "top": _shape(lo_att_docs)},
+            {"key": "placement_pending", "label": "Placement Pending", "severity": "amber",
+             "count": place_count, "target_tab": "projects", "top": _shape(place_docs)},
+            {"key": "batches_ending", "label": "Batches Ending (15d)", "severity": "blue",
+             "count": ending_count, "target_tab": "projects", "top": _shape(ending_docs)},
+            {"key": "trainer_gap", "label": "Trainer Gap (JSDMS)", "severity": "red",
+             "count": trainer_gap_count, "target_tab": "jsdms",
+             "top": _shape(trainer_gap_rows)},
+        ],
+    }
+
+
+
 
 
 
