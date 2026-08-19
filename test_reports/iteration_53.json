@@ -1,0 +1,42 @@
+{
+  "summary": "Iter53 — Phase 37 · Phase 2 (Stages 3 Enrollment, 4 Attendance, 7 Closure) verified end-to-end. Backend: 25/25 pytest cases pass — covers list/add/delete candidates, capacity-full 400, duplicate Aadhaar 409, CSV bulk-upload (missing-name, dup-in-file, dup-in-batch, capacity truncation), bulk-commit atomic capacity re-check, attendance GET default window, mark P/A/H with overwrite=false preserves and overwrite=true updates, out-of-window date 400 with 'extension' hint, summary counters+overall_pct, extension create (new_end must be > current), approve updates batch.end_date, re-approve rejected, reject requires rejection_reason, re-reject rejected, auto-close closes end_date<today batches setting closed=true + lifecycle_status=Closed + all four *_locked=true + lifecycle_history 'system' entry, extension-approve on already-closed batch reopens (closed=false, locks cleared). Regression: /api/batches, /api/batch-targets, /api/mis/live/overview 200. Frontend: /batch-management renders; tabs 3/4/7 enabled; tabs 5/6 remain disabled. Enrollment stage: batch dropdown loads batches, capacity meter renders, CSV Template + Add Manually + Preview all visible; manual dialog creates candidate successfully (Allocated 0→3). Attendance stage: batch select drives grid + summary, Mark All Present button visible. Closure stage: Run Auto-Close Now visible for admin, Request Extension dialog opens when eligible batches exist, filter dropdown + KPI strip (Active/Closed/Pending/Total) all render, approve/reject wired to /approve+/reject. Created 1 test batch + 1 candidate for UI walkthrough — all cleaned up.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Closure · Request Extension button visibility", "issue": "Button is hidden when eligibleBatches=0 (batches without end_date). In this environment 204/351 batches have no end_date, so before creating any new batch the button is completely absent for admins/managers. Recommendation: still show the button but disable it with a tooltip 'No batches with end_date to extend' — hiding it entirely surprises users and looks like a bug. See ClosureStage.jsx:123.", "affected_selectors": ["bm-closure-request-btn"]}
+    ],
+    "design_issues": [
+      {"screen": "Enrollment / Attendance stage", "issues": ["React warning persists: 'Select is changing from uncontrolled to controlled'. Same issue flagged in iter52 — bm-enroll-batch and bm-att-batch selects have no initial defined value. Initialise with '' or use value={x||''}."]},
+      {"screen": "Closure · Request Extension dialog", "issues": ["Auto-Closure header row lays out as flex-wrap with a ml-auto on 'Run Auto-Close Now', which visually pins it to the far right and shoves 'Request Extension' below it on wrap. On 1920 viewport it fits fine, but on narrower screens the two buttons overlap the description column. Consider a dedicated actions container instead of relying on ml-auto."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter53_phase37_phase2.py",
+    "/app/test_reports/pytest/iter53.xml"
+  ],
+  "action_items": [
+    "(Medium) ClosureStage.jsx:123 — Always render the 'Request Extension' button; disable it (with tooltip) when eligibleBatches.length===0 instead of hiding entirely. Users otherwise cannot tell whether the feature exists.",
+    "(Low) Fix 'uncontrolled → controlled' Select warning in Enrollment/Attendance stage batch selects — set value={x||''} or initialise to ''.",
+    "(Low) BatchOut Pydantic model does not expose auto_closed_at, so admins cannot see when a batch was auto-closed via API. It IS persisted in DB (verified). Consider adding to BatchOut or a dedicated field on the closure history entry (lifecycle_history already captures it, so this is optional).",
+    "(Low) Consider adding a soft-delete flag on batch_extension_requests — currently a rejected request stays in the collection forever with no way to hide from list even after batch is deleted."
+  ],
+  "critical_code_review_comments": [
+    "server.py:10905-10909 — /batches/{bid}/attendance builds matrix by iterating db.attendance results but does not filter by candidate.is_deleted. If a candidate is soft-deleted after attendance was marked, their old records still appear in matrix under a cid not in candidates[]. Frontend will silently drop them (since grid rows come from candidates[]), so it's a benign leak, but for stats accuracy consider filtering the summary aggregation too.",
+    "server.py:10992-11017 — batch_attendance_summary counts records across ALL time (batch_id filter only) but returns total_days from batch.start/end. If dates outside window were marked before end_date shrank (unlikely but possible via extension→shrink chain), presents+absents can exceed capacity*total_days. Not a bug given current UI validation, but summary should ideally match the requested window.",
+    "server.py:11031-11054 — _auto_close_expired_batches uses find + async for + individual update_one per batch. For 147 batches that's fine, but for large scale (>5000 batches) this will be slow. Consider bulk_write + $push. Not urgent.",
+    "server.py:11085-11087 — @app.on_event('startup') is deprecated in FastAPI 0.109+ in favour of lifespan handlers. Still works but will warn in newer versions.",
+    "server.py:10742-10813 — bulk_upload_candidates does the same permission + capacity check as bulk_commit_candidates. Since bulk_upload is idempotent (no writes), a client could poll it to enumerate existing_aadhaars leak-checks without any rate limit. Consider adding a rate limit or making the endpoint less chatty on errors.",
+    "ClosureStage.jsx:57 — eligibleBatches filter (`b.end_date && !b.closed`) hides the Request Extension button when no batches have end_date. See action items — fix by disabling the button rather than hiding it.",
+    "AttendanceStage.jsx — grid uses one <td> per (candidate × date). For a 3-month batch × 50 candidates that's ~4500 cells with onClick handlers per cell. Consider virtualization or clicking a single event handler via delegation for large batches.",
+    "Backend + Frontend — no export button on the attendance grid. Users will want CSV/XLSX export of the matrix. Suggest a small addition in the next phase."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter53_phase37_phase2.py"],
+  "success_rate": { "backend": "100% (25/25)", "frontend": "100%" },
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "During pytest run, TEST_BM53_* targets/batches/candidates are auto-cleaned in fixture teardown. UI walkthrough created 1 batch TEST_UI_BM53 + 1 candidate — both cleaned up by end of script.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Endpoints added in Phase 37 P2: GET/POST /api/batches/{bid}/candidates, POST /api/batches/{bid}/candidates/bulk-upload (multipart), POST /api/batches/{bid}/candidates/bulk-commit, DELETE /api/batches/{bid}/candidates/{cid}, GET /api/batches/{bid}/attendance (?from_date&to_date), POST /api/batches/{bid}/attendance/mark, GET /api/batches/{bid}/attendance/summary, POST /api/batches/auto-close/run (admin), POST/GET /api/batch-extension-requests, PATCH /api/batch-extension-requests/{rid}/{approve|reject}. Roles: ENROLL_ROLES=(admin,manager,senior_manager,hr,center_manager). Approve/reject admin-only. Attendance status P/A/H; overwrite=false uses $setOnInsert (preserves existing). Frontend testids: bm-enroll-{stage,batch,template,file,upload,manual-btn,manual-dialog,inp-<field>,manual-save,commit}, bm-att-{stage,batch,from,to,mark-all,row-<cid>,cell-<cid>-<date>}, bm-closure-{stage,autoclose-btn,request-btn,filter,req-<rid>,approve-<rid>,reject-<rid>,req-dialog,req-batch,req-newend,req-reason,req-submit,reject-dialog,reject-reason,reject-confirm}. Known caveats: (1) 204 of 351 legacy batches have no end_date, hides Request Extension button; (2) GET /api/batches/{bid} does not exist — use GET /api/batches then filter; (3) BatchOut strips auto_closed_at from responses (still stored in DB).",
+  "rca of the issue": "N/A — no functional bugs found. Only one UX friction (Request Extension button hidden when no batches have end_date) — documented in action_items as Medium priority."
+}

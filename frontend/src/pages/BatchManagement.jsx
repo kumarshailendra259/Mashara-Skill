@@ -16,6 +16,9 @@ import {
   Target, Layers, Users, ClipboardList, GraduationCap, BadgeCheck,
   Plus, Trash2, Edit3, Search, Info, LockKeyhole,
 } from "lucide-react";
+import EnrollmentStage from "@/pages/bm/EnrollmentStage";
+import AttendanceStage from "@/pages/bm/AttendanceStage";
+import ClosureStage from "@/pages/bm/ClosureStage";
 
 /**
  * Batch Management — centralised module for the full batch lifecycle
@@ -317,11 +320,11 @@ export default function BatchManagement() {
         <TabsList className="rounded-none grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-1 h-auto p-1 bg-gray-100">
           <TabsTrigger value="targets" className="rounded-none" data-testid="bm-tab-targets">1 · Target Allocation</TabsTrigger>
           <TabsTrigger value="batches" className="rounded-none" data-testid="bm-tab-batches">2 · Batch Creation</TabsTrigger>
-          <TabsTrigger value="enroll" className="rounded-none" data-testid="bm-tab-enroll" disabled>3 · Enrollment</TabsTrigger>
-          <TabsTrigger value="attendance" className="rounded-none" data-testid="bm-tab-attendance" disabled>4 · Attendance</TabsTrigger>
+          <TabsTrigger value="enroll" className="rounded-none" data-testid="bm-tab-enroll">3 · Enrollment</TabsTrigger>
+          <TabsTrigger value="attendance" className="rounded-none" data-testid="bm-tab-attendance">4 · Attendance</TabsTrigger>
           <TabsTrigger value="assessment" className="rounded-none" data-testid="bm-tab-assessment" disabled>5 · Assessment</TabsTrigger>
           <TabsTrigger value="placement" className="rounded-none" data-testid="bm-tab-placement" disabled>6 · Placement</TabsTrigger>
-          <TabsTrigger value="closure" className="rounded-none" data-testid="bm-tab-closure" disabled>7 · Closure</TabsTrigger>
+          <TabsTrigger value="closure" className="rounded-none" data-testid="bm-tab-closure">7 · Closure</TabsTrigger>
         </TabsList>
 
         {/* ================== STAGE 1: TARGETS ================== */}
@@ -508,14 +511,29 @@ export default function BatchManagement() {
           </div>
         </TabsContent>
 
-        {/* ================== STAGES 3–7 PLACEHOLDERS ================== */}
-        {["enroll", "attendance", "assessment", "placement", "closure"].map((k) => (
+        {/* ================== STAGE 3: ENROLLMENT ================== */}
+        <TabsContent value="enroll" className="pt-4">
+          <EnrollmentStage batches={batches} canWrite={canManageBatches} />
+        </TabsContent>
+
+        {/* ================== STAGE 4: ATTENDANCE ================== */}
+        <TabsContent value="attendance" className="pt-4">
+          <AttendanceStage batches={batches} canWrite={canManageBatches} />
+        </TabsContent>
+
+        {/* ================== STAGE 7: CLOSURE + EXTENSIONS ================== */}
+        <TabsContent value="closure" className="pt-4">
+          <ClosureStage batches={batches} refreshBatches={loadBatches} />
+        </TabsContent>
+
+        {/* ================== STAGES 5, 6 PLACEHOLDERS ================== */}
+        {["assessment", "placement"].map((k) => (
           <TabsContent key={k} value={k} className="pt-8">
             <div className="swiss-card p-8 text-center border-2 border-dashed border-[var(--muted)]/30" data-testid={`bm-placeholder-${k}`}>
               <div className="font-heading font-black text-xl">Stage coming in next release</div>
               <div className="text-sm text-[var(--muted)] mt-2 max-w-lg mx-auto">
-                This stage is scheduled for Phase 2 & 3 of the Batch Management rollout. Until then use
-                the existing modules (Candidates / Attendance / Assessment / Placement) — data will be
+                This stage is scheduled for the next Batch Management rollout. Until then use
+                the existing MIS Project Summary tab for assessment / placement fields — data will be
                 migrated safely.
               </div>
             </div>

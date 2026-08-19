@@ -9366,6 +9366,8 @@ class BatchOut(BatchIn):
     placement_locked: Optional[bool] = False
     # Audit trail of lifecycle transitions
     lifecycle_history: List[dict] = Field(default_factory=list)
+    # Timestamp set by the daily auto-close scheduler when it closes an expired batch.
+    auto_closed_at: Optional[str] = None
 
 
 # Category hourly rates (fixed business config — change here if statutory rates revise).
@@ -10656,6 +10658,533 @@ async def _release_target(tid: str, amount: int) -> None:
         {"$inc": {"allocated": -amount, "remaining": amount},
          "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
     )
+
+
+# ============================================================================
+# ==========  BATCH MANAGEMENT · Stages 3 · Candidate Enrollment  =============
+# ============================================================================
+# Enrollment is stored in the existing `db.candidates` collection but scoped to
+# a batch_id. Capacity is enforced against the parent batch's total_beneficiaries.
+
+class BulkCandidateRow(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(min_length=1)
+    mobile: Optional[str] = ""
+    email: Optional[str] = ""
+    gender: Optional[str] = ""
+    dob: Optional[str] = ""
+    aadhaar: Optional[str] = ""
+    father_name: Optional[str] = ""
+    address: Optional[str] = ""
+    job_role: Optional[str] = ""
+
+
+async def _batch_capacity_state(bid: str) -> dict:
+    """Return {batch, enrolled, capacity, available}. 404 if batch missing."""
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b:
+        raise HTTPException(404, "Batch not found")
+    enrolled = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}})
+    capacity = int(b.get("total_beneficiaries") or 0)
+    return {"batch": b, "enrolled": enrolled, "capacity": capacity,
+            "available": max(0, capacity - enrolled)}
+
+
+ENROLL_ROLES = ("admin", "manager", "senior_manager", "hr", "center_manager")
+
+
+@api.get("/batches/{bid}/candidates")
+async def list_batch_candidates(bid: str, _=Depends(require_role(*ENROLL_ROLES, "accountant"))):
+    b = await db.batches.find_one({"id": bid}, {"_id": 0, "id": 1})
+    if not b: raise HTTPException(404, "Batch not found")
+    cands = await db.candidates.find(
+        {"batch_id": bid, "is_deleted": {"$ne": True}},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(5000)
+    state = await _batch_capacity_state(bid)
+    return {"capacity": state["capacity"], "enrolled": state["enrolled"],
+            "available": state["available"], "rows": cands}
+
+
+@api.post("/batches/{bid}/candidates", status_code=201)
+async def add_batch_candidate(bid: str, body: BulkCandidateRow, user=Depends(require_role(*ENROLL_ROLES))):
+    state = await _batch_capacity_state(bid)
+    if state["available"] <= 0:
+        raise HTTPException(400, f"Batch is at full capacity ({state['capacity']}). No seats available.")
+    # Center-manager scoping
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if state["batch"].get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only enroll into own batches")
+    # Duplicate guard (Aadhaar within batch)
+    if body.aadhaar:
+        dup = await db.candidates.find_one(
+            {"batch_id": bid, "aadhaar": body.aadhaar, "is_deleted": {"$ne": True}},
+            {"_id": 0, "id": 1})
+        if dup:
+            raise HTTPException(409, f"Candidate with Aadhaar {body.aadhaar} already exists in this batch")
+    b = state["batch"]
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "batch_id": bid,
+        "project_id": b.get("project_id"),
+        "center_id": b.get("center_id"),
+        "candidate_id": f"CND-{str(uuid.uuid4())[:8].upper()}",
+        **body.model_dump(),
+        "status": "enrolled",
+        "is_deleted": False,
+        "created_by": user["id"], "created_at": now,
+    }
+    await db.candidates.insert_one(doc)
+    doc.pop("_id", None)
+    return {"candidate": doc, "capacity_state": await _batch_capacity_state(bid)}
+
+
+@api.post("/batches/{bid}/candidates/bulk-upload")
+async def bulk_upload_candidates(bid: str, file: UploadFile = File(...), user=Depends(require_role(*ENROLL_ROLES))):
+    """Upload a CSV/XLSX with headers: name, mobile, email, gender, dob, aadhaar,
+    father_name, address, job_role. Returns a preview + error rows without
+    inserting. Actual insert happens on /commit endpoint."""
+    state = await _batch_capacity_state(bid)
+    if state["available"] <= 0:
+        raise HTTPException(400, f"Batch is at full capacity ({state['capacity']}). No seats available.")
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if state["batch"].get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only enroll into own batches")
+
+    raw = await file.read()
+    filename = (file.filename or "").lower()
+    parsed_rows: List[dict] = []
+    try:
+        if filename.endswith(".csv"):
+            import csv, io
+            text = raw.decode("utf-8-sig", errors="ignore")
+            reader = csv.DictReader(io.StringIO(text))
+            parsed_rows = [{k.strip().lower(): (v or "").strip() for k, v in r.items() if k} for r in reader]
+        else:
+            # xlsx
+            import io, openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+            ws = wb.active
+            headers = [str(c.value or "").strip().lower() for c in next(ws.iter_rows(min_row=1, max_row=1))]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not any(row): continue
+                parsed_rows.append({headers[i]: (str(row[i]).strip() if row[i] is not None else "") for i in range(min(len(headers), len(row)))})
+    except Exception as e:
+        raise HTTPException(400, f"Failed to parse file: {e}")
+
+    # Get existing Aadhaars in this batch for dedupe
+    existing = await db.candidates.find(
+        {"batch_id": bid, "is_deleted": {"$ne": True}, "aadhaar": {"$ne": ""}},
+        {"_id": 0, "aadhaar": 1}
+    ).to_list(5000)
+    existing_aadhaars = {e.get("aadhaar") for e in existing if e.get("aadhaar")}
+
+    valid: List[dict] = []
+    errors: List[dict] = []
+    seen_aadhaars_this_file: set = set()
+    for idx, r in enumerate(parsed_rows, start=2):  # start=2 accounts for header row
+        name = (r.get("name") or "").strip()
+        if not name:
+            errors.append({"row": idx, "reason": "Name is required", "data": r}); continue
+        aadhaar = (r.get("aadhaar") or "").strip()
+        if aadhaar and aadhaar in existing_aadhaars:
+            errors.append({"row": idx, "reason": f"Aadhaar {aadhaar} already enrolled in this batch", "data": r}); continue
+        if aadhaar and aadhaar in seen_aadhaars_this_file:
+            errors.append({"row": idx, "reason": f"Duplicate Aadhaar {aadhaar} within file", "data": r}); continue
+        if aadhaar: seen_aadhaars_this_file.add(aadhaar)
+        valid.append({
+            "row": idx, "name": name, "mobile": r.get("mobile") or "",
+            "email": r.get("email") or "", "gender": r.get("gender") or "",
+            "dob": r.get("dob") or "", "aadhaar": aadhaar,
+            "father_name": r.get("father_name") or "", "address": r.get("address") or "",
+            "job_role": r.get("job_role") or "",
+        })
+
+    # Capacity check on valid rows
+    would_exceed = len(valid) > state["available"]
+    if would_exceed:
+        # Truncate to available capacity; move overflow into errors
+        for r in valid[state["available"]:]:
+            errors.append({"row": r["row"], "reason": f"Would exceed batch capacity ({state['capacity']}). Only {state['available']} seats available.", "data": r})
+        valid = valid[:state["available"]]
+
+    return {"capacity_state": state, "valid": valid, "errors": errors,
+            "counts": {"total_parsed": len(parsed_rows), "valid": len(valid), "errors": len(errors)}}
+
+
+@api.post("/batches/{bid}/candidates/bulk-commit", status_code=201)
+async def bulk_commit_candidates(bid: str, payload: dict = Body(...), user=Depends(require_role(*ENROLL_ROLES))):
+    """Commit the previewed rows. Expects {rows: [validated rows]}. Capacity is
+    re-checked atomically to prevent concurrent overflow."""
+    rows = payload.get("rows") or []
+    if not rows:
+        raise HTTPException(400, "No rows to commit")
+    state = await _batch_capacity_state(bid)
+    if len(rows) > state["available"]:
+        raise HTTPException(400, f"Only {state['available']} seats available; you sent {len(rows)}")
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if state["batch"].get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only enroll into own batches")
+    b = state["batch"]
+    now = datetime.now(timezone.utc).isoformat()
+    docs = []
+    for r in rows:
+        docs.append({
+            "id": str(uuid.uuid4()),
+            "batch_id": bid,
+            "project_id": b.get("project_id"),
+            "center_id": b.get("center_id"),
+            "candidate_id": f"CND-{str(uuid.uuid4())[:8].upper()}",
+            "name": r.get("name") or "", "mobile": r.get("mobile") or "",
+            "email": r.get("email") or "", "gender": r.get("gender") or "",
+            "dob": r.get("dob") or "", "aadhaar": r.get("aadhaar") or "",
+            "father_name": r.get("father_name") or "", "address": r.get("address") or "",
+            "job_role": r.get("job_role") or "",
+            "status": "enrolled", "is_deleted": False,
+            "created_by": user["id"], "created_at": now,
+        })
+    if docs:
+        await db.candidates.insert_many(docs)
+    return {"inserted": len(docs), "capacity_state": await _batch_capacity_state(bid)}
+
+
+@api.delete("/batches/{bid}/candidates/{cid}", status_code=204)
+async def remove_batch_candidate(bid: str, cid: str, user=Depends(require_role(*ENROLL_ROLES))):
+    c = await db.candidates.find_one({"id": cid, "batch_id": bid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not c: raise HTTPException(404, "Candidate not found in this batch")
+    if user.get("role") == "center_manager":
+        b = await db.batches.find_one({"id": bid}, {"_id": 0, "center_id": 1})
+        assigned = set(user.get("assigned_center_ids") or [])
+        if b.get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only remove own-batch candidates")
+    await db.candidates.update_one({"id": cid}, {"$set": {"is_deleted": True,
+        "deleted_at": datetime.now(timezone.utc).isoformat()}})
+    return Response(status_code=204)
+
+
+# ============================================================================
+# ==========  BATCH MANAGEMENT · Stage 4 · Attendance Grid  ==================
+# ============================================================================
+# One document per (batch_id, candidate_id, date). Status is 'P' (present),
+# 'A' (absent), or 'H' (holiday). Marking is blocked outside [start_date, end_date].
+
+ATT_ROLES = ("admin", "manager", "senior_manager", "hr", "center_manager")
+
+
+def _iter_dates(start: str, end: str):
+    """Yield ISO dates from start to end inclusive."""
+    from datetime import date as _d, timedelta as _t
+    s = _d.fromisoformat(start); e = _d.fromisoformat(end)
+    cur = s
+    while cur <= e:
+        yield cur.isoformat()
+        cur = cur + _t(days=1)
+
+
+@api.get("/batches/{bid}/attendance")
+async def get_batch_attendance(
+    bid: str,
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
+    _=Depends(require_role(*ATT_ROLES, "accountant")),
+):
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    # Default range = batch window
+    f = from_date or b.get("start_date") or datetime.now(timezone.utc).date().isoformat()
+    t = to_date or b.get("end_date") or f
+    candidates = await db.candidates.find(
+        {"batch_id": bid, "is_deleted": {"$ne": True}},
+        {"_id": 0, "id": 1, "candidate_id": 1, "name": 1, "mobile": 1}
+    ).sort("name", 1).to_list(2000)
+    att = await db.attendance.find(
+        {"batch_id": bid, "date": {"$gte": f, "$lte": t}},
+        {"_id": 0}
+    ).to_list(200000)
+    # Build a matrix: candidate_id -> date -> status
+    matrix: dict = {}
+    for a in att:
+        matrix.setdefault(a["candidate_id"], {})[a["date"]] = a.get("status") or "A"
+    dates = list(_iter_dates(f, t)) if f and t else []
+    return {
+        "batch": {"id": bid, "name": b.get("name"), "start_date": b.get("start_date"),
+                  "end_date": b.get("end_date"),
+                  "total_beneficiaries": b.get("total_beneficiaries")},
+        "from_date": f, "to_date": t, "dates": dates,
+        "candidates": candidates,
+        "matrix": matrix,
+        "training_days": len(dates),
+    }
+
+
+def _validate_att_window(batch: dict, dates: List[str]) -> None:
+    s = batch.get("start_date") or ""
+    e = batch.get("end_date") or ""
+    for d in dates:
+        if s and d < s:
+            raise HTTPException(400, f"Attendance date {d} is before batch start ({s})")
+        if e and d > e:
+            raise HTTPException(400, f"Attendance date {d} is after batch end ({e}). Request an extension first.")
+
+
+@api.post("/batches/{bid}/attendance/mark")
+async def mark_batch_attendance(bid: str, payload: dict = Body(...), user=Depends(require_role(*ATT_ROLES))):
+    """payload shape:
+    {
+      "date": "2025-06-10",              # optional; use dates[] for range
+      "dates": ["2025-06-10", ...],
+      "status": "P" | "A" | "H",
+      "candidate_ids": [...] | "all",
+      "overwrite": false
+    }
+    """
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if b.get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only mark own-batch attendance")
+    status = (payload.get("status") or "").upper()
+    if status not in ("P", "A", "H"):
+        raise HTTPException(400, "status must be one of P (present), A (absent), H (holiday)")
+    dates: List[str] = payload.get("dates") or ([payload["date"]] if payload.get("date") else [])
+    if not dates:
+        raise HTTPException(400, "date or dates[] is required")
+    _validate_att_window(b, dates)
+    cand_selector = payload.get("candidate_ids")
+    if cand_selector == "all" or not cand_selector:
+        cand_ids = [c["id"] for c in await db.candidates.find(
+            {"batch_id": bid, "is_deleted": {"$ne": True}}, {"_id": 0, "id": 1}
+        ).to_list(5000)]
+    else:
+        cand_ids = list(cand_selector)
+    if not cand_ids:
+        return {"updated": 0, "inserted": 0}
+    overwrite = bool(payload.get("overwrite", False))
+    now = datetime.now(timezone.utc).isoformat()
+    # Bulk upsert
+    ops: List = []
+    from pymongo import UpdateOne
+    for cid in cand_ids:
+        for d in dates:
+            f = {"batch_id": bid, "candidate_id": cid, "date": d}
+            if overwrite:
+                ops.append(UpdateOne(f,
+                    {"$set": {"status": status, "marked_by": user["id"], "marked_at": now},
+                     "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+                    upsert=True))
+            else:
+                # $setOnInsert only — skip existing records.
+                ops.append(UpdateOne(f,
+                    {"$setOnInsert": {"id": str(uuid.uuid4()), "status": status,
+                                       "marked_by": user["id"], "marked_at": now,
+                                       "created_at": now}},
+                    upsert=True))
+    if not ops:
+        return {"updated": 0, "inserted": 0}
+    result = await db.attendance.bulk_write(ops, ordered=False)
+    return {"inserted": result.upserted_count, "updated": result.modified_count,
+            "candidates_affected": len(cand_ids), "dates_affected": len(dates)}
+
+
+@api.get("/batches/{bid}/attendance/summary")
+async def batch_attendance_summary(bid: str, _=Depends(require_role(*ATT_ROLES, "accountant"))):
+    """Overall + per-candidate attendance %s across the batch window."""
+    b = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    s = b.get("start_date") or ""; e = b.get("end_date") or ""
+    total_days = 0
+    if s and e:
+        from datetime import date as _d
+        total_days = (_d.fromisoformat(e) - _d.fromisoformat(s)).days + 1
+    total_records = await db.attendance.count_documents({"batch_id": bid})
+    presents = await db.attendance.count_documents({"batch_id": bid, "status": "P"})
+    holidays = await db.attendance.count_documents({"batch_id": bid, "status": "H"})
+    absents = await db.attendance.count_documents({"batch_id": bid, "status": "A"})
+    per_cand = await db.attendance.aggregate([
+        {"$match": {"batch_id": bid}},
+        {"$group": {"_id": {"cid": "$candidate_id", "status": "$status"}, "n": {"$sum": 1}}},
+    ]).to_list(50000)
+    cand_map: dict = {}
+    for r in per_cand:
+        cid = r["_id"]["cid"]; st = r["_id"]["status"]
+        cand_map.setdefault(cid, {"P": 0, "A": 0, "H": 0})[st] = int(r["n"] or 0)
+    return {"total_days": total_days, "total_records": total_records,
+            "presents": presents, "absents": absents, "holidays": holidays,
+            "overall_pct": round(presents / max(1, presents + absents) * 100, 2),
+            "per_candidate": cand_map}
+
+
+# ============================================================================
+# ==========  BATCH MANAGEMENT · Stage 5 · Auto-Closure + Extension  ==========
+# ============================================================================
+
+class ExtensionRequestIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    batch_id: str
+    new_end_date: str
+    reason: str = Field(min_length=3)
+
+
+async def _auto_close_expired_batches() -> dict:
+    """Close any batch whose end_date is in the past and status is not Closed.
+    Called by scheduler + admin trigger endpoint."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    cur = db.batches.find({
+        "end_date": {"$lt": today, "$ne": ""},
+        "closed": {"$ne": True},
+        "lifecycle_status": {"$ne": "Closed"},
+    }, {"_id": 0, "id": 1, "name": 1})
+    closed_ids: List[str] = []
+    async for b in cur:
+        await db.batches.update_one(
+            {"id": b["id"]},
+            {"$set": {"closed": True, "lifecycle_status": "Closed",
+                      "basic_locked": True, "attendance_locked": True,
+                      "assessment_locked": True, "placement_locked": True,
+                      "auto_closed_at": datetime.now(timezone.utc).isoformat()},
+             "$push": {"lifecycle_history": {
+                "from": None, "to": "Closed", "at": datetime.now(timezone.utc).isoformat(),
+                "by_user_id": "system", "by_user_name": "Auto-Closure Job",
+                "remarks": f"Auto-closed on {today} (end_date < today)"}}}
+        )
+        closed_ids.append(b["id"])
+    return {"closed_count": len(closed_ids), "closed_ids": closed_ids}
+
+
+@api.post("/batches/auto-close/run", dependencies=[Depends(require_role("admin"))])
+async def batches_run_auto_close():
+    """Admin-triggered dry-run of the auto-close job (mostly for testing)."""
+    return await _auto_close_expired_batches()
+
+
+async def _batch_autoclose_scheduler():
+    """Runs once at 01:15 IST daily — closes any batch whose end_date has passed."""
+    from datetime import datetime as _dt, time as _t, timedelta as _td, timezone as _tz
+    IST = _tz(_td(hours=5, minutes=30))
+    while True:
+        try:
+            now = _dt.now(IST)
+            target = _dt.combine(now.date(), _t(1, 15), tzinfo=IST)
+            if now >= target:
+                target = target + _td(days=1)
+            wait = (target - now).total_seconds()
+            await asyncio.sleep(max(60, wait))
+            r = await _auto_close_expired_batches()
+            if r["closed_count"]:
+                logger.info(f"[batch-autoclose] Closed {r['closed_count']} expired batches")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.exception(f"[batch-autoclose] Scheduler error: {e}")
+            await asyncio.sleep(3600)
+
+
+@app.on_event("startup")
+async def _startup_batch_autoclose():
+    asyncio.create_task(_batch_autoclose_scheduler())
+
+
+@api.post("/batch-extension-requests", status_code=201)
+async def create_extension_request(body: ExtensionRequestIn, user=Depends(require_role(*ENROLL_ROLES))):
+    b = await db.batches.find_one({"id": body.batch_id}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if b.get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only request extensions for own batches")
+    if body.new_end_date <= (b.get("end_date") or ""):
+        raise HTTPException(400, f"new_end_date must be after current end_date ({b.get('end_date')})")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "batch_id": body.batch_id,
+        "batch_name": b.get("name"),
+        "current_end_date": b.get("end_date") or "",
+        "new_end_date": body.new_end_date,
+        "reason": body.reason.strip(),
+        "status": "pending",
+        "requested_by": user["id"],
+        "requested_by_name": user.get("name") or user.get("email"),
+        "requested_at": now,
+        "approved_by": None, "approved_by_name": None,
+        "approved_at": None, "rejection_reason": None,
+    }
+    await db.batch_extension_requests.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/batch-extension-requests")
+async def list_extension_requests(
+    status: Optional[str] = Query(None, description="pending / approved / rejected"),
+    batch_id: Optional[str] = Query(None),
+    user=Depends(require_role(*ENROLL_ROLES, "accountant")),
+):
+    q: dict = {}
+    if status: q["status"] = status
+    if batch_id: q["batch_id"] = batch_id
+    # Center manager only sees own centers' requests
+    if user.get("role") == "center_manager":
+        assigned = user.get("assigned_center_ids") or ["__none__"]
+        batch_ids = [b["id"] for b in await db.batches.find(
+            {"center_id": {"$in": assigned}}, {"_id": 0, "id": 1}
+        ).to_list(5000)]
+        q["batch_id"] = {"$in": batch_ids} if not batch_id else batch_id
+    docs = await db.batch_extension_requests.find(q, {"_id": 0}).sort("requested_at", -1).to_list(2000)
+    return docs
+
+
+@api.patch("/batch-extension-requests/{rid}/approve", dependencies=[Depends(require_role("admin"))])
+async def approve_extension_request(rid: str, user=Depends(get_current_user)):
+    req = await db.batch_extension_requests.find_one({"id": rid}, {"_id": 0})
+    if not req: raise HTTPException(404, "Request not found")
+    if req["status"] != "pending":
+        raise HTTPException(400, f"Request is already {req['status']}")
+    b = await db.batches.find_one({"id": req["batch_id"]}, {"_id": 0})
+    if not b: raise HTTPException(404, "Batch not found")
+    now = datetime.now(timezone.utc).isoformat()
+    old_end = b.get("end_date") or ""
+    # Update the batch end_date + reopen if it was closed on end_date.
+    upd = {"end_date": req["new_end_date"]}
+    if b.get("closed"):
+        upd["closed"] = False
+        upd["lifecycle_status"] = "Active"
+        upd["basic_locked"] = False
+        upd["attendance_locked"] = False
+        upd["assessment_locked"] = False
+        upd["placement_locked"] = False
+    await db.batches.update_one({"id": req["batch_id"]},
+        {"$set": upd, "$push": {"lifecycle_history": {
+            "from": b.get("lifecycle_status"), "to": upd.get("lifecycle_status") or b.get("lifecycle_status"),
+            "at": now, "by_user_id": user["id"], "by_user_name": user.get("name") or user.get("email"),
+            "remarks": f"End date extended: {old_end} → {req['new_end_date']} (request {rid})"}}})
+    await db.batch_extension_requests.update_one({"id": rid},
+        {"$set": {"status": "approved", "approved_by": user["id"],
+                   "approved_by_name": user.get("name") or user.get("email"),
+                   "approved_at": now, "old_end_date": old_end}})
+    return {"ok": True, "old_end_date": old_end, "new_end_date": req["new_end_date"]}
+
+
+@api.patch("/batch-extension-requests/{rid}/reject", dependencies=[Depends(require_role("admin"))])
+async def reject_extension_request(rid: str, payload: dict = Body(...), user=Depends(get_current_user)):
+    req = await db.batch_extension_requests.find_one({"id": rid}, {"_id": 0})
+    if not req: raise HTTPException(404, "Request not found")
+    if req["status"] != "pending":
+        raise HTTPException(400, f"Request is already {req['status']}")
+    reason = (payload.get("rejection_reason") or "").strip()
+    if not reason:
+        raise HTTPException(400, "rejection_reason is required")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.batch_extension_requests.update_one({"id": rid},
+        {"$set": {"status": "rejected", "approved_by": user["id"],
+                   "approved_by_name": user.get("name") or user.get("email"),
+                   "approved_at": now, "rejection_reason": reason}})
+    return {"ok": True}
 
 
 # ---------- Fooding Income (per-month boarding cost × mandays) ----------

@@ -26,7 +26,24 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 37 · Phase 2 — Batch Management Stages 3, 4, 7 (Done, Feb 2026)
+- **User asked**: Ship Enrollment (bulk CSV + capacity gate), Attendance Grid (date-range Mark-All-Present), and Auto-Closure + Extension approval.
+- **Backend `/app/backend/server.py`** (~+450 LOC):
+  - **Enrollment**: `_batch_capacity_state(bid)` helper; `GET /api/batches/{bid}/candidates` returns capacity + rows; `POST /api/batches/{bid}/candidates` single-add with Aadhaar dedupe + full-capacity 400; `POST /api/batches/{bid}/candidates/bulk-upload` (multipart CSV/XLSX) returns `{valid, errors, counts, capacity_state}` — validates name, dedupes Aadhaar (in-batch + in-file), truncates overflow into errors; `POST /api/batches/{bid}/candidates/bulk-commit` atomically re-checks capacity + `insert_many`; `DELETE /api/batches/{bid}/candidates/{cid}` soft-deletes.
+  - **Attendance**: `_iter_dates` + `_validate_att_window`; `GET /api/batches/{bid}/attendance` returns candidates × dates matrix; `POST /api/batches/{bid}/attendance/mark` bulk-marks P/A/H with per-cell / column / all-batch modes via PyMongo `bulk_write(UpdateOne, ...)`; `GET /api/batches/{bid}/attendance/summary` overall + per-candidate %s.
+  - **Auto-close + Extension**: `_auto_close_expired_batches` closes past-end batches, sets all four `*_locked=true` + appends system entry to `lifecycle_history`; `_batch_autoclose_scheduler` daily 01:15 IST cron; `POST /api/batches/auto-close/run` (admin-only manual trigger); `POST/GET /api/batch-extension-requests` (center_manager scoped); `PATCH .../{rid}/approve` admin-only (updates end_date, reopens if closed, clears locks, audit trail); `PATCH .../{rid}/reject` requires `rejection_reason`.
+  - `BatchOut` now exposes `auto_closed_at`.
+- **Frontend** (3 new files):
+  - `/pages/bm/EnrollmentStage.jsx` — batch picker + capacity meter, CSV template download, upload-with-preview flow (valid rows table + inline error panel), manual-add dialog, enrolled candidates table with remove.
+  - `/pages/bm/AttendanceStage.jsx` — batch + date-range picker (clamped to batch window), summary chips, sticky-header grid with clickable P/A/H cells, per-column bulk-mark icons, "Mark All Present" button (overwrite=false), per-candidate % column.
+  - `/pages/bm/ClosureStage.jsx` — Auto-Closure description + "Run Auto-Close Now" (admin), Request Extension dialog (batch + new-end + reason), requests table with Approve/Reject (admin), reject dialog with mandatory reason, KPI strip, closed-batches details.
+  - `BatchManagement.jsx` — tabs 3/4/7 now enabled and render the 3 new stage components.
+- **Verified iter-53**: 25/25 backend pytest + 100% Playwright E2E across all 3 stages. Regression clean on /api/batches, /api/batch-targets, /api/mis/live/overview.
+- **Post-test fixes**: (1) Request Extension button now stays visible but disabled with tooltip when no active batches with end_date; (2) `auto_closed_at` exposed in BatchOut so admins can see when the scheduler closed a batch.
+- **Remaining Batch Management stages**: 5 (Assessment) + 6 (Placement) — placeholders in the current UI.
+
 ### Phase 37 · Phase 1 — Batch Management Module (Stages 1 & 2) (Done, Feb 2026)
+
 - **User asked**: New dedicated "Batch Management" module = single centralised system for the batch lifecycle (Target Allocation → Batch Creation → Enrollment → Attendance → Assessment → Placement → Closure). Duplicate Add-Batch buttons removed from other modules. User approved (a) Phase 1 only, (d) admin-only for extension approvals in future, (f) grandfather legacy batches without target link.
 - **Backend `/app/backend/server.py`** (~+250 LOC around line 10450):
   - New models `BatchTargetIn` / `BatchTargetOut` + `TARGET_ADMIN_ROLES` = (admin, manager, senior_manager). Fields: state/territory/company_id/center_id/project_id/target_year/fy/training_type/job_role_targets[]/total_target/remarks + auto-managed allocated/remaining.
