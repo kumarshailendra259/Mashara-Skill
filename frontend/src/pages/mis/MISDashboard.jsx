@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import SIPStatusTab from "./SIPStatusTab";
+import ProjectSummaryTab from "./ProjectSummaryTab";
 
 /**
  * Jharkhand Skills — Daily Report / MIS Dashboard
@@ -157,12 +158,7 @@ export default function MISDashboard() {
 
         {/* -------- Placeholders for later phases -------- */}
         <TabsContent value="projects" className="pt-4">
-          <ComingSoon
-            title="Project Wise Summary"
-            phase="Phase 2"
-            hint="Batch-level tracker with auto-calculated Remaining Target, Certification %, Placement %."
-            icon={ClipboardList}
-          />
+          <ProjectSummaryTab canWrite={canWrite} onChange={loadOverview} />
         </TabsContent>
         <TabsContent value="jsdms" className="pt-4">
           <ComingSoon

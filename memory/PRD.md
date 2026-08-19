@@ -983,3 +983,42 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - **Project Wise Summary** (38 cols): S.NO., State, Territory, Name Of Company, Center Name, Center Manager, Projects, Target year, Training Type, Total Target, Remaining Target, Total Target FY wise, Remaining Target FY Wise, Batch ID, Job Role, Total Enrolled, Start Date, End Date, Status, SDMS Batch ID, Attendance Percentage, Total Drop Out, Assessment Date, Billing Status, Total Certified, Status(2), Assessment Agency, Assessor Name, Assessor Contact Number, Total Actual Present Candidates, Pass, Fail, Absent, NO OF PLACEMENT, Offer Letter, Placement Status 1st/2nd/3rd Month
 - **JSDMS PROJECT** (20 cols): Sl.No., BG Status, Centre Name, Job Role, Target Received Work Order, Target Achieved 21-22/22-23/23-24, No. of Batches, Total Hour, Training Duration in Months, Training Per Hour, Center Status, Job Role Status, If Not approved then Reason, Total Enrolled, No of Certified Trainer at center, No. Of Trainers TOT Aligned, No. Of TOT Renew Aligned, No. Of Trainers Required at Center
 - **Mobilization Report** (up to 21 cols): BRANCH NAME, DATE, Project Name, MOBILIZATION AREA NAME 1-5 with DISTANCE/Total for each, Total Mobilisation, TOTAL DISTANCE, MOBILIZER NAME/EMP.ID/CONTACT, REMARKS
+
+## MIS · Phase 2 — Project Wise Summary (Done + Verified, Feb 2026)
+
+### Backend (`server.py`, appended to MIS section)
+- Collection: `mis_project_summary` (batch-level rows)
+- 38 fields matching reference Excel (Bharno / Satgawan / Kairo / future projects)
+- Endpoints:
+  - `POST/GET/PATCH/DELETE /api/mis/projects[/{id}]` — full CRUD with duplicate Batch ID guard (409)
+  - `GET /api/mis/projects/filter-options` — distinct projects/centers/territories/target_years for filter dropdowns
+  - `GET /api/mis/projects/rollups` — by_project + by_center + by_territory aggregates for dashboard charts
+  - `GET /api/mis/projects/sample-excel` — 38-column template with real example row
+  - `POST /api/mis/projects/bulk-preview` — dry-run validation with row-wise errors
+  - `POST /api/mis/projects/bulk-upload` — insert valid rows with in-file + DB dupe detection
+  - `GET /api/mis/projects/export` — full Excel export (38 base + 5 auto-calc columns)
+- Header alias handling for messy real-world Excel: `"Remaining Targate"`→`remaining_target`, `"NO OF PLACEMMENNT"`→`num_placement`, multi-line placement headers etc.
+- **Auto-calculated fields** (computed on read, never persisted):
+  - `certification_pct` = certified / enrolled × 100
+  - `placement_pct`    = placement / certified × 100
+  - `assessment_pct`   = actual_present / enrolled × 100
+  - `pass_pct`         = pass_count / actual_present × 100
+  - `dropout_pct`      = dropout / enrolled × 100
+  - `achievement_pct`  = certified / total_target × 100
+  - `remaining_target_calc` = max(0, target - enrolled)
+
+### Frontend (`/app/frontend/src/pages/mis/ProjectSummaryTab.jsx`)
+- 6-KPI summary strip (batches, target, enrolled, certified, placement, certification %)
+- 5-filter bar: search, project, center, FY, status + Export/Bulk Upload/Add
+- **Batch table** with 16 columns including all auto-calc %s (color-coded: green ≥60%, amber >0, muted otherwise; drop % red >15% / amber >5% / green ≤5%)
+- **Add/Edit form** grouped into 4 sections: Basic Info / Batch Info / Assessment / Placement + live auto-calc preview panel at bottom (shows Certif %, Place %, Ach %, Drop %, Remaining Target while typing)
+- **View modal** with 3 highlight KPIs at top + all 38 fields grouped by section
+- **Bulk Upload dialog** — 3-step (template → file → preview with red errors + green ready-to-insert)
+- Status chips color-coded (active/running/ongoing=green, closed=grey, completed=blue)
+
+### Verified E2E with reference workbook
+- Imported real "Project wise summary Bharno Gum" sheet → 79 rows → 26 valid batches inserted + 53 blank rows correctly skipped
+- Auto-calc math verified against known row: `BATCH/19424/08/2024` → target=440, enrolled=30, certified=29 → cert%=96.67, ach%=6.59, place%=100 ✅
+- Overview updates: total_batches=26, total_enrolled=780, total_certified=355, placement_pct=38.33%, certification_pct=45.51%
+- Rollups aggregate: by_project "Birsa" — 26 batches, 2280 target, 780 enrolled, 355 certified
+- Frontend screenshot confirms color-coded % table, filters, KPI strip, bulk-upload flow — existing modules untouched

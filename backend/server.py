@@ -14281,6 +14281,348 @@ async def _mis_startup():
     await _ensure_mis_indexes()
 
 
+# ============================================================================
+# ============  MIS  ·  PROJECT  WISE  SUMMARY  (Phase 2)  ===================
+# ============================================================================
+# Batch-level tracker matching the 38-column reference Excel (Bharno Gumla /
+# Satgawan Koderma / Kairo Lohardaga & any future projects). One document =
+# one batch row.
+
+# (excel_header, model_key)
+PJT_FIELDS_MAP = [
+    ("serial_no",                  "S.NO."),
+    ("state",                      "State"),
+    ("territory",                  "Territory"),
+    ("name_of_company",            "Name Of Company"),
+    ("center_name",                "Center Name"),
+    ("center_manager",             "Center Manager"),
+    ("project",                    "Projects"),
+    ("target_year",                "Target year"),
+    ("training_type",              "Training Type"),
+    ("total_target",               "Total Target"),
+    ("remaining_target",           "Remaining Targate"),
+    ("total_target_fy",            "Total Target FY wise"),
+    ("remaining_target_fy",        "Remaining Target FY Wise"),
+    ("batch_id",                   "Batch ID"),
+    ("job_role",                   "Job Role"),
+    ("total_enrolled",             "Total Enrolled"),
+    ("start_date",                 "Start Date"),
+    ("end_date",                   "End Date"),
+    ("status",                     "Status"),
+    ("sdms_batch_id",              "SDMS Batch ID"),
+    ("attendance_pct",             "Attendance Percentage"),
+    ("total_dropout",              "Total Drop Out"),
+    ("assessment_date",            "Assessment Date"),
+    ("billing_status",             "Billing Status"),
+    ("total_certified",            "Total Certified"),
+    ("assessment_status",          "Assessment Status"),
+    ("assessment_agency",          "Assessment Agency"),
+    ("assessor_name",              "Assessor Name"),
+    ("assessor_contact",           "Assessor Contact Number"),
+    ("actual_present",             "Total Actual Present Candidates"),
+    ("pass_count",                 "Pass"),
+    ("fail_count",                 "Fail"),
+    ("absent_count",               "Absent"),
+    ("num_placement",              "NO OF PLACEMENT"),
+    ("offer_letter_status",        "Offer Letter"),
+    ("placement_month_1",          "Placement Status 1st Month"),
+    ("placement_month_2",          "Placement Status 2nd Month"),
+    ("placement_month_3",          "Placement Status 3rd Month"),
+]
+PJT_HEADER_BY_KEY = {k: h for k, h in PJT_FIELDS_MAP}
+PJT_KEY_BY_HEADER = {h: k for k, h in PJT_FIELDS_MAP}
+# Alternate headers accepted (handles the messy sheets w/ typos / line breaks)
+PJT_HEADER_ALIASES = {
+    "Remaining Target":            "remaining_target",
+    "Remaining Targate":           "remaining_target",
+    "Job  Role":                   "job_role",
+    "  Job Role":                  "job_role",
+    "Job Role":                    "job_role",
+    "NO OF PLACEMMENNT":           "num_placement",
+    "Offer Letter ":               "offer_letter_status",
+    "Placement Status\n(1 st Month)": "placement_month_1",
+    "Placement Status\n(2 nd Month)": "placement_month_2",
+    "Placement Status\n(3rd Month)":  "placement_month_3",
+    "Billing Status ":             "billing_status",
+    "Total Drop Out":              "total_dropout",
+    "Total Drop out":              "total_dropout",
+    "Attendance Percentage":       "attendance_pct",
+    "Territory":                   "territory",
+}
+
+PJT_NUM_FIELDS = {"serial_no", "total_target", "remaining_target", "total_target_fy",
+                  "remaining_target_fy", "total_enrolled", "attendance_pct", "total_dropout",
+                  "total_certified", "actual_present", "pass_count", "fail_count",
+                  "absent_count", "num_placement"}
+PJT_DATE_FIELDS = {"start_date", "end_date", "assessment_date"}
+
+
+def _pjt_from_payload(p: dict) -> dict:
+    out = {}
+    for k, _h in PJT_FIELDS_MAP:
+        v = p.get(k)
+        if k in PJT_NUM_FIELDS:
+            out[k] = _mis_num(v)
+        elif k in PJT_DATE_FIELDS:
+            out[k] = _parse_excel_date(v)
+        else:
+            out[k] = _mis_norm(v)
+    return out
+
+
+def _pjt_compute(rec: dict) -> dict:
+    """Overlay auto-calculated fields (never persisted, computed on read)."""
+    enrolled = rec.get("total_enrolled") or 0
+    certified = rec.get("total_certified") or 0
+    placement = rec.get("num_placement") or 0
+    dropout = rec.get("total_dropout") or 0
+    present = rec.get("actual_present") or 0
+    passed = rec.get("pass_count") or 0
+    total_target = rec.get("total_target") or 0
+    return {
+        **rec,
+        "certification_pct": round((certified / enrolled * 100) if enrolled else 0, 2),
+        "placement_pct":     round((placement / certified * 100) if certified else 0, 2),
+        "assessment_pct":    round((present / enrolled * 100) if enrolled else 0, 2),
+        "pass_pct":          round((passed / present * 100) if present else 0, 2),
+        "dropout_pct":       round((dropout / enrolled * 100) if enrolled else 0, 2),
+        "achievement_pct":   round((certified / total_target * 100) if total_target else 0, 2),
+        "remaining_target_calc": max(0, (total_target - enrolled)) if total_target else 0,
+    }
+
+
+@api.post("/mis/projects", status_code=201)
+async def mis_pjt_create(payload: dict = Body(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+    data = _pjt_from_payload(payload)
+    if not data["batch_id"] and not data["center_name"]:
+        raise HTTPException(400, "Batch ID or Center Name is required")
+    if data["batch_id"]:
+        dup = await db.mis_project_summary.find_one(
+            {"batch_id": {"$regex": f"^{data['batch_id']}$", "$options": "i"},
+             "is_deleted": {"$ne": True}}, {"_id": 0, "id": 1})
+        if dup:
+            raise HTTPException(409, f"Batch ID '{data['batch_id']}' already exists")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **data, "is_deleted": False,
+           "created_by": user["id"], "created_at": now, "updated_at": now}
+    await db.mis_project_summary.insert_one(doc)
+    doc.pop("_id", None)
+    return _pjt_compute(doc)
+
+
+@api.get("/mis/projects")
+async def mis_pjt_list(
+    search: Optional[str] = Query(None),
+    project: Optional[str] = Query(None),
+    center: Optional[str] = Query(None),
+    territory: Optional[str] = Query(None),
+    target_year: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    _=Depends(require_role(*MIS_READ_ROLES)),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    if project and project != "all":    q["project"] = {"$regex": f"^{project}$", "$options": "i"}
+    if center and center != "all":      q["center_name"] = {"$regex": f"^{center}$", "$options": "i"}
+    if territory and territory != "all": q["territory"] = {"$regex": f"^{territory}$", "$options": "i"}
+    if target_year and target_year != "all": q["target_year"] = target_year
+    if status and status != "all":      q["status"] = {"$regex": f"^{status}$", "$options": "i"}
+    if search:
+        s = search.strip()
+        q["$or"] = [
+            {"batch_id": {"$regex": s, "$options": "i"}},
+            {"center_name": {"$regex": s, "$options": "i"}},
+            {"job_role": {"$regex": s, "$options": "i"}},
+            {"sdms_batch_id": {"$regex": s, "$options": "i"}},
+            {"center_manager": {"$regex": s, "$options": "i"}},
+            {"name_of_company": {"$regex": s, "$options": "i"}},
+        ]
+    docs = await db.mis_project_summary.find(q, {"_id": 0}).sort([("center_name", 1), ("serial_no", 1)]).to_list(5000)
+    return [_pjt_compute(d) for d in docs]
+
+
+@api.get("/mis/projects/filter-options")
+async def mis_pjt_filter_options(_=Depends(require_role(*MIS_READ_ROLES))):
+    q = {"is_deleted": {"$ne": True}}
+    projects = await db.mis_project_summary.distinct("project", q)
+    centers = await db.mis_project_summary.distinct("center_name", q)
+    territories = await db.mis_project_summary.distinct("territory", q)
+    target_years = await db.mis_project_summary.distinct("target_year", q)
+    return {
+        "projects": sorted([p for p in projects if p]),
+        "centers": sorted([c for c in centers if c]),
+        "territories": sorted([t for t in territories if t]),
+        "target_years": sorted([y for y in target_years if y]),
+    }
+
+
+@api.get("/mis/projects/rollups")
+async def mis_pjt_rollups(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Project-wise + center-wise aggregate for dashboard charts."""
+    def _pipeline(group_key):
+        return [{"$match": {"is_deleted": {"$ne": True}}},
+                {"$group": {"_id": f"${group_key}",
+                            "batches": {"$sum": 1},
+                            "target": {"$sum": {"$ifNull": ["$total_target", 0]}},
+                            "enrolled": {"$sum": {"$ifNull": ["$total_enrolled", 0]}},
+                            "certified": {"$sum": {"$ifNull": ["$total_certified", 0]}},
+                            "placement": {"$sum": {"$ifNull": ["$num_placement", 0]}},
+                            "dropout": {"$sum": {"$ifNull": ["$total_dropout", 0]}}}},
+                {"$sort": {"_id": 1}}]
+    by_project = await db.mis_project_summary.aggregate(_pipeline("project")).to_list(500)
+    by_center = await db.mis_project_summary.aggregate(_pipeline("center_name")).to_list(500)
+    by_territory = await db.mis_project_summary.aggregate(_pipeline("territory")).to_list(500)
+    def _shape(rows):
+        out = []
+        for r in rows:
+            if not r["_id"]: continue
+            enrolled = r["enrolled"] or 0
+            certified = r["certified"] or 0
+            out.append({"label": r["_id"], "batches": r["batches"],
+                        "target": int(r["target"] or 0), "enrolled": int(enrolled),
+                        "certified": int(certified), "placement": int(r["placement"] or 0),
+                        "dropout": int(r["dropout"] or 0),
+                        "certification_pct": round((certified / enrolled * 100) if enrolled else 0, 2),
+                        "placement_pct": round((r["placement"] / certified * 100) if certified else 0, 2)})
+        return out
+    return {"by_project": _shape(by_project), "by_center": _shape(by_center),
+            "by_territory": _shape(by_territory)}
+
+
+@api.patch("/mis/projects/{pid}")
+async def mis_pjt_update(pid: str, payload: dict = Body(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+    existing = await db.mis_project_summary.find_one({"id": pid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Batch not found")
+    upd = _pjt_from_payload({**existing, **payload})
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.mis_project_summary.update_one({"id": pid}, {"$set": upd})
+    doc = await db.mis_project_summary.find_one({"id": pid}, {"_id": 0})
+    return _pjt_compute(doc)
+
+
+@api.delete("/mis/projects/{pid}", status_code=204)
+async def mis_pjt_delete(pid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.mis_project_summary.update_one({"id": pid}, {"$set": {
+        "is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat()}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Batch not found")
+    return Response(status_code=204)
+
+
+@api.get("/mis/projects/sample-excel")
+async def mis_pjt_sample_excel(_=Depends(require_role(*MIS_WRITE_ROLES))):
+    wb = Workbook(); ws = wb.active; ws.title = "Project-Summary"
+    hf = Font(bold=True, color="FFFFFF")
+    hp = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    for idx, (_k, header) in enumerate(PJT_FIELDS_MAP, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = hf; c.fill = hp
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(16, len(header) + 4)
+    sample = [1, "Jharkhand", "Gumla", "Vir Subhash Chandra Bose Sewa Sanstha",
+              "Birsa Bharno", "Kaushal Kumar", "Birsa", "2024-2025", "STT",
+              440, 410, "", "", "BATCH/19424/08/2024", "Self Employed Tailor",
+              30, "2024-09-04", "2025-01-22", "Closed", "3112076",
+              85, 2, "2025-01-15", "Bill Generated", 28, "Passed",
+              "SSC", "Assessor A", "9876543210", 28, 26, 2, 0,
+              20, "Received", "Placed", "Retained", "Retained"]
+    for i, v in enumerate(sample, start=1):
+        ws.cell(row=2, column=i, value=v)
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="project_summary_template.xlsx"'})
+
+
+async def _pjt_validate_rows(rows_iter, header_index: dict, existing_ids: set) -> dict:
+    valid: list = []; errors: list = []; seen: set = set()
+    for r_i, row in enumerate(rows_iter, start=2):
+        if not row or all(c is None or _mis_norm(c) == "" for c in row):
+            continue
+        rec: dict = {}
+        for header, key in {**PJT_KEY_BY_HEADER, **PJT_HEADER_ALIASES}.items():
+            idx = header_index.get(header)
+            if idx is not None and idx < len(row) and key not in rec:
+                rec[key] = row[idx]
+        cleaned = _pjt_from_payload(rec)
+        preview = {k: _mis_norm(v) for k, v in cleaned.items()}
+        if not cleaned["batch_id"] and not cleaned["center_name"]:
+            errors.append({"row": r_i, "reason": "Row blank / missing Batch ID and Center", "data": preview}); continue
+        if cleaned["batch_id"]:
+            key = cleaned["batch_id"].lower()
+            if key in seen:
+                errors.append({"row": r_i, "reason": f"Duplicate Batch ID in file: {cleaned['batch_id']}", "data": preview}); continue
+            if key in existing_ids:
+                errors.append({"row": r_i, "reason": f"Batch ID exists in system: {cleaned['batch_id']}", "data": preview}); continue
+            seen.add(key)
+        valid.append({"row": r_i, "data": cleaned})
+    return {"valid_rows": valid, "errors": errors}
+
+
+@api.post("/mis/projects/bulk-preview")
+async def mis_pjt_bulk_preview(file: UploadFile = File(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+    rows, hi = await _mis_read_workbook(file, [h for _, h in PJT_FIELDS_MAP])
+    existing = await db.mis_project_summary.find({"is_deleted": {"$ne": True}, "batch_id": {"$ne": ""}}, {"_id": 0, "batch_id": 1}).to_list(20000)
+    existing_ids = {(d.get("batch_id") or "").strip().lower() for d in existing if d.get("batch_id")}
+    result = await _pjt_validate_rows(iter(rows), hi, existing_ids)
+    return {"total_rows": len(result["valid_rows"]) + len(result["errors"]),
+            "valid": len(result["valid_rows"]), "failed": len(result["errors"]),
+            "valid_rows": result["valid_rows"], "errors": result["errors"]}
+
+
+@api.post("/mis/projects/bulk-upload")
+async def mis_pjt_bulk_upload(file: UploadFile = File(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+    rows, hi = await _mis_read_workbook(file, [h for _, h in PJT_FIELDS_MAP])
+    existing = await db.mis_project_summary.find({"is_deleted": {"$ne": True}, "batch_id": {"$ne": ""}}, {"_id": 0, "batch_id": 1}).to_list(20000)
+    existing_ids = {(d.get("batch_id") or "").strip().lower() for d in existing if d.get("batch_id")}
+    result = await _pjt_validate_rows(iter(rows), hi, existing_ids)
+    now = datetime.now(timezone.utc).isoformat()
+    docs = [{"id": str(uuid.uuid4()), **vr["data"], "is_deleted": False,
+             "created_by": user["id"], "created_at": now, "updated_at": now}
+            for vr in result["valid_rows"]]
+    if docs: await db.mis_project_summary.insert_many(docs)
+    return {"uploaded": len(docs), "failed": len(result["errors"]),
+            "total_rows": len(docs) + len(result["errors"]), "errors": result["errors"]}
+
+
+@api.get("/mis/projects/export")
+async def mis_pjt_export(
+    project: Optional[str] = Query(None),
+    center: Optional[str] = Query(None),
+    _=Depends(require_role(*MIS_READ_ROLES)),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    if project and project != "all": q["project"] = {"$regex": f"^{project}$", "$options": "i"}
+    if center and center != "all":   q["center_name"] = {"$regex": f"^{center}$", "$options": "i"}
+    docs = await db.mis_project_summary.find(q, {"_id": 0}).sort("center_name", 1).to_list(20000)
+    wb = Workbook(); ws = wb.active; ws.title = "Project-Summary"
+    hf = Font(bold=True, color="FFFFFF")
+    hp = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    extra_cols = [("certification_pct", "Certification %"),
+                  ("placement_pct", "Placement %"),
+                  ("assessment_pct", "Assessment %"),
+                  ("dropout_pct", "Dropout %"),
+                  ("achievement_pct", "Achievement %")]
+    all_cols = PJT_FIELDS_MAP + extra_cols
+    for idx, (_k, header) in enumerate(all_cols, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = hf; c.fill = hp
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(16, len(header) + 4)
+    for d in docs:
+        computed = _pjt_compute(d)
+        ws.append([computed.get(k) for k, _ in all_cols])
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="project_summary_{stamp}.xlsx"'})
+
+
+
+
 
 
 
