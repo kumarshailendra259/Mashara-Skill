@@ -11,6 +11,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import SIPStatusTab from "./SIPStatusTab";
 import ProjectSummaryTab from "./ProjectSummaryTab";
 import JSDMSTab from "./JSDMSTab";
+import MobilizationTab from "./MobilizationTab";
 
 /**
  * Jharkhand Skills — Daily Report / MIS Dashboard
@@ -165,12 +166,7 @@ export default function MISDashboard() {
           <JSDMSTab canWrite={canWrite} onChange={loadOverview} />
         </TabsContent>
         <TabsContent value="mob" className="pt-4">
-          <ComingSoon
-            title="Daily Mobilization Report"
-            phase="Phase 4"
-            hint="Field-team daily mobilization — multi-location, GPS, photo upload, auto totals."
-            icon={RouteIcon}
-          />
+          <MobilizationTab canWrite={canWrite || user?.role === "staff" || user?.role === "center_staff" || user?.role === "center_manager"} onChange={loadOverview} />
         </TabsContent>
         <TabsContent value="reports" className="pt-4">
           <ComingSoon

@@ -1050,3 +1050,35 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - Manual create with target=800, FY splits 120/180/220/60, req=4, aligned=2, renew=1, certified=3 → total_achieved=580, remaining=220, ach%=72.5, trainer_gap=1, readiness%=75 ✅
 - Template download + bulk upload of own template roundtrip works
 - Frontend screenshot confirms KPI strip + table + BG chips render with real auto-calc values
+
+## MIS · Phase 4 — Daily Mobilization Report (Done + Verified, Feb 2026)
+
+### Backend
+- Collection: `mis_mobilization`; one document per (branch, mobilizer, date) with embedded `locations[]` (max 5)
+- Location schema: `{area_name, distance_km, mobilisation, lat, lng, photo_data_url (base64), notes}`
+- **Auto-calc at write time**: `total_mobilisation = sum(loc.mobilisation)`, `total_distance_km = sum(loc.distance_km)`
+- Endpoints (all `/api/mis/mobilization/*`): CRUD, `filter-options`, `rollups`, `export`
+- `rollups` returns: today · month_to_date · avg_per_day · by_mobilizer (30d, top 100) · by_branch · by_project · daily_trend (last 30d)
+- RBAC: staff / center_staff can create + edit only their own reports (`submitted_by` guard); admin/hr/manager/senior_manager/accountant/center_manager have full read; admin/hr can delete
+
+### Frontend (`/app/frontend/src/pages/mis/MobilizationTab.jsx`)
+- 6-KPI strip: Today Mob, Today Distance, Today Reports, MTD Mob, Avg/Day Mob, Avg/Day KM
+- 4-filter bar (Branch, Project, From, To) + Export + New Daily Report
+- **3 rollup mini-tables** side by side: Top Mobilizers (30d), Branch-wise (30d), Project-wise (30d)
+- Reports table (date, branch, project, mobilizer, emp id, locations count, total mob, distance, submitted by)
+- **New Report dialog**:
+  - Header fields (Branch, Project, Date, Mobilizer Name/Emp ID/Contact)
+  - Dynamic Locations section — Add up to 5 locations; each row has:
+    - Area Name, Distance (km), Mobilisation count
+    - **GPS button** — uses browser `navigator.geolocation.getCurrentPosition`, shows captured lat/lng inline
+    - **Photo Upload** — client-side canvas downscale to ~400 KB base64, thumbnail preview + remove button
+    - Notes
+  - Live totals panel at bottom (Total Mobilisation + Total Distance updating as user types)
+- View dialog shows metadata + location cards with photo thumbnails + clickable Google Maps link on GPS coords
+- Excel export flattens all 5 possible location slots into columns
+
+### Verified E2E
+- Manual POST with 3 locations (5.5+12.3+8.7 km, 20+35+18 mob) → auto totals: `total_mobilisation=73`, `total_distance_km=26.5` ✅
+- Rollups: today/MTD `{mob:73, km:26.5, reports:1}`; avg-per-day `{mob:3.84, km:1.39}` (correctly divided by days-in-month elapsed); by_mobilizer / by_branch / by_project all show single Kaushal Kumar entry; daily_trend has 1 row
+- Overview KPI updates: `today_total=73, today_distance_km=26.5` ✅
+- Frontend screenshot confirms 6-KPI strip, 3 rollup cards, table row, and lists integration with existing overview

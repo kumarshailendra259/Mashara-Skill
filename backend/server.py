@@ -14843,6 +14843,269 @@ async def mis_jsdms_export(_=Depends(require_role(*MIS_READ_ROLES))):
         headers={"Content-Disposition": f'attachment; filename="jsdms_project_{stamp}.xlsx"'})
 
 
+# ============================================================================
+# ============  MIS  ·  DAILY  MOBILIZATION  REPORT  (Phase 4)  ==============
+# ============================================================================
+# One document per (branch, mobilizer, date). Contains a `locations[]` array
+# with up to 5 entries. Each location can carry GPS (lat/lng) captured from the
+# browser and an inline base64 photo (small — object storage integration will
+# swap this out in a later phase).
+
+def _mob_norm_location(loc: dict) -> dict:
+    return {
+        "area_name":       _mis_norm(loc.get("area_name")),
+        "distance_km":     _mis_num(loc.get("distance_km")) or 0,
+        "mobilisation":    _mis_int(loc.get("mobilisation")) or 0,
+        "lat":             _mis_num(loc.get("lat")),
+        "lng":             _mis_num(loc.get("lng")),
+        "photo_data_url":  loc.get("photo_data_url") or None,  # base64 data-URL string
+        "notes":           _mis_norm(loc.get("notes")),
+    }
+
+
+def _mob_from_payload(p: dict, existing: dict | None = None) -> dict:
+    locs = p.get("locations") or []
+    if not isinstance(locs, list):
+        raise HTTPException(400, "locations must be a list")
+    if len(locs) > 5:
+        raise HTTPException(400, "At most 5 locations per daily report")
+    norm_locs = [_mob_norm_location(l) for l in locs if l]
+    doc = {
+        "branch":               _mis_norm(p.get("branch")),
+        "project":              _mis_norm(p.get("project")),
+        "report_date":          _parse_excel_date(p.get("report_date")),
+        "mobilizer_name":       _mis_norm(p.get("mobilizer_name")),
+        "mobilizer_emp_id":     _mis_norm(p.get("mobilizer_emp_id")),
+        "mobilizer_contact":    _mis_norm(p.get("mobilizer_contact")),
+        "remarks":              _mis_norm(p.get("remarks")),
+        "locations":            norm_locs,
+        "total_mobilisation":   sum(l["mobilisation"] for l in norm_locs),
+        "total_distance_km":    round(sum(l["distance_km"] for l in norm_locs), 2),
+    }
+    return doc
+
+
+@api.post("/mis/mobilization", status_code=201)
+async def mis_mob_create(payload: dict = Body(...), user=Depends(require_role(
+    "admin", "hr", "manager", "senior_manager", "accountant", "staff", "center_staff", "center_manager"))):
+    data = _mob_from_payload(payload)
+    if not data["branch"]:
+        raise HTTPException(400, "Branch is required")
+    if not data["report_date"]:
+        raise HTTPException(400, "Report Date is required (YYYY-MM-DD)")
+    if not data["mobilizer_name"]:
+        raise HTTPException(400, "Mobilizer Name is required")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **data, "is_deleted": False,
+           "submitted_by": user["id"], "submitted_by_name": user.get("name") or user.get("email"),
+           "created_at": now, "updated_at": now}
+    await db.mis_mobilization.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/mis/mobilization")
+async def mis_mob_list(
+    branch: Optional[str] = Query(None),
+    project: Optional[str] = Query(None),
+    mobilizer_emp_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    user=Depends(require_role("admin", "hr", "manager", "senior_manager", "accountant",
+                              "staff", "center_staff", "center_manager", "partner")),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    if branch and branch != "all":     q["branch"] = {"$regex": f"^{branch}$", "$options": "i"}
+    if project and project != "all":   q["project"] = {"$regex": f"^{project}$", "$options": "i"}
+    if mobilizer_emp_id and mobilizer_emp_id != "all":
+        q["mobilizer_emp_id"] = {"$regex": f"^{mobilizer_emp_id}$", "$options": "i"}
+    date_range: dict = {}
+    if date_from: date_range["$gte"] = date_from
+    if date_to:   date_range["$lte"] = date_to
+    if date_range: q["report_date"] = date_range
+    # Staff-role sees only own submissions
+    if user.get("role") in ("staff", "center_staff"):
+        q["submitted_by"] = user["id"]
+    docs = await db.mis_mobilization.find(q, {"_id": 0}).sort("report_date", -1).to_list(3000)
+    return docs
+
+
+@api.get("/mis/mobilization/filter-options")
+async def mis_mob_filter_options(_=Depends(require_role(*MIS_READ_ROLES))):
+    q = {"is_deleted": {"$ne": True}}
+    branches = await db.mis_mobilization.distinct("branch", q)
+    projects = await db.mis_mobilization.distinct("project", q)
+    # mobilizers as {emp_id, name} objects — pipeline picks distinct
+    pipe = [{"$match": q},
+            {"$group": {"_id": {"emp_id": "$mobilizer_emp_id", "name": "$mobilizer_name"}}}]
+    mobs_raw = await db.mis_mobilization.aggregate(pipe).to_list(1000)
+    mobs = [{"emp_id": d["_id"]["emp_id"], "name": d["_id"]["name"]}
+            for d in mobs_raw if d["_id"].get("emp_id")]
+    return {
+        "branches": sorted([b for b in branches if b]),
+        "projects": sorted([p for p in projects if p]),
+        "mobilizers": sorted(mobs, key=lambda x: x.get("name") or ""),
+    }
+
+
+@api.get("/mis/mobilization/rollups")
+async def mis_mob_rollups(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Return today / month / avg / mobilizer & branch / project totals."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    tstr = today.isoformat()
+    month_start = today.replace(day=1).isoformat()
+    thirty_ago = (today - _td(days=29)).isoformat()
+
+    async def _tot(match):
+        pipe = [{"$match": {**match, "is_deleted": {"$ne": True}}},
+                {"$group": {"_id": None,
+                            "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                            "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}},
+                            "reports": {"$sum": 1}}}]
+        r = await db.mis_mobilization.aggregate(pipe).to_list(1)
+        if not r: return {"mob": 0, "km": 0, "reports": 0}
+        return {"mob": int(r[0]["mob"] or 0), "km": round(float(r[0]["km"] or 0), 2), "reports": r[0]["reports"]}
+
+    today_tot = await _tot({"report_date": tstr})
+    month_tot = await _tot({"report_date": {"$gte": month_start, "$lte": tstr}})
+    days_span = max(1, (today - today.replace(day=1)).days + 1)
+
+    # Mobilizer-wise (last 30 days)
+    mob_pipe = [{"$match": {"is_deleted": {"$ne": True}, "report_date": {"$gte": thirty_ago}}},
+                {"$group": {"_id": {"emp_id": "$mobilizer_emp_id", "name": "$mobilizer_name"},
+                            "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                            "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}},
+                            "reports": {"$sum": 1}}},
+                {"$sort": {"mob": -1}}, {"$limit": 100}]
+    mobilizer_rows = await db.mis_mobilization.aggregate(mob_pipe).to_list(200)
+    by_mobilizer = [{"emp_id": r["_id"].get("emp_id") or "",
+                     "name": r["_id"].get("name") or "",
+                     "mobilisation": int(r["mob"] or 0),
+                     "distance_km": round(float(r["km"] or 0), 2),
+                     "reports": r["reports"]} for r in mobilizer_rows]
+
+    # Branch-wise (last 30 days)
+    branch_pipe = [{"$match": {"is_deleted": {"$ne": True}, "report_date": {"$gte": thirty_ago}}},
+                   {"$group": {"_id": "$branch",
+                               "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                               "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}},
+                               "reports": {"$sum": 1}}},
+                   {"$sort": {"mob": -1}}]
+    branch_rows = await db.mis_mobilization.aggregate(branch_pipe).to_list(200)
+    by_branch = [{"branch": r["_id"] or "—",
+                  "mobilisation": int(r["mob"] or 0),
+                  "distance_km": round(float(r["km"] or 0), 2),
+                  "reports": r["reports"]} for r in branch_rows if r["_id"]]
+
+    # Project-wise (last 30 days)
+    proj_pipe = [{"$match": {"is_deleted": {"$ne": True}, "report_date": {"$gte": thirty_ago}}},
+                 {"$group": {"_id": "$project",
+                             "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                             "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}},
+                 {"$sort": {"mob": -1}}]
+    proj_rows = await db.mis_mobilization.aggregate(proj_pipe).to_list(200)
+    by_project = [{"project": r["_id"] or "—",
+                   "mobilisation": int(r["mob"] or 0),
+                   "distance_km": round(float(r["km"] or 0), 2)} for r in proj_rows if r["_id"]]
+
+    # Daily trend (last 30 days) for chart
+    trend_pipe = [{"$match": {"is_deleted": {"$ne": True}, "report_date": {"$gte": thirty_ago}}},
+                  {"$group": {"_id": "$report_date",
+                              "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                              "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}},
+                  {"$sort": {"_id": 1}}]
+    trend_rows = await db.mis_mobilization.aggregate(trend_pipe).to_list(60)
+    daily_trend = [{"date": r["_id"],
+                    "mobilisation": int(r["mob"] or 0),
+                    "distance_km": round(float(r["km"] or 0), 2)} for r in trend_rows]
+
+    return {
+        "today": today_tot,
+        "month_to_date": month_tot,
+        "avg_per_day": {
+            "mob": round(month_tot["mob"] / days_span, 2),
+            "km":  round(month_tot["km"]  / days_span, 2),
+        },
+        "by_mobilizer": by_mobilizer,
+        "by_branch": by_branch,
+        "by_project": by_project,
+        "daily_trend": daily_trend,
+    }
+
+
+@api.patch("/mis/mobilization/{mid}")
+async def mis_mob_update(mid: str, payload: dict = Body(...),
+                          user=Depends(require_role("admin", "hr", "manager", "senior_manager",
+                                                    "staff", "center_staff", "center_manager"))):
+    existing = await db.mis_mobilization.find_one({"id": mid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Mobilization report not found")
+    # Staff/center_staff can only edit their own
+    if user.get("role") in ("staff", "center_staff") and existing.get("submitted_by") != user["id"]:
+        raise HTTPException(403, "Not allowed — you can only edit your own reports")
+    merged = _mob_from_payload({**existing, **payload})
+    merged["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.mis_mobilization.update_one({"id": mid}, {"$set": merged})
+    doc = await db.mis_mobilization.find_one({"id": mid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/mis/mobilization/{mid}", status_code=204)
+async def mis_mob_delete(mid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.mis_mobilization.update_one({"id": mid}, {"$set": {
+        "is_deleted": True, "deleted_at": datetime.now(timezone.utc).isoformat()}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Mobilization report not found")
+    return Response(status_code=204)
+
+
+@api.get("/mis/mobilization/export")
+async def mis_mob_export(
+    branch: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    _=Depends(require_role(*MIS_READ_ROLES)),
+):
+    q: dict = {"is_deleted": {"$ne": True}}
+    if branch and branch != "all": q["branch"] = {"$regex": f"^{branch}$", "$options": "i"}
+    if date_from: q.setdefault("report_date", {})["$gte"] = date_from
+    if date_to:   q.setdefault("report_date", {})["$lte"] = date_to
+    docs = await db.mis_mobilization.find(q, {"_id": 0}).sort("report_date", -1).to_list(20000)
+    wb = Workbook(); ws = wb.active; ws.title = "Mobilization"
+    hf = Font(bold=True, color="FFFFFF")
+    hp = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    # Flat headers: report meta + up to 5 location columns
+    headers = ["Report Date","Branch","Project","Mobilizer","Emp ID","Contact",
+               "Total Mobilisation","Total Distance KM"]
+    for i in range(1, 6):
+        headers += [f"Area {i} Name", f"Area {i} KM", f"Area {i} Mob"]
+    headers.append("Remarks")
+    for idx, header in enumerate(headers, start=1):
+        c = ws.cell(row=1, column=idx, value=header)
+        c.font = hf; c.fill = hp
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[c.column_letter].width = max(14, len(header) + 2)
+    for d in docs:
+        base = [d.get("report_date"), d.get("branch"), d.get("project"),
+                d.get("mobilizer_name"), d.get("mobilizer_emp_id"),
+                d.get("mobilizer_contact"), d.get("total_mobilisation"),
+                d.get("total_distance_km")]
+        locs = d.get("locations") or []
+        for i in range(5):
+            loc = locs[i] if i < len(locs) else {}
+            base += [loc.get("area_name"), loc.get("distance_km"), loc.get("mobilisation")]
+        base.append(d.get("remarks"))
+        ws.append(base)
+    ws.freeze_panes = "A2"
+    buf = BytesIO(); wb.save(buf); buf.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return Response(content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="mobilization_{stamp}.xlsx"'})
+
+
+
 
 
 
