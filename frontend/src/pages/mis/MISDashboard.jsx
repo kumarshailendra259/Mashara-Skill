@@ -82,7 +82,7 @@ export default function MISDashboard() {
   const lBa  = live?.batches  || {};
   const lBg  = live?.bg       || {};
 
-  const canWrite = ["admin", "hr", "manager", "senior_manager", "accountant"].includes(user?.role);
+  const canWrite = ["admin", "hr", "manager", "senior_manager", "accountant", "center_manager"].includes(user?.role);
 
   // KPI drill-down state
   const [drill, setDrill] = useState(null); // { title, kind, rows }

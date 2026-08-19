@@ -9319,11 +9319,49 @@ class BatchIn(BaseModel):
     # When True, batch is closed — no new fooding entries can be created.
     # Set/unset via /batches/{id}/close and /batches/{id}/reopen endpoints.
     closed: bool = False
+    # ---- MIS overlay fields (Phase 36B — Single Source of Truth) ----
+    # Lifecycle. See BATCH_LIFECYCLE_STATES (10-state machine). Defaults to "Draft".
+    lifecycle_status: Optional[str] = "Draft"
+    # Geo / plan
+    state: Optional[str] = ""
+    territory: Optional[str] = ""
+    target_year: Optional[str] = ""             # e.g. "2025-26"
+    training_type: Optional[str] = ""           # "STT" | "RPL"
+    total_target: int = 0                       # target enrolments (separate from total_beneficiaries)
+    sdms_batch_id: Optional[str] = ""
+    # Attendance / dropout
+    attendance_pct: float = Field(default=0, ge=0, le=100)
+    total_dropout: int = 0
+    # Assessment
+    assessment_date: Optional[str] = ""
+    assessment_agency: Optional[str] = ""
+    assessor_name: Optional[str] = ""
+    assessor_contact: Optional[str] = ""
+    total_certified: int = 0
+    assessment_status: Optional[str] = ""       # Pending | Conducted | Result Awaited | Result Declared
+    actual_present: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    absent_count: int = 0
+    billing_status: Optional[str] = ""
+    # Placement
+    num_placement: int = 0
+    offer_letter_status: Optional[str] = ""
+    placement_month_1: Optional[str] = ""
+    placement_month_2: Optional[str] = ""
+    placement_month_3: Optional[str] = ""
 
 
 class BatchOut(BatchIn):
     id: str
     created_at: str
+    # Lifecycle-derived lock flags (auto-set by /batches/{id}/lifecycle)
+    basic_locked: Optional[bool] = False
+    attendance_locked: Optional[bool] = False
+    assessment_locked: Optional[bool] = False
+    placement_locked: Optional[bool] = False
+    # Audit trail of lifecycle transitions
+    lifecycle_history: List[dict] = Field(default_factory=list)
 
 
 # Category hourly rates (fixed business config — change here if statutory rates revise).
@@ -9545,7 +9583,7 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
 
 
 @api.put("/batches/{bid}", response_model=BatchOut)
-async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", "manager", "senior_manager", "accountant"))):
+async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin", "manager", "senior_manager", "accountant", "hr", "center_manager"))):
     # Re-validate same FKs as create (project/center/partners)
     if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "project_id does not exist")
@@ -9555,7 +9593,46 @@ async def update_batch(bid: str, body: BatchIn, _=Depends(require_role("admin", 
         cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
         if cnt != len(set(body.partner_ids)):
             raise HTTPException(400, "one or more partner_ids do not exist")
-    res = await db.batches.find_one_and_update({"id": bid}, {"$set": body.model_dump()}, return_document=True)
+    # Lifecycle-based lock enforcement (admin bypasses locks).
+    existing = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Not found")
+    role = user.get("role")
+    if role == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if existing.get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only edit batches at own centers")
+    if role != "admin":
+        cur_locks = _lifecycle_locks(existing.get("lifecycle_status") or "Draft")
+        BASIC_FIELDS = {"project_id", "center_id", "company_id", "partner_ids", "name",
+                        "start_date", "end_date", "total_beneficiaries", "total_target",
+                        "state", "territory", "target_year", "training_type", "job_roles",
+                        "sdms_batch_id"}
+        ATTENDANCE_FIELDS = {"attendance_pct", "total_dropout"}
+        ASSESSMENT_FIELDS = {"assessment_date", "assessment_agency", "assessor_name",
+                             "assessor_contact", "total_certified", "assessment_status",
+                             "actual_present", "pass_count", "fail_count", "absent_count",
+                             "billing_status", "passed_candidates"}
+        PLACEMENT_FIELDS = {"num_placement", "offer_letter_status", "placement_month_1",
+                            "placement_month_2", "placement_month_3", "placed_candidates"}
+        new_data = body.model_dump()
+        def _changed(fset):
+            return [f for f in fset
+                    if str(new_data.get(f, "") or "") != str(existing.get(f, "") or "")
+                    and new_data.get(f) != existing.get(f)]
+        if cur_locks["basic_locked"] and _changed(BASIC_FIELDS):
+            raise HTTPException(400, f"Basic info is locked (lifecycle: {existing.get('lifecycle_status')}). Ask admin to unlock.")
+        if cur_locks["attendance_locked"] and _changed(ATTENDANCE_FIELDS):
+            raise HTTPException(400, "Attendance is locked at this lifecycle stage.")
+        if cur_locks["assessment_locked"] and _changed(ASSESSMENT_FIELDS):
+            raise HTTPException(400, "Assessment fields are locked at this lifecycle stage.")
+        if cur_locks["placement_locked"] and _changed(PLACEMENT_FIELDS):
+            raise HTTPException(400, "Placement fields are locked (batch is Closed). Ask admin to reopen.")
+
+    upd = body.model_dump()
+    # Keep locks in sync with lifecycle_status if it changed via PUT.
+    upd.update(_lifecycle_locks(upd.get("lifecycle_status") or "Draft"))
+    res = await db.batches.find_one_and_update({"id": bid}, {"$set": upd}, return_document=True)
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
@@ -10272,6 +10349,101 @@ async def reopen_batch(bid: str, _=Depends(require_role("admin"))):
         raise HTTPException(404, "Batch not found")
     r.pop("_id", None)
     return BatchOut(**r)
+
+
+# ---------- Batch Lifecycle Status (10-state machine) ----------
+# Business flow: batches move linearly through these states. Advancing to a later
+# state auto-locks earlier-stage editable fields (basic info, assessment, placement).
+# Both `db.batches` and `db.mis_project_summary` share the same lifecycle taxonomy.
+BATCH_LIFECYCLE_STATES = [
+    "Draft",                    # 0 — being planned, all fields editable
+    "Upcoming",                 # 1 — approved & scheduled, basic info locks on next step
+    "Active",                   # 2 — training running (basic locked, attendance editable)
+    "Training Completed",       # 3 — training done, awaiting assessment
+    "Assessment Pending",       # 4 — assessment scheduled/upcoming
+    "Assessment Completed",     # 5 — assessment done (assessment fields lock on next step)
+    "Certification Pending",    # 6 — awaiting certifier response
+    "Certified",                # 7 — certificates received (placement editable)
+    "Placement in Progress",    # 8 — placement drive underway
+    "Closed",                   # 9 — everything final, all locked
+]
+BATCH_LIFECYCLE_INDEX = {s: i for i, s in enumerate(BATCH_LIFECYCLE_STATES)}
+
+
+def _lifecycle_locks(status: str) -> dict:
+    """Return the {basic_locked, assessment_locked, placement_locked} flags for
+    a given lifecycle status. Advancing past a phase locks the fields owned by
+    that phase."""
+    idx = BATCH_LIFECYCLE_INDEX.get(status, 0)
+    return {
+        # Basic info (project/center/company/target/dates/job_role) locks once
+        # the batch reaches "Active" (idx=2) — HR can't rewrite the plan mid-training.
+        "basic_locked":      idx >= BATCH_LIFECYCLE_INDEX["Active"],
+        # Attendance % locks when training is done.
+        "attendance_locked": idx >= BATCH_LIFECYCLE_INDEX["Training Completed"],
+        # Assessment fields lock once results are recorded.
+        "assessment_locked": idx >= BATCH_LIFECYCLE_INDEX["Certification Pending"],
+        # Placement fields lock only when the batch is fully Closed.
+        "placement_locked":  idx >= BATCH_LIFECYCLE_INDEX["Closed"],
+    }
+
+
+@api.patch("/batches/{bid}/lifecycle")
+async def advance_batch_lifecycle(
+    bid: str,
+    to: str = Query(..., description="Target lifecycle state (must be defined in BATCH_LIFECYCLE_STATES)"),
+    remarks: Optional[str] = Query(None),
+    user=Depends(require_role("admin", "manager", "senior_manager", "accountant", "hr", "center_manager")),
+):
+    """Advance (or explicitly move) a batch to a new lifecycle state.
+    - Non-admins can only move FORWARD (no rollback). Admin can jump anywhere.
+    - center_manager can only advance batches at their assigned centers.
+    - Appends to `lifecycle_history` for audit.
+    """
+    if to not in BATCH_LIFECYCLE_INDEX:
+        raise HTTPException(400, f"Invalid state '{to}'. Allowed: {BATCH_LIFECYCLE_STATES}")
+    existing = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Batch not found")
+
+    role = user.get("role")
+    # Center manager scope check
+    if role == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        if existing.get("center_id") not in assigned:
+            raise HTTPException(403, "Center manager can only advance batches at own centers")
+
+    current = existing.get("lifecycle_status") or "Draft"
+    cur_idx = BATCH_LIFECYCLE_INDEX.get(current, 0)
+    new_idx = BATCH_LIFECYCLE_INDEX[to]
+
+    if role != "admin" and new_idx < cur_idx:
+        raise HTTPException(400, f"Only admin can roll back from '{current}' to '{to}'")
+
+    locks = _lifecycle_locks(to)
+    history_entry = {
+        "from": current, "to": to,
+        "by_user_id": user.get("id"), "by_user_name": user.get("name") or user.get("email"),
+        "at": datetime.now(timezone.utc).isoformat(),
+        "remarks": (remarks or "").strip() or None,
+    }
+    upd = {"$set": {"lifecycle_status": to, **locks},
+           "$push": {"lifecycle_history": history_entry}}
+    # Keep the legacy `closed` bool in sync so existing flows (fooding etc.) work.
+    if to == "Closed":
+        upd["$set"]["closed"] = True
+    elif current == "Closed" and to != "Closed":
+        upd["$set"]["closed"] = False
+
+    res = await db.batches.find_one_and_update({"id": bid}, upd, return_document=True)
+    res.pop("_id", None)
+    return BatchOut(**res)
+
+
+@api.get("/batches/lifecycle-states")
+async def get_batch_lifecycle_states(_=Depends(get_current_user)):
+    """Return the list of allowed lifecycle states for UI dropdowns."""
+    return {"states": BATCH_LIFECYCLE_STATES}
 
 
 # ---------- Fooding Income (per-month boarding cost × mandays) ----------
@@ -14688,8 +14860,15 @@ def _pjt_compute(rec: dict) -> dict:
     present = rec.get("actual_present") or 0
     passed = rec.get("pass_count") or 0
     total_target = rec.get("total_target") or 0
+    # Lifecycle: map legacy `status` → lifecycle_status if not explicitly set.
+    lifecycle = rec.get("lifecycle_status") or rec.get("status") or "Draft"
+    if lifecycle not in BATCH_LIFECYCLE_INDEX:
+        lifecycle = "Draft"
+    locks = _lifecycle_locks(lifecycle)
     return {
         **rec,
+        "lifecycle_status": lifecycle,
+        **locks,
         "certification_pct": round((certified / enrolled * 100) if enrolled else 0, 2),
         "placement_pct":     round((placement / certified * 100) if certified else 0, 2),
         "assessment_pct":    round((present / enrolled * 100) if enrolled else 0, 2),
@@ -14701,18 +14880,38 @@ def _pjt_compute(rec: dict) -> dict:
 
 
 @api.post("/mis/projects", status_code=201)
-async def mis_pjt_create(payload: dict = Body(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
+async def mis_pjt_create(payload: dict = Body(...), user=Depends(require_role(*MIS_WRITE_ROLES, "center_manager"))):
     data = _pjt_from_payload(payload)
     if not data["batch_id"] and not data["center_name"]:
         raise HTTPException(400, "Batch ID or Center Name is required")
+    # Center manager scope check — can only create for their own centers.
+    if user.get("role") == "center_manager":
+        assigned = set(user.get("assigned_center_ids") or [])
+        # Resolve the requested center_name to a center_id + validate scope.
+        cname = (data.get("center_name") or "").strip()
+        if not cname:
+            raise HTTPException(400, "center_name is required for center manager")
+        c = await db.centers.find_one({"name": {"$regex": f"^{cname}$", "$options": "i"},
+                                        "id": {"$in": list(assigned)}}, {"_id": 0, "id": 1, "name": 1})
+        if not c:
+            raise HTTPException(403, "Center manager can only create batches for own assigned centers")
     if data["batch_id"]:
         dup = await db.mis_project_summary.find_one(
             {"batch_id": {"$regex": f"^{data['batch_id']}$", "$options": "i"},
              "is_deleted": {"$ne": True}}, {"_id": 0, "id": 1})
         if dup:
             raise HTTPException(409, f"Batch ID '{data['batch_id']}' already exists")
+    # Lifecycle: honour explicitly-passed status, else default to Draft.
+    lifecycle = (payload.get("lifecycle_status") or payload.get("status") or "Draft").strip()
+    if lifecycle not in BATCH_LIFECYCLE_INDEX: lifecycle = "Draft"
     now = datetime.now(timezone.utc).isoformat()
     doc = {"id": str(uuid.uuid4()), **data, "is_deleted": False,
+           "lifecycle_status": lifecycle, "status": lifecycle,
+           **_lifecycle_locks(lifecycle),
+           "lifecycle_history": [{"from": None, "to": lifecycle,
+                                   "by_user_id": user.get("id"),
+                                   "by_user_name": user.get("name") or user.get("email"),
+                                   "at": now, "remarks": "Created"}],
            "created_by": user["id"], "created_at": now, "updated_at": now}
     await db.mis_project_summary.insert_one(doc)
     doc.pop("_id", None)
@@ -14798,13 +14997,76 @@ async def mis_pjt_rollups(_=Depends(require_role(*MIS_READ_ROLES))):
 
 
 @api.patch("/mis/projects/{pid}")
-async def mis_pjt_update(pid: str, payload: dict = Body(...), _=Depends(require_role(*MIS_WRITE_ROLES))):
+async def mis_pjt_update(pid: str, payload: dict = Body(...), user=Depends(require_role(*MIS_WRITE_ROLES))):
     existing = await db.mis_project_summary.find_one({"id": pid, "is_deleted": {"$ne": True}}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Batch not found")
+    # Lifecycle-based lock enforcement (admin bypasses)
+    role = user.get("role")
+    if role != "admin":
+        cur_lifecycle = existing.get("lifecycle_status") or existing.get("status") or "Draft"
+        cur_locks = _lifecycle_locks(cur_lifecycle)
+        BASIC_FIELDS = {"state", "territory", "name_of_company", "center_name", "center_manager",
+                        "project", "target_year", "training_type", "total_target",
+                        "batch_id", "job_role", "start_date", "end_date", "sdms_batch_id",
+                        "total_enrolled", "serial_no"}
+        ATTENDANCE_FIELDS = {"attendance_pct", "total_dropout"}
+        ASSESSMENT_FIELDS = {"assessment_date", "billing_status", "total_certified",
+                             "assessment_status", "assessment_agency", "assessor_name",
+                             "assessor_contact", "actual_present", "pass_count",
+                             "fail_count", "absent_count"}
+        PLACEMENT_FIELDS = {"num_placement", "offer_letter_status", "placement_month_1",
+                            "placement_month_2", "placement_month_3"}
+        def _changed(fset):
+            return [f for f in fset
+                    if f in payload and str(payload.get(f) or "") != str(existing.get(f) or "")]
+        if cur_locks["basic_locked"] and _changed(BASIC_FIELDS):
+            raise HTTPException(400, f"Basic info is locked (lifecycle: {cur_lifecycle}). Ask admin to unlock or roll back.")
+        if cur_locks["attendance_locked"] and _changed(ATTENDANCE_FIELDS):
+            raise HTTPException(400, "Attendance is locked at this lifecycle stage.")
+        if cur_locks["assessment_locked"] and _changed(ASSESSMENT_FIELDS):
+            raise HTTPException(400, "Assessment fields are locked at this lifecycle stage.")
+        if cur_locks["placement_locked"] and _changed(PLACEMENT_FIELDS):
+            raise HTTPException(400, "Placement fields are locked (batch is Closed).")
     upd = _pjt_from_payload({**existing, **payload})
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.mis_project_summary.update_one({"id": pid}, {"$set": upd})
+    doc = await db.mis_project_summary.find_one({"id": pid}, {"_id": 0})
+    return _pjt_compute(doc)
+
+
+@api.patch("/mis/projects/{pid}/lifecycle")
+async def mis_pjt_advance_lifecycle(
+    pid: str,
+    to: str = Query(..., description="Target lifecycle state"),
+    remarks: Optional[str] = Query(None),
+    user=Depends(require_role(*MIS_WRITE_ROLES, "center_manager")),
+):
+    """Advance the MIS overlay batch through its lifecycle. Mirrors
+    /api/batches/{bid}/lifecycle semantics but for `mis_project_summary`."""
+    if to not in BATCH_LIFECYCLE_INDEX:
+        raise HTTPException(400, f"Invalid state '{to}'. Allowed: {BATCH_LIFECYCLE_STATES}")
+    existing = await db.mis_project_summary.find_one({"id": pid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Batch not found")
+    current = existing.get("lifecycle_status") or existing.get("status") or "Draft"
+    if current not in BATCH_LIFECYCLE_INDEX: current = "Draft"
+    role = user.get("role")
+    if role != "admin" and BATCH_LIFECYCLE_INDEX[to] < BATCH_LIFECYCLE_INDEX[current]:
+        raise HTTPException(400, f"Only admin can roll back from '{current}' to '{to}'")
+    locks = _lifecycle_locks(to)
+    history_entry = {
+        "from": current, "to": to,
+        "by_user_id": user.get("id"), "by_user_name": user.get("name") or user.get("email"),
+        "at": datetime.now(timezone.utc).isoformat(),
+        "remarks": (remarks or "").strip() or None,
+    }
+    await db.mis_project_summary.update_one(
+        {"id": pid},
+        {"$set": {"lifecycle_status": to, "status": to,
+                  "updated_at": datetime.now(timezone.utc).isoformat(), **locks},
+         "$push": {"lifecycle_history": history_entry}}
+    )
     doc = await db.mis_project_summary.find_one({"id": pid}, {"_id": 0})
     return _pjt_compute(doc)
 

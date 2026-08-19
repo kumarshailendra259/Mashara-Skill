@@ -16,29 +16,76 @@ import {
 } from "lucide-react";
 
 /**
- * Project Wise Summary (Phase 2)
- * -------------------------------
+ * Project Wise Summary (Phase 2 + Phase 36C — Lifecycle & Locks)
+ * ---------------------------------------------------------------
  * Batch-level tracker matching the 38-column reference Excel. Auto-calc badges:
  *   Certification % = certified / enrolled × 100
  *   Placement %     = placement / certified × 100
  *   Achievement %   = certified / total_target × 100
  *   Dropout %       = dropout / enrolled × 100
- *   Remaining Target = max(0, target - enrolled)   [computed if not entered]
+ *   Remaining Target = max(0, target - enrolled)
+ *
+ * Phase 36C additions:
+ *   • Project / Center / Company / Job Role now dropdowns (from Core ERP)
+ *   • Batch Status = 10-state lifecycle (Draft → Closed)
+ *   • Per-phase locks (basic / attendance / assessment / placement) auto-set
+ *     on server side; UI dims + 🔒 badges corresponding fields.
  */
+
+// Lifecycle states must mirror BATCH_LIFECYCLE_STATES on the backend.
+const LIFECYCLE_STATES = [
+  "Draft", "Upcoming", "Active", "Training Completed", "Assessment Pending",
+  "Assessment Completed", "Certification Pending", "Certified",
+  "Placement in Progress", "Closed",
+];
+const LIFECYCLE_TONES = {
+  "Draft":                 "bg-gray-100 text-gray-700 border-gray-300",
+  "Upcoming":              "bg-blue-100 text-blue-800 border-blue-300",
+  "Active":                "bg-emerald-100 text-emerald-800 border-emerald-300",
+  "Training Completed":    "bg-teal-100 text-teal-800 border-teal-300",
+  "Assessment Pending":    "bg-amber-100 text-amber-800 border-amber-300",
+  "Assessment Completed":  "bg-indigo-100 text-indigo-800 border-indigo-300",
+  "Certification Pending": "bg-purple-100 text-purple-800 border-purple-300",
+  "Certified":             "bg-emerald-100 text-emerald-900 border-emerald-400",
+  "Placement in Progress": "bg-orange-100 text-orange-800 border-orange-300",
+  "Closed":                "bg-gray-200 text-gray-700 border-gray-300",
+};
+// Which phase-lock each field belongs to. Empty/undefined = always editable
+// (except explicit read-only). Server enforces this — UI only dims for clarity.
+const FIELD_PHASE = {
+  // Basic info — locks when batch reaches Active
+  serial_no: "basic", state: "basic", territory: "basic", name_of_company: "basic",
+  center_name: "basic", center_manager: "basic", project: "basic", target_year: "basic",
+  training_type: "basic", total_target: "basic", total_target_fy: "basic",
+  remaining_target: "basic", remaining_target_fy: "basic", batch_id: "basic",
+  job_role: "basic", start_date: "basic", end_date: "basic",
+  sdms_batch_id: "basic", total_enrolled: "basic",
+  // Attendance — locks when Training Completed
+  attendance_pct: "attendance", total_dropout: "attendance",
+  // Assessment — locks when Certification Pending
+  assessment_date: "assessment", billing_status: "assessment", total_certified: "assessment",
+  assessment_status: "assessment", assessment_agency: "assessment", assessor_name: "assessment",
+  assessor_contact: "assessment", actual_present: "assessment", pass_count: "assessment",
+  fail_count: "assessment", absent_count: "assessment",
+  // Placement — locks only when Closed
+  num_placement: "placement", offer_letter_status: "placement",
+  placement_month_1: "placement", placement_month_2: "placement",
+  placement_month_3: "placement",
+};
 
 const SECTIONS = [
   {
-    title: "Basic Information",
+    title: "Basic Information", phase: "basic",
     fields: [
       { k: "serial_no", l: "S.No.", type: "number" },
+      { k: "project", l: "Project *", type: "select-project" },
+      { k: "center_name", l: "Center Name *", type: "select-center" },
+      { k: "name_of_company", l: "Name Of Company", type: "select-company" },
       { k: "state", l: "State" },
       { k: "territory", l: "Territory / District" },
-      { k: "name_of_company", l: "Name Of Company" },
-      { k: "center_name", l: "Center Name" },
       { k: "center_manager", l: "Center Manager" },
-      { k: "project", l: "Project" },
-      { k: "target_year", l: "Target Year" },
-      { k: "training_type", l: "Training Type (STT/RPL)" },
+      { k: "target_year", l: "Target Year (e.g. 2025-26)" },
+      { k: "training_type", l: "Training Type", type: "select", options: ["STT", "RPL"] },
       { k: "total_target", l: "Total Target", type: "number" },
       { k: "remaining_target", l: "Remaining Target (manual)", type: "number" },
       { k: "total_target_fy", l: "Total Target FY-wise", type: "number" },
@@ -46,21 +93,28 @@ const SECTIONS = [
     ],
   },
   {
-    title: "Batch Information",
+    title: "Batch Information", phase: "basic",
     fields: [
-      { k: "batch_id", l: "Batch ID" },
+      { k: "batch_id", l: "Batch ID *" },
       { k: "job_role", l: "Job Role" },
       { k: "total_enrolled", l: "Total Enrolled", type: "number" },
       { k: "start_date", l: "Start Date", type: "date" },
       { k: "end_date", l: "End Date", type: "date" },
-      { k: "status", l: "Status" },
+      { k: "lifecycle_status", l: "Batch Status", type: "select-lifecycle" },
       { k: "sdms_batch_id", l: "SDMS Batch ID" },
+    ],
+  },
+  {
+    title: "Attendance Monitoring", phase: "attendance",
+    hint: "Editable when lifecycle is between Active and Training Completed.",
+    fields: [
       { k: "attendance_pct", l: "Attendance %", type: "number" },
       { k: "total_dropout", l: "Total Drop-out", type: "number" },
     ],
   },
   {
-    title: "Assessment Information",
+    title: "Assessment Information", phase: "assessment",
+    hint: "Locks once lifecycle advances to Certification Pending.",
     fields: [
       { k: "assessment_date", l: "Assessment Date", type: "date" },
       { k: "billing_status", l: "Billing Status" },
@@ -76,7 +130,8 @@ const SECTIONS = [
     ],
   },
   {
-    title: "Placement Information",
+    title: "Placement Information", phase: "placement",
+    hint: "Editable while lifecycle is Certified → Placement in Progress. Locks on Closed.",
     fields: [
       { k: "num_placement", l: "No. of Placement", type: "number" },
       { k: "offer_letter_status", l: "Offer Letter Status" },
@@ -87,7 +142,7 @@ const SECTIONS = [
   },
 ];
 const ALL_FIELDS = SECTIONS.flatMap((s) => s.fields);
-const EMPTY = ALL_FIELDS.reduce((a, f) => ({ ...a, [f.k]: "" }), {});
+const EMPTY = ALL_FIELDS.reduce((a, f) => ({ ...a, [f.k]: "" }), { lifecycle_status: "Draft" });
 
 const STATUS_TONES = {
   active:  "bg-emerald-100 text-emerald-800 border-emerald-300",
@@ -134,6 +189,31 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkFileRef = useRef(null);
+
+  // Phase 36C: Core ERP entity dropdowns (Projects / Centers / Companies) so
+  // the operator picks from existing records instead of typing free text.
+  const [entProjects, setEntProjects] = useState([]);
+  const [entCenters, setEntCenters] = useState([]);
+  const [entCompanies, setEntCompanies] = useState([]);
+  useEffect(() => {
+    // Best-effort: silently ignore role-based 403s (partner/staff can't read entities).
+    Promise.all([
+      api.get("/entities/project").then((r) => r.data).catch(() => []),
+      api.get("/entities/center").then((r) => r.data).catch(() => []),
+      api.get("/entities/company").then((r) => r.data).catch(() => []),
+    ]).then(([p, c, co]) => {
+      setEntProjects(p || []); setEntCenters(c || []); setEntCompanies(co || []);
+    });
+  }, []);
+
+  // Lifecycle helpers
+  const advanceLifecycle = async (row, to) => {
+    try {
+      await api.patch(`/mis/projects/${row.id}/lifecycle`, null, { params: { to } });
+      toast.success(`Batch moved to "${to}"`);
+      load(); onChange && onChange();
+    } catch (e) { toast.error(formatError(e)); }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -337,15 +417,13 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
             </SelectContent>
           </Select>
         </div>
-        <div className="w-32">
+        <div className="w-44">
           <Label className="overline">Status</Label>
           <Select value={statusF} onValueChange={setStatusF}>
             <SelectTrigger className="rounded-none" data-testid="pjt-status"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All</SelectItem>
-              <SelectItem value="Active">Active</SelectItem>
-              <SelectItem value="Closed">Closed</SelectItem>
-              <SelectItem value="Ongoing">Ongoing</SelectItem>
+              <SelectItem value="all">All Statuses</SelectItem>
+              {LIFECYCLE_STATES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
@@ -394,10 +472,18 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
                     <span className={`font-bold ${r.dropout_pct > 15 ? "text-red-700" : r.dropout_pct > 5 ? "text-amber-700" : "text-emerald-700"}`}>{r.dropout_pct}%</span>
                   ) : "—"}
                 </td>
-                <td>{statusChip(r.status)}</td>
+                <td>
+                  {(() => {
+                    const lc = r.lifecycle_status || r.status || "—";
+                    const tone = LIFECYCLE_TONES[lc] || "bg-gray-100 text-gray-600 border-gray-300";
+                    return (
+                      <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-bold uppercase border ${tone}`} data-testid={`pjt-lc-${r.id}`}>{lc}</span>
+                    );
+                  })()}
+                </td>
                 <td>
                   <Button size="icon" variant="ghost" onClick={() => setViewing(r)} className="h-7 w-7 rounded-none" title="View" data-testid={`pjt-view-${r.id}`}><Eye size={12} /></Button>
-                  {canWriteEffective && <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit" data-testid={`pjt-edit-${r.id}`}><Edit3 size={12} /></Button>}
+                  {canWriteEffective && <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit & lifecycle" data-testid={`pjt-edit-${r.id}`}><Edit3 size={12} /></Button>}
                   {canWriteEffective && <Button size="icon" variant="ghost" onClick={() => remove(r)} className="h-7 w-7 rounded-none hover:text-red-700" title="Delete" data-testid={`pjt-del-${r.id}`}><Trash2 size={12} /></Button>}
                 </td>
               </tr>
@@ -406,25 +492,138 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
         </table>
       </div>
 
-      {/* Add/Edit — grouped sections */}
+      {/* Add/Edit — grouped sections with phase locks */}
       <Dialog open={openForm} onOpenChange={(o) => !o && (setOpenForm(false), setEditing(null))}>
         <DialogContent className="rounded-none max-w-5xl max-h-[92vh] overflow-y-auto" data-testid="pjt-form">
-          <DialogHeader><DialogTitle className="font-heading">{editing?.id ? "Edit Batch" : "Add New Batch"}</DialogTitle></DialogHeader>
+          <DialogHeader>
+            <DialogTitle className="font-heading flex items-center gap-3">
+              {editing?.id ? "Edit Batch" : "Add New Batch"}
+              {editing?.lifecycle_status && (
+                <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-bold uppercase border ${LIFECYCLE_TONES[editing.lifecycle_status] || "bg-gray-100 border-gray-300"}`} data-testid="pjt-form-lifecycle">
+                  {editing.lifecycle_status}
+                </span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
           {editing && (
             <div className="space-y-4">
-              {SECTIONS.map((sec) => (
-                <div key={sec.title}>
-                  <div className="overline mb-2 border-b border-[var(--border)] pb-1">{sec.title}</div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {sec.fields.map((f) => (
-                      <div key={f.k}>
-                        <Label className="overline text-[10px]">{f.l}</Label>
-                        <Input type={f.type || "text"} value={editing[f.k] ?? ""} onChange={(e) => setEditing({ ...editing, [f.k]: e.target.value })} className="rounded-none" data-testid={`pjt-inp-${f.k}`} />
-                      </div>
-                    ))}
+              {SECTIONS.map((sec) => {
+                const phaseLockKey = sec.phase ? `${sec.phase}_locked` : null;
+                const isLocked = !!(phaseLockKey && editing[phaseLockKey]);
+                return (
+                  <div key={sec.title} className={isLocked ? "opacity-70" : ""}>
+                    <div className="overline mb-2 border-b border-[var(--border)] pb-1 flex items-center gap-2">
+                      <span>{sec.title}</span>
+                      {isLocked && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 text-[9px] font-bold uppercase" data-testid={`pjt-lock-${sec.phase}`}>
+                          🔒 Locked
+                        </span>
+                      )}
+                      {sec.hint && <span className="text-[10px] font-normal text-[var(--muted)] normal-case ml-1">{sec.hint}</span>}
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {sec.fields.map((f) => {
+                        const commonInputProps = {
+                          "data-testid": `pjt-inp-${f.k}`,
+                          disabled: isLocked,
+                          className: "rounded-none",
+                        };
+                        const setVal = (v) => setEditing({ ...editing, [f.k]: v });
+                        // Center dropdown: on change auto-fill state/territory/center_manager from entity meta
+                        const onCenterChange = (name) => {
+                          const c = entCenters.find((x) => x.name === name);
+                          setEditing({
+                            ...editing,
+                            center_name: name,
+                            state: c?.state || editing.state,
+                            territory: c?.city || editing.territory,
+                            center_manager: c?.manager_name || editing.center_manager,
+                          });
+                        };
+                        return (
+                          <div key={f.k}>
+                            <Label className="overline text-[10px]">{f.l}</Label>
+                            {f.type === "select-project" && (
+                              <Select value={editing[f.k] || undefined} onValueChange={setVal} disabled={isLocked}>
+                                <SelectTrigger className="rounded-none" data-testid={`pjt-inp-${f.k}`}><SelectValue placeholder="Select project…" /></SelectTrigger>
+                                <SelectContent>
+                                  {entProjects.length === 0 && <SelectItem value="__none__" disabled>No projects — create in Projects module</SelectItem>}
+                                  {entProjects.filter((p) => p.name).map((p) => <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
+                            )}
+                            {f.type === "select-center" && (
+                              <Select value={editing[f.k] || undefined} onValueChange={onCenterChange} disabled={isLocked}>
+                                <SelectTrigger className="rounded-none" data-testid={`pjt-inp-${f.k}`}><SelectValue placeholder="Select center…" /></SelectTrigger>
+                                <SelectContent>
+                                  {entCenters.length === 0 && <SelectItem value="__none__" disabled>No centers — create in Centers module</SelectItem>}
+                                  {entCenters.filter((c) => c.name).map((c) => <SelectItem key={c.id} value={c.name}>{c.name}{c.city ? ` · ${c.city}` : ""}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
+                            )}
+                            {f.type === "select-company" && (
+                              <Select value={editing[f.k] || undefined} onValueChange={setVal} disabled={isLocked}>
+                                <SelectTrigger className="rounded-none" data-testid={`pjt-inp-${f.k}`}><SelectValue placeholder="Select company…" /></SelectTrigger>
+                                <SelectContent>
+                                  {entCompanies.length === 0 && <SelectItem value="__none__" disabled>No companies — create in Companies module</SelectItem>}
+                                  {entCompanies.filter((co) => co.name).map((co) => <SelectItem key={co.id} value={co.name}>{co.name}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
+                            )}
+                            {f.type === "select-lifecycle" && (
+                              <Select value={editing[f.k] || "Draft"} onValueChange={setVal} disabled={isLocked || !editing.id}>
+                                <SelectTrigger className="rounded-none" data-testid={`pjt-inp-${f.k}`}><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                  {LIFECYCLE_STATES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
+                            )}
+                            {f.type === "select" && (
+                              <Select value={editing[f.k] || undefined} onValueChange={setVal} disabled={isLocked}>
+                                <SelectTrigger className="rounded-none" data-testid={`pjt-inp-${f.k}`}><SelectValue placeholder="Select…" /></SelectTrigger>
+                                <SelectContent>
+                                  {(f.options || []).map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+                                </SelectContent>
+                              </Select>
+                            )}
+                            {(!f.type || f.type === "text" || f.type === "number" || f.type === "date") && (
+                              <Input type={f.type || "text"} value={editing[f.k] ?? ""} onChange={(e) => setVal(e.target.value)} {...commonInputProps} />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Lifecycle advance action bar (edit mode only) */}
+              {editing?.id && (
+                <div className="border-l-4 border-blue-500 bg-blue-50/40 p-3" data-testid="pjt-lifecycle-actions">
+                  <div className="overline text-[10px] mb-1">Lifecycle actions</div>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    {LIFECYCLE_STATES.map((s) => {
+                      const isCurrent = s === (editing.lifecycle_status || "Draft");
+                      return (
+                        <button
+                          key={s}
+                          type="button"
+                          disabled={isCurrent || saving}
+                          onClick={() => advanceLifecycle({ id: editing.id }, s)}
+                          className={`px-2 py-1 border text-[10px] font-bold uppercase transition-colors ${isCurrent ? `${LIFECYCLE_TONES[s]} cursor-default` : "hover:bg-blue-100 border-blue-300 text-blue-800 bg-white"}`}
+                          data-testid={`pjt-lc-btn-${s.replace(/\s+/g, "-").toLowerCase()}`}
+                        >
+                          {s}{isCurrent && " ●"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="text-[10px] text-[var(--muted)] mt-2">
+                    Advancing changes lock flags on the server. Only Admin can roll back.
                   </div>
                 </div>
-              ))}
+              )}
+
               {/* Live auto-calc preview */}
               <div className="border-l-4 border-emerald-500 bg-emerald-50/40 p-3 grid grid-cols-2 md:grid-cols-5 gap-2 text-xs" data-testid="pjt-autocalc-preview">
                 {[

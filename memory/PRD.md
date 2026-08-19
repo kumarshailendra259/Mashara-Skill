@@ -26,7 +26,28 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
-### Phase 36 — MIS Single Source of Truth · Phase A + B (Done, Feb 2026)
+### Phase 36C — MIS Batch Lifecycle + Entity Dropdowns (Done, Feb 2026)
+- **User asked (Hinglish)**: "isme jo already created hai use dropdown me dikhaye jaise project center etc, iske alawa center manager jo dwara jo batch banaya ja raha hai usme ye sab option daliye aur baar samajhiye yadi ek baar batch ban gaya to o lock ho jayega uske baad attendance monitoring hoga, uske baad assessment status sirf upload hoga ye hone ke baad ye bhi lock matlab fir se edit nahi baad me placement status update kuch is trah se … Batch Status Auto-Update should support: Draft / Upcoming / Active / Training Completed / Assessment Pending / Assessment Completed / Certification Pending / Certified / Placement in Progress / Closed". User chose option (c) — enable lifecycle on BOTH Core ERP `db.batches` AND `mis_project_summary`, target Production.
+- **Backend `/app/backend/server.py`**:
+  - Added `BATCH_LIFECYCLE_STATES` (10-state ordered list) + `_lifecycle_locks(status)` helper that returns `{basic_locked, attendance_locked, assessment_locked, placement_locked}` derived from the current status index.
+  - `BatchIn` model extended with ~24 optional MIS overlay fields (state/territory/target_year/training_type/total_target/sdms_batch_id/attendance_pct/total_dropout + assessment block + placement block + `lifecycle_status`). `BatchOut` exposes lock flags + `lifecycle_history`.
+  - New `PATCH /api/batches/{bid}/lifecycle?to=<State>&remarks=...` — advances/rolls-back with role checks (non-admin can only move forward; center_manager confined to own centers; admin bypasses everything). Appends every transition to `lifecycle_history`. Keeps legacy `closed` bool in sync on Closed / non-Closed.
+  - New `GET /api/batches/lifecycle-states` — returns the ordered list for UI dropdowns.
+  - `PUT /api/batches/{bid}` — added lifecycle-lock enforcement (400 if a non-admin tries to edit a locked field). Center manager scope enforced.
+  - MIS mirror: `PATCH /api/mis/projects/{pid}/lifecycle` (same semantics on `mis_project_summary`). MIS `POST /mis/projects` now allows `center_manager` (scope-checked against `db.centers`) and stamps `lifecycle_status` + locks + creation history entry. MIS `PATCH /mis/projects/{pid}` enforces the same per-phase locks. `_pjt_compute` overlays lock flags + normalises `lifecycle_status` on every read.
+- **Frontend `ProjectSummaryTab.jsx`** (MIS Project Summary):
+  - `SECTIONS` restructured with per-section `phase` + per-section `hint`. Fields tagged with `type: select-project | select-center | select-company | select-lifecycle | select` where relevant.
+  - Loads Core ERP entities via `Promise.all([/entities/project, /entities/center, /entities/company])` on mount. Filters out entities with empty names before rendering `<SelectItem>` (Shadcn Select rejects empty values).
+  - Center dropdown auto-fills State / Territory / Center Manager from the selected center's entity metadata.
+  - Section headers show 🔒 **Locked** amber chip when the corresponding `*_locked` flag is true; inputs dimmed + `disabled`.
+  - New **Lifecycle actions** bar in edit dialog — 10 buttons for direct state transitions; current state highlighted with its lifecycle tone. Backend enforces role-based validation.
+  - Row Status column now shows the 10-state lifecycle chip (colored per `LIFECYCLE_TONES`). Filter dropdown offers all 10 lifecycle states.
+  - `canWrite` extended to include `center_manager` (MIS Dashboard).
+- **Bug found & fixed same-session**: Shadcn `<Select.Item value="">` runtime error — fixed by (a) using `value={editing[f.k] || undefined}` on controlled Selects and (b) filtering out entity records with empty `name` before rendering options.
+- **Verified**: E2E backend flow — create MIS batch (Draft) → advance to Active (basic_locked=true) → advance to Certification Pending (assessment_locked=true, placement_locked=false) → admin rollback to Draft (all locks cleared). Live browser: Add Batch dialog renders with all dropdowns + 10-state Batch Status selector + section-level lock hints.
+- **Note for user**: Preview me implementation complete. Production par push karne ke liye "Deploy" button dabana hoga (finance.masharaskills.com).
+
+### Phase 36A + 36B — MIS Single Source of Truth (Done, Feb 2026)
 - **User asked**: MIS Dashboard should not create duplicate Projects/Centers/Batches/Candidates. It must fetch, calculate, and display data directly from the existing Core ERP modules — Single Source of Truth. User approved "Phase A (Backend rewiring) → Phase B (Frontend) → testing agent".
 - **Backend `/app/backend/server.py` — new additive endpoints (all non-breaking; legacy /api/mis/* left intact)**:
   - Helper `_mis_live_batch_rows()` — joins `db.batches` with `db.projects`, `db.centers`, `db.companies`, and per-batch candidate counts (aggregation on `db.candidates` grouped by batch_id). Returns rows shaped like `mis_project_summary` (batch_id, project, center_name, state, total_target, total_enrolled, total_certified, num_placement, total_dropout, status + computed %s).
