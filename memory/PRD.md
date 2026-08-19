@@ -26,6 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 36 — MIS Single Source of Truth · Phase A + B (Done, Feb 2026)
+- **User asked**: MIS Dashboard should not create duplicate Projects/Centers/Batches/Candidates. It must fetch, calculate, and display data directly from the existing Core ERP modules — Single Source of Truth. User approved "Phase A (Backend rewiring) → Phase B (Frontend) → testing agent".
+- **Backend `/app/backend/server.py` — new additive endpoints (all non-breaking; legacy /api/mis/* left intact)**:
+  - Helper `_mis_live_batch_rows()` — joins `db.batches` with `db.projects`, `db.centers`, `db.companies`, and per-batch candidate counts (aggregation on `db.candidates` grouped by batch_id). Returns rows shaped like `mis_project_summary` (batch_id, project, center_name, state, total_target, total_enrolled, total_certified, num_placement, total_dropout, status + computed %s).
+  - `GET /api/mis/live/overview` — Live KPIs from Core ERP: entities (projects/centers/companies/partners counts), batches (total/active/closed), training (target/enrolled/certified/placement/dropout with %s), bg (live from `bank_guarantees`), mobilization (today from mis_mobilization).
+  - `GET /api/mis/live/project-summary` — batch-level rows with filters (project, center, state, status, search).
+  - `GET /api/mis/live/project-summary/filter-options` — dropdown values.
+  - `GET /api/mis/live/rollups` — by_project / by_center / by_state aggregates.
+  - `GET /api/mis/live/reports/daily` — executive summary + rollups (Core ERP driven).
+  - `GET /api/mis/live/reports/drilldown/{kpi}` — kpi ∈ {enrolled, certified, placement, dropout, active_batches, centers, projects}. Returns kind + count + rows.
+- **Frontend**:
+  - `MISDashboard.jsx` — dual overview fetch via `Promise.all([/mis/overview, /mis/live/overview])`. New **"Live · Core ERP"** KPI strip (green badge, 8 KPIs) rendered above the existing "MIS Overlay" strip (indigo badge). Live KPI cards drill down via `/api/mis/live/reports/drilldown/*`. Drill dialog handles new kinds `centers` and `projects`.
+  - `ProjectSummaryTab.jsx` — new **Data Source** segmented toggle at top (`pjt-src-live` / `pjt-src-manual`). Defaults to Live. In Live mode: rows come from `/api/mis/live/project-summary`, Add/Edit/Delete/Bulk/Export buttons hidden (with explanatory copy "Add batches on Programs page — numbers auto-fetch from Batches / Candidates modules"). Switching to Manual keeps legacy behaviour on `/api/mis/projects`.
+- **Verified iter-51**: 21/21 backend pytest pass (all 6 new endpoints + RBAC + legacy regression on `/api/mis/overview`, `/api/mis/projects`, `/api/mis/reports/daily`, `/api/batches`, `/api/candidates`). Frontend 100% E2E — both KPI strips visible, drill-downs open for Projects (100 records) & Active Batches (351 records), Data Source toggle works, Manual mode restores Add/Bulk/Export buttons. No regression on Overview / SIP Status / JSDMS / Mobilization / Reports / Alerts tabs.
+- **Data observations (not bugs)**: Preview seed data has 3,467 certified > 2,559 total_target (Achievement % 135.48% — over-achievement) and 0 candidates linked to batches (Enrolled live = 0). This reflects the current seeded state, not a code defect.
+
+
 ## Implemented Features (Mar 2026)
 
 ### Phase 31 — Cycle-Based Partner Settlement Math (Done, Aug 2026)

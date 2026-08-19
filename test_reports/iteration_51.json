@@ -1,0 +1,32 @@
+{
+  "summary": "Iter51 — Phase A + B (MIS Single Source of Truth) fully verified. Backend: 21/21 pytest cases pass across all 6 new /api/mis/live/* endpoints (overview, project-summary, filter-options, rollups, reports/daily, drilldown for 7 KPIs incl. centers & projects), RBAC (unauth → 401/403), and legacy regression (/api/mis/overview, /api/mis/projects, /api/mis/reports/daily, /api/batches, /api/candidates all 200). Frontend: /mis loads, both KPI strips render (mis-live-strip 'Live · Core ERP' green with 8 KPIs — Projects 112, Centers 212, Batches 351, Active Batches 351, Enrolled(live) 0, Certified 3,467, Placement 2,760, Achievement % 135.48% — and mis-kpi-strip 'MIS Overlay' indigo below). Live drill modals open correctly for Projects (100 records) and Active Batches (351 records). Project Summary tab defaults to Live source (pjt-src-live/pjt-src-manual toggle visible); Add/Bulk/Export buttons hidden in Live and shown in Manual mode. Other tabs (Overview, SIP Status, JSDMS, Mobilization, Reports) render without regression.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "MIS Live strip", "issues": ["Achievement % displays 135.48% (>100%) because total_certified (3,467) exceeds total_target (2,559) in the underlying batch data. Formula is correct but consider capping display at 100% or showing 'Over-achieved' label for clarity."]},
+      {"screen": "MIS Live strip", "issues": ["'Enrolled (live)' shows 0 because no candidates have batch_id linked to any live batch. UI could show a subtle hint (e.g. 'Link candidates to batches for live counts') so operators know why the value is 0."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_mis_live.py",
+    "/app/test_reports/pytest/iter51.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:14530-14531 — mis_live_reports_daily calls mis_live_overview() and mis_live_rollups() directly (bypassing FastAPI Depends). Works because both functions only use `_` as an unused dependency param, but relying on Depends default resolution outside a FastAPI request is fragile. Consider refactoring into a plain async helper (e.g. `_build_live_overview()`) that both the endpoint and reports/daily call — cleaner and future-proof.",
+    "server.py:14464-14476 — In-memory filtering on project-summary is fine at current dataset size (~350 batches) but if batches grow past ~10k, push filters into the batches.aggregate() pipeline for performance.",
+    "server.py:14320 — Fallback logic `cand_by_batch.get(b['id'], 0) or cand_by_batch.get(b.get('name',''), 0)` for candidate counts by-batch is a nice safety net, but the mixed key strategy (id OR name) could double-count if both mappings match different candidates in edge cases. Prefer standardizing candidate.batch_id to always store batch.id.",
+    "Frontend MISDashboard.jsx — Uses Promise.all for dual fetch (live + overlay) which is efficient. Good.",
+    "ProjectSummaryTab.jsx — canWriteEffective correctly disables mutations in live mode. Well-scoped."
+  ],
+  "updated_files": ["/app/backend/tests/test_mis_live.py"],
+  "success_rate": { "backend": "100% (21/21)", "frontend": "100%" },
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "None — tests are read-only against existing seeded data (112 projects, 212 centers, 351 batches).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New Live endpoints live at /api/mis/live/* (overview, project-summary, project-summary/filter-options, rollups, reports/daily, reports/drilldown/{kpi}). All roles in MIS_READ_ROLES = admin, hr, manager, senior_manager, accountant, center_manager, partner, staff, center_staff can read; unauthenticated → 401/403. Legacy /api/mis/* untouched. Frontend Project Summary defaults to 'live' source; toggling to 'manual' reloads from /api/mis/projects. Login uses data-testid=login-email/login-password/login-submit. After admin login, redirect goes to '/' — navigate to /mis directly. Live drill-down opens a Dialog with drilldown={centers|projects|active_batches|enrolled|certified|placement|dropout} — dialog uses [role='dialog'].",
+  "rca of the issue": "N/A — no bugs found. Achievement % >100% and Enrolled (live)=0 are correct outputs of the formulas given current seed data (target < certified, no candidate has batch_id) and are data-quality observations rather than code defects."
+}

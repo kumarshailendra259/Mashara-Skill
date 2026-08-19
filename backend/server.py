@@ -14275,6 +14275,315 @@ async def mis_overview(_=Depends(require_role(*MIS_READ_ROLES))):
     }
 
 
+# ============================================================================
+# ============  MIS  ·  LIVE  (Single Source of Truth from Core ERP)  =========
+# ============================================================================
+# These endpoints derive all MIS numbers from the LIVE Core ERP collections —
+# projects, centers, batches, candidates — instead of the manually-maintained
+# mis_project_summary overlay. This avoids duplicate data entry: when HR/Ops
+# add a batch on the Programs page, the MIS Dashboard picks it up instantly.
+#
+# The response shape closely mirrors the mis_project_summary rows so the
+# existing frontend components can render both live + overlay data with
+# minimal changes (Phase B).
+#
+# NOTE: Original /api/mis/* endpoints stay untouched for backward compatibility;
+# frontend will simply prefer /api/mis/live/* wherever available.
+
+async def _mis_live_batch_rows() -> list:
+    """Return a list of batch-level rows built by joining batches + projects
+    + centers + companies + candidates (grouped). Each row has the same keys
+    used by the existing MIS Project Summary UI so the same table renders."""
+    # 1) Pre-load lookup maps (small collections — cheap).
+    projects = {p["id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(2000)}
+    centers  = {c["id"]: c for c in await db.centers.find({}, {"_id": 0}).to_list(2000)}
+    companies = {c["id"]: c for c in await db.companies.find({}, {"_id": 0}).to_list(2000)}
+
+    # 2) Count candidates per batch_id via aggregation.
+    cand_by_batch: dict = {}
+    async for r in db.candidates.aggregate([
+        {"$match": {"is_deleted": {"$ne": True}, "batch_id": {"$ne": ""}}},
+        {"$group": {"_id": "$batch_id", "n": {"$sum": 1}}},
+    ]):
+        if r.get("_id"): cand_by_batch[str(r["_id"])] = int(r["n"] or 0)
+
+    # 3) Batches — the base rows.
+    batches = await db.batches.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+
+    rows = []
+    for b in batches:
+        pid = b.get("project_id"); cid = b.get("center_id"); coid = b.get("company_id")
+        p = projects.get(pid) or {}
+        c = centers.get(cid) or {}
+        co = companies.get(coid) or {}
+        # Live candidate count if any candidates linked to this batch's id OR name.
+        live_enrolled = cand_by_batch.get(b["id"], 0) or cand_by_batch.get(b.get("name", ""), 0)
+        # Fallback: batches store `total_beneficiaries` (target set at creation).
+        enrolled = live_enrolled or int(b.get("total_beneficiaries") or 0)
+        certified = int(b.get("passed_candidates") or 0)
+        placement = int(b.get("placed_candidates") or 0)
+        total_target = int(b.get("total_beneficiaries") or 0)
+        dropout = max(0, enrolled - certified - placement) if enrolled > 0 else 0
+        # Job role summary from job_roles array
+        job_roles_list = b.get("job_roles") or []
+        job_role = ", ".join([str(r.get("job_role") or "").strip()
+                              for r in job_roles_list if r.get("job_role")]) or "—"
+        # Status: closed batches → "closed"; else "active"
+        status = "closed" if b.get("closed") else "active"
+        rows.append({
+            "id": b["id"],
+            "source": "live",
+            "batch_id": b.get("name") or b["id"][:8],
+            "project": p.get("name") or "—",
+            "project_id": pid,
+            "center_name": c.get("name") or "—",
+            "center_id": cid,
+            "state": c.get("state") or "—",
+            "territory": c.get("city") or c.get("state") or "—",
+            "name_of_company": co.get("name") or "—",
+            "company_id": coid,
+            "center_manager": c.get("manager_name") or "—",
+            "job_role": job_role,
+            "job_roles": job_roles_list,
+            "total_target": total_target,
+            "total_enrolled": enrolled,
+            "total_certified": certified,
+            "num_placement": placement,
+            "total_dropout": dropout,
+            "start_date": b.get("start_date") or "",
+            "end_date": b.get("end_date") or "",
+            "status": status,
+            "closed": bool(b.get("closed")),
+            "partner_ids": b.get("partner_ids") or [],
+            "certification_pct": round((certified / enrolled * 100) if enrolled else 0, 2),
+            "placement_pct":     round((placement / certified * 100) if certified else 0, 2),
+            "dropout_pct":       round((dropout / enrolled * 100) if enrolled else 0, 2),
+            "achievement_pct":   round((certified / total_target * 100) if total_target else 0, 2),
+            "remaining_target_calc": max(0, total_target - enrolled) if total_target else 0,
+        })
+    return rows
+
+
+@api.get("/mis/live/overview")
+async def mis_live_overview(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Live KPIs derived entirely from Core ERP (projects, centers, batches,
+    candidates). No dependency on mis_project_summary overlay."""
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    tstr = today.isoformat()
+    plus_30 = (today + _td(days=30)).isoformat()
+
+    # Core entity counts
+    total_projects  = await db.projects.count_documents({})
+    total_centers   = await db.centers.count_documents({})
+    total_companies = await db.companies.count_documents({})
+    total_partners  = await db.partners.count_documents({})
+    total_batches   = await db.batches.count_documents({})
+    active_batches  = await db.batches.count_documents({"closed": {"$ne": True}})
+    closed_batches  = await db.batches.count_documents({"closed": True})
+
+    # Batch aggregates — target + outcomes
+    pipe = [{"$group": {"_id": None,
+        "target": {"$sum": {"$ifNull": ["$total_beneficiaries", 0]}},
+        "passed": {"$sum": {"$ifNull": ["$passed_candidates", 0]}},
+        "placed": {"$sum": {"$ifNull": ["$placed_candidates", 0]}}}}]
+    r = await db.batches.aggregate(pipe).to_list(1)
+    total_target    = int(r[0]["target"] or 0) if r else 0
+    total_certified = int(r[0]["passed"] or 0) if r else 0
+    total_placement = int(r[0]["placed"] or 0) if r else 0
+
+    # Candidate count (live enrollment)
+    total_enrolled = await db.candidates.count_documents({"is_deleted": {"$ne": True}})
+    total_dropout  = max(0, total_enrolled - total_certified - total_placement)
+
+    # BG expiry (from bank_guarantees — live) — supplements mis_sip_centers.
+    bg_expiring_30d = await db.bank_guarantees.count_documents({
+        "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
+        "bg_claim_expiry_date": {"$gte": tstr, "$lte": plus_30},
+    })
+    bg_expired = await db.bank_guarantees.count_documents({
+        "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
+        "bg_claim_expiry_date": {"$lt": tstr, "$ne": ""},
+    })
+
+    # Mobilization for today from mis_mobilization overlay (this stays MIS-specific)
+    mob = await db.mis_mobilization.aggregate([
+        {"$match": {"is_deleted": {"$ne": True}, "report_date": tstr}},
+        {"$group": {"_id": None, "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
+                                 "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}},
+    ]).to_list(1)
+    today_mob = int(mob[0]["mob"] or 0) if mob else 0
+    today_km  = round(float(mob[0]["km"] or 0), 2) if mob else 0.0
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "today": tstr,
+        "source": "core-erp-live",
+        "entities": {
+            "projects":  total_projects,
+            "centers":   total_centers,
+            "companies": total_companies,
+            "partners":  total_partners,
+        },
+        "batches": {
+            "total": total_batches,
+            "active": active_batches,
+            "closed": closed_batches,
+        },
+        "training": {
+            "total_target":    total_target,
+            "total_enrolled":  total_enrolled,
+            "total_certified": total_certified,
+            "total_placement": total_placement,
+            "total_dropout":   total_dropout,
+            "achievement_pct":   round((total_certified / total_target * 100) if total_target else 0, 2),
+            "certification_pct": round((total_certified / total_enrolled * 100) if total_enrolled else 0, 2),
+            "placement_pct":     round((total_placement / total_certified * 100) if total_certified else 0, 2),
+            "dropout_pct":       round((total_dropout / total_enrolled * 100) if total_enrolled else 0, 2),
+        },
+        "bg": {
+            "expiring_30d": bg_expiring_30d,
+            "expired":      bg_expired,
+        },
+        "mobilization": {"today_total": today_mob, "today_distance_km": today_km},
+    }
+
+
+@api.get("/mis/live/project-summary")
+async def mis_live_project_summary(
+    project: Optional[str] = Query(None),
+    center: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    _=Depends(require_role(*MIS_READ_ROLES)),
+):
+    """Batch-level live summary from Core ERP. Each row = 1 batch enriched
+    with live candidate counts + project/center/company metadata."""
+    rows = await _mis_live_batch_rows()
+    # Filters (in-memory; dataset is small enough — up to few thousand rows).
+    def _match(r):
+        if project and project != "all" and r["project"].lower() != project.lower(): return False
+        if center  and center  != "all" and r["center_name"].lower() != center.lower():  return False
+        if state   and state   != "all" and r["state"].lower() != state.lower():         return False
+        if status  and status  != "all" and r["status"].lower() != status.lower():       return False
+        if search:
+            s = search.strip().lower()
+            hay = " ".join([str(r.get(k) or "") for k in
+                            ("batch_id","project","center_name","job_role","name_of_company")]).lower()
+            if s not in hay: return False
+        return True
+    filtered = [r for r in rows if _match(r)]
+    return filtered
+
+
+@api.get("/mis/live/project-summary/filter-options")
+async def mis_live_project_summary_filters(_=Depends(require_role(*MIS_READ_ROLES))):
+    rows = await _mis_live_batch_rows()
+    return {
+        "projects": sorted({r["project"] for r in rows if r["project"] and r["project"] != "—"}),
+        "centers":  sorted({r["center_name"] for r in rows if r["center_name"] and r["center_name"] != "—"}),
+        "states":   sorted({r["state"]  for r in rows if r["state"]  and r["state"]  != "—"}),
+        "statuses": sorted({r["status"] for r in rows if r["status"]}),
+    }
+
+
+@api.get("/mis/live/rollups")
+async def mis_live_rollups(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Live project-wise / center-wise / state-wise rollups for chart tabs."""
+    rows = await _mis_live_batch_rows()
+    def _bucket(key):
+        agg: dict = {}
+        for r in rows:
+            k = r.get(key) or "—"
+            if k == "—": continue
+            a = agg.setdefault(k, {"label": k, "batches": 0, "target": 0,
+                                    "enrolled": 0, "certified": 0,
+                                    "placement": 0, "dropout": 0})
+            a["batches"]  += 1
+            a["target"]   += r["total_target"]
+            a["enrolled"] += r["total_enrolled"]
+            a["certified"] += r["total_certified"]
+            a["placement"] += r["num_placement"]
+            a["dropout"]  += r["total_dropout"]
+        out = list(agg.values())
+        for a in out:
+            e = a["enrolled"] or 0; c = a["certified"] or 0; t = a["target"] or 0
+            a["certification_pct"] = round((c / e * 100) if e else 0, 2)
+            a["placement_pct"]     = round((a["placement"] / c * 100) if c else 0, 2)
+            a["achievement_pct"]   = round((c / t * 100) if t else 0, 2)
+        out.sort(key=lambda x: x["target"], reverse=True)
+        return out
+    return {
+        "by_project": _bucket("project"),
+        "by_center":  _bucket("center_name"),
+        "by_state":   _bucket("state"),
+    }
+
+
+@api.get("/mis/live/reports/daily")
+async def mis_live_reports_daily(_=Depends(require_role(*MIS_READ_ROLES))):
+    """Live daily report — Core ERP driven executive summary + rollups."""
+    from datetime import date as _date
+    today = _date.today()
+    tstr = today.isoformat()
+    ov = await mis_live_overview()  # noqa: reuse
+    roll = await mis_live_rollups()  # noqa: reuse
+    ent = ov["entities"]; tr = ov["training"]; ba = ov["batches"]; bg = ov["bg"]; mo = ov["mobilization"]
+    executive = {
+        "total_projects": ent["projects"],
+        "total_centers":  ent["centers"],
+        "total_batches":  ba["total"],
+        "active_batches": ba["active"],
+        "closed_batches": ba["closed"],
+        "total_target":    tr["total_target"],
+        "target_achieved": tr["total_certified"],
+        "remaining_target": max(0, tr["total_target"] - tr["total_certified"]),
+        "total_enrolled":  tr["total_enrolled"],
+        "total_certified": tr["total_certified"],
+        "total_placement": tr["total_placement"],
+        "total_dropout":   tr["total_dropout"],
+        "achievement_pct":   tr["achievement_pct"],
+        "certification_pct": tr["certification_pct"],
+        "placement_pct":     tr["placement_pct"],
+        "today_mobilisation": mo["today_total"],
+        "today_distance_km":  mo["today_distance_km"],
+        "bg_expiring_30d": bg["expiring_30d"],
+        "bg_expired":      bg["expired"],
+    }
+    return {
+        "generated_at": ov["generated_at"],
+        "today": tstr,
+        "source": "core-erp-live",
+        "executive": executive,
+        "by_project": roll["by_project"],
+        "by_center":  roll["by_center"],
+        "by_state":   roll["by_state"],
+    }
+
+
+@api.get("/mis/live/reports/drilldown/{kpi}")
+async def mis_live_drilldown(kpi: str, limit: int = 100,
+                              _=Depends(require_role(*MIS_READ_ROLES))):
+    """Live drill-down. kpi ∈ {enrolled, certified, placement, dropout,
+    active_batches, centers, projects}."""
+    if kpi == "centers":
+        docs = await db.centers.find({}, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
+        return {"kind": "centers", "count": len(docs), "rows": docs}
+    if kpi == "projects":
+        docs = await db.projects.find({}, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
+        return {"kind": "projects", "count": len(docs), "rows": docs}
+    rows = await _mis_live_batch_rows()
+    if kpi == "enrolled":      rows = [r for r in rows if r["total_enrolled"]  > 0]; rows.sort(key=lambda r: r["total_enrolled"],  reverse=True)
+    elif kpi == "certified":   rows = [r for r in rows if r["total_certified"] > 0]; rows.sort(key=lambda r: r["total_certified"], reverse=True)
+    elif kpi == "placement":   rows = [r for r in rows if r["num_placement"]   > 0]; rows.sort(key=lambda r: r["num_placement"],   reverse=True)
+    elif kpi == "dropout":     rows = [r for r in rows if r["total_dropout"]   > 0]; rows.sort(key=lambda r: r["total_dropout"],   reverse=True)
+    elif kpi == "active_batches": rows = [r for r in rows if not r["closed"]]
+    else:
+        raise HTTPException(400, f"Unknown KPI '{kpi}'")
+    return {"kind": "batches", "count": len(rows), "rows": rows[:limit]}
+
+
 # Trigger index creation on app startup (side-effect).
 @app.on_event("startup")
 async def _mis_startup():

@@ -58,12 +58,16 @@ export default function MISDashboard() {
   const { user } = useAuth();
   const [tab, setTab] = useState("overview");
   const [overview, setOverview] = useState(null);
+  const [live, setLive] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const loadOverview = () => {
     setLoading(true);
-    api.get("/mis/overview")
-      .then((r) => setOverview(r.data))
+    Promise.all([
+      api.get("/mis/overview").then((r) => r.data).catch(() => null),
+      api.get("/mis/live/overview").then((r) => r.data).catch(() => null),
+    ])
+      .then(([ov, lv]) => { setOverview(ov); setLive(lv); })
       .catch((e) => toast.error(formatError(e)))
       .finally(() => setLoading(false));
   };
@@ -72,17 +76,24 @@ export default function MISDashboard() {
   const sip = overview?.sip || {};
   const p = overview?.projects || {};
   const m = overview?.mobilization || {};
+  // Live (Single Source of Truth from Core ERP)
+  const lEnt = live?.entities || {};
+  const lTr  = live?.training || {};
+  const lBa  = live?.batches  || {};
+  const lBg  = live?.bg       || {};
 
   const canWrite = ["admin", "hr", "manager", "senior_manager", "accountant"].includes(user?.role);
 
   // KPI drill-down state
   const [drill, setDrill] = useState(null); // { title, kind, rows }
-  const openDrill = async (key, title) => {
+  const openDrill = async (key, title, useLive = false) => {
     try {
-      const r = await api.get(`/mis/reports/drilldown/${key}`, { params: { limit: 100 } });
+      const path = useLive ? `/mis/live/reports/drilldown/${key}` : `/mis/reports/drilldown/${key}`;
+      const r = await api.get(path, { params: { limit: 100 } });
       setDrill({ title, ...r.data });
     } catch (e) { toast.error(formatError(e)); }
   };
+  const openLiveDrill = (key, title) => openDrill(key, title, true);
 
   return (
     <div className="space-y-5" data-testid="mis-dashboard">
@@ -100,8 +111,41 @@ export default function MISDashboard() {
         </div>
       </div>
 
-      {/* Overview KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3" data-testid="mis-kpi-strip">
+      {/* Live (Single Source of Truth) — Core ERP driven */}
+      {live && (
+        <div data-testid="mis-live-strip">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold uppercase bg-emerald-600 text-white">
+              ● Live · Core ERP
+            </span>
+            <span className="text-[11px] text-[var(--muted)]">
+              Auto-synced from Projects · Centers · Batches · Candidates — no duplicate entry.
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
+            <KPI label="Projects"       value={lEnt.projects}       icon={PackageOpen}  tone="brand" drilldown="projects"       onDrilldown={openLiveDrill} />
+            <KPI label="Centers"        value={lEnt.centers}        icon={MapPin}       tone="brand" drilldown="centers"        onDrilldown={openLiveDrill} />
+            <KPI label="Batches"        value={lBa.total}           icon={ClipboardList} tone="brand" />
+            <KPI label="Active Batches" value={lBa.active}          icon={TrendingUp}   tone="green" drilldown="active_batches" onDrilldown={openLiveDrill} />
+            <KPI label="Enrolled (live)" value={lTr.total_enrolled}  icon={Users}         tone="brand" drilldown="enrolled"      onDrilldown={openLiveDrill} />
+            <KPI label="Certified"       value={lTr.total_certified} icon={GraduationCap} tone="green" drilldown="certified"     onDrilldown={openLiveDrill} />
+            <KPI label="Placement"       value={lTr.total_placement} icon={BadgeCheck}    tone="green" drilldown="placement"     onDrilldown={openLiveDrill} />
+            <KPI label="Achievement %"   value={lTr.achievement_pct} suffix="%"          tone="green" />
+          </div>
+        </div>
+      )}
+
+      {/* Overview KPI strip (MIS overlay — SIP + manual data) */}
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold uppercase bg-indigo-600 text-white">
+            📝 MIS Overlay
+          </span>
+          <span className="text-[11px] text-[var(--muted)]">
+            SIP-specific fields + legacy manually-maintained numbers.
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3" data-testid="mis-kpi-strip">
         <KPI label="Total Centers"      value={sip.total_centers}      icon={MapPin}       tone="brand" drilldown="centers"        onDrilldown={openDrill} />
         <KPI label="Accredited"         value={sip.accredited}         icon={BadgeCheck}   tone="green" />
         <KPI label="BG Expiring (30d)"  value={sip.bg_expiring_30d}    icon={AlertTriangle} tone="amber" />
@@ -114,6 +158,7 @@ export default function MISDashboard() {
         <KPI label="Placement %"        value={p.placement_pct}        suffix="%" tone="green" />
         <KPI label="Today Mobilisation" value={m.today_total}          icon={ClipboardList} tone="brand" />
         <KPI label="Today Distance"     value={m.today_distance_km}    suffix=" km" icon={RouteIcon} tone="brand" />
+      </div>
       </div>
 
       {/* Tabbed modules */}
@@ -254,6 +299,28 @@ export default function MISDashboard() {
                           <td>{r.status || "—"}</td>
                           <td>{r.center_rating || "—"}</td>
                           <td>{r.bg_validity_date || "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {(drill.kind === "centers" || drill.kind === "projects") && (
+                <div className="overflow-x-auto border border-[var(--border)]">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50 border-b border-[var(--border)]">
+                      <tr className="[&>th]:p-2 [&>th]:text-left [&>th]:overline [&>th]:text-[10px]">
+                        <th>Name</th><th>Type</th><th>City</th><th>State</th><th>Manager / Code</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(drill.rows || []).map((r) => (
+                        <tr key={r.id} className="border-b border-[var(--border)]/50 [&>td]:p-2 hover:bg-gray-50">
+                          <td className="font-semibold">{r.name || "—"}</td>
+                          <td className="uppercase text-[10px] font-bold text-[var(--muted)]">{r.type || drill.kind.slice(0, -1)}</td>
+                          <td>{r.city || "—"}</td>
+                          <td>{r.state || "—"}</td>
+                          <td className="font-mono">{r.manager_name || r.project_code || "—"}</td>
                         </tr>
                       ))}
                     </tbody>

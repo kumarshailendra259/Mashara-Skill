@@ -117,7 +117,12 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
   const [centerF, setCenterF] = useState("all");
   const [statusF, setStatusF] = useState("all");
   const [targetYearF, setTargetYearF] = useState("all");
-  const [filters, setFilters] = useState({ projects: [], centers: [], territories: [], target_years: [] });
+  const [filters, setFilters] = useState({ projects: [], centers: [], territories: [], target_years: [], states: [], statuses: [] });
+  // Single Source of Truth: 'live' pulls from Core ERP (Batches/Projects/Centers/Candidates)
+  // via /mis/live/* endpoints. 'manual' uses the legacy mis_project_summary overlay.
+  const [dataSource, setDataSource] = useState("live");
+  const liveMode = dataSource === "live";
+  const canWriteEffective = canWrite && !liveMode;
 
   const [openForm, setOpenForm] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -138,16 +143,31 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
       if (projectF && projectF !== "all") params.project = projectF;
       if (centerF && centerF !== "all")   params.center = centerF;
       if (statusF && statusF !== "all")   params.status = statusF;
-      if (targetYearF && targetYearF !== "all") params.target_year = targetYearF;
-      const [rowsRes, optsRes] = await Promise.all([
-        api.get("/mis/projects", { params }),
-        api.get("/mis/projects/filter-options"),
-      ]);
-      setRows(rowsRes.data || []);
-      setFilters(optsRes.data || { projects: [], centers: [], territories: [], target_years: [] });
+      if (liveMode) {
+        // Single Source of Truth: Core ERP-driven aggregation.
+        const [rowsRes, optsRes] = await Promise.all([
+          api.get("/mis/live/project-summary", { params }),
+          api.get("/mis/live/project-summary/filter-options"),
+        ]);
+        setRows(rowsRes.data || []);
+        const o = optsRes.data || {};
+        setFilters({
+          projects: o.projects || [], centers: o.centers || [],
+          territories: o.states || [], states: o.states || [],
+          target_years: [], statuses: o.statuses || [],
+        });
+      } else {
+        if (targetYearF && targetYearF !== "all") params.target_year = targetYearF;
+        const [rowsRes, optsRes] = await Promise.all([
+          api.get("/mis/projects", { params }),
+          api.get("/mis/projects/filter-options"),
+        ]);
+        setRows(rowsRes.data || []);
+        setFilters(optsRes.data || { projects: [], centers: [], territories: [], target_years: [] });
+      }
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
-  }, [search, projectF, centerF, statusF, targetYearF]);
+  }, [search, projectF, centerF, statusF, targetYearF, liveMode]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -235,6 +255,30 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
 
   return (
     <div className="space-y-4" data-testid="mis-projects-tab">
+      {/* Data source toggle — Single Source of Truth */}
+      <div className="flex items-center gap-3 border-l-4 border-[var(--brand)] bg-indigo-50/50 px-3 py-2" data-testid="pjt-source-strip">
+        <div className="overline text-[10px] font-bold">Data Source</div>
+        <div className="inline-flex border border-[var(--border)] bg-white">
+          <button
+            type="button"
+            onClick={() => setDataSource("live")}
+            className={`px-3 py-1 text-[11px] font-bold uppercase transition-colors ${liveMode ? "bg-emerald-600 text-white" : "text-[var(--muted)] hover:bg-gray-50"}`}
+            data-testid="pjt-src-live"
+          >● Live · Core ERP</button>
+          <button
+            type="button"
+            onClick={() => setDataSource("manual")}
+            className={`px-3 py-1 text-[11px] font-bold uppercase transition-colors ${!liveMode ? "bg-indigo-600 text-white" : "text-[var(--muted)] hover:bg-gray-50"}`}
+            data-testid="pjt-src-manual"
+          >📝 Manual · MIS Overlay</button>
+        </div>
+        <div className="text-[11px] text-[var(--muted)] ml-2">
+          {liveMode
+            ? "Numbers auto-fetch from Batches / Candidates modules — no duplicate entry. Add batches on Programs page."
+            : "Legacy MIS overlay — data entered directly here. Only used when Core ERP is not the source of truth."}
+        </div>
+      </div>
+
       {/* Summary strip */}
       <div className="grid grid-cols-2 md:grid-cols-6 gap-2" data-testid="pjt-summary">
         {[
@@ -283,7 +327,7 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
             </SelectContent>
           </Select>
         </div>
-        <div className="w-36">
+        <div className="w-36" style={{ display: liveMode ? "none" : undefined }}>
           <Label className="overline">FY</Label>
           <Select value={targetYearF} onValueChange={setTargetYearF}>
             <SelectTrigger className="rounded-none" data-testid="pjt-fy"><SelectValue /></SelectTrigger>
@@ -306,9 +350,9 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
           </Select>
         </div>
         <div className="flex gap-2 ml-auto">
-          <Button variant="outline" onClick={exportExcel} className="rounded-none gap-1" data-testid="pjt-export"><Download size={13} /> Export</Button>
-          {canWrite && <Button variant="outline" onClick={() => setBulkOpen(true)} className="rounded-none gap-1" data-testid="pjt-bulk-btn"><Upload size={13} /> Bulk Upload</Button>}
-          {canWrite && <Button onClick={openAdd} className="brand-btn rounded-none gap-1" data-testid="pjt-add-btn"><Plus size={13} /> Add Batch</Button>}
+          <Button variant="outline" onClick={exportExcel} className="rounded-none gap-1" data-testid="pjt-export" disabled={liveMode} title={liveMode ? "Export available only in Manual mode" : ""}><Download size={13} /> Export</Button>
+          {canWriteEffective && <Button variant="outline" onClick={() => setBulkOpen(true)} className="rounded-none gap-1" data-testid="pjt-bulk-btn"><Upload size={13} /> Bulk Upload</Button>}
+          {canWriteEffective && <Button onClick={openAdd} className="brand-btn rounded-none gap-1" data-testid="pjt-add-btn"><Plus size={13} /> Add Batch</Button>}
         </div>
       </div>
 
@@ -353,8 +397,8 @@ export default function ProjectSummaryTab({ canWrite, onChange }) {
                 <td>{statusChip(r.status)}</td>
                 <td>
                   <Button size="icon" variant="ghost" onClick={() => setViewing(r)} className="h-7 w-7 rounded-none" title="View" data-testid={`pjt-view-${r.id}`}><Eye size={12} /></Button>
-                  {canWrite && <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit" data-testid={`pjt-edit-${r.id}`}><Edit3 size={12} /></Button>}
-                  {canWrite && <Button size="icon" variant="ghost" onClick={() => remove(r)} className="h-7 w-7 rounded-none hover:text-red-700" title="Delete" data-testid={`pjt-del-${r.id}`}><Trash2 size={12} /></Button>}
+                  {canWriteEffective && <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit" data-testid={`pjt-edit-${r.id}`}><Edit3 size={12} /></Button>}
+                  {canWriteEffective && <Button size="icon" variant="ghost" onClick={() => remove(r)} className="h-7 w-7 rounded-none hover:text-red-700" title="Delete" data-testid={`pjt-del-${r.id}`}><Trash2 size={12} /></Button>}
                 </td>
               </tr>
             ))}
