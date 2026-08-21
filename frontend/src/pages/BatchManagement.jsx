@@ -14,7 +14,8 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Target, Layers, Users, ClipboardList, GraduationCap, BadgeCheck,
-  Plus, Trash2, Edit3, Search, Info, LockKeyhole,
+  Plus, Trash2, Edit3, Search, Info, LockKeyhole, Upload, Download,
+  CheckCircle2, AlertTriangle,
 } from "lucide-react";
 import EnrollmentStage from "@/pages/bm/EnrollmentStage";
 import AttendanceStage from "@/pages/bm/AttendanceStage";
@@ -328,6 +329,48 @@ export default function BatchManagement() {
     setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: rid, job_role_hours: r?.default_hours || prev.job_role_hours }) : prev);
   };
 
+  // Phase 38 Session 2 · Bulk Batch Creation
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFile, setBulkFile] = useState(null);
+  const [bulkPreview, setBulkPreview] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkResult, setBulkResult] = useState(null);
+
+  const downloadBulkTemplate = () => {
+    const headers = ["batch_name", "project", "center", "company", "start_date", "end_date",
+      "total_beneficiaries", "fy_year", "category", "job_role", "job_role_hours",
+      "num_candidates", "training_type"];
+    const sample = ["Ramgarh-BOCWW-JR12", "BOCWW", "Ramgarh Skill Centre", "Emergent Skills Pvt Ltd",
+      "2026-04-01", "2026-06-30", "30", "2026-27", "I", "Electrician", "8", "30", "STT"];
+    const csv = [headers.join(","), sample.join(",")].join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a"); a.href = url; a.download = "batches_bulk_template.csv"; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const doBulkUpload = async () => {
+    if (!bulkFile) return toast.error("Pick a CSV / XLSX file first");
+    setBulkBusy(true);
+    try {
+      const fd = new FormData(); fd.append("file", bulkFile);
+      const r = await api.post("/batches/bulk-upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setBulkPreview(r.data); setBulkResult(null);
+      toast.success(`Parsed ${r.data.counts.total_parsed} rows · ${r.data.counts.valid} valid · ${r.data.counts.errors} error(s)`);
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
+  const doBulkCommit = async () => {
+    if (!bulkPreview?.valid?.length) return;
+    setBulkBusy(true);
+    try {
+      const r = await api.post("/batches/bulk-commit", { rows: bulkPreview.valid });
+      setBulkResult(r.data);
+      toast.success(`Inserted ${r.data.inserted} of ${r.data.total} batches`);
+      loadBatches();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkBusy(false); }
+  };
+  const closeBulk = () => { setBulkOpen(false); setBulkFile(null); setBulkPreview(null); setBulkResult(null); };
+
   // ---- Aggregate metrics for header ----
   const kpi = useMemo(() => {
     const total = targets.reduce((s, t) => s + (t.total_target || 0), 0);
@@ -514,6 +557,16 @@ export default function BatchManagement() {
                   data-testid="bm-batch-add-btn"
                 >
                   <Plus size={13} /> Create Batch
+                </Button>
+              )}
+              {canManageBatches && (
+                <Button
+                  onClick={() => setBulkOpen(true)}
+                  variant="outline"
+                  className="rounded-none gap-1"
+                  data-testid="bm-batch-bulk-btn"
+                >
+                  <Upload size={13} /> Bulk Create
                 </Button>
               )}
               {!canManageBatches && (
@@ -910,6 +963,105 @@ export default function BatchManagement() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setJrOpen(false)} className="rounded-none">Cancel</Button>
             <Button onClick={addJobRole} className="brand-btn rounded-none" data-testid="bm-jr-save">Add</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Phase 38 · Bulk Batch Creation dialog */}
+      <Dialog open={bulkOpen} onOpenChange={(o) => !o && closeBulk()}>
+        <DialogContent className="rounded-none max-w-6xl max-h-[92vh] overflow-y-auto" data-testid="bm-batch-bulk-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-heading">Bulk Batch Creation</DialogTitle>
+            <DialogDescription className="text-xs">
+              Upload CSV / XLSX with headers: batch_name, project, center, company, start_date, end_date,
+              total_beneficiaries, fy_year, category, job_role, job_role_hours, num_candidates, training_type.
+              Rate and Work Order Value auto-calculated server-side per row.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {/* Upload bar */}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" onClick={downloadBulkTemplate} className="rounded-none gap-1 text-xs" data-testid="bm-bulk-template">
+                <Download size={13} /> Download Template
+              </Button>
+              <input type="file" accept=".csv,.xlsx" onChange={(e) => setBulkFile(e.target.files?.[0] || null)} className="text-xs" data-testid="bm-bulk-file" />
+              <Button onClick={doBulkUpload} disabled={!bulkFile || bulkBusy} className="brand-btn rounded-none gap-1 text-xs" data-testid="bm-bulk-preview">
+                <Upload size={13} /> {bulkBusy ? "Parsing…" : "Preview"}
+              </Button>
+              {bulkPreview && !bulkResult && (
+                <Button onClick={doBulkCommit} disabled={bulkBusy || !bulkPreview.valid.length} className="brand-btn rounded-none gap-1 text-xs ml-auto" data-testid="bm-bulk-commit">
+                  <CheckCircle2 size={13} /> Commit {bulkPreview.valid.length} rows
+                </Button>
+              )}
+            </div>
+
+            {/* Preview stats */}
+            {bulkPreview && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 border border-gray-300 text-[10px] font-bold uppercase">Total parsed: {bulkPreview.counts.total_parsed}</span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-100 border border-emerald-300 text-emerald-800 text-[10px] font-bold uppercase"><CheckCircle2 size={11} /> {bulkPreview.counts.valid} valid</span>
+                {bulkPreview.counts.errors > 0 && <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 border border-red-300 text-red-800 text-[10px] font-bold uppercase"><AlertTriangle size={11} /> {bulkPreview.counts.errors} error(s)</span>}
+              </div>
+            )}
+
+            {/* Errors panel */}
+            {bulkPreview && bulkPreview.errors.length > 0 && (
+              <div className="border border-red-200 bg-red-50/60 p-2 max-h-52 overflow-y-auto text-[11px]">
+                <div className="font-bold text-red-800 mb-1">Row-level errors — fix and re-upload:</div>
+                {bulkPreview.errors.map((e, i) => (
+                  <div key={i} className="border-t border-red-200 pt-1 mt-1">
+                    <span className="font-mono font-bold">Row {e.row}:</span>{" "}
+                    {(e.reasons || []).join(" · ")}{" "}
+                    <span className="text-[10px] text-red-600 italic">({e.data?.batch_name || "—"})</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Valid rows preview */}
+            {bulkPreview && bulkPreview.valid.length > 0 && !bulkResult && (
+              <div className="overflow-x-auto border border-[var(--border)] max-h-96">
+                <table className="w-full text-[10px]">
+                  <thead className="bg-gray-50 sticky top-0"><tr className="[&>th]:p-1.5 [&>th]:text-left [&>th]:overline [&>th]:text-[9px]">
+                    <th>#</th><th>Batch Name</th><th>Project</th><th>Center</th><th>Cap</th><th>FY</th><th>Cat</th><th>Rate</th><th>WO Value</th>
+                  </tr></thead>
+                  <tbody>
+                    {bulkPreview.valid.slice(0, 100).map((r) => (
+                      <tr key={r.row} className="border-t border-[var(--border)]/50 [&>td]:p-1.5">
+                        <td className="font-mono">{r.row}</td>
+                        <td className="font-semibold">{r.name}</td>
+                        <td>{r.project_name || "—"}</td>
+                        <td>{r.center_name || "—"}{r.is_lwe && <span className="ml-1 text-amber-700 font-bold text-[9px]">LWE</span>}</td>
+                        <td className="text-right">{r.total_beneficiaries}</td>
+                        <td className="font-mono">{r.fy_year || "—"}</td>
+                        <td className="font-bold">{r.category || "—"}</td>
+                        <td className="font-mono">{r.final_rate ? `₹${r.final_rate}` : "—"}</td>
+                        <td className="font-mono font-black text-emerald-700">{r.work_order_value ? `₹${Number(r.work_order_value).toLocaleString("en-IN")}` : "—"}</td>
+                      </tr>
+                    ))}
+                    {bulkPreview.valid.length > 100 && <tr><td colSpan={9} className="p-1.5 text-center italic text-[var(--muted)]">… and {bulkPreview.valid.length - 100} more</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Commit result */}
+            {bulkResult && (
+              <div className="border-l-4 border-emerald-500 bg-emerald-50/60 p-3">
+                <div className="font-heading font-black text-xl text-emerald-700 flex items-center gap-2">
+                  <CheckCircle2 size={20} /> {bulkResult.inserted} of {bulkResult.total} batches created
+                </div>
+                {bulkResult.failed?.length > 0 && (
+                  <div className="mt-2 text-[11px]">
+                    <div className="font-bold text-red-800">Failed rows:</div>
+                    {bulkResult.failed.map((f, i) => <div key={i}>Row {f.row}: {f.reason}</div>)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeBulk} className="rounded-none">Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

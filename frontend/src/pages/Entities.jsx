@@ -144,7 +144,7 @@ export default function Entities({ etype }) {
   const extraColumns = useMemo(() => {
     if (etype === "company") return [{ key: "gst_number", label: "GST" }, { key: "email", label: "Email" }];
     if (etype === "partner") return [{ key: "email", label: "Email" }, { key: "mobile", label: "Mobile" }, { key: "_mail_status", label: "Login Mail" }];
-    if (etype === "center")  return [{ key: "manager_name", label: "Manager" }, { key: "email", label: "Email" }, { key: "_mail_status", label: "Login Mail" }];
+    if (etype === "center")  return [{ key: "manager_name", label: "Manager" }, { key: "email", label: "Email" }, { key: "_lwe", label: "LWE" }, { key: "_mail_status", label: "Login Mail" }];
     if (etype === "project") return [{ key: "project_type", label: "Type" }, { key: "project_code", label: "Code" }];
     return [];
   }, [etype]);

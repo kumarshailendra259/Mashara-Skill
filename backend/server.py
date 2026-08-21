@@ -11409,6 +11409,187 @@ async def set_district_lwe(cid: str, payload: dict = Body(...),
     return r
 
 
+# ---------- Bulk Batch Creation (Excel/CSV) ----------
+BULK_BATCH_COLUMNS = [
+    "batch_name", "project", "center", "company", "start_date", "end_date",
+    "total_beneficiaries", "fy_year", "category", "job_role", "job_role_hours",
+    "num_candidates", "training_type",
+]
+
+
+@api.post("/batches/bulk-upload")
+async def batches_bulk_upload(file: UploadFile = File(...),
+                               user=Depends(require_role("admin", "manager", "senior_manager"))):
+    """Parse an Excel/CSV of batches and return a preview with row-level errors.
+    Does NOT insert — commit happens via /batches/bulk-commit."""
+    raw = await file.read()
+    filename = (file.filename or "").lower()
+    parsed_rows: List[dict] = []
+    try:
+        if filename.endswith(".csv"):
+            import csv, io
+            text = raw.decode("utf-8-sig", errors="ignore")
+            reader = csv.DictReader(io.StringIO(text))
+            parsed_rows = [{(k or "").strip().lower().replace(" ", "_"): (v or "").strip() for k, v in r.items() if k} for r in reader]
+        else:
+            import io, openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+            ws = wb.active
+            headers = [str(c.value or "").strip().lower().replace(" ", "_") for c in next(ws.iter_rows(min_row=1, max_row=1))]
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not any(row): continue
+                parsed_rows.append({headers[i]: (str(row[i]).strip() if row[i] is not None else "") for i in range(min(len(headers), len(row)))})
+    except Exception as e:
+        raise HTTPException(400, f"Failed to parse file: {e}")
+
+    # Pre-load lookups (case-insensitive) for validation.
+    projects = {p["name"].lower(): p for p in await db.projects.find({}, {"_id": 0}).to_list(2000) if p.get("name")}
+    centers  = {c["name"].lower(): c for c in await db.centers.find({}, {"_id": 0}).to_list(2000) if c.get("name")}
+    companies = {c["name"].lower(): c for c in await db.companies.find({}, {"_id": 0}).to_list(2000) if c.get("name")}
+    roles    = {r["name"].lower(): r for r in await db.job_role_master.find({}, {"_id": 0}).to_list(2000) if r.get("name")}
+    existing_names = set()
+    async for b in db.batches.find({}, {"_id": 0, "name": 1}):
+        if b.get("name"): existing_names.add(b["name"].lower())
+
+    valid: List[dict] = []
+    errors: List[dict] = []
+    seen_names: set = set()
+    for idx, r in enumerate(parsed_rows, start=2):  # header on row 1
+        row_errors = []
+        name = (r.get("batch_name") or r.get("name") or "").strip()
+        if not name: row_errors.append("batch_name required")
+        elif name.lower() in existing_names: row_errors.append(f"batch_name '{name}' already exists")
+        elif name.lower() in seen_names: row_errors.append(f"duplicate batch_name '{name}' within file")
+
+        pname = (r.get("project") or "").strip().lower()
+        proj = projects.get(pname)
+        if not pname: row_errors.append("project required")
+        elif not proj: row_errors.append(f"project '{r.get('project')}' not found in master")
+
+        cname = (r.get("center") or "").strip().lower()
+        center = centers.get(cname) if cname else None
+        if cname and not center: row_errors.append(f"center '{r.get('center')}' not found in master")
+
+        coname = (r.get("company") or "").strip().lower()
+        company = companies.get(coname) if coname else None
+        if coname and not company: row_errors.append(f"company '{r.get('company')}' not found in master")
+
+        try: total_ben = int(float(r.get("total_beneficiaries") or 0))
+        except Exception: total_ben = 0; row_errors.append("total_beneficiaries must be a number")
+        if total_ben <= 0: row_errors.append("total_beneficiaries must be > 0")
+
+        fy = (r.get("fy_year") or "").strip()
+        category = (r.get("category") or "").strip().upper()
+        # FY + Category are optional in bulk; if provided must be valid.
+        rate_result = None
+        if fy or category:
+            if not fy: row_errors.append("fy_year required when category set")
+            if category not in VALID_CATEGORIES: row_errors.append(f"category must be one of I/II/III (got '{category}')")
+            if fy and category in VALID_CATEGORIES:
+                try:
+                    is_lwe = bool(center and center.get("is_lwe"))
+                    rate_result = await _compute_wo_rate(fy, category, is_lwe)
+                except HTTPException as ex:
+                    row_errors.append(f"rate error: {ex.detail}")
+
+        rname = (r.get("job_role") or "").strip().lower()
+        role = roles.get(rname) if rname else None
+        try: hours = float(r.get("job_role_hours") or (role["default_hours"] if role else 0) or 0)
+        except Exception: hours = 0.0; row_errors.append("job_role_hours must be numeric")
+
+        try: num_cands = int(float(r.get("num_candidates") or 0))
+        except Exception: num_cands = 0
+        if r.get("num_candidates") and num_cands <= 0:
+            row_errors.append("num_candidates must be > 0")
+
+        if row_errors:
+            errors.append({"row": idx, "reasons": row_errors, "data": r})
+            continue
+        seen_names.add(name.lower())
+
+        wo_value = round(num_cands * (rate_result["final_rate"] if rate_result else 0) * hours, 2)
+        valid.append({
+            "row": idx,
+            "name": name,
+            "project_id": proj["id"], "project_name": proj["name"],
+            "center_id": center["id"] if center else None, "center_name": center["name"] if center else None,
+            "company_id": company["id"] if company else None, "company_name": company["name"] if company else None,
+            "start_date": r.get("start_date") or "", "end_date": r.get("end_date") or "",
+            "total_beneficiaries": total_ben,
+            "fy_year": fy, "category": category if category in VALID_CATEGORIES else "",
+            "job_role_master_id": role["id"] if role else None,
+            "job_role_hours": hours,
+            "num_candidates": num_cands,
+            "training_type": r.get("training_type") or "",
+            "is_lwe": bool(center.get("is_lwe")) if center else False,
+            "base_rate": rate_result["base_rate"] if rate_result else 0,
+            "final_rate": rate_result["final_rate"] if rate_result else 0,
+            "work_order_value": wo_value,
+        })
+
+    return {"counts": {"total_parsed": len(parsed_rows), "valid": len(valid), "errors": len(errors)},
+            "valid": valid, "errors": errors}
+
+
+@api.post("/batches/bulk-commit", status_code=201)
+async def batches_bulk_commit(payload: dict = Body(...),
+                                user=Depends(require_role("admin", "manager", "senior_manager"))):
+    """Commit pre-validated rows to db.batches. Each row is inserted independently
+    — one failure does not roll back the rest (per user requirement)."""
+    rows = payload.get("rows") or []
+    if not rows: raise HTTPException(400, "rows[] is required")
+    now = datetime.now(timezone.utc).isoformat()
+    inserted = 0
+    failed: List[dict] = []
+    # Re-validate against existing names atomically to handle races between preview and commit.
+    for r in rows:
+        try:
+            # Duplicate-name guard.
+            if await db.batches.find_one({"name": r.get("name")}, {"_id": 0, "id": 1}):
+                failed.append({"row": r.get("row"), "reason": f"batch_name '{r.get('name')}' already exists"})
+                continue
+            # Server re-computes the rate — never trust preview values.
+            rc = None
+            if r.get("fy_year") and r.get("category"):
+                rc = await _compute_wo_rate(r["fy_year"], r["category"], bool(r.get("is_lwe")))
+            doc = {
+                "id": str(uuid.uuid4()),
+                "name": r.get("name"),
+                "project_id": r.get("project_id"),
+                "center_id": r.get("center_id"),
+                "company_id": r.get("company_id"),
+                "partner_ids": [], "job_roles": [],
+                "start_date": r.get("start_date") or "", "end_date": r.get("end_date") or "",
+                "total_beneficiaries": int(r.get("total_beneficiaries") or 0),
+                "description": "", "closed": False,
+                "lifecycle_status": "Draft",
+                "state": "", "territory": "",
+                "target_year": r.get("fy_year") or "",
+                "training_type": r.get("training_type") or "",
+                "total_target": int(r.get("total_beneficiaries") or 0),
+                # WO Allocation
+                "fy_year": r.get("fy_year") or "",
+                "category": r.get("category") or "",
+                "job_role_master_id": r.get("job_role_master_id"),
+                "job_role_hours": float(r.get("job_role_hours") or 0),
+                "num_candidates": int(r.get("num_candidates") or 0),
+                "is_lwe": bool(rc["is_lwe"]) if rc else bool(r.get("is_lwe")),
+                "base_rate": rc["base_rate"] if rc else 0,
+                "final_rate": rc["final_rate"] if rc else 0,
+                "work_order_value": round(
+                    int(r.get("num_candidates") or 0) * (rc["final_rate"] if rc else 0) * float(r.get("job_role_hours") or 0),
+                    2,
+                ),
+                "created_at": now, "created_by": user["id"],
+                "passed_candidates": 0, "placed_candidates": 0, "partner_share_percent": 0,
+            }
+            await db.batches.insert_one(doc)
+            inserted += 1
+        except Exception as e:
+            failed.append({"row": r.get("row"), "reason": str(e)})
+    return {"inserted": inserted, "failed": failed, "total": len(rows)}
+
+
 # ============================================================================
 # ==========  BATCH MANAGEMENT · Stage 6 · Placement Management  =============
 # ============================================================================

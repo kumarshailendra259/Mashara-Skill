@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
@@ -7,6 +7,7 @@ import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
+  ChevronDown, ChevronRight, Star, ChevronsRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,37 +19,94 @@ import {
 } from "@/components/ui/sheet";
 import AnnouncementBanner from "@/components/AnnouncementBanner";
 
-const navItems = [
-  { to: "/", key: "dashboard", icon: LayoutDashboard, end: true, dashboardRoles: true },
-  { to: "/companies", key: "companies", icon: Building2 },
-  { to: "/partners", key: "partners", icon: Users },
-  { to: "/centers", key: "centers", icon: MapPin },
-  { to: "/projects", key: "projects", icon: Briefcase },
-  { to: "/programs", key: "programs", icon: Layers, programsAccess: true },
-  { to: "/batch-management", key: "batch_management", icon: Target, batchMgmtAccess: true },
-  { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
-  { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
-  { to: "/advances", key: "advances", icon: Wallet },
-  { to: "/quotations", key: "quotations", icon: FileSignature, nonPartner: true },
-  { to: "/vendors", key: "vendors", icon: Users2, nonPartner: true },
-  { to: "/stock", key: "stock", icon: Package },
-  { to: "/assets", key: "assets", icon: Box },
-  { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
-  { to: "/candidates", key: "candidates", icon: UserPlus, candidateAccess: true },
-  { to: "/bank-guarantees", key: "bank_guarantees", icon: Landmark, bgAccess: true },
-  { to: "/mis", key: "mis_dashboard", icon: BarChart3, misAccess: true },
-  { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
-  { to: "/payment-dashboard", key: "payment_dashboard", icon: PieChart, financeOnly: true },
-  { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
-  { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
-  { to: "/hrms", key: "HRMS", icon: Users },
-  { to: "/me/profile", key: "my_profile", icon: UserCog },
-  { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
-  { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
-  { to: "/partner-associations", key: "partner_associations", icon: Link2, adminManagerOnly: true },
-  { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
-  { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
-  { to: "/login-history", key: "login_history", icon: History, adminOnly: true },
+// Grouped sidebar structure (exact order per product spec).
+// Each group has: key (i18n), icon, and items (each item preserves its own
+// role-gate flag exactly as before — RBAC filtering is unchanged).
+const navGroups = [
+  {
+    key: "grp_dashboard",
+    icon: LayoutDashboard,
+    items: [
+      { to: "/", key: "dashboard", icon: LayoutDashboard, end: true, dashboardRoles: true },
+      { to: "/payment-dashboard", key: "payment_dashboard", icon: PieChart, financeOnly: true },
+    ],
+  },
+  {
+    key: "grp_organization",
+    icon: Building2,
+    items: [
+      { to: "/companies", key: "companies", icon: Building2 },
+      { to: "/partners", key: "partners", icon: Users },
+      { to: "/centers", key: "centers", icon: MapPin },
+      { to: "/projects", key: "projects", icon: Briefcase },
+    ],
+  },
+  {
+    key: "grp_batch",
+    icon: Target,
+    items: [
+      { to: "/batch-management", key: "batch_management", icon: Target, batchMgmtAccess: true },
+    ],
+  },
+  {
+    key: "grp_finance",
+    icon: Wallet,
+    items: [
+      { to: "/programs", key: "programs", icon: Layers, programsAccess: true },
+      { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
+      { to: "/advances", key: "advances", icon: Wallet },
+      { to: "/quotations", key: "payment_request", icon: FileSignature, nonPartner: true },
+      { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
+      { to: "/bank-guarantees", key: "bank_guarantees", icon: Landmark, bgAccess: true },
+      { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
+      { to: "/mis", key: "mis_dashboard", icon: BarChart3, misAccess: true },
+      { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
+    ],
+  },
+  {
+    key: "grp_approvals",
+    icon: ClipboardCheck,
+    items: [
+      { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
+      { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
+      { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
+    ],
+  },
+  {
+    key: "grp_candidates",
+    icon: UserPlus,
+    items: [
+      { to: "/candidates", key: "candidates", icon: UserPlus, candidateAccess: true },
+      { to: "/me/profile", key: "my_profile", icon: UserCog },
+    ],
+  },
+  {
+    key: "grp_hr",
+    icon: Users,
+    items: [
+      { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
+      { to: "/hrms", key: "HRMS", icon: Users },
+      { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
+      { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
+      { to: "/login-history", key: "login_history", icon: History, adminOnly: true },
+    ],
+  },
+  {
+    key: "grp_procurement",
+    icon: Package,
+    items: [
+      { to: "/vendors", key: "vendors", icon: Users2, nonPartner: true },
+      { to: "/stock", key: "stock", icon: Package },
+      { to: "/assets", key: "assets", icon: Box },
+    ],
+  },
+  {
+    key: "grp_partnerships",
+    icon: Star,
+    items: [
+      { to: "/partner-associations", key: "partner_ratings", icon: Star, adminManagerOnly: true },
+    ],
+  },
 ];
 
 // Roles that may see investments / income / expense / profit-loss / milestones / TDS.
@@ -59,8 +117,9 @@ const FINANCE_VISIBLE_ROLES = ["admin", "partner", "senior_manager", "hr", "acco
 const DASHBOARD_ROLES = [...FINANCE_VISIBLE_ROLES, "center_manager"];
 
 // Sidebar navigation body — shared between desktop <aside> and the mobile Sheet drawer.
-// Extracted out of Layout to satisfy react/no-unstable-nested-components.
-function SidebarBody({ t, visibleNavItems, badgeFor, onNavigate, companyLine }) {
+// Renders grouped, collapsible menu with active-state highlighting and
+// auto-expansion when a child route is active.
+function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expanded, toggleGroup, currentPath }) {
   return (
     <>
       <div className="px-5 py-5 border-b border-[var(--border)]">
@@ -73,33 +132,70 @@ function SidebarBody({ t, visibleNavItems, badgeFor, onNavigate, companyLine }) 
           </span>
         </div>
       </div>
-      <nav className="flex-1 py-3 overflow-y-auto" data-testid="sidebar-nav">
-        {visibleNavItems.map((it) => {
-          const Icon = it.icon;
-          const badge = badgeFor(it.key);
+      <nav className="flex-1 py-2 overflow-y-auto" data-testid="sidebar-nav">
+        {visibleGroups.map((grp) => {
+          const GIcon = grp.icon;
+          const isOpen = expanded[grp.key];
+          // Sum badges across children so a collapsed parent still shows attention.
+          const groupBadge = grp.items.reduce((sum, it) => sum + (badgeFor(it.key) || 0), 0);
+          // Highlight parent if any child matches the current path.
+          const hasActiveChild = grp.items.some((it) => (it.end ? currentPath === it.to : currentPath === it.to || currentPath.startsWith(it.to + "/")));
           return (
-            <NavLink
-              key={it.to}
-              to={it.to}
-              end={it.end}
-              onClick={onNavigate}
-              data-testid={`nav-${it.key}`}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-5 py-2.5 text-sm border-l-2 transition-colors ${
-                  isActive
-                    ? "border-[var(--brand)] bg-[#f3f5fb] text-[var(--brand)] font-medium"
-                    : "border-transparent text-[var(--muted)] hover:text-[var(--text)] hover:bg-gray-50"
-                }`
-              }
-            >
-              <Icon size={16} strokeWidth={1.6} />
-              <span className="flex-1">{t(it.key)}</span>
-              {badge > 0 && (
-                <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`badge-${it.key}`}>
-                  {badge}
-                </span>
+            <div key={grp.key} data-testid={`navgrp-${grp.key}`} className="mb-0.5">
+              <button
+                type="button"
+                onClick={() => toggleGroup(grp.key)}
+                data-testid={`navgrp-toggle-${grp.key}`}
+                className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm text-left transition-colors border-l-2 ${
+                  hasActiveChild
+                    ? "border-[var(--brand)] bg-[#f8f9fd] text-[var(--ink)] font-semibold"
+                    : "border-transparent text-[var(--ink)] hover:bg-gray-50 font-semibold"
+                }`}
+              >
+                <GIcon size={16} strokeWidth={1.8} className={hasActiveChild ? "text-[var(--brand)]" : "text-[var(--muted)]"} />
+                <span className="flex-1 tracking-tight uppercase text-[11px]">{t(grp.key)}</span>
+                {groupBadge > 0 && !isOpen && (
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`navgrp-badge-${grp.key}`}>
+                    {groupBadge}
+                  </span>
+                )}
+                {isOpen
+                  ? <ChevronDown size={14} strokeWidth={2} className="text-[var(--muted)]" />
+                  : <ChevronRight size={14} strokeWidth={2} className="text-[var(--muted)]" />}
+              </button>
+              {isOpen && (
+                <div className="pb-1" data-testid={`navgrp-body-${grp.key}`}>
+                  {grp.items.map((it) => {
+                    const Icon = it.icon;
+                    const badge = badgeFor(it.key);
+                    return (
+                      <NavLink
+                        key={it.to}
+                        to={it.to}
+                        end={it.end}
+                        onClick={onNavigate}
+                        data-testid={`nav-${it.key}`}
+                        className={({ isActive }) =>
+                          `flex items-center gap-3 pl-10 pr-5 py-2 text-[13px] border-l-2 transition-colors ${
+                            isActive
+                              ? "border-[var(--brand)] bg-[#f3f5fb] text-[var(--brand)] font-medium"
+                              : "border-transparent text-[var(--muted)] hover:text-[var(--text)] hover:bg-gray-50"
+                          }`
+                        }
+                      >
+                        <Icon size={14} strokeWidth={1.6} />
+                        <span className="flex-1">{t(it.key)}</span>
+                        {badge > 0 && (
+                          <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`badge-${it.key}`}>
+                            {badge}
+                          </span>
+                        )}
+                      </NavLink>
+                    );
+                  })}
+                </div>
               )}
-            </NavLink>
+            </div>
           );
         })}
       </nav>
@@ -112,6 +208,7 @@ export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const { lang, switchLang, t } = useLang();
   const nav = useNavigate();
+  const location = useLocation();
   const [tasks, setTasks] = useState({ txn_pending: 0, reimb_l1: 0, reimb_accountant: 0, reimb_pay: 0, payroll_pay: 0, total: 0 });
   const [notifs, setNotifs] = useState({ items: [], unread: 0 });
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -178,28 +275,76 @@ export default function Layout({ children }) {
     nav("/login");
   };
 
-  // Memoise the role-filtered nav list so the sidebar doesn't rebuild it on every render.
-  const visibleNavItems = useMemo(
-    () => navItems.filter((it) => {
-      if (it.adminOnly && user?.role !== "admin") return false;
-      if (it.adminManagerOnly && !["admin", "manager"].includes(user?.role)) return false;
-      if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
-      if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
-      if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
-      if (it.candidateAccess && !["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role)) return false;
-      if (it.bgAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner"].includes(user?.role)) return false;
-      if (it.misAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner", "staff", "center_staff"].includes(user?.role)) return false;
-      if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
-      if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
-      if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
-      if (it.batchMgmtAccess && !["admin", "manager", "senior_manager", "accountant", "hr", "center_manager"].includes(user?.role)) return false;
-      if (it.nonPartner && user?.role === "partner") return false;
-      if (it.staffOnly && !["center_staff", "center_manager", "hr", "manager", "senior_manager"].includes(user?.role)) return false;
-      if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;
-      return true;
-    }),
-    [user?.role],
-  );
+  // Role gate — mirrors the previous flat `navItems.filter` exactly so no
+  // permission model changes; just relocated into a helper.
+  const canSee = (it) => {
+    if (it.adminOnly && user?.role !== "admin") return false;
+    if (it.adminManagerOnly && !["admin", "manager"].includes(user?.role)) return false;
+    if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
+    if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
+    if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
+    if (it.candidateAccess && !["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role)) return false;
+    if (it.bgAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner"].includes(user?.role)) return false;
+    if (it.misAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner", "staff", "center_staff"].includes(user?.role)) return false;
+    if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
+    if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
+    if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
+    if (it.batchMgmtAccess && !["admin", "manager", "senior_manager", "accountant", "hr", "center_manager"].includes(user?.role)) return false;
+    if (it.nonPartner && user?.role === "partner") return false;
+    if (it.staffOnly && !["center_staff", "center_manager", "hr", "manager", "senior_manager"].includes(user?.role)) return false;
+    if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;
+    return true;
+  };
+
+  // Group-level visibility: hide any group whose every item is filtered out.
+  // If the user only has access to one submenu inside a group, the group and
+  // that single submenu still render (per product requirement).
+  const visibleGroups = useMemo(() => {
+    return navGroups
+      .map((g) => ({ ...g, items: g.items.filter(canSee) }))
+      .filter((g) => g.items.length > 0);
+  }, [user?.role]);
+
+  // Track which groups are expanded. A group opens automatically when one of
+  // its children matches the current route. User can still manually toggle.
+  const [expanded, setExpanded] = useState({});
+  useEffect(() => {
+    // On route change, ensure the parent of the active route is expanded.
+    setExpanded((prev) => {
+      const next = { ...prev };
+      let mutated = false;
+      visibleGroups.forEach((g) => {
+        const activeChild = g.items.some((it) =>
+          it.end ? location.pathname === it.to
+                 : location.pathname === it.to || location.pathname.startsWith(it.to + "/"));
+        if (activeChild && !next[g.key]) {
+          next[g.key] = true;
+          mutated = true;
+        }
+      });
+      // First-load fallback: open the Dashboard group by default.
+      if (Object.keys(prev).length === 0 && !mutated) {
+        next.grp_dashboard = true;
+        mutated = true;
+      }
+      return mutated ? next : prev;
+    });
+  }, [location.pathname, visibleGroups]);
+
+  const toggleGroup = (key) => setExpanded((s) => ({ ...s, [key]: !s[key] }));
+
+  // Breadcrumb — resolve the active submenu + its parent group label.
+  const breadcrumb = useMemo(() => {
+    for (const g of visibleGroups) {
+      for (const it of g.items) {
+        const active = it.end
+          ? location.pathname === it.to
+          : location.pathname === it.to || location.pathname.startsWith(it.to + "/");
+        if (active) return { group: t(g.key), page: t(it.key) };
+      }
+    }
+    return null;
+  }, [location.pathname, visibleGroups, t]);
 
   // ---- Bottom tab-bar (mobile-only) — 4 shortcuts + "Menu" -----------------
   const totalApprovalBadge = (tasks.pending_approvals || 0) + (tasks.txn_pending || 0);
@@ -219,7 +364,15 @@ export default function Layout({ children }) {
     <div className="min-h-screen flex" data-testid="app-layout">
       {/* Desktop sidebar */}
       <aside className="w-60 shrink-0 border-r border-[var(--border)] bg-white hidden md:flex md:flex-col">
-        <SidebarBody t={t} visibleNavItems={visibleNavItems} badgeFor={badgeFor} companyLine={companyLine} />
+        <SidebarBody
+          t={t}
+          visibleGroups={visibleGroups}
+          badgeFor={badgeFor}
+          companyLine={companyLine}
+          expanded={expanded}
+          toggleGroup={toggleGroup}
+          currentPath={location.pathname}
+        />
       </aside>
 
       {/* Mobile drawer (Sheet) */}
@@ -231,10 +384,13 @@ export default function Layout({ children }) {
         >
           <SidebarBody
             t={t}
-            visibleNavItems={visibleNavItems}
+            visibleGroups={visibleGroups}
             badgeFor={badgeFor}
             onNavigate={() => setMobileOpen(false)}
             companyLine={companyLine}
+            expanded={expanded}
+            toggleGroup={toggleGroup}
+            currentPath={location.pathname}
           />
         </SheetContent>
       </Sheet>
@@ -253,7 +409,21 @@ export default function Layout({ children }) {
               <Menu size={22} />
             </button>
             <div className="md:hidden font-heading font-black tracking-tight text-lg truncate">{t("app_name")}</div>
-            <div className="hidden md:block overline">{t("dashboard")} · {user?.role}</div>
+            <div className="hidden md:flex items-center gap-1.5 text-[12px]" data-testid="breadcrumb">
+              {breadcrumb ? (
+                <>
+                  <span className="text-[var(--muted)] uppercase tracking-wider text-[10px] font-semibold" data-testid="breadcrumb-group">
+                    {breadcrumb.group}
+                  </span>
+                  <ChevronsRight size={12} className="text-[var(--muted)]" />
+                  <span className="text-[var(--ink)] font-semibold" data-testid="breadcrumb-page">
+                    {breadcrumb.page}
+                  </span>
+                </>
+              ) : (
+                <span className="overline">{t("dashboard")} · {user?.role}</span>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-1.5 md:gap-2">
             {/* Notifications */}

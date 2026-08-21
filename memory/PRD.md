@@ -26,6 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 39 — Sidebar Reorganization: Grouped, Collapsible Nav + Breadcrumbs (Done, Feb 2026)
+- **User asked**: Reorganize existing sidebar into 9 grouped, expandable/collapsible parent menus in exact order — Dashboard → Organization Management → Batch Management → Finance & Accounting → Approvals & Workflow → Candidate/Student Management → Employee/HR Management → Procurement & Vendors → Partnerships. Preserve every existing page, route, permission, and data connection. Add breadcrumbs, auto-expand parent when child is active, no duplicates.
+- **Frontend `/app/frontend/src/components/Layout.jsx`**:
+  - Flat `navItems` array replaced with a `navGroups` array of 9 parent groups. Each group has `key` (i18n), `icon`, and `items[]`. Every item preserves its **exact prior role-gate flag** (adminOnly, financeOnly, hrOrAdmin, misAccess, batchMgmtAccess, dashboardRoles, nonPartner, etc.) — RBAC filter logic is unchanged, just relocated into a helper `canSee(it)`.
+  - `visibleGroups` memo filters items via `canSee` and drops any group whose items array becomes empty. If a user only has one submenu in a group, the group + that single submenu still render (per spec).
+  - New `expanded` state + `toggleGroup(key)` handler. `useEffect` on `location.pathname` auto-expands the group containing the active route (and defaults `grp_dashboard` open on first load).
+  - SidebarBody now renders each group as a header button (uppercase 11px label, icon, chevron, aggregated badge when collapsed) followed by indented submenu items with the existing NavLink active-state styling.
+  - Header breadcrumb `[data-testid="breadcrumb"]` shows `{Group} » {Page}` using `ChevronsRight` separator, replacing the old "Dashboard · role" text.
+  - Renamed sidebar labels only where the user's spec demanded: `Quotations` submenu now displays as "Payment Request" (label-only via new i18n key `payment_request` → route `/quotations` unchanged), `Partner Pairings` displays as "Partner Ratings" (label-only via new i18n key `partner_ratings` → route `/partner-associations` unchanged). Underlying page titles and routes untouched.
+  - Bank Guarantees (unlisted in user spec but existing) placed under Finance & Accounting group to keep it accessible.
+  - Mobile drawer (Sheet) uses the same grouped SidebarBody — mobile UX preserved.
+- **i18n `/app/frontend/src/lib/i18n.js`**: 11 new keys added in both English + Hindi (`grp_dashboard`, `grp_organization`, `grp_batch`, `grp_finance`, `grp_approvals`, `grp_candidates`, `grp_hr`, `grp_procurement`, `grp_partnerships`, `payment_request`, `partner_ratings`).
+- **Not touched**: `App.js` routes, every page file, backend, DB, and every role-permission check. Zero risk of route breakage.
+- **Verified**: Admin login → all 9 groups render in exact order. Click `/transactions` → Finance & Accounting group auto-expands, Transactions row highlighted, breadcrumb "FINANCE & ACCOUNTING » Transactions" shows in header. Collapsed groups display aggregated pending badges (127 · 219 · 2625). Lint clean.
+
+
+
 ### Phase 38 · Session 1 — Work Order Allocation Rate Engine + Job Role Master (Done, Feb 2026)
 - **User asked**: 28-section spec — Work Order allocation with FY Year + Category (I/II/III) + District (LWE 10% multiplier) → Per Hour Rate (auto) → Total Work Order Value (auto). Job Role master with default hours + inline "+ Add New". Backend-authoritative rate calc (frontend rate ignored). Centralised rate config for future FY changes. User approved (a) Session 1 (single-batch rate engine), (d) LWE flag empty — admin toggles per district, (g) legacy batches show "Incomplete WO" badge.
 - **Backend `/app/backend/server.py`** (~+230 LOC):
