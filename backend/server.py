@@ -17465,6 +17465,688 @@ async def _mis_reports_startup():
 
 
 
+# ============================================================================
+# PHASE 40 — Invoice & Payment Tracking Module
+# Central Invoice-to-Payment lifecycle with 5 consolidated business stages:
+#   1. Generated on Portal
+#   2. Bill Submitted to Department
+#   3. Final Approved on Portal
+#   4. Payment File is in Process
+#   5. Disbursed
+# Reuses existing companies / centers / projects / batches masters —
+# never duplicates them.
+# ============================================================================
+
+INVOICE_STAGES = [
+    {"code": 1, "id": "generated",  "label": "Generated on Portal"},
+    {"code": 2, "id": "submitted",  "label": "Bill Submitted to Department"},
+    {"code": 3, "id": "approved",   "label": "Final Approved on Portal"},
+    {"code": 4, "id": "processing", "label": "Payment File is in Process"},
+    {"code": 5, "id": "disbursed",  "label": "Disbursed"},
+]
+INVOICE_STAGE_BY_CODE = {s["code"]: s for s in INVOICE_STAGES}
+INVOICE_STAGE_BY_ID = {s["id"]: s for s in INVOICE_STAGES}
+INVOICE_WRITE_ROLES = ("admin", "accountant", "hr", "senior_manager", "manager")
+INVOICE_READ_ROLES = ("admin", "accountant", "hr", "senior_manager", "manager",
+                      "partner", "center_manager", "reporting_authority")
+
+DEFAULT_AGING = {
+    "id": "aging",
+    "normal_max_days": 7,        # <=7 days pending = normal
+    "attention_max_days": 15,    # 8-15 days = attention; >15 = overdue
+    "updated_at": None,
+    "updated_by": None,
+}
+
+
+def _now_ist_iso() -> str:
+    """Current time in IST as ISO 8601 (with offset)."""
+    return datetime.now(BUSINESS_TZ).isoformat(timespec="seconds")
+
+
+def _parse_iso_dt(v):
+    """Parse ISO datetime string → tz-aware datetime in IST. Returns None on failure."""
+    if not v:
+        return None
+    try:
+        if isinstance(v, datetime):
+            dt = v
+        else:
+            dt = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=BUSINESS_TZ)
+        return dt.astimezone(BUSINESS_TZ)
+    except Exception:
+        return None
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration in seconds as 'X Days Y Hours' (or 'X Hours Y Min')."""
+    if seconds is None or seconds < 0:
+        return "—"
+    total_min = int(seconds // 60)
+    days = total_min // (60 * 24)
+    hours = (total_min // 60) % 24
+    minutes = total_min % 60
+    if days > 0:
+        return f"{days} Day{'s' if days != 1 else ''} {hours} Hour{'s' if hours != 1 else ''}"
+    if hours > 0:
+        return f"{hours} Hour{'s' if hours != 1 else ''} {minutes} Min"
+    return f"{minutes} Min"
+
+
+async def _get_aging_config() -> dict:
+    doc = await db.finance_settings.find_one({"id": "aging"}) or {}
+    return {
+        "normal_max_days": int(doc.get("normal_max_days", DEFAULT_AGING["normal_max_days"])),
+        "attention_max_days": int(doc.get("attention_max_days", DEFAULT_AGING["attention_max_days"])),
+        "updated_at": doc.get("updated_at"),
+        "updated_by": doc.get("updated_by"),
+    }
+
+
+def _aging_bucket(days: float, cfg: dict) -> str:
+    if days is None:
+        return "normal"
+    if days <= cfg["normal_max_days"]:
+        return "normal"
+    if days <= cfg["attention_max_days"]:
+        return "attention"
+    return "overdue"
+
+
+def _stages_bootstrap() -> dict:
+    """Empty stages dict — every stage keyed by id with completed=False."""
+    return {s["id"]: {"timestamp": None, "remarks": None,
+                       "completed_by_id": None, "completed_by_name": None,
+                       "completed": False}
+            for s in INVOICE_STAGES}
+
+
+def _compute_current_stage(stages: dict) -> int:
+    """Return the highest completed stage code (0 if none)."""
+    highest = 0
+    for s in INVOICE_STAGES:
+        if stages.get(s["id"], {}).get("completed"):
+            highest = s["code"]
+    return highest
+
+
+def _compute_stage_durations(stages: dict) -> list:
+    """Return per-stage timing rows for the UI timeline."""
+    rows = []
+    now_dt = datetime.now(BUSINESS_TZ)
+    prev_ts = None
+    for s in INVOICE_STAGES:
+        st = stages.get(s["id"], {}) or {}
+        ts = _parse_iso_dt(st.get("timestamp"))
+        completed = bool(st.get("completed"))
+        # Duration TO this stage from previous (or from prev_ts)
+        duration_from_prev = None
+        if completed and ts and prev_ts:
+            duration_from_prev = (ts - prev_ts).total_seconds()
+        # Time spent AT this stage — if this is the current stage and not yet
+        # advanced, measure from its own timestamp until now.
+        stayed = None
+        if completed and ts:
+            # For non-terminal stages: from this stage's ts to the NEXT stage's ts if next completed.
+            next_stage = next((n for n in INVOICE_STAGES if n["code"] == s["code"] + 1), None)
+            next_ts = None
+            if next_stage:
+                next_ts = _parse_iso_dt((stages.get(next_stage["id"]) or {}).get("timestamp"))
+            end = next_ts or now_dt
+            stayed = (end - ts).total_seconds()
+        rows.append({
+            "code": s["code"],
+            "id": s["id"],
+            "label": s["label"],
+            "timestamp": st.get("timestamp"),
+            "remarks": st.get("remarks"),
+            "completed": completed,
+            "completed_by_name": st.get("completed_by_name"),
+            "duration_from_prev_seconds": duration_from_prev,
+            "duration_from_prev_label": _fmt_duration(duration_from_prev) if duration_from_prev is not None else None,
+            "stayed_seconds": stayed,
+            "stayed_label": _fmt_duration(stayed) if stayed is not None else None,
+        })
+        if completed and ts:
+            prev_ts = ts
+    return rows
+
+
+def _days_pending(current_stage: int, stages: dict) -> Optional[float]:
+    """Days since the current stage was reached (only for not-yet-disbursed)."""
+    if current_stage == 5 or current_stage == 0:
+        return None
+    stage_id = INVOICE_STAGE_BY_CODE[current_stage]["id"]
+    ts = _parse_iso_dt((stages.get(stage_id) or {}).get("timestamp"))
+    if not ts:
+        return None
+    delta = datetime.now(BUSINESS_TZ) - ts
+    return round(delta.total_seconds() / 86400.0, 2)
+
+
+class InvoiceIn(BaseModel):
+    invoice_no: str
+    invoice_type: Optional[str] = None
+    milestone_type: Optional[str] = None
+    tsp_company_id: Optional[str] = None
+    tsp_company_name: Optional[str] = None
+    district: Optional[str] = None
+    center_id: Optional[str] = None
+    project_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    total_candidates: Optional[int] = 0
+    amount_payable: float = 0.0
+    adjustment: float = 0.0
+    gross_payment: Optional[float] = None
+    deduction: float = 0.0
+    net_payable: Optional[float] = None
+    remarks: Optional[str] = None
+    # Optional — allow the caller to stamp the "generated" timestamp explicitly.
+    generated_at: Optional[str] = None
+
+
+class InvoiceUpdateIn(BaseModel):
+    invoice_type: Optional[str] = None
+    milestone_type: Optional[str] = None
+    tsp_company_id: Optional[str] = None
+    tsp_company_name: Optional[str] = None
+    district: Optional[str] = None
+    center_id: Optional[str] = None
+    project_id: Optional[str] = None
+    batch_id: Optional[str] = None
+    total_candidates: Optional[int] = None
+    amount_payable: Optional[float] = None
+    adjustment: Optional[float] = None
+    gross_payment: Optional[float] = None
+    deduction: Optional[float] = None
+    net_payable: Optional[float] = None
+    remarks: Optional[str] = None
+
+
+class StageAdvanceIn(BaseModel):
+    to_stage: int  # 2..5
+    remarks: Optional[str] = None
+    # Optional — override the stamped timestamp (ISO). Defaults to now (IST).
+    timestamp: Optional[str] = None
+    # Only for stage 5 (Disbursed):
+    disbursed_amount: Optional[float] = None
+    payment_reference: Optional[str] = None
+    bank_reference: Optional[str] = None
+    payment_remarks: Optional[str] = None
+
+
+def _resolve_names(inv: dict) -> dict:
+    """Return the invoice with denormalised names embedded for the list view."""
+    return inv
+
+
+async def _hydrate_invoice(inv: dict) -> dict:
+    """Attach denormalised master names + computed lifecycle fields."""
+    stages = inv.get("stages") or _stages_bootstrap()
+    current = _compute_current_stage(stages)
+    current_info = INVOICE_STAGE_BY_CODE.get(current) if current else None
+    net_payable = inv.get("net_payable") or 0.0
+    disbursed = inv.get("disbursed_amount") or 0.0
+    outstanding = max(0.0, float(net_payable) - float(disbursed))
+
+    # Resolve current stage timestamp
+    current_ts = None
+    if current_info:
+        current_ts = (stages.get(current_info["id"]) or {}).get("timestamp")
+
+    # Lookup master names (in parallel where cheap)
+    company_name = inv.get("tsp_company_name")
+    center_name = inv.get("center_name")
+    project_name = inv.get("project_name")
+    batch_no = inv.get("batch_no")
+    if inv.get("tsp_company_id") and not company_name:
+        c = await db.companies.find_one({"id": inv["tsp_company_id"]})
+        company_name = (c or {}).get("name")
+    if inv.get("center_id") and not center_name:
+        c = await db.centers.find_one({"id": inv["center_id"]})
+        center_name = (c or {}).get("name")
+    if inv.get("project_id") and not project_name:
+        p = await db.projects.find_one({"id": inv["project_id"]})
+        project_name = (p or {}).get("name")
+    if inv.get("batch_id") and not batch_no:
+        b = await db.batches.find_one({"id": inv["batch_id"]})
+        batch_no = (b or {}).get("code") or (b or {}).get("name")
+
+    cfg = await _get_aging_config()
+    days_pending = _days_pending(current, stages)
+
+    return {
+        "id": inv.get("id"),
+        "invoice_no": inv.get("invoice_no"),
+        "invoice_type": inv.get("invoice_type"),
+        "milestone_type": inv.get("milestone_type"),
+        "tsp_company_id": inv.get("tsp_company_id"),
+        "tsp_company_name": company_name,
+        "district": inv.get("district"),
+        "center_id": inv.get("center_id"),
+        "center_name": center_name,
+        "project_id": inv.get("project_id"),
+        "project_name": project_name,
+        "batch_id": inv.get("batch_id"),
+        "batch_no": batch_no,
+        "total_candidates": inv.get("total_candidates") or 0,
+        "amount_payable": inv.get("amount_payable") or 0.0,
+        "adjustment": inv.get("adjustment") or 0.0,
+        "gross_payment": inv.get("gross_payment") or 0.0,
+        "deduction": inv.get("deduction") or 0.0,
+        "net_payable": inv.get("net_payable") or 0.0,
+        "disbursed_amount": disbursed,
+        "outstanding_amount": outstanding,
+        "payment_date": inv.get("payment_date"),
+        "payment_reference": inv.get("payment_reference"),
+        "bank_reference": inv.get("bank_reference"),
+        "payment_remarks": inv.get("payment_remarks"),
+        "remarks": inv.get("remarks"),
+        "generated_date": (stages.get("generated") or {}).get("timestamp"),
+        "current_stage": current,
+        "current_stage_id": current_info["id"] if current_info else None,
+        "current_stage_label": current_info["label"] if current_info else None,
+        "current_stage_timestamp": current_ts,
+        "days_pending": days_pending,
+        "aging_bucket": _aging_bucket(days_pending, cfg) if days_pending is not None else None,
+        "stages": stages,
+        "created_at": inv.get("created_at"),
+        "created_by": inv.get("created_by"),
+        "created_by_name": inv.get("created_by_name"),
+        "updated_at": inv.get("updated_at"),
+    }
+
+
+async def _write_invoice_audit(invoice_id: str, action: str, prev_stage: int,
+                                new_stage: int, user: dict, remarks: str = None):
+    entry = {
+        "id": str(uuid.uuid4()),
+        "invoice_id": invoice_id,
+        "action": action,
+        "stage_name": INVOICE_STAGE_BY_CODE.get(new_stage, {}).get("label"),
+        "prev_stage": prev_stage,
+        "new_stage": new_stage,
+        "user_id": user.get("id"),
+        "user_name": user.get("name") or user.get("email"),
+        "remarks": remarks,
+        "timestamp": _now_ist_iso(),
+    }
+    await db.invoice_audit.insert_one(entry)
+
+
+# ---------- Endpoints ----------
+
+@api.get("/finance-settings/aging")
+async def get_aging_settings(_=Depends(require_role(*INVOICE_READ_ROLES))):
+    return await _get_aging_config()
+
+
+@api.patch("/finance-settings/aging")
+async def update_aging_settings(payload: dict = Body(...),
+                                 user=Depends(require_role("admin", "accountant"))):
+    normal = int(payload.get("normal_max_days") or DEFAULT_AGING["normal_max_days"])
+    attention = int(payload.get("attention_max_days") or DEFAULT_AGING["attention_max_days"])
+    if normal < 0 or attention < normal:
+        raise HTTPException(status_code=400, detail="Invalid aging thresholds")
+    doc = {
+        "id": "aging",
+        "normal_max_days": normal,
+        "attention_max_days": attention,
+        "updated_at": _now_ist_iso(),
+        "updated_by": user.get("id"),
+    }
+    await db.finance_settings.update_one({"id": "aging"}, {"$set": doc}, upsert=True)
+    return doc
+
+
+@api.get("/invoices/stages")
+async def list_invoice_stages(_=Depends(get_current_user)):
+    return INVOICE_STAGES
+
+
+@api.get("/invoices/dashboard")
+async def invoice_dashboard(
+    q: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    company_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    _=Depends(require_role(*INVOICE_READ_ROLES)),
+):
+    """KPI cards: totals + per-stage counts + outstanding sum."""
+    query = {}
+    if company_id:
+        query["tsp_company_id"] = company_id
+    if center_id:
+        query["center_id"] = center_id
+    if project_id:
+        query["project_id"] = project_id
+    if from_date or to_date:
+        query["stages.generated.timestamp"] = {}
+        if from_date:
+            query["stages.generated.timestamp"]["$gte"] = from_date
+        if to_date:
+            query["stages.generated.timestamp"]["$lte"] = to_date + "T23:59:59"
+    if q:
+        query["$or"] = [
+            {"invoice_no": {"$regex": q, "$options": "i"}},
+            {"tsp_company_name": {"$regex": q, "$options": "i"}},
+            {"district": {"$regex": q, "$options": "i"}},
+        ]
+    rows = await db.invoices.find(query, {"_id": 0}).to_list(length=10000)
+    total_count = len(rows)
+    total_value = sum(float(r.get("net_payable") or 0) for r in rows)
+    per_stage = {s["id"]: {"count": 0, "value": 0.0, "code": s["code"], "label": s["label"]}
+                 for s in INVOICE_STAGES}
+    outstanding = 0.0
+    disbursed_total = 0.0
+    for r in rows:
+        stages = r.get("stages") or {}
+        cs = _compute_current_stage(stages)
+        if cs > 0:
+            sid = INVOICE_STAGE_BY_CODE[cs]["id"]
+            per_stage[sid]["count"] += 1
+            per_stage[sid]["value"] += float(r.get("net_payable") or 0)
+        net = float(r.get("net_payable") or 0)
+        disb = float(r.get("disbursed_amount") or 0)
+        outstanding += max(0.0, net - disb)
+        disbursed_total += disb
+    return {
+        "total_invoices": total_count,
+        "total_invoice_value": round(total_value, 2),
+        "outstanding_amount": round(outstanding, 2),
+        "disbursed_total": round(disbursed_total, 2),
+        "per_stage": [per_stage[s["id"]] | {"id": s["id"]} for s in INVOICE_STAGES],
+    }
+
+
+@api.get("/invoices/export.csv")
+async def export_invoices_csv(
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    company_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    _=Depends(require_role(*INVOICE_READ_ROLES)),
+):
+    query = _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
+                                  None, None, from_date, to_date, None)
+    rows = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).to_list(length=100000)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Invoice No", "Generated Date", "TSP/Company", "District", "Training Centre",
+                      "Project", "Batch No", "Invoice Type", "Milestone Type", "Total Candidates",
+                      "Amount Payable", "Adjustment", "Gross Payment", "Deduction", "Net Payable",
+                      "Current Stage", "Current Stage At", "Days Pending", "Disbursed Amount",
+                      "Payment Date", "Payment Reference", "Outstanding Amount"])
+    for r in rows:
+        h = await _hydrate_invoice(r)
+        writer.writerow([
+            h["invoice_no"], h["generated_date"] or "", h["tsp_company_name"] or "",
+            h["district"] or "", h["center_name"] or "", h["project_name"] or "",
+            h["batch_no"] or "", h["invoice_type"] or "", h["milestone_type"] or "",
+            h["total_candidates"], h["amount_payable"], h["adjustment"], h["gross_payment"],
+            h["deduction"], h["net_payable"],
+            h["current_stage_label"] or "—", h["current_stage_timestamp"] or "",
+            h["days_pending"] if h["days_pending"] is not None else "",
+            h["disbursed_amount"], h["payment_date"] or "",
+            h["payment_reference"] or "", h["outstanding_amount"],
+        ])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="invoices.csv"'})
+
+
+def _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
+                          invoice_type, milestone_type, from_date, to_date, aging):
+    query = {}
+    if company_id:
+        query["tsp_company_id"] = company_id
+    if center_id:
+        query["center_id"] = center_id
+    if project_id:
+        query["project_id"] = project_id
+    if batch_id:
+        query["batch_id"] = batch_id
+    if invoice_type:
+        query["invoice_type"] = invoice_type
+    if milestone_type:
+        query["milestone_type"] = milestone_type
+    if from_date or to_date:
+        query["stages.generated.timestamp"] = {}
+        if from_date:
+            query["stages.generated.timestamp"]["$gte"] = from_date
+        if to_date:
+            query["stages.generated.timestamp"]["$lte"] = to_date + "T23:59:59"
+    if q:
+        query["$or"] = [
+            {"invoice_no": {"$regex": q, "$options": "i"}},
+            {"tsp_company_name": {"$regex": q, "$options": "i"}},
+            {"district": {"$regex": q, "$options": "i"}},
+            {"batch_no": {"$regex": q, "$options": "i"}},
+        ]
+    if status:
+        # status is a stage_id (e.g. "processing")
+        stage = INVOICE_STAGE_BY_ID.get(status)
+        if stage:
+            # Match: this stage completed AND next stage NOT completed (i.e., current stage)
+            code = stage["code"]
+            query[f"stages.{stage['id']}.completed"] = True
+            for s in INVOICE_STAGES:
+                if s["code"] > code:
+                    query[f"stages.{s['id']}.completed"] = {"$ne": True}
+    return query
+
+
+@api.get("/invoices")
+async def list_invoices(
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    company_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    invoice_type: Optional[str] = None,
+    milestone_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    aging: Optional[str] = None,  # normal | attention | overdue
+    page: int = 1,
+    page_size: int = 50,
+    sort: Optional[str] = "-created_at",
+    _=Depends(require_role(*INVOICE_READ_ROLES)),
+):
+    query = _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
+                                  invoice_type, milestone_type, from_date, to_date, aging)
+    total = await db.invoices.count_documents(query)
+    sort_field = sort.lstrip("-") if sort else "created_at"
+    sort_dir = -1 if (sort or "").startswith("-") else 1
+    cur = db.invoices.find(query, {"_id": 0}).sort(sort_field, sort_dir).skip((page - 1) * page_size).limit(page_size)
+    docs = await cur.to_list(length=page_size)
+    hydrated = [await _hydrate_invoice(d) for d in docs]
+    # Filter by aging bucket in Python (post-hydration)
+    if aging in ("normal", "attention", "overdue"):
+        hydrated = [h for h in hydrated if (h.get("aging_bucket") == aging)]
+    return {"rows": hydrated, "total": total, "page": page, "page_size": page_size}
+
+
+@api.post("/invoices", status_code=201)
+async def create_invoice(body: InvoiceIn, user=Depends(require_role(*INVOICE_WRITE_ROLES))):
+    # Enforce unique invoice_no
+    exists = await db.invoices.find_one({"invoice_no": body.invoice_no})
+    if exists:
+        raise HTTPException(status_code=400, detail="Invoice number already exists")
+
+    # Compute derived money fields
+    amount_payable = float(body.amount_payable or 0)
+    adjustment = float(body.adjustment or 0)
+    gross = body.gross_payment if body.gross_payment is not None else (amount_payable + adjustment)
+    deduction = float(body.deduction or 0)
+    net = body.net_payable if body.net_payable is not None else max(0.0, float(gross) - deduction)
+
+    stages = _stages_bootstrap()
+    generated_ts = body.generated_at or _now_ist_iso()
+    stages["generated"] = {
+        "timestamp": generated_ts,
+        "remarks": body.remarks,
+        "completed_by_id": user.get("id"),
+        "completed_by_name": user.get("name") or user.get("email"),
+        "completed": True,
+    }
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "invoice_no": body.invoice_no.strip(),
+        "invoice_type": body.invoice_type,
+        "milestone_type": body.milestone_type,
+        "tsp_company_id": body.tsp_company_id,
+        "tsp_company_name": body.tsp_company_name,
+        "district": body.district,
+        "center_id": body.center_id,
+        "project_id": body.project_id,
+        "batch_id": body.batch_id,
+        "total_candidates": int(body.total_candidates or 0),
+        "amount_payable": amount_payable,
+        "adjustment": adjustment,
+        "gross_payment": float(gross),
+        "deduction": deduction,
+        "net_payable": float(net),
+        "disbursed_amount": 0.0,
+        "remarks": body.remarks,
+        "stages": stages,
+        "created_at": _now_ist_iso(),
+        "created_by": user.get("id"),
+        "created_by_name": user.get("name") or user.get("email"),
+    }
+    await db.invoices.insert_one(doc)
+    await _write_invoice_audit(doc["id"], "create", 0, 1, user, "Invoice generated")
+    return await _hydrate_invoice(doc)
+
+
+@api.get("/invoices/{iid}")
+async def get_invoice(iid: str, _=Depends(require_role(*INVOICE_READ_ROLES))):
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    hydrated = await _hydrate_invoice(inv)
+    hydrated["timeline"] = _compute_stage_durations(inv.get("stages") or {})
+    return hydrated
+
+
+@api.patch("/invoices/{iid}")
+async def update_invoice(iid: str, body: InvoiceUpdateIn,
+                          user=Depends(require_role(*INVOICE_WRITE_ROLES))):
+    inv = await db.invoices.find_one({"id": iid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    # Recompute money fields if any changed
+    if any(k in patch for k in ("amount_payable", "adjustment", "gross_payment", "deduction")):
+        amount = float(patch.get("amount_payable", inv.get("amount_payable") or 0))
+        adj = float(patch.get("adjustment", inv.get("adjustment") or 0))
+        gross = float(patch.get("gross_payment", (patch.get("amount_payable", inv.get("amount_payable") or 0) + adj)))
+        deduc = float(patch.get("deduction", inv.get("deduction") or 0))
+        patch["amount_payable"] = amount
+        patch["adjustment"] = adj
+        patch["gross_payment"] = gross
+        patch["deduction"] = deduc
+        patch["net_payable"] = max(0.0, gross - deduc)
+    patch["updated_at"] = _now_ist_iso()
+    await db.invoices.update_one({"id": iid}, {"$set": patch})
+    await _write_invoice_audit(iid, "update", _compute_current_stage(inv.get("stages") or {}),
+                                _compute_current_stage(inv.get("stages") or {}), user, "Invoice details updated")
+    updated = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    return await _hydrate_invoice(updated)
+
+
+@api.post("/invoices/{iid}/advance")
+async def advance_invoice(iid: str, body: StageAdvanceIn,
+                           user=Depends(require_role(*INVOICE_WRITE_ROLES))):
+    inv = await db.invoices.find_one({"id": iid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    to_stage = int(body.to_stage)
+    if to_stage not in INVOICE_STAGE_BY_CODE:
+        raise HTTPException(status_code=400, detail="Invalid stage")
+    stages = inv.get("stages") or _stages_bootstrap()
+    current = _compute_current_stage(stages)
+    # Strict sequence — next stage must be exactly current+1
+    if to_stage <= current:
+        raise HTTPException(status_code=400, detail=f"Invoice is already at stage {current}. Cannot go back or repeat.")
+    if to_stage != current + 1:
+        raise HTTPException(status_code=400, detail=f"Stages must be completed in sequence. Expected stage {current + 1}, got {to_stage}.")
+
+    target = INVOICE_STAGE_BY_CODE[to_stage]
+    ts = body.timestamp or _now_ist_iso()
+    stages[target["id"]] = {
+        "timestamp": ts,
+        "remarks": body.remarks,
+        "completed_by_id": user.get("id"),
+        "completed_by_name": user.get("name") or user.get("email"),
+        "completed": True,
+    }
+    patch = {"stages": stages, "updated_at": _now_ist_iso()}
+
+    # Stage 5 = Disbursed → capture payment fields
+    if to_stage == 5:
+        if body.disbursed_amount is None:
+            raise HTTPException(status_code=400, detail="Disbursed amount is required for stage 5")
+        net = float(inv.get("net_payable") or 0)
+        disbursed = float(body.disbursed_amount)
+        if disbursed < 0:
+            raise HTTPException(status_code=400, detail="Disbursed amount cannot be negative")
+        patch["disbursed_amount"] = disbursed
+        patch["payment_date"] = ts
+        patch["payment_reference"] = body.payment_reference
+        patch["bank_reference"] = body.bank_reference
+        patch["payment_remarks"] = body.payment_remarks
+
+    await db.invoices.update_one({"id": iid}, {"$set": patch})
+    await _write_invoice_audit(iid, "advance", current, to_stage, user,
+                                 body.remarks or f"Advanced to {target['label']}")
+    updated = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    return await _hydrate_invoice(updated)
+
+
+@api.get("/invoices/{iid}/audit")
+async def get_invoice_audit(iid: str, _=Depends(require_role(*INVOICE_READ_ROLES))):
+    rows = await db.invoice_audit.find({"invoice_id": iid}, {"_id": 0}).sort("timestamp", -1).to_list(length=1000)
+    return rows
+
+
+@api.delete("/invoices/{iid}", status_code=204)
+async def delete_invoice(iid: str, user=Depends(require_role("admin"))):
+    inv = await db.invoices.find_one({"id": iid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    await db.invoices.delete_one({"id": iid})
+    await db.invoice_audit.delete_many({"invoice_id": iid})
+    return None
+
+
+@app.on_event("startup")
+async def _invoice_module_startup():
+    try:
+        await db.invoices.create_index("invoice_no", unique=True)
+        await db.invoices.create_index([("tsp_company_id", 1), ("created_at", -1)])
+        await db.invoices.create_index([("center_id", 1), ("created_at", -1)])
+        await db.invoices.create_index([("project_id", 1), ("created_at", -1)])
+        await db.invoices.create_index([("batch_id", 1)])
+        await db.invoice_audit.create_index([("invoice_id", 1), ("timestamp", -1)])
+        await db.finance_settings.update_one(
+            {"id": "aging"},
+            {"$setOnInsert": DEFAULT_AGING},
+            upsert=True,
+        )
+    except Exception as _e:
+        logging.exception("invoice module startup failed: %s", _e)
+
+
 # ---------- Register router + CORS ----------
 app.include_router(api)
 
