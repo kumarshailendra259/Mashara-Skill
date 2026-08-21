@@ -26,6 +26,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 41 — Finance (Milestones) ↔ Invoice Tracking Integration (Done, Feb 2026)
+- **User asked**: Integrate Finance (Milestones) module with Invoice Tracking so milestone updates automatically flow into invoice stages. Chose (a) auto-link approach + (1) simple stage advance with remarks only.
+- **Backend `/app/backend/server.py`** (~+170 LOC):
+  - Helper `_ensure_invoice_for_bp(bp, user)` — checks `bp.invoice_id`; if absent, auto-creates a linked invoice with `invoice_no = "MS-{batch_code}-{milestone}"` (collision-safe via unique index + `-N` suffix), `invoice_type = "Milestone"`, `milestone_type = bp.milestone`, all master IDs derived from the parent batch, `amount_payable = bp.amount`, stage 1 stamped at `bp.created_at`, and back-links `bp.invoice_id` on the batch_payment row. Writes audit entry.
+  - `GET /api/batch-payments/{pid}/bill-status` — returns `{linked, invoice_id, invoice_no, current_stage, current_stage_id, current_stage_label, current_stage_timestamp}` for the Milestones UI badge.
+  - `POST /api/batch-payments/{pid}/advance-bill-status` (body: `{to_stage, remarks?}`) — role-gated (admin/accountant/senior_manager/manager/hr). Ensures invoice exists, enforces strict `to_stage == current + 1` sequence via the same invoice-advance rules. On stage 5, sources `disbursed_amount` from `bp.net_amount` (if received) or `bp.amount`, and re-computes deductions from persisted TDS + recovery + assessment_fee fields.
+  - `_sync_invoice_on_receive(bp, user)` — best-effort helper called after `receive_batch_payment` successfully commits. Auto-advances the linked invoice through any missing stages up to 5 in one shot, stamping the receive timestamp on each and setting disbursement details from the persisted BP amounts. Wrapped in try/except so a sync failure never fails the receive.
+  - Wired the hook: `receive_batch_payment` now calls `_sync_invoice_on_receive(res, user)` right before returning success. All existing rollback behaviour preserved.
+  - Startup indexes: added `invoices.batch_payment_id` for reverse lookup.
+- **Frontend `Programs.jsx`** (~+90 LOC):
+  - `billStatuses` state — `{payment_id: {linked, current_stage, current_stage_label, current_stage_id, invoice_no}}`. `useEffect` fetches all bill statuses in parallel via `Promise.all` whenever the payments list changes.
+  - `MilestoneCard` extended with new **"Bill Status"** section (below expected/received dates, above action buttons). Renders a colour-toned stage chip (slate/blue/indigo/amber/emerald per stage) with the linked invoice_no as a subtitle, plus an inline "Update" button (hidden once the invoice reaches Stage 5).
+  - New "Update Bill Status" dialog — displays Current Stage → Advance To (next stage label), remarks textarea, and a Stage-5 warning that clarifies the disbursed amount will be sourced from the milestone (with a hint to use "Mark Received" instead to also update the finance ledger).
+  - `submitBillStatus` — posts `to_stage = current + 1` + optional remarks, refreshes the specific milestone's status inline.
+- **Existing modules protected**: Zero changes to receive_batch_payment's math, txn creation, rollback logic, or return shape. The invoice sync is strictly additive and wrapped in try/except. `batch_payments` schema gains one optional field (`invoice_id`) — reads unaffected.
+- **Verified end-to-end**: Backend curl — fetched a live batch_payment → checked bill-status (returns `linked: false`) → advanced to stage 2 (invoice `MS-TEST_batch_07ea90-2nd` auto-created, `linked: true, current_stage: 2`) → skip attempt (400 "Expected 3, got 4"). Live browser — /programs → project with milestones → each MilestoneCard shows "Bill Status: Not started" + "Update" button → dialog opens with correct Current Stage / Advance To wording + remarks input.
+
+
+
 ### Phase 40 — Invoice & Payment Tracking Module (Done, Feb 2026)
 - **User asked**: Central Invoice-to-Payment tracker under Finance & Accounting with 5 consolidated business stages (Generated on Portal → Bill Submitted to Department → Final Approved on Portal → Payment File is in Process → Disbursed). Track date+time on every stage, "Stayed at this stage" duration, days pending + aging buckets, configurable aging thresholds, invoice list with 17 fields + advanced filters + CSV export, detail page with vertical timeline + financial summary + audit history, KPI cards, integration with existing masters (companies, centers, projects, batches) — no duplicates.
 - **Backend `/app/backend/server.py`** (~+540 LOC before router registration):

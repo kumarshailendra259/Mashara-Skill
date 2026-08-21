@@ -10391,6 +10391,8 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
         await _rollback("final commit returned no doc")
         raise HTTPException(500, "Failed to finalize receive — rolled back")
     res.pop("_id", None)
+    # Phase 40 integration: auto-sync the linked invoice to Stage 5 (Disbursed).
+    await _sync_invoice_on_receive(res, user)
     return BatchPaymentOut(**res)
 
 
@@ -18137,6 +18139,7 @@ async def _invoice_module_startup():
         await db.invoices.create_index([("center_id", 1), ("created_at", -1)])
         await db.invoices.create_index([("project_id", 1), ("created_at", -1)])
         await db.invoices.create_index([("batch_id", 1)])
+        await db.invoices.create_index([("batch_payment_id", 1)])
         await db.invoice_audit.create_index([("invoice_id", 1), ("timestamp", -1)])
         await db.finance_settings.update_one(
             {"id": "aging"},
@@ -18145,6 +18148,214 @@ async def _invoice_module_startup():
         )
     except Exception as _e:
         logging.exception("invoice module startup failed: %s", _e)
+
+
+# ============================================================================
+# Milestone (batch_payments) ↔ Invoice Tracking Integration
+# When a milestone bill status is updated on the Finance (Milestones) page,
+# an Invoice record is auto-created (if not present) and advanced through the
+# same 5-stage lifecycle. When a milestone is marked "received" via the
+# existing `receive_batch_payment` endpoint, the linked invoice is auto-
+# advanced to Stage 5 (Disbursed).
+# ============================================================================
+
+async def _ensure_invoice_for_bp(bp: dict, user: dict) -> dict:
+    """Return the linked invoice for a batch_payment. Creates one if missing."""
+    if bp.get("invoice_id"):
+        inv = await db.invoices.find_one({"id": bp["invoice_id"]})
+        if inv:
+            return inv
+    # Derive master IDs from the parent batch.
+    batch = await db.batches.find_one({"id": bp.get("batch_id")}) or {}
+    company_id = bp.get("company_id") or batch.get("company_id")
+    center_id = batch.get("center_id")
+    project_id = batch.get("project_id")
+    # Batch code/name — used for invoice_no & UI.
+    batch_code = batch.get("code") or batch.get("name") or (bp.get("batch_id") or "")[:8]
+    milestone = bp.get("milestone") or "M?"
+    # Generate a deterministic invoice_no. Collision-safe via unique index.
+    base_no = f"MS-{batch_code}-{milestone}".strip("-")
+    invoice_no = base_no
+    attempt = 1
+    while await db.invoices.find_one({"invoice_no": invoice_no}):
+        attempt += 1
+        invoice_no = f"{base_no}-{attempt}"
+    # Money: use batch_payment.amount as amount_payable. On receive, we update
+    # deduction + net_payable + disbursed_amount from the persisted BP fields.
+    amount = float(bp.get("amount") or 0)
+    stages = _stages_bootstrap()
+    generated_ts = bp.get("created_at") or _now_ist_iso()
+    stages["generated"] = {
+        "timestamp": generated_ts,
+        "remarks": f"Auto-linked from Milestone {milestone}",
+        "completed_by_id": user.get("id"),
+        "completed_by_name": user.get("name") or user.get("email"),
+        "completed": True,
+    }
+    doc = {
+        "id": str(uuid.uuid4()),
+        "invoice_no": invoice_no,
+        "invoice_type": "Milestone",
+        "milestone_type": milestone,
+        "tsp_company_id": company_id,
+        "center_id": center_id,
+        "project_id": project_id,
+        "batch_id": bp.get("batch_id"),
+        "batch_payment_id": bp.get("id"),
+        "total_candidates": batch.get("num_candidates") or batch.get("total_candidates") or 0,
+        "amount_payable": amount,
+        "adjustment": 0.0,
+        "gross_payment": amount,
+        "deduction": 0.0,
+        "net_payable": amount,
+        "disbursed_amount": 0.0,
+        "remarks": bp.get("description"),
+        "stages": stages,
+        "created_at": _now_ist_iso(),
+        "created_by": user.get("id"),
+        "created_by_name": user.get("name") or user.get("email"),
+        "source": "milestone",
+    }
+    await db.invoices.insert_one(doc)
+    await db.batch_payments.update_one({"id": bp["id"]}, {"$set": {"invoice_id": doc["id"]}})
+    await _write_invoice_audit(doc["id"], "auto_create", 0, 1, user,
+                                 f"Auto-linked from Milestone {milestone} on batch {batch_code}")
+    return doc
+
+
+class BillStatusIn(BaseModel):
+    to_stage: int
+    remarks: Optional[str] = None
+
+
+@api.get("/batch-payments/{pid}/bill-status")
+async def get_bp_bill_status(pid: str, user=Depends(require_finance_visible)):
+    bp = await db.batch_payments.find_one({"id": pid}, {"_id": 0})
+    if not bp:
+        raise HTTPException(404, "Milestone not found")
+    inv_id = bp.get("invoice_id")
+    if not inv_id:
+        return {"linked": False, "invoice_id": None, "current_stage": 0}
+    inv = await db.invoices.find_one({"id": inv_id}, {"_id": 0})
+    if not inv:
+        return {"linked": False, "invoice_id": None, "current_stage": 0}
+    stages = inv.get("stages") or {}
+    cs = _compute_current_stage(stages)
+    info = INVOICE_STAGE_BY_CODE.get(cs) if cs else None
+    return {
+        "linked": True,
+        "invoice_id": inv_id,
+        "invoice_no": inv.get("invoice_no"),
+        "current_stage": cs,
+        "current_stage_id": info["id"] if info else None,
+        "current_stage_label": info["label"] if info else None,
+        "current_stage_timestamp": (stages.get(info["id"]) if info else {} or {}).get("timestamp") if info else None,
+    }
+
+
+@api.post("/batch-payments/{pid}/advance-bill-status")
+async def advance_bp_bill_status(pid: str, body: BillStatusIn,
+                                   user=Depends(require_role("admin", "accountant", "senior_manager", "manager", "hr"))):
+    """Advance the linked invoice's bill-status stage from the Milestones page.
+
+    * Auto-creates the linked invoice on first call if it doesn't exist yet.
+    * Enforces strict sequence via the existing invoice-advance rules.
+    * If the milestone has already been received in the finance ledger and the
+      target stage is 5, uses the persisted net_amount as disbursed_amount.
+    """
+    bp = await db.batch_payments.find_one({"id": pid})
+    if not bp:
+        raise HTTPException(404, "Milestone not found")
+    inv = await _ensure_invoice_for_bp(bp, user)
+    stages = inv.get("stages") or _stages_bootstrap()
+    current = _compute_current_stage(stages)
+    to_stage = int(body.to_stage)
+    if to_stage not in INVOICE_STAGE_BY_CODE:
+        raise HTTPException(400, "Invalid stage")
+    if to_stage <= current:
+        raise HTTPException(400, f"Invoice is already at stage {current}. Cannot go back or repeat.")
+    if to_stage != current + 1:
+        raise HTTPException(400, f"Stages must be completed in sequence. Expected {current + 1}, got {to_stage}.")
+
+    target = INVOICE_STAGE_BY_CODE[to_stage]
+    ts = _now_ist_iso()
+    stages[target["id"]] = {
+        "timestamp": ts,
+        "remarks": body.remarks,
+        "completed_by_id": user.get("id"),
+        "completed_by_name": user.get("name") or user.get("email"),
+        "completed": True,
+    }
+    patch = {"stages": stages, "updated_at": ts}
+
+    # If advancing to Disbursed, source the amount from the batch_payment.
+    if to_stage == 5:
+        # If already received in finance, use net_amount; else fall back to amount.
+        if bp.get("status") == "received":
+            disbursed = float(bp.get("net_amount") or bp.get("amount") or 0)
+            deduction = float((bp.get("tds_amount") or 0)
+                              + (bp.get("recovery_amount") or 0)
+                              + (bp.get("assessment_fee_total") or 0))
+            patch["deduction"] = deduction
+            gross = float(bp.get("amount") or 0)
+            patch["gross_payment"] = gross
+            patch["net_payable"] = max(0.0, gross - deduction)
+        else:
+            disbursed = float(bp.get("amount") or 0)
+        patch["disbursed_amount"] = disbursed
+        patch["payment_date"] = bp.get("received_date") or ts
+        patch["payment_remarks"] = body.remarks
+
+    await db.invoices.update_one({"id": inv["id"]}, {"$set": patch})
+    await _write_invoice_audit(inv["id"], "advance", current, to_stage, user,
+                                 body.remarks or f"Advanced from Milestones page to {target['label']}")
+    updated = await db.invoices.find_one({"id": inv["id"]}, {"_id": 0})
+    return await _hydrate_invoice(updated)
+
+
+async def _sync_invoice_on_receive(bp: dict, user: dict):
+    """Called after receive_batch_payment successfully commits. Best-effort —
+    never fails the receive flow if the invoice sync errors out."""
+    try:
+        inv = await _ensure_invoice_for_bp(bp, user)
+        stages = inv.get("stages") or _stages_bootstrap()
+        current = _compute_current_stage(stages)
+        if current >= 5:
+            return  # already disbursed
+        ts = _now_ist_iso()
+        # Auto-advance through any missing stages up to 5, stamping each with the
+        # receive timestamp so the timeline stays continuous even if the user
+        # never used the manual UI.
+        for code in range(current + 1, 6):
+            sid = INVOICE_STAGE_BY_CODE[code]["id"]
+            stages[sid] = {
+                "timestamp": ts,
+                "remarks": ("Auto-advanced on milestone receive"
+                             if code < 5 else "Milestone received — auto disbursed"),
+                "completed_by_id": user.get("id"),
+                "completed_by_name": user.get("name") or user.get("email"),
+                "completed": True,
+            }
+        disbursed = float(bp.get("net_amount") or bp.get("amount") or 0)
+        deduction = float((bp.get("tds_amount") or 0)
+                          + (bp.get("recovery_amount") or 0)
+                          + (bp.get("assessment_fee_total") or 0))
+        gross = float(bp.get("amount") or 0)
+        patch = {
+            "stages": stages,
+            "updated_at": ts,
+            "disbursed_amount": disbursed,
+            "gross_payment": gross,
+            "deduction": deduction,
+            "net_payable": max(0.0, gross - deduction),
+            "payment_date": bp.get("received_date") or ts,
+            "payment_remarks": "Auto-synced from milestone receive",
+        }
+        await db.invoices.update_one({"id": inv["id"]}, {"$set": patch})
+        await _write_invoice_audit(inv["id"], "advance", current, 5, user,
+                                     "Milestone marked received — invoice auto-disbursed")
+    except Exception as _e:
+        logging.exception("invoice sync on receive failed: %s", _e)
 
 
 # ---------- Register router + CORS ----------

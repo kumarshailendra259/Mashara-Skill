@@ -85,9 +85,17 @@ const computeFirstMilestone = (rows) => {
   return { roleTotal: b.roleTotal, uniformTotal: b.uniform, total: b.first.amount, totalCandidates: b.totalCandidates };
 };
 
-function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onReceive, onEdit, onDelete }) {
+function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onReceive, onEdit, onDelete, billStatus, onOpenBillStatus }) {
   const received = payment?.status === "received";
   const empty = !payment;
+  const stageId = billStatus?.current_stage_id;
+  const STAGE_TONE = {
+    generated:  "border-slate-300 text-slate-700",
+    submitted:  "border-blue-300 text-blue-700",
+    approved:   "border-indigo-300 text-indigo-700",
+    processing: "border-amber-300 text-amber-700",
+    disbursed:  "border-emerald-300 text-emerald-700",
+  };
   return (
     <div className={`swiss-card p-4 ${received ? "border-[var(--success)]" : empty ? "border-dashed" : ""}`} data-testid={`milestone-${milestone}`}>
       <div className="flex items-center justify-between mb-2">
@@ -147,6 +155,33 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
             )}
             {payment.description && <div className="text-xs text-[var(--muted)] pt-1 border-t border-[var(--border)]">{payment.description}</div>}
           </div>
+          {/* Phase 40 — Bill Status (linked Invoice stage) */}
+          {canEdit && (
+            <div className="mt-3 pt-2 border-t border-[var(--border)]">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="overline text-[10px]">Bill Status</div>
+                  {billStatus?.linked && stageId ? (
+                    <div className="mt-0.5">
+                      <span className={`inline-flex items-center px-1.5 py-0.5 text-[11px] border font-medium ${STAGE_TONE[stageId] || "border-slate-300"}`}>
+                        {billStatus.current_stage_label}
+                      </span>
+                      {billStatus.invoice_no && (
+                        <div className="text-[10px] text-[var(--muted)] mt-0.5 truncate">{billStatus.invoice_no}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-[var(--muted)] mt-0.5">Not started</div>
+                  )}
+                </div>
+                {(!billStatus?.current_stage || billStatus.current_stage < 5) && (
+                  <Button size="sm" variant="outline" onClick={() => onOpenBillStatus(payment, billStatus)} className="rounded-none text-[11px] h-7 px-2" data-testid={`btn-bill-status-${milestone}`}>
+                    Update
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
           <div className="flex gap-2 mt-3 no-print">
             {!received && canReceive && (
               <Button size="sm" onClick={() => onReceive(payment)} className="brand-btn rounded-none flex-1 gap-1" data-testid={`btn-receive-${milestone}`}>
@@ -204,6 +239,13 @@ export default function Programs() {
   const [recvTds, setRecvTds] = useState("0");
   const [recvCompanyId, setRecvCompanyId] = useState("");
 
+  // Phase 40 — Bill Status (linked Invoice stages) per milestone.
+  const [billStatuses, setBillStatuses] = useState({}); // { [payment_id]: statusObj }
+  const [billOpen, setBillOpen] = useState(false);
+  const [billTarget, setBillTarget] = useState(null); // { payment, status }
+  const [billRemarks, setBillRemarks] = useState("");
+  const [billBusy, setBillBusy] = useState(false);
+
   useEffect(() => {
     Promise.all([
       api.get("/entities/project"),
@@ -237,6 +279,57 @@ export default function Programs() {
     if (!selectedBatchId) { setPayments([]); return; }
     api.get("/batch-payments", { params: { batch_id: selectedBatchId } }).then((r) => setPayments(r.data)).catch(() => setPayments([]));
   }, [selectedBatchId]);
+
+  // Load bill statuses (linked invoice stage) for each visible milestone payment.
+  useEffect(() => {
+    if (!payments || payments.length === 0) { setBillStatuses({}); return; }
+    let cancelled = false;
+    (async () => {
+      const map = {};
+      await Promise.all(payments.map(async (p) => {
+        try {
+          const { data } = await api.get(`/batch-payments/${p.id}/bill-status`);
+          map[p.id] = data;
+        } catch (e) {
+          map[p.id] = { linked: false, current_stage: 0 };
+        }
+      }));
+      if (!cancelled) setBillStatuses(map);
+    })();
+    return () => { cancelled = true; };
+  }, [payments]);
+
+  const reloadBillStatus = async (pid) => {
+    try {
+      const { data } = await api.get(`/batch-payments/${pid}/bill-status`);
+      setBillStatuses((s) => ({ ...s, [pid]: data }));
+    } catch (e) { /* noop */ }
+  };
+
+  const openBillStatus = (payment, status) => {
+    setBillTarget({ payment, status });
+    setBillRemarks("");
+    setBillOpen(true);
+  };
+
+  const submitBillStatus = async () => {
+    if (!billTarget) return;
+    const cur = billTarget.status?.current_stage || 0;
+    const next = cur + 1;
+    if (next > 5) return;
+    setBillBusy(true);
+    try {
+      await api.post(`/batch-payments/${billTarget.payment.id}/advance-bill-status`, {
+        to_stage: next, remarks: billRemarks || undefined,
+      });
+      toast.success("Bill status updated");
+      await reloadBillStatus(billTarget.payment.id);
+      setBillOpen(false);
+    } catch (e) {
+      toast.error(formatError(e));
+    }
+    setBillBusy(false);
+  };
 
   const paymentByMilestone = useMemo(() => {
     const m = {};
@@ -785,6 +878,8 @@ export default function Programs() {
                             onReceive={openReceive}
                             onEdit={openEditPayment}
                             onDelete={deletePayment}
+                            billStatus={paymentByMilestone[m] ? billStatuses[paymentByMilestone[m].id] : null}
+                            onOpenBillStatus={openBillStatus}
                           />
                         ))}
                       </div>
@@ -1201,6 +1296,54 @@ export default function Programs() {
             <Button variant="outline" onClick={() => setRecvOpen(false)} className="rounded-none" disabled={recvBusy}>Cancel</Button>
             <Button onClick={confirmReceive} disabled={recvBusy} className={`brand-btn rounded-none gap-1 ${recvBusy ? "opacity-60 cursor-not-allowed" : ""}`} data-testid="recv-confirm">
               <Check size={14} /> {recvBusy ? "Processing…" : "Confirm Receive"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Phase 40 — Bill Status update dialog */}
+      <Dialog open={billOpen} onOpenChange={setBillOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Update Bill Status</DialogTitle>
+          </DialogHeader>
+          {billTarget && (() => {
+            const cur = billTarget.status?.current_stage || 0;
+            const next = cur + 1;
+            const STAGE_LABELS = {
+              1: "Generated on Portal",
+              2: "Bill Submitted to Department",
+              3: "Final Approved on Portal",
+              4: "Payment File is in Process",
+              5: "Disbursed",
+            };
+            if (next > 5) return <div className="text-sm text-[var(--muted)]">Already disbursed — no further stages.</div>;
+            return (
+              <div className="space-y-3">
+                <div className="text-sm">
+                  <div className="text-[var(--muted)]">Current Stage</div>
+                  <div className="font-medium">{cur === 0 ? "Not started" : `Stage ${cur} — ${STAGE_LABELS[cur]}`}</div>
+                </div>
+                <div className="text-sm">
+                  <div className="text-[var(--muted)]">Advance To</div>
+                  <div className="font-bold text-[var(--brand)]">Stage {next} — {STAGE_LABELS[next]}</div>
+                </div>
+                <div>
+                  <Label>Remarks (optional)</Label>
+                  <Textarea rows={2} value={billRemarks} onChange={(e) => setBillRemarks(e.target.value)} data-testid="bill-remarks" />
+                </div>
+                {next === 5 && billTarget.payment?.status !== "received" && (
+                  <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 p-2">
+                    Note: Stage 5 marks the invoice as Disbursed. The disbursed amount will be sourced from the milestone amount (₹{Number(billTarget.payment?.amount || 0).toLocaleString("en-IN")}). To also update the finance ledger, use &ldquo;Mark Received&rdquo; instead.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBillOpen(false)}>Cancel</Button>
+            <Button onClick={submitBillStatus} disabled={billBusy} className="brand-btn rounded-none" data-testid="btn-submit-bill-status">
+              {billBusy ? "Saving…" : "Confirm Advance"}
             </Button>
           </DialogFooter>
         </DialogContent>
