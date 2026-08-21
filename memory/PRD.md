@@ -26,7 +26,24 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 38 · Session 1 — Work Order Allocation Rate Engine + Job Role Master (Done, Feb 2026)
+- **User asked**: 28-section spec — Work Order allocation with FY Year + Category (I/II/III) + District (LWE 10% multiplier) → Per Hour Rate (auto) → Total Work Order Value (auto). Job Role master with default hours + inline "+ Add New". Backend-authoritative rate calc (frontend rate ignored). Centralised rate config for future FY changes. User approved (a) Session 1 (single-batch rate engine), (d) LWE flag empty — admin toggles per district, (g) legacy batches show "Incomplete WO" badge.
+- **Backend `/app/backend/server.py`** (~+230 LOC):
+  - **Rate engine (single source of truth)**: `DEFAULT_RATE_SLABS` seeded on startup into `db.rate_config` (2 slabs — <2026-27: I=49/II=42/III=35.10; ≥2026-27: I=56.35/II=52.50/III=36.85). `LWE_MULTIPLIER=1.10`. Helper `_compute_wo_rate(fy, category, is_lwe)` returns `{base_rate, final_rate, slab_id, ...}`. `_parse_fy_year("2026-27") → 2026`.
+  - Endpoints: `GET /api/work-order/rate-config` (auth), `PATCH /api/work-order/rate-config/{slab_id}` (admin), `POST /api/work-order/calculate` (preview — accepts `is_lwe` or `district_id`).
+  - **Job Role Master** `db.job_role_master` (name, default_hours, nsqf_level, category_hint, active). CRUD endpoints with case-insensitive dedupe. Soft-delete via `active=false`.
+  - **District LWE flag**: `PATCH /api/districts/{cid}/lwe` (admin/manager/senior_manager) toggles `is_lwe` on `db.centers`. Returns minimal projection so no sensitive center fields leak.
+  - **BatchIn** extended with `fy_year, category, job_role_master_id, job_role_hours, num_candidates, is_lwe, base_rate, final_rate, work_order_value`. `create_batch` + `update_batch` call `_compute_wo_rate` authoritatively — any frontend-sent rate is overwritten with the server value.
+- **Frontend `BatchManagement.jsx`**:
+  - New Work Order Allocation section in the Create Batch dialog: FY Year (5-option dropdown), Category (I/II/III), Job Role dropdown from master + `+` quick-add button, Job Role Hours (auto-fills from default_hours on role pick), No. of Candidate, **Per Hour Rate** (read-only, ₹X.XX with base + slab subtitle), **Total Work Order Value** (read-only, ₹large, with formula subtitle + LWE +10% chip).
+  - Live recalc via debounced (250ms) `POST /api/work-order/calculate` on every FY/Category/Center/Candidates/Hours change.
+  - "Add Job Role" dialog: name + default_hours + NSQF level → immediate dropdown insertion + auto-select on close.
+  - Row indicator: batches missing `fy_year` or `category` show an "Incomplete WO" amber badge next to Legacy/Linked chip.
+- **Verified iter-55**: 27/27 backend pytest (including full 12-cell rate matrix to 3-decimal precision + bogus-rate-override test) + 100% Playwright frontend flow.
+- **Post-test polish**: `/api/districts/{cid}/lwe` now returns minimal projection.
+
 ### Phase 37 · Phase 3 — Assessment + Placement + Attendance CSV (Done, Feb 2026)
+
 - **User asked**: Ship Assessment stage (SDMS + agency + present/pass/fail chips + live certification %), Placement stage (employer + CTC + M1/M2/M3 retention chips + live placement %), and CSV export for the attendance grid.
 - **Backend `/app/backend/server.py`** (~+280 LOC):
   - **Assessment**: `PATCH /api/batches/{bid}/assessment` (batch-level SDMS/agency/date/assessor/status); `POST /api/batches/{bid}/candidates/{cid}/assessment` (per-candidate absent/present/passed/failed + certified auto-set on passed); `POST /api/batches/{bid}/candidates/assessment/bulk` (UpdateOne `bulk_write`); `GET /api/batches/{bid}/assessment/summary` (returns present/absent/passed/failed/certified counters + `certification_pct`, `pass_pct`). Helper `_resync_batch_assessment_counters` keeps batch.passed_candidates / total_certified / actual_present / pass_count / fail_count / absent_count in sync.

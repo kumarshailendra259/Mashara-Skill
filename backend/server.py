@@ -9354,6 +9354,18 @@ class BatchIn(BaseModel):
     placement_month_1: Optional[str] = ""
     placement_month_2: Optional[str] = ""
     placement_month_3: Optional[str] = ""
+    # ---- Phase 38 · Work Order Allocation ----
+    # Rate engine inputs. category ∈ {I, II, III}; fy_year e.g. '2026-27'.
+    fy_year: Optional[str] = ""
+    category: Optional[str] = ""             # I | II | III
+    job_role_master_id: Optional[str] = None  # FK to db.job_role_master (Phase 38)
+    job_role_hours: float = Field(default=0, ge=0)
+    num_candidates: int = Field(default=0, ge=0)
+    # Derived (backend-authoritative — frontend value ignored on save).
+    is_lwe: Optional[bool] = None
+    base_rate: float = 0
+    final_rate: float = 0
+    work_order_value: float = 0
 
 
 class BatchOut(BatchIn):
@@ -9598,6 +9610,21 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
         # Atomic consume
         consumed_target = await _consume_target(body.target_id, int(body.total_beneficiaries or 0))
     doc = body.model_dump()
+    # Phase 38: authoritative rate calculation. Frontend-supplied rates ignored.
+    # Rate calc runs only when the caller provided both FY + Category.
+    if doc.get("fy_year") and doc.get("category"):
+        is_lwe = doc.get("is_lwe")
+        if is_lwe is None and doc.get("center_id"):
+            c = await db.centers.find_one({"id": doc["center_id"]}, {"_id": 0, "is_lwe": 1})
+            is_lwe = bool(c.get("is_lwe")) if c else False
+        rc = await _compute_wo_rate(doc["fy_year"], doc["category"], bool(is_lwe))
+        doc["is_lwe"] = rc["is_lwe"]
+        doc["base_rate"] = rc["base_rate"]
+        doc["final_rate"] = rc["final_rate"]
+        doc["work_order_value"] = round(
+            int(doc.get("num_candidates") or 0) * rc["final_rate"] * float(doc.get("job_role_hours") or 0),
+            2,
+        )
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     try:
@@ -9658,6 +9685,20 @@ async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin
             raise HTTPException(400, "Placement fields are locked (batch is Closed). Ask admin to reopen.")
 
     upd = body.model_dump()
+    # Phase 38: recompute WO rate/value authoritatively on every PUT if FY+Category present.
+    if upd.get("fy_year") and upd.get("category"):
+        is_lwe = upd.get("is_lwe")
+        if is_lwe is None and upd.get("center_id"):
+            c = await db.centers.find_one({"id": upd["center_id"]}, {"_id": 0, "is_lwe": 1})
+            is_lwe = bool(c.get("is_lwe")) if c else False
+        rc = await _compute_wo_rate(upd["fy_year"], upd["category"], bool(is_lwe))
+        upd["is_lwe"] = rc["is_lwe"]
+        upd["base_rate"] = rc["base_rate"]
+        upd["final_rate"] = rc["final_rate"]
+        upd["work_order_value"] = round(
+            int(upd.get("num_candidates") or 0) * rc["final_rate"] * float(upd.get("job_role_hours") or 0),
+            2,
+        )
     # Keep locks in sync with lifecycle_status if it changed via PUT.
     upd.update(_lifecycle_locks(upd.get("lifecycle_status") or "Draft"))
     res = await db.batches.find_one_and_update({"id": bid}, {"$set": upd}, return_document=True)
@@ -11192,6 +11233,180 @@ async def batch_assessment_summary(bid: str, _=Depends(require_role(*ASSESS_ROLE
         "certification_pct": round(certified / max(1, total_enrolled) * 100, 2),
         "pass_pct": round(counts.get("passed", 0) / max(1, present) * 100, 2),
     }
+
+
+# ============================================================================
+# ============  WORK ORDER · Rate Engine + Job Role Master + LWE  ============
+# ============================================================================
+# Phase 38 (Feb 2026): centralised rate configuration for Work Order allocation.
+# Rate = FY slab × Category, then × 1.10 if District is LWE (Left Wing Extremism).
+# Single source of truth used by both single Batch Creation AND Bulk Creation.
+
+# Default rate config. Seeded once on startup; admin can edit via
+# /api/work-order/rate-config PATCH endpoint. `fy_from` is inclusive lower bound
+# (parsed as the first year in the FY string e.g. "2026-27" → 2026).
+DEFAULT_RATE_SLABS = [
+    {"id": "slab-legacy",  "label": "Before 2026-27", "fy_from": 0,    "fy_to": 2025,
+     "rates": {"I": 49.00, "II": 42.00, "III": 35.10}},
+    {"id": "slab-2026",    "label": "2026-27 & later", "fy_from": 2026, "fy_to": 9999,
+     "rates": {"I": 56.35, "II": 52.50, "III": 36.85}},
+]
+LWE_MULTIPLIER = 1.10
+VALID_CATEGORIES = ("I", "II", "III")
+
+
+def _parse_fy_year(fy: str) -> int:
+    """'2026-27' → 2026. '2026' → 2026. Invalid → -1."""
+    try:
+        return int(str(fy).strip().split("-")[0])
+    except Exception:
+        return -1
+
+
+async def _get_active_rate_slabs() -> list:
+    """Return the slab list (from db.rate_config if present, else defaults)."""
+    docs = await db.rate_config.find({}, {"_id": 0}).sort("fy_from", 1).to_list(50)
+    return docs or DEFAULT_RATE_SLABS
+
+
+async def _compute_wo_rate(fy: str, category: str, is_lwe: bool) -> dict:
+    """The single source of truth for Work Order rate calculation. Never trust
+    the frontend — every save endpoint MUST call this."""
+    y = _parse_fy_year(fy)
+    if y < 0:      raise HTTPException(400, f"Invalid FY year '{fy}'. Expected format like '2026-27'.")
+    if category not in VALID_CATEGORIES:
+        raise HTTPException(400, f"Category must be one of {VALID_CATEGORIES} (got '{category}')")
+    slabs = await _get_active_rate_slabs()
+    slab = next((s for s in slabs if int(s["fy_from"]) <= y <= int(s.get("fy_to", 9999))), None)
+    if not slab: raise HTTPException(400, f"No rate slab configured for FY {fy}. Admin must add one.")
+    base = float(slab["rates"].get(category) or 0)
+    if base <= 0: raise HTTPException(400, f"No base rate configured for {category} in slab {slab.get('label')}")
+    final = round(base * LWE_MULTIPLIER, 4) if is_lwe else base
+    return {
+        "fy_year": fy, "fy_from": int(slab["fy_from"]), "slab_id": slab["id"], "slab_label": slab.get("label"),
+        "category": category, "is_lwe": bool(is_lwe),
+        "base_rate": base, "lwe_multiplier": LWE_MULTIPLIER if is_lwe else 1.0,
+        "final_rate": final,
+    }
+
+
+@app.on_event("startup")
+async def _seed_rate_config():
+    """Seed the default 2 rate slabs on first boot (idempotent)."""
+    for slab in DEFAULT_RATE_SLABS:
+        await db.rate_config.update_one({"id": slab["id"]}, {"$setOnInsert": slab}, upsert=True)
+
+
+@api.get("/work-order/rate-config")
+async def get_rate_config(_=Depends(get_current_user)):
+    """UI/read endpoint. Returns slab table + LWE multiplier."""
+    slabs = await _get_active_rate_slabs()
+    return {"slabs": slabs, "lwe_multiplier": LWE_MULTIPLIER,
+            "categories": list(VALID_CATEGORIES)}
+
+
+@api.patch("/work-order/rate-config/{slab_id}")
+async def update_rate_slab(slab_id: str, payload: dict = Body(...),
+                            _=Depends(require_role("admin"))):
+    """Admin can adjust rates. Cannot remove I/II/III keys or change fy_from < 0."""
+    rates = payload.get("rates") or {}
+    if any(k not in VALID_CATEGORIES for k in rates.keys()):
+        raise HTTPException(400, f"rates keys must be a subset of {VALID_CATEGORIES}")
+    upd = {}
+    for k in ("label", "fy_from", "fy_to"):
+        if k in payload: upd[k] = payload[k]
+    if rates:
+        for cat in VALID_CATEGORIES:
+            if cat in rates: upd[f"rates.{cat}"] = float(rates[cat])
+    r = await db.rate_config.find_one_and_update({"id": slab_id}, {"$set": upd}, return_document=True)
+    if not r: raise HTTPException(404, "Rate slab not found")
+    r.pop("_id", None); return r
+
+
+@api.post("/work-order/calculate")
+async def calculate_wo(payload: dict = Body(...), _=Depends(get_current_user)):
+    """Preview endpoint — used by the UI on every field change. Returns the
+    computed rate + total value. Backend re-validates on save regardless."""
+    fy = str(payload.get("fy_year") or "")
+    category = str(payload.get("category") or "")
+    # District can be passed as `is_lwe` bool OR `district_id` (center_id in this app).
+    is_lwe = payload.get("is_lwe")
+    if is_lwe is None and payload.get("district_id"):
+        c = await db.centers.find_one({"id": payload["district_id"]}, {"_id": 0, "is_lwe": 1})
+        is_lwe = bool(c.get("is_lwe")) if c else False
+    is_lwe = bool(is_lwe)
+    rate = await _compute_wo_rate(fy, category, is_lwe)
+    num_candidates = int(payload.get("num_candidates") or 0)
+    job_role_hours = float(payload.get("job_role_hours") or 0)
+    total = round(num_candidates * rate["final_rate"] * job_role_hours, 2)
+    return {**rate, "num_candidates": num_candidates, "job_role_hours": job_role_hours,
+            "work_order_value": total}
+
+
+# ---------- Job Role Master ----------
+class JobRoleMasterIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str = Field(min_length=1)
+    default_hours: float = Field(default=0, ge=0)
+    nsqf_level: Optional[str] = ""
+    category_hint: Optional[str] = ""  # I/II/III suggestion
+    active: bool = True
+
+
+@api.get("/job-role-master")
+async def list_job_roles(active_only: bool = True, _=Depends(get_current_user)):
+    q = {"active": True} if active_only else {}
+    docs = await db.job_role_master.find(q, {"_id": 0}).sort("name", 1).to_list(2000)
+    return docs
+
+
+@api.post("/job-role-master", status_code=201)
+async def create_job_role(body: JobRoleMasterIn,
+                            _=Depends(require_role("admin", "manager", "senior_manager", "hr", "center_manager"))):
+    name = body.name.strip()
+    dup = await db.job_role_master.find_one({"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}, {"_id": 0, "id": 1})
+    if dup: raise HTTPException(409, f"Job Role '{name}' already exists")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **body.model_dump(),
+           "name": name, "created_at": now}
+    await db.job_role_master.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/job-role-master/{rid}")
+async def update_job_role(rid: str, payload: dict = Body(...),
+                            _=Depends(require_role("admin", "manager", "senior_manager"))):
+    upd = {k: v for k, v in payload.items() if k in ("name", "default_hours", "nsqf_level", "category_hint", "active")}
+    r = await db.job_role_master.find_one_and_update({"id": rid}, {"$set": upd}, return_document=True)
+    if not r: raise HTTPException(404, "Job Role not found")
+    r.pop("_id", None); return r
+
+
+@api.delete("/job-role-master/{rid}", status_code=204)
+async def delete_job_role(rid: str, _=Depends(require_role("admin"))):
+    # Soft-delete by setting active=false so historical batches stay readable.
+    r = await db.job_role_master.update_one({"id": rid}, {"$set": {"active": False}})
+    if r.matched_count == 0: raise HTTPException(404, "Job Role not found")
+    return Response(status_code=204)
+
+
+# ---------- LWE flag on District (Center) Master ----------
+@api.patch("/districts/{cid}/lwe")
+async def set_district_lwe(cid: str, payload: dict = Body(...),
+                             _=Depends(require_role("admin", "manager", "senior_manager"))):
+    """Toggle is_lwe flag on a district (centers are our district source of truth
+    in this app — one row per district-center). Returns a minimal projection
+    so no sensitive center fields leak."""
+    is_lwe = bool(payload.get("is_lwe"))
+    now = datetime.now(timezone.utc).isoformat()
+    r = await db.centers.find_one_and_update(
+        {"id": cid}, {"$set": {"is_lwe": is_lwe, "lwe_updated_at": now}},
+        projection={"_id": 0, "id": 1, "name": 1, "is_lwe": 1, "lwe_updated_at": 1},
+        return_document=True,
+    )
+    if not r: raise HTTPException(404, "District/Center not found")
+    return r
 
 
 # ============================================================================

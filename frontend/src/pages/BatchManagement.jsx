@@ -64,7 +64,13 @@ const EMPTY_BATCH = {
   lifecycle_status: "Draft",
   state: "", territory: "", target_year: "", training_type: "",
   total_target: 0,
+  // Phase 38 · Work Order Allocation
+  fy_year: "", category: "", job_role_master_id: "",
+  job_role_hours: 0, num_candidates: 0,
 };
+
+// FY dropdown options — accepts any year. UI shows common ones + a "Custom" free-text.
+const FY_OPTIONS = ["2024-25", "2025-26", "2026-27", "2027-28", "2028-29"];
 
 const num = (n) => n == null || n === "" ? "—" : Number(n).toLocaleString("en-IN");
 
@@ -190,6 +196,18 @@ export default function BatchManagement() {
   const [bEdit, setBEdit] = useState(null);
   const [bSaving, setBSaving] = useState(false);
   const [selectedTargetForBatch, setSelectedTargetForBatch] = useState(null);
+  // Phase 38 · Job Role master + live WO calculation
+  const [jobRoles, setJobRoles] = useState([]);
+  const [rateInfo, setRateInfo] = useState(null); // {base_rate, final_rate, is_lwe, ...}
+  const [rateBusy, setRateBusy] = useState(false);
+  const [jrOpen, setJrOpen] = useState(false);
+  const [jrDraft, setJrDraft] = useState({ name: "", default_hours: 8, nsqf_level: "" });
+
+  const loadJobRoles = useCallback(async () => {
+    try { const r = await api.get("/job-role-master"); setJobRoles(r.data || []); }
+    catch { setJobRoles([]); }
+  }, []);
+  useEffect(() => { loadJobRoles(); }, [loadJobRoles]);
 
   const loadBatches = useCallback(async () => {
     setBLoading(true);
@@ -263,6 +281,51 @@ export default function BatchManagement() {
       loadBatches(); loadTargets();
     } catch (e) { toast.error(formatError(e)); }
     finally { setBSaving(false); }
+  };
+
+  // Phase 38 · Auto-recalculate rate + work order value whenever the inputs change.
+  // Debounced 250ms so rapid typing doesn't spam the server.
+  useEffect(() => {
+    if (!bEdit || !bOpen) return;
+    if (!bEdit.fy_year || !bEdit.category) { setRateInfo(null); return; }
+    setRateBusy(true);
+    const t = setTimeout(async () => {
+      try {
+        const payload = {
+          fy_year: bEdit.fy_year,
+          category: bEdit.category,
+          num_candidates: Number(bEdit.num_candidates || 0),
+          job_role_hours: Number(bEdit.job_role_hours || 0),
+        };
+        if (bEdit.center_id) payload.district_id = bEdit.center_id;
+        const r = await api.post("/work-order/calculate", payload);
+        setRateInfo(r.data);
+        setBEdit((prev) => prev ? ({
+          ...prev,
+          is_lwe: r.data.is_lwe, base_rate: r.data.base_rate,
+          final_rate: r.data.final_rate, work_order_value: r.data.work_order_value,
+        }) : prev);
+      } catch { setRateInfo(null); }
+      finally { setRateBusy(false); }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [bEdit?.fy_year, bEdit?.category, bEdit?.center_id, bEdit?.num_candidates, bEdit?.job_role_hours, bOpen]);
+
+  const addJobRole = async () => {
+    const name = jrDraft.name.trim();
+    if (!name) return toast.error("Job Role name is required");
+    try {
+      const r = await api.post("/job-role-master", { ...jrDraft, name, default_hours: Number(jrDraft.default_hours) || 0 });
+      toast.success(`Job Role '${r.data.name}' added`);
+      setJobRoles((prev) => [...prev, r.data].sort((a, b) => a.name.localeCompare(b.name)));
+      // Auto-select the newly-created role.
+      setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: r.data.id, job_role_hours: r.data.default_hours }) : prev);
+      setJrOpen(false); setJrDraft({ name: "", default_hours: 8, nsqf_level: "" });
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  const pickJobRole = (rid) => {
+    const r = jobRoles.find((x) => x.id === rid);
+    setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: rid, job_role_hours: r?.default_hours || prev.job_role_hours }) : prev);
   };
 
   // ---- Aggregate metrics for header ----
@@ -504,6 +567,11 @@ export default function BatchManagement() {
                             <LockKeyhole size={9} /> Legacy
                           </span>
                         )}
+                        {(!b.fy_year || !b.category) && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 mt-1 bg-amber-100 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase" title="FY / Category / Rate not set — edit batch to complete Work Order Allocation.">
+                            Incomplete WO
+                          </span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -737,11 +805,111 @@ export default function BatchManagement() {
                   <Input value={bEdit.training_type || ""} className="rounded-none bg-gray-50" readOnly data-testid="bm-batch-inp-training" />
                 </div>
               </div>
+
+              {/* Phase 38 · Work Order Allocation */}
+              <div className="border-l-4 border-indigo-500 bg-indigo-50/30 p-3 space-y-3">
+                <div className="overline text-[10px] flex items-center justify-between border-b border-indigo-200 pb-1">
+                  <span>Work Order Allocation · Rate Engine</span>
+                  {rateBusy && <span className="text-[9px] italic text-[var(--muted)] normal-case">Calculating…</span>}
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <Label className="overline text-[10px]">FY Year *</Label>
+                    <Select value={bEdit.fy_year || undefined} onValueChange={(v) => setBEdit({ ...bEdit, fy_year: v })}>
+                      <SelectTrigger className="rounded-none" data-testid="bm-batch-inp-fy"><SelectValue placeholder="Select FY" /></SelectTrigger>
+                      <SelectContent>
+                        {FY_OPTIONS.map((y) => <SelectItem key={y} value={y}>{y}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="overline text-[10px]">Category *</Label>
+                    <Select value={bEdit.category || undefined} onValueChange={(v) => setBEdit({ ...bEdit, category: v })}>
+                      <SelectTrigger className="rounded-none" data-testid="bm-batch-inp-cat"><SelectValue placeholder="I / II / III" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="I">I</SelectItem>
+                        <SelectItem value="II">II</SelectItem>
+                        <SelectItem value="III">III</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="overline text-[10px]">Job Role</Label>
+                    <div className="flex gap-1">
+                      <Select value={bEdit.job_role_master_id || undefined} onValueChange={pickJobRole}>
+                        <SelectTrigger className="rounded-none flex-1" data-testid="bm-batch-inp-jobrole"><SelectValue placeholder="Select" /></SelectTrigger>
+                        <SelectContent>
+                          {jobRoles.length === 0 && <SelectItem value="__none__" disabled>No job roles — add one</SelectItem>}
+                          {jobRoles.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}{r.default_hours ? ` · ${r.default_hours}h` : ""}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                      <Button type="button" size="icon" variant="outline" onClick={() => setJrOpen(true)} className="h-9 w-9 rounded-none" title="Add Job Role" data-testid="bm-batch-jr-add"><Plus size={13} /></Button>
+                    </div>
+                  </div>
+                  <div>
+                    <Label className="overline text-[10px]">Job Role Hours</Label>
+                    <Input type="number" min={0} step="0.5" value={bEdit.job_role_hours || ""} onChange={(e) => setBEdit({ ...bEdit, job_role_hours: Number(e.target.value) || 0 })} className="rounded-none" data-testid="bm-batch-inp-hours" />
+                  </div>
+                  <div>
+                    <Label className="overline text-[10px]">No. of Candidate *</Label>
+                    <Input type="number" min={1} value={bEdit.num_candidates || ""} onChange={(e) => setBEdit({ ...bEdit, num_candidates: Number(e.target.value) || 0 })} className="rounded-none" data-testid="bm-batch-inp-numcands" />
+                  </div>
+                  <div>
+                    <Label className="overline text-[10px]">Per Hour Rate (auto)</Label>
+                    <Input value={rateInfo ? `₹${Number(rateInfo.final_rate).toFixed(2)}` : "—"} readOnly className="rounded-none bg-gray-50 font-mono" data-testid="bm-batch-inp-rate" />
+                    {rateInfo && (
+                      <div className="text-[9px] text-[var(--muted)] mt-0.5">
+                        Base ₹{rateInfo.base_rate}{rateInfo.is_lwe ? ` × 1.10 (LWE)` : ""} · slab {rateInfo.slab_label}
+                      </div>
+                    )}
+                  </div>
+                  <div className="md:col-span-3">
+                    <Label className="overline text-[10px]">Total Work Order Value (auto)</Label>
+                    <Input value={rateInfo ? `₹${Number(rateInfo.work_order_value).toLocaleString("en-IN")}` : "—"} readOnly className="rounded-none bg-gray-50 font-mono font-black text-lg text-emerald-700" data-testid="bm-batch-inp-value" />
+                    {rateInfo && (
+                      <div className="text-[10px] text-[var(--muted)] mt-0.5">
+                        Formula: {bEdit.num_candidates || 0} × ₹{rateInfo.final_rate} × {bEdit.job_role_hours || 0}h
+                        {rateInfo.is_lwe && <span className="ml-2 inline-flex items-center px-1.5 py-0.5 bg-amber-100 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase">LWE +10%</span>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => { setBOpen(false); setBEdit(null); setSelectedTargetForBatch(null); }} className="rounded-none">Cancel</Button>
             <Button onClick={saveBatch} disabled={bSaving} className="brand-btn rounded-none" data-testid="bm-batch-save">{bSaving ? "Creating…" : "Create Batch"}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Phase 38 · Add Job Role dialog */}
+      <Dialog open={jrOpen} onOpenChange={setJrOpen}>
+        <DialogContent className="rounded-none max-w-md" data-testid="bm-batch-jr-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-heading">Add New Job Role</DialogTitle>
+            <DialogDescription className="text-xs">Adds to the master. Immediately available in the dropdown.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="overline text-[10px]">Job Role Name *</Label>
+              <Input value={jrDraft.name} onChange={(e) => setJrDraft({ ...jrDraft, name: e.target.value })} placeholder="e.g. Mason / Electrician" className="rounded-none" data-testid="bm-jr-inp-name" autoFocus />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <Label className="overline text-[10px]">Default Hours</Label>
+                <Input type="number" min={0} step="0.5" value={jrDraft.default_hours} onChange={(e) => setJrDraft({ ...jrDraft, default_hours: e.target.value })} className="rounded-none" data-testid="bm-jr-inp-hours" />
+              </div>
+              <div>
+                <Label className="overline text-[10px]">NSQF Level</Label>
+                <Input value={jrDraft.nsqf_level} onChange={(e) => setJrDraft({ ...jrDraft, nsqf_level: e.target.value })} placeholder="4 / 5 / 6" className="rounded-none" data-testid="bm-jr-inp-nsqf" />
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setJrOpen(false)} className="rounded-none">Cancel</Button>
+            <Button onClick={addJobRole} className="brand-btn rounded-none" data-testid="bm-jr-save">Add</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
