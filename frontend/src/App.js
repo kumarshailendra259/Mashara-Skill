@@ -39,6 +39,7 @@ import PaymentDashboard from "@/pages/PaymentDashboard";
 import BankReconciliation from "@/pages/BankReconciliation";
 import Invoices from "@/pages/Invoices";
 import InvoiceDetail from "@/pages/InvoiceDetail";
+import StaffFinancialHistory from "@/pages/StaffFinancialHistory";
 import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
@@ -93,6 +94,7 @@ function App() {
             <Route path="/bank-reconciliation" element={<ProtectedRoute><Shell><BankReconciliation /></Shell></ProtectedRoute>} />
             <Route path="/invoices" element={<ProtectedRoute><Shell><Invoices /></Shell></ProtectedRoute>} />
             <Route path="/invoices/:id" element={<ProtectedRoute><Shell><InvoiceDetail /></Shell></ProtectedRoute>} />
+            <Route path="/hrms/financial-history" element={<ProtectedRoute><Shell><StaffFinancialHistory /></Shell></ProtectedRoute>} />
             <Route path="/vendors" element={<ProtectedRoute><Shell><Vendors /></Shell></ProtectedRoute>} />
             <Route path="/candidates" element={<ProtectedRoute><Shell><Candidates /></Shell></ProtectedRoute>} />
             <Route path="/bank-guarantees" element={<ProtectedRoute><Shell><BankGuarantees /></Shell></ProtectedRoute>} />

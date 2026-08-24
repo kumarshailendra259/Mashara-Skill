@@ -26,6 +26,36 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 48 — Staff Wise Financial History / Employee Payment History Module (Done, Feb 2026)
+- **User asked**: Naya HRMS module — HR/Admin kisi bhi employee ko select karke aaj tak ki poori financial ledger dekhe (salary, reimbursement, advance, bonus, incentive, overtime, other payments) with month-wise summary, filters, CSV export, and Add-Payment for manual entries. Duplicate prevention critical: existing payroll/reimbursement/advance data ko re-count nahi karna.
+- **Backend `/app/backend/server.py`** (~+230 LOC before router registration):
+  - **New collection**: `staff_payments` — stores manual payments only (bonus/incentive/overtime/arrear/loan_payment/final_settlement/other_payment/recovery). Auto-cancels via soft-delete (status=cancelled + cancelled_by/at) so audit trail is preserved.
+  - `POST /api/staff-payments` (admin/hr/accountant) — validates type + amount, stamps created_by + IST timestamp.
+  - `GET /api/staff-payments?staff_id=...` — list per employee.
+  - `DELETE /api/staff-payments/{pid}` — soft cancel (status=cancelled).
+  - `GET /api/staff/{sid}/financial-history?date_from&date_to&payment_type&status` — **read-only aggregator** that pulls from four sources in parallel and returns `{staff, summary, monthly[], transactions[]}`:
+    - Salary from `db.payroll` (source_module="payroll", one txn per month, uses paid_at or month/year for date)
+    - Reimbursement from `db.reimbursements` (source_module="reimbursement", matches via staff_id/user_id/created_by)
+    - Advance from `db.advance_requests` (source_module="advance", released/adjusting/settled mapped to "paid" status)
+    - Manual from `db.staff_payments` (source_module="custom")
+  - **Duplicate prevention**: each txn's stable `id` is `{source_module}:{source_id}` — the aggregator never inserts anything, so the same salary/reimbursement/advance appears exactly once no matter how many times the API is called.
+  - **Only Paid counted** in totals — `is_paid()` matches status ∈ {paid, released, adjusting, settled}. Pending/Draft/Rejected/Cancelled excluded from `grand_total` and monthly rollups but still visible in the transactions list.
+  - Startup index bootstrap: `staff_payments(staff_id, payment_date desc)` + `staff_payments(payment_type)`.
+- **Frontend `/app/frontend/src/pages/StaffFinancialHistory.jsx`** (~+380 LOC, new page):
+  - Employee search box with server-side `?q=` (debounced 250ms) — supports both active and historical employees.
+  - Filter bar: Date From / Date To / Payment Type (11 types) / Status + preset buttons (This Month · Last Month · FY 2026-27 · Till Date · Reset).
+  - Employee header card with name + emp code + designation + joining date + Active/Exited badge, plus **Add Payment** button (HR/Admin/Accountant only) and Export CSV button.
+  - **8 KPI cards** in colour-tinted grid: Total Salary · Reimbursements · Advances · Bonus+Incentive · Overtime+Arrear · Other · Deductions · **Grand Total Paid** (highlighted brand blue).
+  - Two tabs: **Transactions** (full table with 10 columns · sticky header · payment-type coloured badges · Paid vs Draft status chips) and **Monthly Summary** (7-column month-wise aggregation).
+  - **Add Payment dialog** with 8 manual payment types + payment date/mode/reference/description/remarks. Saves as `status="paid"` by default.
+  - CSV export generates client-side using the currently filtered transactions.
+- **Routing + Sidebar**: `App.js` gets `/hrms/financial-history` route. `Layout.jsx` adds the menu item **"Employee Payment History"** (Wallet icon) inside the Employee/HR Management group with `hrOrAdminOrAccountant` role gate. i18n keys `financial_history` added in English + Hindi.
+- **Verified end-to-end**:
+  - curl: `POST /api/staff-payments` created a ₹5,000 bonus row for Auto Provisioned (NEFT12345) → `GET /api/staff/{sid}/financial-history` returned staff object + summary (total_salary ₹0, total_bonus ₹5,000, grand_total ₹5,000, transaction_count 15, paid_count 1) + monthly[] with 3 months + transactions[] merging all 4 sources.
+  - Live browser: `/hrms/financial-history` opened, "Auto" search returned "Auto Provisioned", click loaded header + 8 KPI cards (correct ₹5,000 grand total, ₹0 for the 14 draft salaries), Transactions tab shows the bonus row with green "paid" chip alongside 14 draft salary rows, Monthly Summary tab shows 2026-08 correctly rolling up ₹5,000.
+
+
+
 ### Phase 47 — Zero-Attendance Priority Rule + Joining/Exit Filter Verified (Done, Feb 2026)
 - **User reported (production screenshot)**: HRMS Payroll dikha raha tha 0/24 attendance staff ko ₹533, ₹933, ₹587, ₹800, ₹1,000 salary — kyunki Phase 45 formula `payable_days = present + half*0.5 + paid_leave + holidays` mein **holidays being counted** even when the employee had zero real work. User's rule 9: "Zero Attendance Rule Has Highest Priority — Gross=0, Deduction=0, Net=0".
 - **Backend `_compute_payroll_for_staff`** — added **Zero-Attendance Override** immediately after payable_days is computed:

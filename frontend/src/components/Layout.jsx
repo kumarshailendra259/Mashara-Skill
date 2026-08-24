@@ -87,6 +87,7 @@ const navGroups = [
     items: [
       { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
       { to: "/hrms", key: "HRMS", icon: Users },
+      { to: "/hrms/financial-history", key: "financial_history", icon: Wallet, hrOrAdminOrAccountant: true },
       { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
       { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
       { to: "/login-history", key: "login_history", icon: History, adminOnly: true },
@@ -283,6 +284,7 @@ export default function Layout({ children }) {
     if (it.adminManagerOnly && !["admin", "manager"].includes(user?.role)) return false;
     if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
     if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
+    if (it.hrOrAdminOrAccountant && !["admin", "hr", "accountant"].includes(user?.role)) return false;
     if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
     if (it.candidateAccess && !["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role)) return false;
     if (it.bgAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner"].includes(user?.role)) return false;

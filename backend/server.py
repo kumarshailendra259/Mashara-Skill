@@ -18551,6 +18551,309 @@ async def _sync_invoice_on_receive(bp: dict, user: dict):
 
 
 # ---------- Register router + CORS ----------
+
+# ============================================================================
+# PHASE 48 — Staff Wise Financial History / Employee Payment History
+# Aggregates existing payroll, reimbursement, advance, and manual staff_payments
+# collections into a single per-employee ledger view. Uses source_module + source_id
+# to guarantee no duplicates — this is a read-only aggregator on top of existing
+# data, PLUS one new collection (`staff_payments`) for manual "Other Payments"
+# that HR adds directly (bonus, incentive, arrear, final settlement, etc.).
+# ============================================================================
+
+STAFF_PAYMENT_TYPES = [
+    "bonus", "incentive", "overtime", "arrear",
+    "loan_payment", "final_settlement", "other_payment", "recovery",
+]
+
+
+class StaffPaymentIn(BaseModel):
+    staff_id: str
+    payment_type: str  # one of STAFF_PAYMENT_TYPES
+    payment_date: str  # YYYY-MM-DD
+    amount: float
+    description: Optional[str] = None
+    payment_mode: Optional[str] = None
+    payment_reference: Optional[str] = None
+    remarks: Optional[str] = None
+    attachment_url: Optional[str] = None
+    status: str = "paid"  # draft | paid | cancelled
+
+
+def _staff_pay_month(d: str) -> str:
+    try:
+        return d[:7]  # YYYY-MM
+    except (TypeError, ValueError):
+        return ""
+
+
+@api.post("/staff-payments", status_code=201)
+async def create_staff_payment(body: StaffPaymentIn, user=Depends(require_role("admin", "hr", "accountant"))):
+    if body.payment_type not in STAFF_PAYMENT_TYPES:
+        raise HTTPException(400, f"Invalid payment_type. Must be one of: {STAFF_PAYMENT_TYPES}")
+    if body.amount <= 0:
+        raise HTTPException(400, "Amount must be > 0")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "staff_id": body.staff_id,
+        "payment_type": body.payment_type,
+        "payment_date": body.payment_date,
+        "payment_month": _staff_pay_month(body.payment_date),
+        "amount": float(body.amount),
+        "description": body.description,
+        "payment_mode": body.payment_mode,
+        "payment_reference": body.payment_reference,
+        "remarks": body.remarks,
+        "attachment_url": body.attachment_url,
+        "status": body.status,
+        "created_by": user.get("id"),
+        "created_by_name": user.get("name") or user.get("email"),
+        "created_at": _now_ist_iso(),
+    }
+    await db.staff_payments.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/staff-payments")
+async def list_staff_payments(staff_id: Optional[str] = None,
+                                _=Depends(require_role("admin", "hr", "accountant"))):
+    q = {}
+    if staff_id:
+        q["staff_id"] = staff_id
+    rows = await db.staff_payments.find(q, {"_id": 0}).sort("payment_date", -1).to_list(2000)
+    return rows
+
+
+@api.delete("/staff-payments/{pid}", status_code=204)
+async def delete_staff_payment(pid: str, user=Depends(require_role("admin", "hr"))):
+    rec = await db.staff_payments.find_one({"id": pid})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    # Soft cancel — preserve audit trail.
+    await db.staff_payments.update_one({"id": pid}, {"$set": {
+        "status": "cancelled",
+        "cancelled_by": user.get("id"),
+        "cancelled_by_name": user.get("name") or user.get("email"),
+        "cancelled_at": _now_ist_iso(),
+    }})
+    return None
+
+
+@api.get("/staff/{sid}/financial-history")
+async def staff_financial_history(sid: str,
+                                    date_from: Optional[str] = None,
+                                    date_to: Optional[str] = None,
+                                    payment_type: Optional[str] = None,
+                                    status: Optional[str] = None,
+                                    _=Depends(require_role("admin", "hr", "accountant"))):
+    """Return every financial transaction (salary + reimbursement + advance +
+    manual staff_payments) for a staff, with monthly totals + per-type totals.
+    Only Paid transactions are included in the Grand Total.
+    """
+    staff = await db.staff.find_one({"id": sid}, {"_id": 0})
+    if not staff:
+        raise HTTPException(404, "Staff not found")
+
+    def _in_range(dt_str):
+        if not dt_str:
+            return True
+        d = dt_str[:10]
+        if date_from and d < date_from:
+            return False
+        if date_to and d > date_to:
+            return False
+        return True
+
+    txns = []
+
+    # 1) Salary (payroll)
+    payroll_rows = await db.payroll.find({"staff_id": sid}, {"_id": 0}).sort("year", -1).to_list(500)
+    for p in payroll_rows:
+        # Prefer paid_at, else month/year → last day
+        pd = (p.get("paid_at") or "")[:10] or f"{p.get('year','0000')}-{int(p.get('month') or 1):02d}-01"
+        if not _in_range(pd):
+            continue
+        txns.append({
+            "id": f"payroll:{p.get('id')}",
+            "source_module": "payroll",
+            "source_id": p.get("id"),
+            "payment_type": "salary",
+            "date": pd,
+            "month": f"{p.get('year','0000')}-{int(p.get('month') or 1):02d}",
+            "reference": f"PAY-{p.get('year')}-{p.get('month')}-{(p.get('id') or '')[:8]}",
+            "description": f"Salary {p.get('month')}/{p.get('year')}",
+            "gross": float(p.get("gross") or 0),
+            "deduction": float(p.get("deductions") or 0),
+            "net": float(p.get("net") or 0),
+            "status": p.get("status", "draft"),
+            "payment_mode": "bank",
+            "payment_reference": (p.get("txn_id") or ""),
+            "remarks": p.get("remarks"),
+            "paid_at": p.get("paid_at"),
+        })
+
+    # 2) Reimbursements — link via user_id or staff_id
+    reimb_q = {"$or": [{"staff_id": sid}]}
+    if staff.get("user_id"):
+        reimb_q["$or"].append({"user_id": staff["user_id"]})
+        reimb_q["$or"].append({"created_by": staff["user_id"]})
+    reimb_rows = await db.reimbursements.find(reimb_q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    for r in reimb_rows:
+        pd = (r.get("paid_at") or r.get("created_at") or "")[:10]
+        if not _in_range(pd):
+            continue
+        txns.append({
+            "id": f"reimb:{r.get('id')}",
+            "source_module": "reimbursement",
+            "source_id": r.get("id"),
+            "payment_type": "reimbursement",
+            "date": pd,
+            "month": pd[:7] if pd else "",
+            "reference": r.get("claim_no") or (r.get("id") or "")[:12],
+            "description": r.get("purpose") or r.get("category") or "Reimbursement",
+            "gross": float(r.get("amount") or 0),
+            "deduction": 0.0,
+            "net": float(r.get("amount") or 0),
+            "status": r.get("status", "draft"),
+            "payment_mode": r.get("payment_mode") or "bank",
+            "payment_reference": r.get("payment_reference") or r.get("txn_id") or "",
+            "remarks": r.get("remarks"),
+            "paid_at": r.get("paid_at"),
+        })
+
+    # 3) Advances
+    adv_q = {"$or": [{"staff_id": sid}]}
+    if staff.get("user_id"):
+        adv_q["$or"].append({"created_by": staff["user_id"]})
+    adv_rows = await db.advance_requests.find(adv_q, {"_id": 0}).sort("created_at", -1).to_list(200)
+    for a in adv_rows:
+        pd = (a.get("released_at") or a.get("created_at") or "")[:10]
+        if not _in_range(pd):
+            continue
+        st = a.get("status", "draft")
+        txns.append({
+            "id": f"advance:{a.get('id')}",
+            "source_module": "advance",
+            "source_id": a.get("id"),
+            "payment_type": "salary_advance",
+            "date": pd,
+            "month": pd[:7] if pd else "",
+            "reference": a.get("advance_no") or (a.get("id") or "")[:12],
+            "description": a.get("purpose") or "Salary Advance",
+            "gross": float(a.get("amount") or 0),
+            "deduction": 0.0,
+            "net": float(a.get("amount") or 0),
+            "status": "paid" if st in ("released", "adjusting", "settled") else st,
+            "payment_mode": a.get("payment_mode") or "bank",
+            "payment_reference": a.get("txn_id") or "",
+            "remarks": a.get("remarks"),
+            "paid_at": a.get("released_at"),
+        })
+
+    # 4) Manual staff_payments (bonus/incentive/overtime/arrear/other/final_settlement)
+    sp_rows = await db.staff_payments.find({"staff_id": sid}, {"_id": 0}).sort("payment_date", -1).to_list(500)
+    for sp in sp_rows:
+        pd = sp.get("payment_date")
+        if not _in_range(pd):
+            continue
+        txns.append({
+            "id": f"custom:{sp.get('id')}",
+            "source_module": "custom",
+            "source_id": sp.get("id"),
+            "payment_type": sp.get("payment_type"),
+            "date": pd,
+            "month": sp.get("payment_month"),
+            "reference": sp.get("payment_reference") or (sp.get("id") or "")[:12],
+            "description": sp.get("description") or sp.get("payment_type"),
+            "gross": float(sp.get("amount") or 0),
+            "deduction": 0.0,
+            "net": float(sp.get("amount") or 0),
+            "status": sp.get("status", "paid"),
+            "payment_mode": sp.get("payment_mode") or "cash",
+            "payment_reference": sp.get("payment_reference"),
+            "remarks": sp.get("remarks"),
+            "paid_at": sp.get("payment_date"),
+        })
+
+    # Apply filters
+    if payment_type:
+        txns = [t for t in txns if t.get("payment_type") == payment_type]
+    if status:
+        txns = [t for t in txns if t.get("status") == status]
+
+    # Sort descending by date
+    txns.sort(key=lambda t: (t.get("date") or ""), reverse=True)
+
+    # Aggregations — only Paid counts toward totals
+    is_paid = lambda t: (t.get("status") or "").lower() in ("paid", "released", "adjusting", "settled")
+    per_type = {}
+    monthly = {}
+    grand = 0.0
+    total_deduction = 0.0
+    for t in txns:
+        if not is_paid(t):
+            continue
+        pt = t["payment_type"]
+        per_type.setdefault(pt, 0.0)
+        per_type[pt] += t["net"]
+        m = t.get("month") or ""
+        monthly.setdefault(m, {"salary": 0, "reimbursement": 0, "salary_advance": 0,
+                                "bonus": 0, "incentive": 0, "overtime": 0,
+                                "arrear": 0, "loan_payment": 0, "final_settlement": 0,
+                                "other_payment": 0, "recovery": 0, "total": 0})
+        if pt in monthly[m]:
+            monthly[m][pt] += t["net"]
+        else:
+            monthly[m]["other_payment"] += t["net"]
+        monthly[m]["total"] += t["net"]
+        grand += t["net"]
+        total_deduction += t["deduction"]
+
+    # Format monthly summary as array sorted descending by month key
+    monthly_arr = [{"month": m, **totals} for m, totals in monthly.items()]
+    monthly_arr.sort(key=lambda x: x["month"], reverse=True)
+
+    return {
+        "staff": {
+            "id": staff.get("id"),
+            "name": staff.get("name"),
+            "employee_code": staff.get("employee_code"),
+            "designation": staff.get("designation"),
+            "department": staff.get("department"),
+            "joining_date": staff.get("joining_date"),
+            "exit_date": staff.get("exit_date"),
+            "active": staff.get("active", True),
+            "monthly_salary": staff.get("monthly_salary"),
+        },
+        "summary": {
+            "total_salary": round(per_type.get("salary", 0), 2),
+            "total_reimbursement": round(per_type.get("reimbursement", 0), 2),
+            "total_advance": round(per_type.get("salary_advance", 0), 2),
+            "total_bonus": round(per_type.get("bonus", 0), 2),
+            "total_incentive": round(per_type.get("incentive", 0), 2),
+            "total_overtime": round(per_type.get("overtime", 0), 2),
+            "total_arrear": round(per_type.get("arrear", 0), 2),
+            "total_other": round(per_type.get("other_payment", 0) + per_type.get("final_settlement", 0), 2),
+            "total_deductions": round(total_deduction, 2),
+            "grand_total": round(grand, 2),
+            "transaction_count": len(txns),
+            "paid_count": sum(1 for t in txns if is_paid(t)),
+        },
+        "monthly": monthly_arr,
+        "transactions": txns,
+    }
+
+
+@app.on_event("startup")
+async def _fin_history_startup():
+    try:
+        await db.staff_payments.create_index([("staff_id", 1), ("payment_date", -1)])
+        await db.staff_payments.create_index([("payment_type", 1)])
+    except Exception as _e:
+        logging.exception("staff_payments index init failed: %s", _e)
+
+
 app.include_router(api)
 
 
