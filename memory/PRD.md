@@ -26,6 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 45 — Payroll Formula Correction: Per Day Rate + Payable Days (Done, Feb 2026)
+- **User asked (with production screenshot showing bug)**: Shatakshi Parashar (CTC ₹14,000, joined mid-month) was showing **₹15,866.67 Gross > CTC** because Per Day = 14000/15 (working_days) = ₹933 (too high) then × 17 payable days. Explicit corrected formula given:
+  - **Payable Salary = (Monthly Salary ÷ Total Days in the Month) × Payable Days**
+  - **Payable Days = Present + Holidays + Paid Leave** (Weekly Off no longer counted in payable per new policy)
+- **Backend `/app/backend/server.py`** — `_compute_payroll_for_staff` now:
+  - `per_day = monthly_salary / last_day` (calendar days of the month — 30/31/28/29) instead of `working_days`
+  - `payable_days = present_days + (half_days × 0.5) + paid_leave_days + holiday_count` — Weekly Off intentionally excluded (kept as an information stat only)
+  - Removed the dead earlier assignment that included `weekly_off_count` in payable
+  - `basic = per_day × payable_days` — automatically caps mid-month joiners at their proportional share and never exceeds CTC
+- **Frontend `StaffSalaryDetail.jsx`** — Salary Calculation Breakdown updated:
+  - Row label changed to "÷ Total Days in Month" (was "÷ Payroll Working Days")
+  - Weekly Off line removed from the "+" additions with an italic note explaining it is shown separately and no longer counted per company policy
+- **Verified against user's example**: CTC ₹14,000, Present 14, Holiday 1, Paid Leave 0 → Per Day = 14000/31 = ₹451.61, Payable Days = 15, **Basic = ₹6,774.19** (matches expected math, previously ₹15,866.67).
+- **Verified live**: Auto Provisioned Aug 2026 (CTC ₹15,000, 0 present, 5 weekly off, 1 holiday) → Per Day = ₹483.87, Payable Days = 1 (only holiday), **Basic ₹483.87** (previously showed ₹3,600 which incorrectly included weekly-off days).
+
+
+
 ### Phase 44 — Salary Detail: Attendance-Aware UI + Recalculate + Warning + Breakdown (Done, Feb 2026)
 - **User asked**: Salary Detail page pe full salary show ho raha hai kyunki attendance rows kum hain (16/31). Show every unmarked day as unpaid, add warning, add recalculate, add clear breakdown.
 - **Root cause on this specific page**: Backend `/api/payroll/staff/{sid}/summary` returned only `present/half/absent/leave/working_days/days_marked` — no concept of "unmarked absent" — and the frontend just displayed whatever gross the (pre-Phase-43) stale payroll doc had cached, so Shatakshi's July 2026 draft still read ₹15,866.67 even after the payroll_run fix.

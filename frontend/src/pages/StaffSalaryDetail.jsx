@@ -328,14 +328,14 @@ export default function StaffSalaryDetail() {
               <div className="overline mb-2">Attendance → Salary</div>
               <div className="text-sm font-mono space-y-1">
                 <div><span className="text-[var(--muted)]">Monthly CTC:</span> <b>{inr(s.monthly_salary)}</b></div>
-                <div><span className="text-[var(--muted)]">÷ Payroll Working Days:</span> <b>{att.payroll_working_days ?? att.working_days ?? "—"}</b></div>
+                <div><span className="text-[var(--muted)]">÷ Total Days in Month:</span> <b>{att.total_calendar_days ?? "—"}</b></div>
                 <div className="border-t border-[var(--border)] pt-1"><span className="text-[var(--muted)]">= Per Day Rate:</span> <b className="text-[var(--brand)]">{inr(att.per_day_rate)}</b></div>
                 <div className="pt-2">
                   <div><span className="text-[var(--muted)]">Present Days:</span> <b>{att.present_days ?? 0}</b></div>
                   <div><span className="text-[var(--muted)]">+ Half Day × 0.5:</span> <b>{((att.half_days ?? 0) * 0.5).toFixed(1)}</b></div>
                   <div><span className="text-[var(--muted)]">+ Paid Leave:</span> <b>{att.paid_leave_days ?? 0}</b></div>
-                  <div><span className="text-[var(--muted)]">+ Weekly Off:</span> <b>{att.weekly_off_days ?? 0}</b></div>
                   <div><span className="text-[var(--muted)]">+ Holidays:</span> <b>{att.holiday_days ?? 0}</b></div>
+                  <div className="text-[10px] text-[var(--muted)] italic">(Weekly Off shown separately — not counted in Payable Days per company policy)</div>
                   <div className="border-t border-[var(--border)] pt-1"><span className="text-[var(--muted)]">= Payable Days:</span> <b className="text-green-700">{att.payable_days ?? "—"}</b></div>
                 </div>
                 <div className="pt-2 text-[13px]">

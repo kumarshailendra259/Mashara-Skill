@@ -6868,8 +6868,7 @@ async def _compute_payroll_for_staff(s: dict, month: int, year: int,
 
     total_absent = absent_days + unmarked_absent_days
     unpaid_days = total_absent + unpaid_leave_days + (half_days * 0.5)
-    # Payable days = present + half*0.5 + paid_leave + weekly_off + holidays
-    payable_days = present_days + (half_days * 0.5) + paid_leave_days + weekly_off_count + holiday_count
+    # (payable_days is computed below after per_day, per Phase 45 spec.)
 
     # Late buckets
     shift = None
@@ -6878,17 +6877,27 @@ async def _compute_payroll_for_staff(s: dict, month: int, year: int,
     buckets = _compute_late_buckets(rows, shift)
     late_days = (buckets["minor"] // 3) + 0.5 * buckets["half_day"] + 1.0 * buckets["full_day"]
 
-    # Per-day rate: prefer explicit override, else monthly / working_days per spec
+    # PHASE 45 — Per-day rate now uses TOTAL DAYS OF THE CALENDAR MONTH
+    # (last_day) as the divisor per revised user spec:
+    #   Payable Salary = (Monthly Salary ÷ Total Days in the Month) × Payable Days
+    # This prevents mid-month joiners from earning more than CTC (previously
+    # working_days = 15 for a mid-month joiner made per_day artificially high).
     if s.get("per_day_rate", 0):
         per_day = float(s["per_day_rate"])
-    elif working_days > 0:
-        per_day = (s.get("monthly_salary", 0) or 0) / working_days
+    elif last_day > 0:
+        per_day = (s.get("monthly_salary", 0) or 0) / last_day
     else:
         per_day = 0
     late_deduction = round(late_days * per_day, 2)
 
+    # PHASE 45 — Payable Days = Present + Holidays + Paid Leave + Half×0.5.
+    # Weekly Off is intentionally EXCLUDED from payable per revised policy.
+    # (Half-day is retained because a half-day worked is still partially paid.)
+    payable_days = present_days + (half_days * 0.5) + paid_leave_days + holiday_count
+
     # Earnings = per_day × payable_days.
-    # This gives ZERO salary for zero attendance (the critical fix).
+    # This gives ZERO salary for zero attendance (the critical fix from Phase 43),
+    # and caps a mid-month joiner's salary at their proportional share.
     basic = round(per_day * payable_days, 2)
     attendance_deduction = round(per_day * unpaid_days, 2)
 
