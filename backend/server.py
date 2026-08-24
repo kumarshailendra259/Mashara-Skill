@@ -1254,7 +1254,7 @@ async def list_offer_letter_templates(_=Depends(require_role("admin", "hr", "man
 
 
 @api.delete("/offer-letter-templates/{tid}", status_code=204)
-async def delete_offer_letter_template(tid: str, _=Depends(require_role("admin"))):
+async def delete_offer_letter_template(tid: str, _=Depends(require_role("admin", "hr"))):
     r = await db.offer_letter_templates.delete_one({"id": tid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Template not found")
@@ -2312,7 +2312,7 @@ async def bulk_delete_partner_associations(body: BulkIds, _=Depends(require_role
 
 
 @api.post("/staff/bulk-archive")
-async def bulk_archive_staff(body: BulkIds, _=Depends(require_role("admin"))):
+async def bulk_archive_staff(body: BulkIds, _=Depends(require_role("admin", "hr"))):
     """Soft-archive staff (sets is_active=false). Linked user account also archived."""
     if not body.ids:
         return {"archived": 0}
@@ -7505,7 +7505,7 @@ async def list_salary_slip_templates(_=Depends(require_role("admin", "hr", "mana
 
 
 @api.delete("/salary-slip-templates/{tid}", status_code=204)
-async def delete_salary_slip_template(tid: str, _=Depends(require_role("admin"))):
+async def delete_salary_slip_template(tid: str, _=Depends(require_role("admin", "hr"))):
     r = await db.salary_slip_templates.delete_one({"id": tid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Template not found")
@@ -12752,7 +12752,7 @@ async def update_leave_type(lt_id: str, body: LeaveTypeIn, _=Depends(require_rol
 
 
 @api.delete("/leave-types/{lt_id}")
-async def delete_leave_type(lt_id: str, _=Depends(require_role("admin"))):
+async def delete_leave_type(lt_id: str, _=Depends(require_role("admin", "hr"))):
     # Soft-protect: refuse if any balance refers to this type
     if await db.leave_balances.find_one({"leave_type_id": lt_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "This leave type is used in staff balances — deactivate instead of deleting")

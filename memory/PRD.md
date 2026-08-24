@@ -26,6 +26,24 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 42 — HR Full Access + HRMS Command Centre Redesign (Done, Feb 2026)
+- **User asked**: HR ko HRMS ka full control access dena aur HRMS menu ka look interactive + sundar + easy-to-understand banana.
+- **Backend `/app/backend/server.py`** — 4 admin-only endpoints extended with HR:
+  - `DELETE /api/offer-letter-templates/{tid}` → `require_role("admin", "hr")`
+  - `DELETE /api/salary-slip-templates/{tid}` → `require_role("admin", "hr")`
+  - `DELETE /api/leave-types/{lt_id}` → `require_role("admin", "hr")`
+  - `POST /api/staff/bulk-archive` → `require_role("admin", "hr")`
+  - All other HRMS endpoints (staff CRUD, attendance mark/edit, leaves approve, reimbursement templates/l1/accountant/pay/reject, payroll run/edit/generate-slip/release-slip/pay, holidays, shifts, geofences, staff documents, verify/unverify bank, offer letter send, generate-login) already included HR — audited and confirmed.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`** (~+90 LOC, replaced header + tab bar):
+  - **Hero header** with soft gradient (slate → white → indigo/50), new title "HR Command Centre" + Hinglish subtitle "Ek jagah pe pura staff lifecycle — onboarding, attendance, leaves, reimbursements, payroll. Har action ek click door."
+  - **5 KPI cards** side-by-side (grid-cols-5 on desktop, 2 on mobile) — Total Staff / Attendance Rows / Leave Requests / Reimbursements / Payroll Rows, each with its own icon (Users, CalendarCheck, CalendarDays, Receipt, Wallet) and toned background (indigo/emerald/amber/blue/slate).
+  - **Rich tab bar** — flex row of 5 tabs, each with icon + label + tiny descriptor sub-line ("Claims + approvals", "Roster + master data", "Daily punch + regs.", "Requests + balances", "Monthly salary run"). Active state gets a matching tinted background per tab (blue for Reimbursements, indigo Staff, emerald Attendance, amber Leaves, slate Payroll). Border-based active indicator instead of the earlier flat underline.
+  - All existing tab content (Reimbursements templates, Staff roster with 25-column table, Attendance date picker + status cards, Leaves inbox, Payroll rows) untouched — zero functional regression.
+- **Test credentials**: Added `hr@finance.app / Hr@12345` (role: hr) to `/app/memory/test_credentials.md`.
+- **Verified live**: HR user logged in → /hrms rendered with hero + 5 KPI cards (240/24/67/0/2646) + interactive tabs → clicking Attendance switched active tone to emerald + loaded staff punch cards. No console errors. No RBAC 403s on any HRMS action.
+
+
+
 ### Phase 41 — Finance (Milestones) ↔ Invoice Tracking Integration (Done, Feb 2026)
 - **User asked**: Integrate Finance (Milestones) module with Invoice Tracking so milestone updates automatically flow into invoice stages. Chose (a) auto-link approach + (1) simple stage advance with remarks only.
 - **Backend `/app/backend/server.py`** (~+170 LOC):

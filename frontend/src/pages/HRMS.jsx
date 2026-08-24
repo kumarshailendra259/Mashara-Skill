@@ -14,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -808,21 +808,69 @@ export default function HRMS() {
 
   return (
     <div className="space-y-5" data-testid="hrms-page">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <div className="overline">HRMS · Payroll</div>
-          <h1 className="font-heading font-black tracking-tight text-3xl mt-1">HRMS &amp; Payroll</h1>
+      {/* Hero header with gradient + KPI strip */}
+      <div className="relative overflow-hidden border border-[var(--border)]">
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-50 via-white to-indigo-50/50" />
+        <div className="relative px-5 py-5 md:px-6 md:py-6">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <div className="overline text-[10px]">HRMS · Payroll · Attendance · Leaves · Reimbursements</div>
+              <h1 className="font-heading font-black tracking-tight text-3xl md:text-4xl mt-1">HR Command Centre</h1>
+              <p className="text-sm text-[var(--muted)] mt-1 max-w-xl">
+                Ek jagah pe pura staff lifecycle — onboarding, attendance, leaves, reimbursements, payroll. Har action ek click door.
+              </p>
+            </div>
+            <PrintButton />
+          </div>
+          {/* KPI strip */}
+          <div className="mt-5 grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              { key: "staff", icon: Users, label: "Total Staff", value: staffTotal || staff.length, tone: "text-indigo-700 bg-indigo-50 border-indigo-200" },
+              { key: "attendance", icon: CalendarCheck, label: "Attendance Rows", value: attRecent.length, tone: "text-emerald-700 bg-emerald-50 border-emerald-200" },
+              { key: "leaves", icon: CalendarDays, label: "Leave Requests", value: leaves.length, tone: "text-amber-700 bg-amber-50 border-amber-200" },
+              { key: "reimb", icon: Receipt, label: "Reimbursements", value: reimbs.length, tone: "text-blue-700 bg-blue-50 border-blue-200" },
+              { key: "payroll", icon: Wallet, label: "Payroll Rows", value: payrollTotal || payroll.length, tone: "text-slate-700 bg-slate-50 border-slate-200" },
+            ].map((k) => {
+              const Icon = k.icon;
+              return (
+                <div key={k.key} className={`border p-3 ${k.tone}`} data-testid={`hrms-kpi-${k.key}`}>
+                  <div className="flex items-center gap-2">
+                    <Icon size={14} strokeWidth={2} />
+                    <div className="overline text-[10px] font-semibold">{k.label}</div>
+                  </div>
+                  <div className="font-heading font-black text-2xl tracking-tight num mt-1">{k.value}</div>
+                </div>
+              );
+            })}
+          </div>
         </div>
-        <PrintButton />
       </div>
 
       <Tabs defaultValue="reimb">
-        <TabsList className="rounded-none bg-transparent border-b border-[var(--border)] p-0 h-auto">
-          <TabsTrigger value="reimb" className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">Reimbursements</TabsTrigger>
-          <TabsTrigger value="staff" className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">Staff</TabsTrigger>
-          <TabsTrigger value="attendance" className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2" data-testid="tab-attendance">Attendance</TabsTrigger>
-          <TabsTrigger value="leaves" className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2" data-testid="tab-leaves">Leaves</TabsTrigger>
-          <TabsTrigger value="payroll" className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">Payroll</TabsTrigger>
+        <TabsList className="rounded-none bg-white border border-[var(--border)] p-1 h-auto flex flex-wrap gap-1 justify-start" data-testid="hrms-tablist">
+          {[
+            { value: "reimb",      label: "Reimbursements", desc: "Claims + approvals",   icon: Receipt,        tone: "data-[state=active]:bg-blue-50 data-[state=active]:text-blue-700 data-[state=active]:border-blue-300" },
+            { value: "staff",      label: "Staff",          desc: "Roster + master data", icon: Users,          tone: "data-[state=active]:bg-indigo-50 data-[state=active]:text-indigo-700 data-[state=active]:border-indigo-300" },
+            { value: "attendance", label: "Attendance",     desc: "Daily punch + regs.",  icon: CalendarCheck,  tone: "data-[state=active]:bg-emerald-50 data-[state=active]:text-emerald-700 data-[state=active]:border-emerald-300" },
+            { value: "leaves",     label: "Leaves",         desc: "Requests + balances",  icon: CalendarDays,   tone: "data-[state=active]:bg-amber-50 data-[state=active]:text-amber-700 data-[state=active]:border-amber-300" },
+            { value: "payroll",    label: "Payroll",        desc: "Monthly salary run",   icon: Wallet,         tone: "data-[state=active]:bg-slate-100 data-[state=active]:text-slate-800 data-[state=active]:border-slate-400" },
+          ].map((t) => {
+            const Icon = t.icon;
+            return (
+              <TabsTrigger
+                key={t.value}
+                value={t.value}
+                data-testid={`tab-${t.value}`}
+                className={`rounded-none border border-transparent px-3 py-2 flex items-center gap-2 text-left flex-1 min-w-[150px] hover:bg-slate-50 transition-colors ${t.tone}`}
+              >
+                <Icon size={18} strokeWidth={1.8} />
+                <div className="min-w-0">
+                  <div className="font-semibold text-[13px] leading-tight">{t.label}</div>
+                  <div className="text-[10px] text-[var(--muted)] leading-tight truncate">{t.desc}</div>
+                </div>
+              </TabsTrigger>
+            );
+          })}
         </TabsList>
 
         {/* Reimbursements */}
