@@ -26,6 +26,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 49 — HRD (HR Role) Payroll Toolbar + Pay Access + Duplicate-Month Confirmation (Done, Feb 2026)
+- **User reported**: HR user "HRD(Human Resorces Department)" logged in par Payroll tab pe **Run Payroll toolbar aur Pay button nahi dikh rahe** — jabki admin (Mashara Enterprises) ke paas full toolbar hai. User wants HR = admin functionality for payroll.
+- **Root cause**: `HRMS.jsx` had two frontend role gates that only accepted `admin` or `accountant`:
+  - Line 1815: `{(isAdmin || isAccountant) && (…Run Payroll toolbar…)}` → HR excluded from Month/Year picker + Run Payroll + Bank CSV / Attendance CSV / Payroll CSV / Consolidated CSV.
+  - Line 1895: `{p.status !== "paid" && (isAdmin || isAccountant) && (…Pay button…)}` → HR excluded from the Pay action per row.
+  - Backend already granted HR both endpoints (Phase 42/46) — only the UI blocked them.
+- **Fix `/app/frontend/src/pages/HRMS.jsx`**:
+  - Both role gates now read `(isAdmin || isAccountant || user?.role === "hr")` — HR sees the exact same toolbar and Pay buttons as admin/accountant.
+  - `runPayroll()` now **pre-checks** for existing payroll rows on the selected month via `GET /api/payroll?month&year&limit=1` and shows a browser confirm: "Payroll for M/Y already exists. Draft rows will be recalculated; Approved/Paid rows remain locked. Continue?" — prevents accidental overwrites per user's spec item 7.
+  - Success toast now reports 4 counters — `Created X, Updated Y, Skipped locked L, Ineligible N` — so HR sees exactly how many staff were affected including joining/exit-based skips.
+- **Month-wise view + Salary History**: Already delivered in Phase 48 (`/hrms/financial-history`) — HR can pick any employee and filter by From/To Date, Month, Payment Type, Status, and see the full monthly summary + transactions.
+- **Verified live as `hr@finance.app`**:
+  - Payroll tab → Run Payroll toolbar visible with Month=8, Year=2026, Run Payroll button + all 4 CSV downloads ✅
+  - 24 Pay buttons rendered next to draft rows ✅
+  - Zero-attendance rows still correctly show ₹0/₹0/₹0 (Phase 47 preserved) ✅
+  - Consolidated CSV / Bank CSV downloads returned HTTP 200 for HR (verified via curl in Phase 46) ✅
+
+
+
 ### Phase 48 — Staff Wise Financial History / Employee Payment History Module (Done, Feb 2026)
 - **User asked**: Naya HRMS module — HR/Admin kisi bhi employee ko select karke aaj tak ki poori financial ledger dekhe (salary, reimbursement, advance, bonus, incentive, overtime, other payments) with month-wise summary, filters, CSV export, and Add-Payment for manual entries. Duplicate prevention critical: existing payroll/reimbursement/advance data ko re-count nahi karna.
 - **Backend `/app/backend/server.py`** (~+230 LOC before router registration):

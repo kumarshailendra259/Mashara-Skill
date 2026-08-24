@@ -796,12 +796,25 @@ export default function HRMS() {
 
   const runPayroll = async () => {
     try {
+      // Pre-check for existing payroll rows in this month/year.
+      const pre = await api.get(`/payroll?month=${pMonth}&year=${pYear}&limit=1`);
+      const existingCount = Array.isArray(pre.data) ? pre.data.length : (pre.data?.rows?.length || 0);
+      if (existingCount > 0) {
+        const ok = window.confirm(
+          `Payroll for ${pMonth}/${pYear} already exists. \n\n` +
+          `• Draft rows will be recalculated with latest attendance + leaves.\n` +
+          `• Approved/Paid rows will remain locked.\n\n` +
+          `Continue?`,
+        );
+        if (!ok) return;
+      }
       const r = await api.post(`/payroll/run?month=${pMonth}&year=${pYear}`);
       loadAll();
       const c = r.data.created || 0;
       const u = r.data.updated || 0;
       const l = r.data.skipped_locked || 0;
-      toast.success(`Created ${c}, Updated ${u}${l ? `, Skipped locked ${l}` : ""}`);
+      const sne = r.data.skipped_not_employed || 0;
+      toast.success(`Created ${c}, Updated ${u}${l ? `, Skipped locked ${l}` : ""}${sne ? `, Ineligible ${sne}` : ""}`);
     } catch (e) { toast.error(formatError(e)); }
   };
 
@@ -1812,7 +1825,7 @@ export default function HRMS() {
               <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => p + 1)} disabled={(payrollPage + 1) * PAGE >= payrollTotal} className="rounded-none" data-testid="payroll-next">Next</Button>
             </div>
           </div>
-          {(isAdmin || isAccountant) && (
+          {(isAdmin || isAccountant || user?.role === "hr") && (
             <div className="swiss-card p-4 flex items-end gap-3 flex-wrap">
               <div><Label className="overline">Month</Label><Input type="number" min={1} max={12} value={pMonth} onChange={(e) => setPMonth(+e.target.value)} className="rounded-none w-24" /></div>
               <div><Label className="overline">Year</Label><Input type="number" value={pYear} onChange={(e) => setPYear(+e.target.value)} className="rounded-none w-28" /></div>
@@ -1892,7 +1905,7 @@ export default function HRMS() {
                       {p.status !== "paid" && canManageStaff && (
                         <Button size="sm" variant="outline" onClick={() => openEditPayroll(p)} className="rounded-none h-8 px-2" data-testid={`edit-payroll-${p.id}`} title="Edit"><Pencil size={14} /></Button>
                       )}
-                      {p.status !== "paid" && (isAdmin || isAccountant) && (
+                      {p.status !== "paid" && (isAdmin || isAccountant || user?.role === "hr") && (
                         <Button size="sm" onClick={() => payPayroll(p.id)} className="brand-btn rounded-none h-8 px-3" data-testid={`pay-payroll-${p.id}`}>Pay</Button>
                       )}
                     </div>
