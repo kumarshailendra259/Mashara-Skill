@@ -7443,7 +7443,11 @@ async def report_attendance(
             def _fmt(ts):
                 if not ts: return ""
                 try:
-                    return datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%H:%M")
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    # PHASE 46 — Convert UTC → IST so CSV matches the UI clock.
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt.astimezone(BUSINESS_TZ).strftime("%H:%M")
                 except (ValueError, AttributeError):
                     return ""
             ci = att.get("check_in_at")

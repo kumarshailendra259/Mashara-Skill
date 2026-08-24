@@ -26,6 +26,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 46 — Attendance CSV Timezone Fix + HR Permission Audit (Done, Feb 2026)
+- **User reported**: Portal pe 09:17 attendance mark hua, Excel me 03:47 download ho raha hai (5.5h difference = IST vs UTC). Also asked to give HR admin-level HRMS access including Run Payroll.
+- **Backend `/app/backend/server.py`** — `_fmt(ts)` in `/api/reports/attendance`:
+  - Was: `datetime.fromisoformat(ts).strftime("%H:%M")` — printed raw UTC hours.
+  - Now: parses ISO, ensures `tzinfo=UTC` if naive, then `astimezone(BUSINESS_TZ)` before formatting — CSV time column now matches the exact clock time HR sees in the UI.
+- **HR HRMS access — no code changes required**. Audit showed HR is already in the role gate for every HRMS endpoint the user cares about: `POST /api/payroll/run` ✅, `PATCH /api/payroll/{pid}/pay` ✅, `POST /api/payroll/{pid}/recalc` ✅ (Phase 43), `GET /api/payroll/bank-csv` ✅, `GET /api/reports/attendance` ✅, plus staff CRUD, attendance mark/edit, leaves approve, reimbursement l1/accountant/pay/reject, holidays, shifts, geofences, templates delete (Phase 42), bulk archive (Phase 42). Only intentionally-locked areas remain admin: user management, delete transactions, delete entities/batches/vendors.
+- **Verified end-to-end**:
+  - Inserted a test attendance row: `check_in_at=2026-07-15T03:47:00+00:00` (UTC) → CSV export now prints `Punch In: 09:17, Punch Out: 18:00, Hours: 8.72, Marked Via: SELF` — matches the portal exactly.
+  - Logged in as `hr@finance.app / Hr@12345` and hit every write endpoint: `POST /api/payroll/run` → 200, `POST /api/payroll/{pid}/recalc` → 200, `GET /api/payroll/bank-csv` → 200, `GET /api/reports/attendance` → 200.
+
+
+
 ### Phase 45 — Payroll Formula Correction: Per Day Rate + Payable Days (Done, Feb 2026)
 - **User asked (with production screenshot showing bug)**: Shatakshi Parashar (CTC ₹14,000, joined mid-month) was showing **₹15,866.67 Gross > CTC** because Per Day = 14000/15 (working_days) = ₹933 (too high) then × 17 payable days. Explicit corrected formula given:
   - **Payable Salary = (Monthly Salary ÷ Total Days in the Month) × Payable Days**
