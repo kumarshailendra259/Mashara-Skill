@@ -26,6 +26,32 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 47 — Zero-Attendance Priority Rule + Joining/Exit Filter Verified (Done, Feb 2026)
+- **User reported (production screenshot)**: HRMS Payroll dikha raha tha 0/24 attendance staff ko ₹533, ₹933, ₹587, ₹800, ₹1,000 salary — kyunki Phase 45 formula `payable_days = present + half*0.5 + paid_leave + holidays` mein **holidays being counted** even when the employee had zero real work. User's rule 9: "Zero Attendance Rule Has Highest Priority — Gross=0, Deduction=0, Net=0".
+- **Backend `_compute_payroll_for_staff`** — added **Zero-Attendance Override** immediately after payable_days is computed:
+  ```python
+  valid_att_days = present_days + half_days + paid_leave_days
+  if valid_att_days <= 0:
+      payable_days = 0
+  ```
+  Now `basic = per_day × 0 = ₹0` regardless of configured monthly salary or holidays in the window. Someone who never showed up doesn't get holiday pay either.
+- **Joining/Exit date eligibility** — audit confirmed `_compute_payroll_for_staff` already implements the full spec via `_parse(joining_date)` + `_parse(exit_date)`:
+  - `joining > month_end_d` → skip (Case C)
+  - `exit_dt < month_start_d` → skip (Case E)
+  - `eff_start = max(joining, month_start_d)` (Case B)
+  - `eff_end = min(exit_dt, month_end_d)` (Case D)
+  - `payroll_run` returns `skipped_not_employed` counter.
+- **7-case acceptance test PASSED (seeded 5 test staff, ran May/June/July 2026 payroll)**:
+  - Test_JoinedBeforeMay (Jan 1, no exit) → Included in May+Jun+Jul ✅
+  - Test_JoinedDuringJun (Jun 15) → Excluded May, Included Jun window=Jun-15→Jun-30, Included Jul full ✅
+  - Test_JoinedAfterJul (Jul 5) → Excluded May+Jun, Included Jul window=Jul-05→Jul-31 ✅
+  - Test_LeftJun15 (exit Jun 15) → Included May+Jun (window Jun-01→Jun-15), Excluded Jul ✅
+  - Test_LeftMay31 (exit May 31) → Included May (window May-01→May-31), Excluded Jun+Jul ✅
+  - Zero-attendance override → all 5 test staff got basic ₹0 as expected.
+- **Live browser verified**: Payroll tab shows all zero-attendance rows with Gross ₹0, Deduct —, Net ₹0, red "Zero attendance" badge + Draft status. Data-integrity preserved: `payroll_run` re-runs update-in-place (no duplicates), Approved/Paid rows locked (skipped_locked counter), historical values untouched.
+
+
+
 ### Phase 46 — Attendance CSV Timezone Fix + HR Permission Audit (Done, Feb 2026)
 - **User reported**: Portal pe 09:17 attendance mark hua, Excel me 03:47 download ho raha hai (5.5h difference = IST vs UTC). Also asked to give HR admin-level HRMS access including Run Payroll.
 - **Backend `/app/backend/server.py`** — `_fmt(ts)` in `/api/reports/attendance`:

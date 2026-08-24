@@ -6895,6 +6895,16 @@ async def _compute_payroll_for_staff(s: dict, month: int, year: int,
     # (Half-day is retained because a half-day worked is still partially paid.)
     payable_days = present_days + (half_days * 0.5) + paid_leave_days + holiday_count
 
+    # PHASE 47 — Zero-Attendance Rule (highest priority). If the employee has
+    # NO valid attendance days in the effective window (no present, no half,
+    # no paid leave), their salary must be ₹0 regardless of configured monthly
+    # salary or number of holidays in the window. Holidays/weekly-off are only
+    # "paid" when the employee is otherwise on the job. This mirrors real HR
+    # policy: someone who never showed up doesn't get holiday pay either.
+    valid_att_days = present_days + half_days + paid_leave_days
+    if valid_att_days <= 0:
+        payable_days = 0
+
     # Earnings = per_day × payable_days.
     # This gives ZERO salary for zero attendance (the critical fix from Phase 43),
     # and caps a mid-month joiner's salary at their proportional share.
