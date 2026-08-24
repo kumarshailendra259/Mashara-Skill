@@ -6727,6 +6727,198 @@ def _recalc_payroll(doc: dict) -> dict:
     return doc
 
 
+async def _compute_payroll_for_staff(s: dict, month: int, year: int,
+                                       paid_off_dates: set, weekly_off_weekdays: set) -> Optional[dict]:
+    """Compute attendance-aware payroll fields for a single staff for a given month.
+
+    Returns a dict of *computed* fields to be merged into a payroll row, or None if
+    the staff was not employed in this month. All previous behaviour preserved,
+    with one critical bug fix: working days without any attendance record AND no
+    approved leave are now correctly treated as ABSENT (unpaid). Before this fix
+    such days silently counted as paid, so staff with 0 attendance were being
+    paid the full monthly salary.
+    """
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+
+    def _parse(d):
+        try:
+            return datetime.strptime(d, "%Y-%m-%d").date() if d else None
+        except (ValueError, TypeError):
+            return None
+    month_start_d = datetime.strptime(f"{year:04d}-{month:02d}-01", "%Y-%m-%d").date()
+    month_end_d = datetime.strptime(f"{year:04d}-{month:02d}-{last_day:02d}", "%Y-%m-%d").date()
+
+    joining = _parse(s.get("joining_date"))
+    exit_dt = _parse(s.get("exit_date"))
+    if joining and joining > month_end_d:
+        return None
+    if exit_dt and exit_dt < month_start_d:
+        return None
+
+    eff_start = max(joining, month_start_d) if joining else month_start_d
+    eff_end = min(exit_dt, month_end_d) if exit_dt else month_end_d
+    total_days = (eff_end - eff_start).days + 1
+    if total_days <= 0:
+        return None
+
+    # Weekly off + holidays inside window (paid, no salary impact)
+    window_off_dates = {d for d in paid_off_dates if eff_start.isoformat() <= d <= eff_end.isoformat()}
+    weekly_off_count = 0
+    holiday_count = 0
+    cur = eff_start
+    while cur <= eff_end:
+        iso = cur.isoformat()
+        is_hol = iso in window_off_dates
+        is_wo = cur.strftime("%A").lower() in weekly_off_weekdays
+        if is_hol:
+            holiday_count += 1
+        elif is_wo:
+            weekly_off_count += 1
+        cur = cur + timedelta(days=1)
+    working_days = total_days - weekly_off_count - holiday_count
+
+    # Attendance rows (raw)
+    att_start = eff_start.isoformat()
+    att_end = eff_end.isoformat()
+    rows = await db.attendance.find(
+        {"staff_id": s["id"], "date": {"$gte": att_start, "$lte": att_end}},
+        {"_id": 0},
+    ).to_list(1000)
+    # Build a date -> status map so we can detect "unmarked working days"
+    att_by_date = {}
+    for r in rows:
+        d = r.get("date")
+        if d:
+            att_by_date[d] = r
+
+    # Approved leaves overlapping window — resolves paid vs unpaid via leave_type.paid
+    leave_docs = await db.leaves.find({
+        "staff_id": s["id"],
+        "status": "approved",
+        "start_date": {"$lte": att_end},
+        "end_date": {"$gte": att_start},
+    }, {"_id": 0}).to_list(200)
+    # Preload leave-type paid flags
+    leave_type_paid = {}
+    for lv in leave_docs:
+        lt_id = lv.get("leave_type_id")
+        if lt_id and lt_id not in leave_type_paid:
+            lt = await db.leave_types.find_one({"id": lt_id}, {"_id": 0, "paid": 1})
+            leave_type_paid[lt_id] = bool((lt or {}).get("paid", True))
+    # Expand leave date ranges → date -> "paid_leave" / "unpaid_leave"
+    leave_by_date = {}
+    for lv in leave_docs:
+        lt_id = lv.get("leave_type_id")
+        is_paid = leave_type_paid.get(lt_id, True) if lt_id else True
+        try:
+            s_d = datetime.strptime(lv["start_date"], "%Y-%m-%d").date()
+            e_d = datetime.strptime(lv["end_date"], "%Y-%m-%d").date()
+        except (KeyError, ValueError, TypeError):
+            continue
+        d = max(s_d, eff_start)
+        stop = min(e_d, eff_end)
+        while d <= stop:
+            iso = d.isoformat()
+            # attendance status wins if present; otherwise fill from leave
+            leave_by_date[iso] = "paid_leave" if is_paid else "unpaid_leave"
+            d = d + timedelta(days=1)
+
+    # Walk every day in window and classify
+    present_days = 0.0
+    half_days = 0.0
+    paid_leave_days = 0.0
+    unpaid_leave_days = 0.0
+    absent_days = 0.0
+    unmarked_absent_days = 0.0
+    cur = eff_start
+    while cur <= eff_end:
+        iso = cur.isoformat()
+        # 1) holidays / weekly off = paid, no counting
+        if iso in window_off_dates or cur.strftime("%A").lower() in weekly_off_weekdays:
+            cur = cur + timedelta(days=1)
+            continue
+        # 2) attendance row wins
+        att = att_by_date.get(iso)
+        if att:
+            st = att.get("status")
+            if st == "present":
+                present_days += 1
+            elif st == "half":
+                half_days += 1
+            elif st == "absent":
+                absent_days += 1
+            elif st == "unpaid_leave":
+                unpaid_leave_days += 1
+            elif st in ("leave", "paid_leave"):
+                paid_leave_days += 1
+            else:
+                # Unknown status — treat as absent to be safe
+                absent_days += 1
+        # 3) approved leave for this date
+        elif iso in leave_by_date:
+            if leave_by_date[iso] == "paid_leave":
+                paid_leave_days += 1
+            else:
+                unpaid_leave_days += 1
+        # 4) no record + working day = UNMARKED ABSENT (the critical bug fix)
+        else:
+            unmarked_absent_days += 1
+        cur = cur + timedelta(days=1)
+
+    total_absent = absent_days + unmarked_absent_days
+    unpaid_days = total_absent + unpaid_leave_days + (half_days * 0.5)
+    # Payable days = present + half*0.5 + paid_leave + weekly_off + holidays
+    payable_days = present_days + (half_days * 0.5) + paid_leave_days + weekly_off_count + holiday_count
+
+    # Late buckets
+    shift = None
+    if s.get("shift_id"):
+        shift = await db.shifts.find_one({"id": s["shift_id"]}, {"_id": 0})
+    buckets = _compute_late_buckets(rows, shift)
+    late_days = (buckets["minor"] // 3) + 0.5 * buckets["half_day"] + 1.0 * buckets["full_day"]
+
+    # Per-day rate: prefer explicit override, else monthly / working_days per spec
+    if s.get("per_day_rate", 0):
+        per_day = float(s["per_day_rate"])
+    elif working_days > 0:
+        per_day = (s.get("monthly_salary", 0) or 0) / working_days
+    else:
+        per_day = 0
+    late_deduction = round(late_days * per_day, 2)
+
+    # Earnings = per_day × payable_days.
+    # This gives ZERO salary for zero attendance (the critical fix).
+    basic = round(per_day * payable_days, 2)
+    attendance_deduction = round(per_day * unpaid_days, 2)
+
+    return {
+        "days_present": present_days,
+        "present_days": present_days,
+        "half_days": half_days,
+        "paid_leave_days": paid_leave_days,
+        "unpaid_leave_days": unpaid_leave_days,
+        "absent_days": round(total_absent, 2),
+        "unmarked_absent_days": round(unmarked_absent_days, 2),
+        "unpaid_days": round(unpaid_days, 2),
+        "payable_days": round(payable_days, 2),
+        "working_days": working_days,
+        "total_days": total_days,
+        "weekly_off_days": weekly_off_count,
+        "holiday_days": holiday_count,
+        "per_day_rate_effective": round(per_day, 2),
+        "attendance_deduction_display": attendance_deduction,
+        "employment_window": {"start": att_start, "end": att_end},
+        "is_partial_month": working_days < last_day,
+        "base_salary": s.get("monthly_salary", 0),
+        "per_day_rate": s.get("per_day_rate", 0),
+        "basic": basic,
+        "late_deduction": late_deduction,
+        "late_buckets": buckets,
+        "late_days": late_days,
+    }
+
+
 def _compute_late_buckets(rows: List[dict], shift: Optional[dict]) -> dict:
     """Walk attendance rows; for each present day compute late_minutes vs shift start+grace.
     Returns {minor: N, half_day: N, full_day: N, total_late_minutes: M} per user-defined rules:
@@ -6799,106 +6991,21 @@ async def payroll_run(
     start = f"{year:04d}-{month:02d}-01"
     end = f"{year:04d}-{month:02d}-{last_day:02d}"
 
-    def _parse(d):
-        try:
-            return datetime.strptime(d, "%Y-%m-%d").date() if d else None
-        except (ValueError, TypeError):
-            return None
-    month_start_d = datetime.strptime(start, "%Y-%m-%d").date()
-    month_end_d = datetime.strptime(end, "%Y-%m-%d").date()
-
-    # PHASE 37 — Load holiday + weekly-off dates for the month ONCE.
+    # PHASE 42 — Load holiday + weekly-off dates for the month ONCE.
     paid_off_dates, weekly_off_weekdays = await _paid_off_dates_in(start, end)
 
     staff_docs = await db.staff.find({"active": {"$ne": False}}, {"_id": 0}).to_list(5000)
     created: list = []
+    updated: list = []
     skipped_not_employed = 0
+    skipped_locked = 0
     for s in staff_docs:
-        joining = _parse(s.get("joining_date"))
-        exit_dt = _parse(s.get("exit_date"))
-        # Skip staff not employed during any day of this month.
-        if joining and joining > month_end_d:
+        computed = await _compute_payroll_for_staff(s, month, year, paid_off_dates, weekly_off_weekdays)
+        if computed is None:
             skipped_not_employed += 1
             continue
-        if exit_dt and exit_dt < month_start_d:
-            skipped_not_employed += 1
-            continue
-        # Effective employment window inside the calendar month
-        eff_start = max(joining, month_start_d) if joining else month_start_d
-        eff_end = min(exit_dt, month_end_d) if exit_dt else month_end_d
-        total_days = (eff_end - eff_start).days + 1  # calendar days in window
-        if total_days <= 0:
-            skipped_not_employed += 1
-            continue
-        # PHASE 37 — Split calendar days: weekly off + holiday = paid off (working
-        # days are what remain). Salary math: paid on ALL days except absent /
-        # unpaid_leave / late-penalty deductions.
-        window_off_dates = {d for d in paid_off_dates if eff_start.isoformat() <= d <= eff_end.isoformat()}
-        weekly_off_count = 0
-        holiday_count = 0
-        cur = eff_start
-        while cur <= eff_end:
-            iso = cur.isoformat()
-            is_hol = iso in window_off_dates
-            is_wo = cur.strftime("%A").lower() in weekly_off_weekdays
-            if is_hol:
-                holiday_count += 1
-            elif is_wo:
-                weekly_off_count += 1
-            cur = cur + timedelta(days=1)
-        working_days = total_days - weekly_off_count - holiday_count
-        # Only count attendance rows within the effective window.
-        att_start = eff_start.isoformat()
-        att_end = eff_end.isoformat()
-        rows = await db.attendance.find(
-            {"staff_id": s["id"], "date": {"$gte": att_start, "$lte": att_end}},
-            {"_id": 0},
-        ).to_list(1000)
-        days_present = 0.0     # attendance-confirmed present days
-        absent_days = 0.0      # legit absent (deducted)
-        unpaid_leave_days = 0.0
-        for r in rows:
-            st = r.get("status")
-            if st == "present":
-                days_present += 1
-            elif st == "half":
-                days_present += 0.5
-                absent_days += 0.5  # half-day = 0.5 day deducted
-            elif st == "absent":
-                absent_days += 1
-            elif st == "unpaid_leave":
-                unpaid_leave_days += 1
-            # "leave" (paid), "weekly_off", "holiday" → no deduction
-        # Late penalty
-        shift = None
-        if s.get("shift_id"):
-            shift = await db.shifts.find_one({"id": s["shift_id"]}, {"_id": 0})
-        buckets = _compute_late_buckets(rows, shift)
-        late_days = (buckets["minor"] // 3) + 0.5 * buckets["half_day"] + 1.0 * buckets["full_day"]
-        # PHASE 37 — per-day rate is based on TOTAL DAYS in the window (not
-        # working days) so weekly-off + holidays are effectively fully paid.
-        per_day = s.get("per_day_rate", 0) or ((s.get("monthly_salary", 0) or 0) / total_days if total_days else 0)
-        late_deduction = round(late_days * per_day, 2)
-        # Paid days = total − absent − unpaid_leave. Weekly Off + Holidays +
-        # Paid Leaves are all counted as paid automatically.
-        paid_days = max(0.0, total_days - absent_days - unpaid_leave_days)
-        if s.get("per_day_rate", 0):
-            basic = s["per_day_rate"] * paid_days
-        elif s.get("monthly_salary", 0):
-            # Prorate to paid_days out of total_days
-            basic = (s["monthly_salary"] or 0) * (paid_days / total_days) if total_days else 0
-        else:
-            basic = 0
 
-        existing = await db.payroll.find_one({"staff_id": s["id"], "month": month, "year": year})
-        if existing:
-            continue
-        # Phase-3 Batch B: Payroll auto-deduction for open advances.
-        # For every RELEASED/ADJUSTING advance of this staff (with balance > 0) we
-        # pre-fill the `advance` deduction so Accounts sees the number automatically.
-        # If a scheduled `pending_salary_deduction` exists (from settle-by-salary),
-        # prefer that; else default to full balance (capped at the calculated net so
-        # negative payroll never happens — HR can override in Edit later).
+        # Auto-fill advance deduction (as before)
         adv_rows = await db.advance_requests.find({
             "created_by": s.get("user_id"),
             "status": {"$in": ["released", "adjusting"]},
@@ -6910,7 +7017,7 @@ async def payroll_run(
             scheduled = float(a.get("pending_salary_deduction") or 0)
             bal = float(a.get("balance_amount") or 0)
             take = scheduled if scheduled > 0 else bal
-            take = min(take, bal)  # never exceed outstanding
+            take = min(take, bal)
             if take <= 0:
                 continue
             adv_details.append({
@@ -6921,42 +7028,43 @@ async def payroll_run(
                 "reason": "scheduled" if scheduled > 0 else "auto_full_balance",
             })
             adv_total += take
+
+        existing = await db.payroll.find_one({"staff_id": s["id"], "month": month, "year": year})
+        if existing:
+            # Update DRAFT rows in-place; locked rows are left untouched.
+            if existing.get("status") != "draft":
+                skipped_locked += 1
+                continue
+            merged = {**existing, **computed}
+            merged["advance"] = round(adv_total, 2)
+            merged["advance_deductions_details"] = adv_details
+            _recalc_payroll(merged)
+            merged["edited_by"] = "system_recalc"
+            merged["edited_at"] = datetime.now(timezone.utc).isoformat()
+            await db.payroll.update_one({"id": existing["id"]}, {"$set": {
+                k: merged[k] for k in merged if k != "_id"
+            }})
+            merged.pop("_id", None)
+            updated.append(merged)
+            continue
+
         doc = {
             "id": str(uuid.uuid4()),
             "staff_id": s["id"],
             "staff_name": s.get("name"),
             "month": month, "year": year,
-            "days_present": days_present,
-            "working_days": working_days,
-            "total_days": total_days,
-            "weekly_off_days": weekly_off_count,
-            "holiday_days": holiday_count,
-            "absent_days": round(absent_days, 2),
-            "unpaid_leave_days": round(unpaid_leave_days, 2),
-            "paid_days": round(paid_days, 2),
-            "employment_window": {"start": att_start, "end": att_end},
-            "is_partial_month": working_days < last_day,
-            "base_salary": s.get("monthly_salary", 0),
-            "per_day_rate": s.get("per_day_rate", 0),
-            # Earnings breakdown
-            "basic": round(basic, 2),
+            **computed,
             "hra": 0.0, "da": 0.0, "conveyance": 0.0,
             "bonus": 0.0, "incentive": 0.0,
             "overtime_pay": 0.0, "other_earnings": 0.0,
             "reimbursements_paid": 0.0,
-            # Deductions
             "pf_deduction": 0.0, "esi_deduction": 0.0,
-            "late_deduction": late_deduction,
             "early_fine": 0.0,
-            "advance": round(adv_total, 2), "loan_deduction": 0.0,
+            "advance": round(adv_total, 2),
+            "loan_deduction": 0.0,
             "advance_deductions_details": adv_details,
             "other_deductions": [],
-            # Late buckets snapshot
-            "late_buckets": buckets,
-            "late_days": late_days,
-            # Computed
             "gross": 0.0, "deductions": 0.0, "net": 0.0,
-            # Lifecycle
             "status": "draft",
             "txn_id": None, "paid_at": None,
             "remarks": None,
@@ -6967,7 +7075,38 @@ async def payroll_run(
         await db.payroll.insert_one(doc)
         doc.pop("_id", None)
         created.append(doc)
-    return {"created": len(created), "skipped_not_employed": skipped_not_employed, "rows": created}
+    return {"created": len(created), "updated": len(updated),
+            "skipped_not_employed": skipped_not_employed,
+            "skipped_locked": skipped_locked, "rows": created + updated}
+
+
+@api.post("/payroll/{pid}/recalc")
+async def recalc_payroll(pid: str, user=Depends(require_role("admin", "hr", "accountant"))):
+    """Recalculate a draft/calculated payroll row against the LATEST attendance +
+    approved leaves. Locked payrolls (approved/paid) cannot be recalculated."""
+    rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Payroll not found")
+    if rec.get("status") in ("approved", "paid"):
+        raise HTTPException(400, "Approved/Paid payroll cannot be recalculated. Reverse first.")
+    s = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Linked staff not found")
+    import calendar
+    month, year = int(rec["month"]), int(rec["year"])
+    last_day = calendar.monthrange(year, month)[1]
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year:04d}-{month:02d}-{last_day:02d}"
+    paid_off_dates, weekly_off_weekdays = await _paid_off_dates_in(start, end)
+    computed = await _compute_payroll_for_staff(s, month, year, paid_off_dates, weekly_off_weekdays)
+    if computed is None:
+        raise HTTPException(400, "Staff was not employed during this month")
+    merged = {**rec, **computed}
+    _recalc_payroll(merged)
+    merged["edited_by"] = user["id"]
+    merged["edited_at"] = datetime.now(timezone.utc).isoformat()
+    await db.payroll.update_one({"id": pid}, {"$set": {k: merged[k] for k in merged if k != "_id"}})
+    return await db.payroll.find_one({"id": pid}, {"_id": 0})
 
 
 @api.patch("/payroll/{pid}")

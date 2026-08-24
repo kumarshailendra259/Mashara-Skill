@@ -26,6 +26,30 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 43 — Payroll: Attendance-Aware Calculation Fix (Done, Feb 2026)
+- **User asked**: Fix critical payroll bug where staff with 0/26 attendance were still getting full salary. Attendance, approved paid leave, and unpaid leave should drive salary calculation. Added Recalculate action for Draft payrolls.
+- **Root cause**: `payroll_run` calculated `paid_days = total_days − absent_days − unpaid_leave_days`. When a staff had **zero attendance rows** for the month, both `absent_days` and `unpaid_leave_days` were 0, so `paid_days` fell back to the full calendar window — awarding full monthly salary regardless of attendance.
+- **Backend `/app/backend/server.py`** — refactored payroll math into `_compute_payroll_for_staff(s, month, year, paid_off_dates, weekly_off_weekdays)`:
+  - Loads approved leaves overlapping the month + resolves each leave_type's `paid` flag to classify as paid_leave / unpaid_leave.
+  - Walks EVERY day in the effective employment window and classifies as: `weekly_off` / `holiday` / attendance-row status (`present`/`half`/`absent`/`unpaid_leave`/`leave`) / approved-leave status / **`unmarked_absent`** (working day with NO attendance row and NO approved leave — the critical bug fix).
+  - Computes `present_days`, `half_days`, `paid_leave_days`, `unpaid_leave_days`, `absent_days`, `unmarked_absent_days`, `payable_days`, `unpaid_days`.
+  - `per_day = monthly_salary / working_days` (per user spec: "Applicable Monthly Salary ÷ Payroll Working Days").
+  - `basic = per_day × payable_days` (this replaces the old `monthly × paid_days/total_days` formula and correctly returns ₹0 for zero attendance).
+  - `attendance_deduction_display = per_day × unpaid_days` (for the detail drawer).
+  - `payroll_run` now returns `{created, updated, skipped_locked, ...}` and **updates draft rows in-place** on re-run instead of skipping them (data-integrity rule 14 from spec).
+- **New endpoint `POST /api/payroll/{pid}/recalc`** — role `admin`/`hr`/`accountant`. Refreshes a single payroll row against the latest attendance + approved leaves. Blocks recalculation on Approved/Paid rows (locked). Full audit via `edited_by` / `edited_at` stamps.
+- **Frontend `HRMS.jsx`**:
+  - New **Recalculate** button (TrendingUp icon) on every Draft payroll row.
+  - New **"Zero attendance"** red badge appears beside staff name when a Draft row has 0 present + 0 paid leaves.
+  - Days cell now shows secondary line with `PL {n}`, `LOP {n}` (amber), `Unmk {n}` (red) for at-a-glance leave/absence breakdown.
+  - Run Payroll toast updated to show "Created N, Updated M, Skipped locked L".
+- **Verified end-to-end**:
+  - curl: Run Sept-2026 payroll → 236 rows created → staff with 0 attendance now show `payable_days=4 (Sundays only), unpaid_days=26, basic=₹9,230.77` (previously ₹60,000).
+  - curl: Recalculate a Draft row → `net=₹2,307.69` reflects current attendance + advance deductions.
+  - Live browser: 12/2099 Draft rows all show ₹0 gross / ₹0 deduct / ₹0 net (correct for zero attendance). 24 recalculate buttons visible. Existing Edit/Pay/View/Slip buttons unchanged.
+
+
+
 ### Phase 42 — HR Full Access + HRMS Command Centre Redesign (Done, Feb 2026)
 - **User asked**: HR ko HRMS ka full control access dena aur HRMS menu ka look interactive + sundar + easy-to-understand banana.
 - **Backend `/app/backend/server.py`** — 4 admin-only endpoints extended with HR:

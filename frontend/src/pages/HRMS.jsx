@@ -795,8 +795,22 @@ export default function HRMS() {
   };
 
   const runPayroll = async () => {
-    try { const r = await api.post(`/payroll/run?month=${pMonth}&year=${pYear}`); loadAll(); toast.success(`Created ${r.data.created}`); }
-    catch (e) { toast.error(formatError(e)); }
+    try {
+      const r = await api.post(`/payroll/run?month=${pMonth}&year=${pYear}`);
+      loadAll();
+      const c = r.data.created || 0;
+      const u = r.data.updated || 0;
+      const l = r.data.skipped_locked || 0;
+      toast.success(`Created ${c}, Updated ${u}${l ? `, Skipped locked ${l}` : ""}`);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const recalcPayroll = async (pid) => {
+    try {
+      await api.post(`/payroll/${pid}/recalc`);
+      loadAll();
+      toast.success("Recalculated with latest attendance + leaves");
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   const payPayroll = async (id) => {
@@ -1820,8 +1834,22 @@ export default function HRMS() {
               {payroll.length === 0 ? <tr><td colSpan={9} className="text-center py-8 overline">No payroll yet</td></tr> : payroll.map((p) => (
                 <tr key={p.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                   <td className="p-3 num">{p.month}/{p.year}</td>
-                  <td className="p-3">{p.staff_name || sName(p.staff_id)}</td>
-                  <td className="p-3 num">{p.days_present} / {p.working_days}</td>
+                  <td className="p-3">
+                    <div>{p.staff_name || sName(p.staff_id)}</div>
+                    {(((p.present_days ?? p.days_present) || 0) === 0 && (p.paid_leave_days || 0) === 0 && p.status === "draft") && (
+                      <span className="inline-block mt-0.5 text-[10px] px-1 border border-red-300 bg-red-50 text-red-700" title="0 attendance days — salary is fully attendance-deducted. Verify attendance or recalculate after uploading.">Zero attendance</span>
+                    )}
+                  </td>
+                  <td className="p-3 num text-xs">
+                    <div>{p.present_days ?? p.days_present ?? 0} / {p.working_days}</div>
+                    {(p.paid_leave_days > 0 || p.unpaid_leave_days > 0 || p.unmarked_absent_days > 0) && (
+                      <div className="text-[10px] text-[var(--muted)] mt-0.5">
+                        {p.paid_leave_days > 0 && <span className="mr-1">PL {p.paid_leave_days}</span>}
+                        {p.unpaid_leave_days > 0 && <span className="mr-1 text-amber-700">LOP {p.unpaid_leave_days}</span>}
+                        {p.unmarked_absent_days > 0 && <span className="text-red-700">Unmk {p.unmarked_absent_days}</span>}
+                      </div>
+                    )}
+                  </td>
                   <td className="p-3 num text-xs">
                     {p.late_days ? (
                       <span title={`<2h: ${p.late_buckets?.minor || 0} · 2-6h: ${p.late_buckets?.half_day || 0} · ≥6h: ${p.late_buckets?.full_day || 0}`}>{p.late_days}</span>
@@ -1836,6 +1864,11 @@ export default function HRMS() {
                       <Button size="sm" variant="outline" onClick={() => nav(`/hrms/staff/${p.staff_id}/salary?month=${p.month}&year=${p.year}`)} className="rounded-none h-8 px-2" title="Salary Detail" data-testid={`view-detail-${p.id}`}>
                         <User size={14} />
                       </Button>
+                      {p.status === "draft" && canManageStaff && (
+                        <Button size="sm" variant="outline" onClick={() => recalcPayroll(p.id)} className="rounded-none h-8 px-2" title="Recalculate with latest attendance + approved leaves" data-testid={`recalc-payroll-${p.id}`}>
+                          <TrendingUp size={14} />
+                        </Button>
+                      )}
                       <Button size="sm" variant="outline" onClick={() => printPayslip(p)} className="rounded-none h-8 px-2" title="Print payslip (local)" data-testid={`payslip-pdf-${p.id}`}><FileText size={14} /></Button>
                       {/* Salary Slip actions (Phase B): Generate → Download → Release */}
                       {(isAdmin || isAccountant || user?.role === "hr") && !p.slip_id && (
