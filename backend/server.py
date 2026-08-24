@@ -7277,11 +7277,15 @@ async def staff_salary_summary(
     d_start = f"{y:04d}-{m:02d}-01"
     d_end = f"{y:04d}-{m:02d}-{last_day:02d}"
 
-    # Attendance breakdown for the month
+    # Attendance breakdown for the month — enhanced (Phase 44) with paid/unpaid
+    # leave, unmarked, weekly-off + holiday classification. Uses the same
+    # source-of-truth algorithm as the payroll computation so numbers match.
+    paid_off_dates, weekly_off_weekdays = await _paid_off_dates_in(d_start, d_end)
     att_rows = await db.attendance.find(
         {"staff_id": staff_id, "date": {"$gte": d_start, "$lte": d_end}},
         {"_id": 0},
     ).to_list(500)
+    # Legacy simple counts (kept for backward compat with existing UI)
     att_breakdown = {"present": 0.0, "half": 0.0, "absent": 0.0, "leave": 0.0,
                      "working_days": last_day, "days_marked": len(att_rows)}
     for r in att_rows:
@@ -7292,6 +7296,32 @@ async def staff_salary_summary(
                 att_breakdown["present"] += 0.5  # counted toward pay
             else:
                 att_breakdown[s_] += 1
+
+    # Phase 44 — Rich breakdown consistent with payroll math.
+    computed_att = await _compute_payroll_for_staff(
+        staff, m, y, paid_off_dates, weekly_off_weekdays,
+    ) if staff.get("monthly_salary") is not None else None
+    att_rich = {}
+    if computed_att:
+        att_rich = {
+            "total_calendar_days": computed_att["total_days"],
+            "payroll_working_days": computed_att["working_days"],
+            "present_days": computed_att["present_days"],
+            "half_days": computed_att["half_days"],
+            "paid_leave_days": computed_att["paid_leave_days"],
+            "unpaid_leave_days": computed_att["unpaid_leave_days"],
+            "absent_days": computed_att["absent_days"],
+            "unmarked_absent_days": computed_att["unmarked_absent_days"],
+            "weekly_off_days": computed_att["weekly_off_days"],
+            "holiday_days": computed_att["holiday_days"],
+            "payable_days": computed_att["payable_days"],
+            "unpaid_days": computed_att["unpaid_days"],
+            "per_day_rate": computed_att["per_day_rate_effective"],
+            "attendance_deduction_display": computed_att["attendance_deduction_display"],
+            "employment_window": computed_att["employment_window"],
+        }
+    # Merge rich fields into legacy breakdown so both keys are available.
+    att_breakdown.update(att_rich)
 
     # Payroll doc (may or may not exist yet)
     pr = await db.payroll.find_one({"staff_id": staff_id, "month": m, "year": y}, {"_id": 0})

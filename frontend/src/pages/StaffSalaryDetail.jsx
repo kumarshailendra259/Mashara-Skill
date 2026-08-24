@@ -13,7 +13,7 @@ import {
 import { toast } from "sonner";
 import {
   ArrowLeft, Download, User, Wallet, ClipboardCheck, TrendingUp,
-  TrendingDown, Calendar, Building2, Landmark, Edit2, FileText,
+  TrendingDown, Calendar, Building2, Landmark, Edit2, FileText, RefreshCw, AlertTriangle, Info,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
@@ -102,6 +102,16 @@ export default function StaffSalaryDetail() {
     try {
       await api.post("/payroll/run", null, { params: { month, year } });
       toast.success("Payroll draft generated");
+      await load();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const recalcPayroll = async () => {
+    const pr = data?.current?.payroll;
+    if (!pr?.id) return;
+    try {
+      await api.post(`/payroll/${pr.id}/recalc`);
+      toast.success("Payroll recalculated with latest attendance + leaves");
       await load();
     } catch (e) { toast.error(formatError(e)); }
   };
@@ -218,6 +228,9 @@ export default function StaffSalaryDetail() {
             )}
             {pr && pr.status !== "paid" && (
               <>
+                <Button variant="outline" onClick={recalcPayroll} className="rounded-none" data-testid="recalc-payroll-btn" title="Refresh from latest attendance + approved leaves">
+                  <RefreshCw size={14} className="mr-1" /> Recalculate
+                </Button>
                 <Button variant="outline" onClick={openEdit} className="rounded-none" data-testid="edit-payroll-btn">
                   <Edit2 size={14} className="mr-1" /> Edit Components
                 </Button>
@@ -235,20 +248,41 @@ export default function StaffSalaryDetail() {
         </div>
       </div>
 
+      {/* Phase 44 — Attendance completeness warning */}
+      {(att.unmarked_absent_days || 0) > 0 && pr && pr.status !== "paid" && (
+        <div className="border-2 border-amber-400 bg-amber-50 p-4 flex items-start gap-3" data-testid="unmarked-warning">
+          <AlertTriangle size={18} className="text-amber-700 mt-0.5 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="font-bold text-amber-900 text-sm">Attendance incomplete: {att.unmarked_absent_days} day(s) not marked</div>
+            <div className="text-xs text-amber-800 mt-1">
+              These days are currently treated as <b>unpaid absence</b> and are reducing the payable salary. Please mark attendance
+              (present / paid leave / weekly off) or approve pending leave, then click <b>Recalculate</b> to refresh this payroll.
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={recalcPayroll} className="rounded-none" data-testid="warn-recalc-btn">
+            <RefreshCw size={12} className="mr-1" /> Recalculate
+          </Button>
+        </div>
+      )}
+
       {/* Attendance breakdown + Earnings / Deductions grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         <div className="swiss-card p-4 md:col-span-1" data-testid="attendance-card">
           <div className="flex items-center justify-between">
-            <div className="font-heading font-bold flex items-center gap-1.5"><ClipboardCheck size={14} /> Attendance</div>
+            <div className="font-heading font-bold flex items-center gap-1.5"><ClipboardCheck size={14} /> Attendance Summary</div>
             <div className="text-[10px] text-[var(--muted)]">{MONTHS[month - 1]} {year}</div>
           </div>
           <div className="grid grid-cols-2 gap-2 mt-3 text-sm">
-            <MiniStat label="Present" value={att.present} accent="text-green-700" />
-            <MiniStat label="Half Day" value={att.half} accent="text-amber-700" />
-            <MiniStat label="Absent" value={att.absent} accent="text-red-700" />
-            <MiniStat label="Leave" value={att.leave} accent="text-blue-700" />
-            <MiniStat label="Working Days" value={att.working_days} />
-            <MiniStat label="Marked" value={att.days_marked} />
+            <MiniStat label="Present" value={att.present_days ?? att.present} accent="text-green-700" />
+            <MiniStat label="Half Day" value={att.half_days ?? att.half} accent="text-amber-700" />
+            <MiniStat label="Paid Leave" value={att.paid_leave_days ?? 0} accent="text-blue-700" />
+            <MiniStat label="Unpaid Leave / LOP" value={att.unpaid_leave_days ?? 0} accent="text-red-700" />
+            <MiniStat label="Absent" value={att.absent_days ?? att.absent} accent="text-red-700" />
+            <MiniStat label="Not Marked" value={att.unmarked_absent_days ?? 0} accent={((att.unmarked_absent_days || 0) > 0) ? "text-red-700" : ""} />
+            <MiniStat label="Weekly Off" value={att.weekly_off_days ?? 0} />
+            <MiniStat label="Holidays" value={att.holiday_days ?? 0} />
+            <MiniStat label="Working Days" value={att.payroll_working_days ?? att.working_days} />
+            <MiniStat label="Payable Days" value={att.payable_days ?? "—"} accent="text-green-800" />
           </div>
           <div className="mt-3 pt-3 border-t border-[var(--border)]">
             <button
@@ -281,6 +315,65 @@ export default function StaffSalaryDetail() {
           </div>
         </div>
       </div>
+
+      {/* Phase 44 — Salary Calculation Breakdown (transparency) */}
+      {pr && (
+        <details className="swiss-card p-4" data-testid="calc-breakdown">
+          <summary className="cursor-pointer font-heading font-bold flex items-center gap-2 select-none">
+            <Info size={14} className="text-[var(--brand)]" /> Salary Calculation Breakdown
+            <span className="text-[10px] text-[var(--muted)] font-normal ml-2">Click to expand</span>
+          </summary>
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <div className="overline mb-2">Attendance → Salary</div>
+              <div className="text-sm font-mono space-y-1">
+                <div><span className="text-[var(--muted)]">Monthly CTC:</span> <b>{inr(s.monthly_salary)}</b></div>
+                <div><span className="text-[var(--muted)]">÷ Payroll Working Days:</span> <b>{att.payroll_working_days ?? att.working_days ?? "—"}</b></div>
+                <div className="border-t border-[var(--border)] pt-1"><span className="text-[var(--muted)]">= Per Day Rate:</span> <b className="text-[var(--brand)]">{inr(att.per_day_rate)}</b></div>
+                <div className="pt-2">
+                  <div><span className="text-[var(--muted)]">Present Days:</span> <b>{att.present_days ?? 0}</b></div>
+                  <div><span className="text-[var(--muted)]">+ Half Day × 0.5:</span> <b>{((att.half_days ?? 0) * 0.5).toFixed(1)}</b></div>
+                  <div><span className="text-[var(--muted)]">+ Paid Leave:</span> <b>{att.paid_leave_days ?? 0}</b></div>
+                  <div><span className="text-[var(--muted)]">+ Weekly Off:</span> <b>{att.weekly_off_days ?? 0}</b></div>
+                  <div><span className="text-[var(--muted)]">+ Holidays:</span> <b>{att.holiday_days ?? 0}</b></div>
+                  <div className="border-t border-[var(--border)] pt-1"><span className="text-[var(--muted)]">= Payable Days:</span> <b className="text-green-700">{att.payable_days ?? "—"}</b></div>
+                </div>
+                <div className="pt-2 text-[13px]">
+                  <b>Basic Earnings = Per Day × Payable Days = {inr(pr.basic)}</b>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div className="overline mb-2">Deduction Breakdown</div>
+              <div className="text-sm space-y-1">
+                <RowKV label="Unpaid Days (Absent + LOP + Unmarked)" value={att.unpaid_days ?? "—"} />
+                <RowKV label="Attendance / LOP Deduction (implicit in prorated basic)" value={inr(att.attendance_deduction_display)} />
+                <RowKV label="Late Fine" value={inr(pr.late_deduction)} />
+                <RowKV label="Early Fine" value={inr(pr.early_fine)} />
+                <RowKV label="PF" value={inr(pr.pf_deduction)} />
+                <RowKV label="ESI" value={inr(pr.esi_deduction)} />
+                <RowKV label="Advance Recovery" value={inr(pr.advance)} />
+                <RowKV label="Loan EMI" value={inr(pr.loan_deduction)} />
+                {(pr.other_deductions || []).map((li, idx) => (
+                  <RowKV key={idx} label={li.reason || "Other Deduction"} value={inr(li.amount || 0)} />
+                ))}
+                <div className="flex justify-between border-t border-[var(--border)] pt-2 mt-2 font-bold text-red-700">
+                  <span>Total Deductions</span><span className="num">{inr(pr.deductions)}</span>
+                </div>
+                <div className="flex justify-between border-t border-[var(--border)] pt-2 mt-2 font-bold text-lg text-[var(--brand)]">
+                  <span>Final Net Pay</span><span className="num">{inr(pr.net)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          {(att.unmarked_absent_days || 0) > 0 && (
+            <div className="mt-4 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 p-2">
+              Note: {att.unmarked_absent_days} unmarked day(s) are being treated as unpaid absence. HR should either mark
+              attendance for these days or approve/reject any pending leave, then click Recalculate to refresh.
+            </div>
+          )}
+        </details>
+      )}
 
       {/* Download strip */}
       <div className="swiss-card p-4 flex items-center justify-between flex-wrap gap-2" data-testid="download-strip">

@@ -26,6 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 44 — Salary Detail: Attendance-Aware UI + Recalculate + Warning + Breakdown (Done, Feb 2026)
+- **User asked**: Salary Detail page pe full salary show ho raha hai kyunki attendance rows kum hain (16/31). Show every unmarked day as unpaid, add warning, add recalculate, add clear breakdown.
+- **Root cause on this specific page**: Backend `/api/payroll/staff/{sid}/summary` returned only `present/half/absent/leave/working_days/days_marked` — no concept of "unmarked absent" — and the frontend just displayed whatever gross the (pre-Phase-43) stale payroll doc had cached, so Shatakshi's July 2026 draft still read ₹15,866.67 even after the payroll_run fix.
+- **Backend `/app/backend/server.py`** — `staff_salary_summary` now calls the same `_compute_payroll_for_staff` used by payroll_run and returns a **rich attendance breakdown** merged into `current.attendance`:
+  - `total_calendar_days`, `payroll_working_days`, `present_days`, `half_days`, `paid_leave_days`, `unpaid_leave_days`, `absent_days`, `unmarked_absent_days`, `weekly_off_days`, `holiday_days`, `payable_days`, `unpaid_days`, `per_day_rate`, `attendance_deduction_display`, `employment_window`
+  - Legacy fields (`present/half/absent/leave/working_days/days_marked`) are preserved so no other consumer breaks.
+- **Frontend `StaffSalaryDetail.jsx`**:
+  - **Warning banner** (amber, dashed border) — appears when `unmarked_absent_days > 0` and payroll is not paid. Explains the impact and offers an inline Recalculate button.
+  - **Recalculate button** — always visible on Draft/Approved rows (except Paid). Calls `POST /api/payroll/{pid}/recalc`, toasts, and reloads the summary.
+  - **Attendance Summary card** — now shows 10 stats (Present · Half Day · Paid Leave · Unpaid Leave/LOP · Absent · Not Marked · Weekly Off · Holidays · Working Days · Payable Days) instead of the old 6.
+  - **Salary Calculation Breakdown** collapsible `<details>` — reveals the exact formula: `Monthly CTC ÷ Working Days = Per Day Rate`, then `Present + Half×0.5 + Paid Leave + Weekly Off + Holidays = Payable Days`, then `Per Day × Payable Days = Basic Earnings`. Right column lists every deduction line item with its amount, then Total Deductions and Final Net Pay.
+- **Verified end-to-end**:
+  - curl `/summary` for July 2026 Auto Provisioned (₹15,000 CTC): rich attendance returns `present=0, unmarked=25, weekly_off=5, holidays=1, payable=6, per_day=₹555.56` (was previously invisible in UI).
+  - Live browser: opened Auto Provisioned's Aug 2026 detail → yellow warning banner, expanded 10-stat attendance card, ₹0 stale salary. Clicked **Recalculate** → toast "Payroll recalculated with latest attendance + leaves" → salary refreshed to **₹3,600 DRAFT** = 6 payable days × ₹600 per-day rate, Basic Pay updated in Earnings card, Gross Payable now ₹3,600 (not the full ₹15,000 CTC).
+
+
+
 ### Phase 43 — Payroll: Attendance-Aware Calculation Fix (Done, Feb 2026)
 - **User asked**: Fix critical payroll bug where staff with 0/26 attendance were still getting full salary. Attendance, approved paid leave, and unpaid leave should drive salary calculation. Added Recalculate action for Draft payrolls.
 - **Root cause**: `payroll_run` calculated `paid_days = total_days − absent_days − unpaid_leave_days`. When a staff had **zero attendance rows** for the month, both `absent_days` and `unpaid_leave_days` were 0, so `paid_days` fell back to the full calendar window — awarding full monthly salary regardless of attendance.
