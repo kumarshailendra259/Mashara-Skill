@@ -397,7 +397,12 @@ export default function StaffSalaryDetail() {
       {/* Monthly attendance rows — editable */}
       {(data.current?.attendance_rows || []).length > 0 && (
         <div className="swiss-card p-4" data-testid="attendance-rows">
-          <div className="font-heading font-bold text-sm mb-2">Attendance rows this month (HR editable)</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-heading font-bold text-sm">Attendance rows this month (HR editable)</div>
+            <div className="text-[10px] text-[var(--muted)]">
+              {(data.current.attendance_rows || []).filter((r) => !r.synthetic).length} marked · {(data.current.attendance_rows || []).filter((r) => r.synthetic).length} auto-generated
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
@@ -412,18 +417,31 @@ export default function StaffSalaryDetail() {
               </TableHeader>
               <TableBody>
                 {(data.current?.attendance_rows || []).map((r) => (
-                  <TableRow key={r.id} data-testid={`att-row-${r.id}`}>
-                    <TableCell className="whitespace-nowrap">{r.date}</TableCell>
-                    <TableCell><StatusBadge s={r.status} /></TableCell>
+                  <TableRow key={r.id} data-testid={`att-row-${r.id}`} className={r.synthetic ? "opacity-70" : ""}>
+                    <TableCell className="whitespace-nowrap">
+                      <div className="flex items-center gap-2">
+                        <span>{r.date}</span>
+                        {r.holiday_name && <span title={r.holiday_name} className="text-[9px] font-bold uppercase text-pink-700">🎉</span>}
+                      </div>
+                    </TableCell>
+                    <TableCell><AttStatusBadge row={r} /></TableCell>
                     <TableCell className="whitespace-nowrap num">{fmtTime(r.check_in_at)}</TableCell>
                     <TableCell className="whitespace-nowrap num">{fmtTime(r.check_out_at)}</TableCell>
-                    <TableCell><span className="text-[10px] uppercase text-[var(--muted)]">{r.marked_via || "-"}</span></TableCell>
                     <TableCell>
-                      <button
-                        className="text-[var(--brand)] hover:underline text-xs"
-                        onClick={() => setAttEditRow({ ...r })}
-                        data-testid={`edit-att-${r.id}`}
-                      >Edit</button>
+                      <span className={`text-[10px] uppercase font-semibold ${r.is_regularised ? "text-purple-700" : "text-[var(--muted)]"}`}>
+                        {r.is_regularised ? "REGULARISED" : (r.marked_via || "-")}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      {r.synthetic ? (
+                        <span className="text-[10px] text-[var(--muted)]">—</span>
+                      ) : (
+                        <button
+                          className="text-[var(--brand)] hover:underline text-xs"
+                          onClick={() => setAttEditRow({ ...r })}
+                          data-testid={`edit-att-${r.id}`}
+                        >Edit</button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -616,6 +634,36 @@ function StatusBadge({ s }) {
     leave: "bg-blue-100 text-blue-700",
   };
   return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${map[s] || "bg-gray-100 text-gray-600"}`}>{s}</span>;
+}
+
+// Attendance-specific badge that also handles synthetic (all-dates report) statuses:
+// week_off, holiday, upcoming, incomplete. Regularised rows are always shown as PRESENT.
+function AttStatusBadge({ row }) {
+  const s = row?.status;
+  if (!s) return <span className="text-[10px] text-[var(--muted)]">—</span>;
+  const map = {
+    present: { cls: "bg-green-100 text-green-700", label: "PRESENT" },
+    half: { cls: "bg-amber-100 text-amber-700", label: "HALF DAY" },
+    absent: { cls: "bg-red-100 text-red-700", label: "ABSENT" },
+    leave: { cls: "bg-blue-100 text-blue-700", label: "LEAVE" },
+    incomplete: { cls: "bg-orange-100 text-orange-700", label: "INCOMPLETE" },
+    week_off: { cls: "bg-gray-200 text-gray-700", label: "WEEK OFF" },
+    holiday: { cls: "bg-pink-100 text-pink-700", label: "HOLIDAY" },
+    upcoming: { cls: "bg-gray-50 text-gray-400", label: "—" },
+  };
+  const entry = map[s] || { cls: "bg-gray-100 text-gray-600", label: s?.toUpperCase() || "—" };
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${entry.cls}`}>{entry.label}</span>
+      {row?.is_regularised && (
+        <span
+          className="text-[9px] font-bold uppercase px-1.5 py-0.5 bg-purple-100 text-purple-700"
+          title="Regularised via approved request"
+          aria-label="Regularised via approved request"
+        >R</span>
+      )}
+    </span>
+  );
 }
 
 function fmtTime(ts) {

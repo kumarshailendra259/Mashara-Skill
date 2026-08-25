@@ -26,6 +26,22 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 54 — HRMS Attendance Report Fix (All-Dates + Regularised Status) (Done, Feb 2026)
+- **User reported (Hinglish, URGENT, production)**: (1) approved regularisation rows dikha rahe hain "INCOMPLETE" instead of PRESENT, (2) selected month me har date show nahi ho rahi (e.g., 07-01 ke baad seedhe 07-08 aa raha hai), (3) missing dates ka status calculate hi nahi ho raha.
+- **Root cause**: (a) auto-closure sweep in POST `/api/attendance/self` (line ~4855) was flipping any prior row with `check_in_at != null AND check_out_at empty` to status='incomplete', which included regularised rows. (b) `GET /api/payroll/staff/{sid}/summary` returned raw `att_rows` from Mongo — only dates with an existing record made it into the response, so missing dates disappeared.
+- **Backend `/app/backend/server.py`**:
+  - **self_check_in auto-closure filter** (L~4855) tightened — now excludes rows where `regularised=True OR status IN (leave, half) OR marked_via IN (regularised, admin)`. Prevents future corruption.
+  - **staff_salary_summary** — completely reworked `attendance_rows` output. Now emits ONE row per calendar day in the month via a merge of `db.attendance` + approved `db.leaves` (paid/unpaid) + `db.holidays` + HR-policy weekly_off_days. Priority: real attendance row (with regularised override to 'present') > approved leave > holiday > week_off > future/upcoming > absent. Synthetic rows carry `synthetic:true`, `is_week_off`, `holiday_name`, and `is_regularised` flags.
+  - **Regularised effective-status override** — if `regularised=True OR marked_via='regularised'`, status is forced to 'present' (or 'half' if raw='half'), never 'incomplete'.
+  - **Startup Phase54 repair migration** — one-shot pipeline `update_many` on `db.attendance` that fixes any legacy row where `(regularised=True OR marked_via='regularised') AND status='incomplete'` — falls back to `attendance_status` field when valid, else 'present'. Runs on every boot idempotently (only logs when modified_count>0).
+- **Frontend `/app/frontend/src/pages/StaffSalaryDetail.jsx`**:
+  - Attendance rows table now uses new `AttStatusBadge` component that supports all statuses: present/half/absent/leave/incomplete/week_off/holiday/upcoming with distinct color chips.
+  - Regularised rows render a small purple **R** chip next to the PRESENT badge (with title + aria-label for a11y).
+  - Synthetic (auto-generated) rows show `opacity-70`, no Edit button, marked_via shows 'policy'/'holiday'/'leave' where applicable; only real rows are editable.
+  - Header caption shows "N marked · M auto-generated" for transparency.
+- **Testing agent iter-58**: 8/8 pytest PASS. Verified 31 rows for Jul/Aug 2026, 28 for Feb 2026, 31 for Dec 2030 (future). Regularised staff `43be2dc5-fff3-4de7-8762-5207f597b44f` on 2026-04-15 → status='present', is_regularised=true, marked_via='regularised' (was 'incomplete' before). Aug 2026 UI: 19 red (absent), 5 gray (week_off), 1 pink (holiday Aug 15), 1 green (present), 5 gray-50 (upcoming future). All required testids present.
+- **Preview only** — production redeploy required to push changes to `finance.masharaskills.com`.
+
 ### Phase 53 — Staff Edit Preserves Employee Code + Accountant View (Done, Feb 2026)
 - **User reported (Hinglish, production)**: (1) "staff edit karne par employee id change ho ja raha hai — aisa nahi hona chahiye", (2) "accountant aur HR ko staff ka pura details jaise bank documents etc puri tarike se dikhe".
 - **Root cause (bug 1)**: `PUT /api/staff/{sid}` did `update = body.model_dump()` which included `employee_code: None` when the frontend edit form didn't send it (edit dialog has no employee_code input). Mongo `$set` then wiped the code to null — next backfill run would re-issue a *different* EMP-YYYY-NNNN. Same latent risk for `user_id`.

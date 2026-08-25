@@ -1,0 +1,26 @@
+{
+  "summary": "iter-58 (Phase 54 HRMS Attendance Report fixes) — backend + frontend both PASS. Backend: 8/8 pytest cases in test_iter58_salary_attendance_rows.py PASS. Verified: (a) GET /api/payroll/staff/{sid}/summary returns attendance_rows with EXACTLY total_days entries — 31 for Jul 2026, 31 for Aug 2026, 28 for Feb 2026, 31 for Dec 2030 future; (b) row shape includes id, date, status, synthetic, is_regularised, is_week_off, holiday_name; (c) Sundays without a real row are status='week_off' + marked_via='policy' + is_week_off=true; (d) Regularised row for staff 43be2dc5-fff3-4de7-8762-5207f597b44f on 2026-04-15 correctly returns status='present', is_regularised=true, marked_via='regularised', synthetic=false (was 'incomplete' before fix); (e) future dates in Dec 2030 all synthetic with status in {upcoming, week_off, holiday}; (f) past working weekday without row = 'absent'; (g) unauthenticated request returns 401/403. Frontend: logged in admin@finance.app, navigated to /hrms/staff/bb0b247d-.../salary — [data-testid=attendance-rows] container rendered with exactly 31 [data-testid=att-row-*] rows for Aug 2026 in sequential date order (2026-08-01 through 2026-08-31). Badge color mapping verified: 19 red (absent), 5 gray-200 (week_off), 1 pink (holiday Aug 15), 1 green (present), 5 gray-50 (upcoming future days). Only 1 non-synthetic row → 1 Edit button; the 30 synthetic rows correctly have opacity-70 wrapper and no Edit. Then switched to staff 43be2dc5 + Apr 2026: 30 rows rendered, and 2026-04-15 shows PRESENT (green badge) + 'R' purple chip beside status + 'REGULARISED' text in Marked Via column + Edit button (real row). Startup Phase54 repair migration code path verified in server.py L865–892; log line only emits when modified_count>0 (idempotent — expected empty on subsequent boots).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_iter58_salary_attendance_rows.py",
+    "/app/test_reports/pytest/iter58_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py staff_salary_summary (L7527–7616): correct priority chain — attendance row (with regularised override) > approved leave > holiday > week_off > future/absent. Regularised branch (L7572) also handles the raw 'half' case which is nice. Good defensive fallback effective=raw or 'absent' at L7581.",
+    "server.py Phase54 repair migration (L865–892): uses pipeline update to conditionally use attendance_status when valid — good. But note repair only fires on rows already flagged regularised=True or marked_via='regularised' — any historically corrupted row where BOTH flags were lost cannot be recovered by this migration (acceptable — those cases don't exist per problem statement).",
+    "server.py self_check_in auto-closure filter (L4889–4900): tightened to skip regularised/leave/half/admin — correct. Suggest adding index on (staff_id, date) for the update_many since it's called on every check-in.",
+    "server.py file is now ~19,180 lines — same router-extraction flag from iter-55/56/57 still open, non-blocking.",
+    "StaffSalaryDetail.jsx L419–447: `.map((r) => …)` renders every row from attendance_rows, so if backend ever returns >~60 rows the DOM will scale linearly. Fine for month view (max 31), just noting.",
+    "AttStatusBadge purple 'R' chip renders inline with the badge — visually clear. Accessible label could be improved (title='Regularised' or aria-label) — currently a bare 'R' text node."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter58_salary_attendance_rows.py"],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (all required testids + badge colors + regularised chip verified for both staff)"},
+  "test_credentials": "Admin: admin@finance.app / Admin@123 (verified). Staff Reg-test: 43be2dc5-fff3-4de7-8762-5207f597b44f has approved regularised attendance on 2026-04-15. Staff autostaff: bb0b247d-6f35-47b3-b612-4cf47e3faf56.",
+  "seed_data_creation": "None — used existing regularised approval already in DB for staff 43be2dc5.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iter58_salary_attendance_rows.py is the regression baseline for the Salary Detail attendance_rows feature. It covers row count, shape, status priority (regularised override, sundays as week_off, future=upcoming, past=absent), and RBAC. If the salary detail UI is extended (e.g., pagination or new status buckets), extend this file. To verify the startup repair migration end-to-end, seed a broken row manually with `{regularised:True, status:'incomplete'}` in db.attendance, then `sudo supervisorctl restart backend` and grep for 'Phase54 attendance repair' in /var/log/supervisor/backend.err.log.",
+  "rca of the issue": "N/A — no bugs found. Original Phase 54 problems (regularised approvals showing INCOMPLETE + missing dates in report) are both correctly fixed: (a) staff_salary_summary now generates one row per calendar day and applies a regularised-override in the effective-status computation, and (b) self_check_in auto-closure query now excludes regularised/leave/half/admin rows so it cannot re-corrupt them; a one-shot startup migration repairs any legacy corrupted rows."
+}

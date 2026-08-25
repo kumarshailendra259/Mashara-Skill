@@ -858,6 +858,38 @@ async def on_startup():
     await db.geofences.create_index([("center_id", 1), ("active", 1)])
     await db.regularisations.create_index([("created_by", 1), ("status", 1)])
     await db.staff_documents.create_index([("staff_id", 1), ("uploaded_at", -1)])
+    # Phase 54 — one-shot data repair: rows created by an approved regularisation
+    # were sometimes flipped to status="incomplete" by the next self-check-in's
+    # auto-closure sweep (before the safety filter was added). Restore them to
+    # the requested status so the Attendance Report shows PRESENT / HALF-DAY.
+    try:
+        _repair = await db.attendance.update_many(
+            {
+                "$or": [{"regularised": True}, {"marked_via": "regularised"}],
+                "status": "incomplete",
+            },
+            [
+                {"$set": {
+                    "status": {
+                        "$cond": [
+                            {"$in": [{"$ifNull": ["$attendance_status", None]}, ["present", "half", "absent", "leave"]]},
+                            "$attendance_status",
+                            "present",
+                        ],
+                    },
+                    "regularised": True,
+                    "marked_via": "regularised",
+                    "repaired_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            ],
+        )
+        if _repair.modified_count:
+            logging.getLogger("finance").info(
+                "Phase54 attendance repair: fixed %s regularised-but-incomplete rows",
+                _repair.modified_count,
+            )
+    except Exception as _e:
+        logging.getLogger("finance").warning("Phase54 attendance repair skipped: %s", _e)
     # Password reset OTPs — TTL on expires_at (auto-purge expired docs)
     await db.password_reset_otps.create_index("email")
     await db.password_reset_otps.create_index("expires_at", expireAfterSeconds=0)
@@ -4852,12 +4884,17 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
     # close it as "incomplete" so today starts fresh. Prevents the display
     # bug where yesterday's dangling check-in was paired with today's
     # check-in-as-check-out on the UI.
+    # SAFETY: never overwrite rows that were regularised (approved retro attendance),
+    # admin-edited, marked as leave, or half-day — those statuses are authoritative.
     await db.attendance.update_many(
         {
             "staff_id": staff["id"],
             "date": {"$lt": today},
             "check_in_at": {"$exists": True, "$ne": None},
             "check_out_at": {"$in": [None, ""]},
+            "regularised": {"$ne": True},
+            "status": {"$nin": ["leave", "half"]},
+            "marked_via": {"$nin": ["regularised", "admin"]},
         },
         {"$set": {"status": "incomplete", "auto_closed_at": now_iso}},
     )
@@ -7485,6 +7522,99 @@ async def staff_salary_summary(
         {"staff_id": staff_id, "date": {"$gte": d_start, "$lte": d_end}},
         {"_id": 0},
     ).to_list(500)
+    att_by_date = {r["date"]: r for r in att_rows}
+
+    # Full-month per-day view (Phase 54) — one row per date so the report shows
+    # every day of the selected month, not just days with an attendance record.
+    # Priority: attendance row > approved leave > holiday > weekly-off > absent.
+    # Regularised rows are ALWAYS treated as present (never "incomplete").
+    _WEEKDAY_INT = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
+    weekly_off_ints = {_WEEKDAY_INT[n] for n in (weekly_off_weekdays or set()) if n in _WEEKDAY_INT}
+    holidays_rows = await db.holidays.find(
+        {"date": {"$gte": d_start, "$lte": d_end}}, {"_id": 0, "date": 1, "name": 1},
+    ).to_list(60)
+    holidays_by_date = {h["date"]: h for h in holidays_rows}
+    leave_rows = await db.leaves.find(
+        {
+            "staff_id": staff_id, "status": "approved",
+            "start_date": {"$lte": d_end}, "end_date": {"$gte": d_start},
+        },
+        {"_id": 0},
+    ).to_list(100)
+    leave_days = {}
+    for lv in leave_rows:
+        try:
+            _ls = datetime.fromisoformat(lv["start_date"]).date()
+            _le = datetime.fromisoformat(lv["end_date"]).date()
+        except (ValueError, KeyError):
+            continue
+        _cur = _ls
+        while _cur <= _le:
+            _iso = _cur.isoformat()
+            if d_start <= _iso <= d_end:
+                leave_days[_iso] = lv
+            _cur += timedelta(days=1)
+
+    today_ist = _today_ist()
+    daily_rows: List[dict] = []
+    for _d in range(1, last_day + 1):
+        iso = f"{y:04d}-{m:02d}-{_d:02d}"
+        wd = datetime(y, m, _d).weekday()  # 0=Mon
+        row = att_by_date.get(iso)
+        holiday = holidays_by_date.get(iso)
+        leave = leave_days.get(iso)
+        is_week_off = wd in weekly_off_ints
+        is_future = iso > today_ist
+        if row:
+            # Effective status — regularised approvals are ALWAYS present, even if
+            # the raw row was auto-closed as "incomplete" earlier (fix for Phase 54).
+            raw = row.get("status")
+            if row.get("regularised") or row.get("marked_via") == "regularised":
+                effective = row.get("status") if row.get("status") in ("present", "half") else "present"
+            elif raw == "incomplete":
+                effective = "incomplete"
+            elif raw in ("present", "half", "absent", "leave"):
+                effective = raw
+            elif row.get("check_in_at") and not row.get("check_out_at"):
+                effective = "incomplete"
+            else:
+                effective = raw or "absent"
+            daily_rows.append({
+                **row,
+                "id": row.get("id") or f"synth-{iso}",
+                "date": iso,
+                "status": effective,
+                "raw_status": raw,
+                "synthetic": False,
+                "is_regularised": bool(row.get("regularised") or row.get("marked_via") == "regularised"),
+                "holiday_name": (holiday or {}).get("name"),
+                "is_week_off": is_week_off,
+            })
+        else:
+            # No attendance row → derive from leave / holiday / week-off / future / absent.
+            if leave:
+                # Distinguish paid vs unpaid leave — attendance report treats both as "leave"
+                # for the Status column, but records the leave_type for detail views.
+                syn = {"id": f"synth-{iso}", "date": iso, "status": "leave", "synthetic": True,
+                       "marked_via": "leave", "leave_id": leave.get("id"),
+                       "leave_type_id": leave.get("leave_type_id"), "leave_reason": leave.get("reason")}
+            elif holiday:
+                syn = {"id": f"synth-{iso}", "date": iso, "status": "holiday", "synthetic": True,
+                       "marked_via": "holiday", "holiday_name": holiday.get("name")}
+            elif is_week_off:
+                syn = {"id": f"synth-{iso}", "date": iso, "status": "week_off", "synthetic": True,
+                       "marked_via": "policy"}
+            elif is_future:
+                syn = {"id": f"synth-{iso}", "date": iso, "status": "upcoming", "synthetic": True,
+                       "marked_via": ""}
+            else:
+                syn = {"id": f"synth-{iso}", "date": iso, "status": "absent", "synthetic": True,
+                       "marked_via": ""}
+            syn["is_week_off"] = is_week_off
+            syn["holiday_name"] = (holiday or {}).get("name")
+            syn["is_regularised"] = False
+            daily_rows.append(syn)
+
     # Legacy simple counts (kept for backward compat with existing UI)
     att_breakdown = {"present": 0.0, "half": 0.0, "absent": 0.0, "leave": 0.0,
                      "working_days": last_day, "days_marked": len(att_rows)}
@@ -7566,7 +7696,7 @@ async def staff_salary_summary(
         "current": {
             "month": m, "year": y,
             "attendance": att_breakdown,
-            "attendance_rows": att_rows,
+            "attendance_rows": daily_rows,
             "payroll": pr,
             "reimbursements_approved": approved_reimb,
         },
