@@ -4303,6 +4303,13 @@ async def update_staff(sid: str, body: StaffIn, user=Depends(require_role("admin
     # Strip transient login-only fields — never persist them as columns
     update.pop("create_login", None)
     update.pop("send_credentials_email", None)
+    # Immutable fields — edit dialog must NEVER change these. If the caller wants to
+    # (re)generate a login use `/staff/{sid}/generate-login`; if they need to correct
+    # an employee_code, run the backfill endpoint. Silently dropping them here means
+    # a partial payload from the frontend can't accidentally null-out these columns
+    # (the previous behaviour wiped employee_code on every Edit → Save).
+    update.pop("employee_code", None)
+    update.pop("user_id", None)
     if user.get("role") != "admin":
         # Preserve existing reports_to_id; only admin may change it
         existing = await db.staff.find_one({"id": sid}, {"_id": 0, "reports_to_id": 1})
@@ -4685,7 +4692,7 @@ async def list_my_staff_documents(user=Depends(get_current_user)):
 
 
 @api.get("/staff/{sid}/documents")
-async def list_staff_documents(sid: str, _=Depends(require_role("admin", "hr", "manager"))):
+async def list_staff_documents(sid: str, _=Depends(require_role("admin", "hr", "manager", "accountant"))):
     return await db.staff_documents.find({"staff_id": sid}, {"_id": 0}).sort("uploaded_at", -1).to_list(200)
 
 

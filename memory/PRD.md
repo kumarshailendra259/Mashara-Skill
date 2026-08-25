@@ -26,6 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 53 — Staff Edit Preserves Employee Code + Accountant View (Done, Feb 2026)
+- **User reported (Hinglish, production)**: (1) "staff edit karne par employee id change ho ja raha hai — aisa nahi hona chahiye", (2) "accountant aur HR ko staff ka pura details jaise bank documents etc puri tarike se dikhe".
+- **Root cause (bug 1)**: `PUT /api/staff/{sid}` did `update = body.model_dump()` which included `employee_code: None` when the frontend edit form didn't send it (edit dialog has no employee_code input). Mongo `$set` then wiped the code to null — next backfill run would re-issue a *different* EMP-YYYY-NNNN. Same latent risk for `user_id`.
+- **Backend `/app/backend/server.py`**:
+  - `update_staff` (line ~4300) now `update.pop("employee_code", None)` + `update.pop("user_id", None)` — these are immutable-from-edit. Employee code changes go through `/staff/backfill-employee-codes`; login (user_id) changes go through `/staff/{sid}/generate-login`.
+  - `GET /api/staff/{sid}/documents` role list extended: `admin/hr/manager` → `admin/hr/manager/accountant` — accountant can now see uploaded documents.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`**:
+  - New `canViewStaffFull` gate (admin/hr/manager/accountant) + `viewStaffId` state.
+  - Staff row now shows an **Eye "View Details"** button (data-testid `staff-view-{id}`) visible to accountant + all editors. Edit pencil (`staff-edit-{id}`) remains gated to `canManageStaff` (admin/manager/hr).
+  - Actions <td> + Actions <th> gate widened to `canManageStaff || canViewStaffFull` so the column renders for accountant too. Individual row buttons (offer letter Mail, verify-bank) still gated to `canManageStaff` so accountant sees only Salary, View, and (if privileged) the write buttons.
+  - New `StaffFullDetailsDialog` component (bottom of file) — Read-only 5-section drawer: Identity (emp code, name, designation, joining/exit, status), Contact (email/mobile/DOB/gender/PAN/Aadhaar last4/address/emergency contact), Salary & Center, Bank Details (with Verified/Pending chips), and Documents list (fetches via `/staff/{sid}/documents`, opens each via `/api/files/view` in a new tab). Uses `data-testid` on every field (`view-empcode`, `view-holder`, `view-accno`, `view-ifsc`, `view-docs-list`, `view-doc-{id}`).
+  - Ancillary: added `DialogDescription` import + `Eye` icon import.
+- **Test credentials added**: `acc@finance.app / Acc@12345` (role: accountant) — persisted in `/app/memory/test_credentials.md`.
+- **Verified end-to-end**:
+  - Backend curl: PUT /api/staff/{sid} with body missing employee_code → response returns `employee_code: EMP-2026-0178` (preserved) and `designation: TEST_DESIG` (updated) ✅
+  - Live browser as `acc@finance.app`: /hrms → Staff tab → 25 view buttons render, 0 edit buttons (correct RBAC) → clicking View opens the dialog showing Identity, Contact, Salary & Center, Bank Details, Documents sections ✅
+
 ### Phase 52 — Staff App Attendance Redesign (Home Check-In + Monthly Calendar) (Done, Feb 2026)
 - **User asked (URGENT, Hindi/Hinglish)**: Redesign Staff App per reference screenshots — (1) home page pe direct CHECK IN button (Home → GPS → Selfie → Marked), (2) out-of-office pe "You are X meters away from office · Please move closer · Refresh Location" screen, (3) home button state 'Checked In – HH:MM' → 'CHECK OUT' after check-in, (4) Attendance menu me monthly calendar (Attendance For [Month] dropdown + Present/Absent/Half/Paid Leave/Week Off summary + Sun-Sat grid with LATE labels + today highlighted + click date detail). Do NOT redirect from Home to Attendance. Preserve HRMS/Admin flows.
 - **Backend `/app/backend/server.py`**:

@@ -11,10 +11,10 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -473,6 +473,10 @@ export default function HRMS() {
 
   const canManageStaff = isAdmin || user?.role === "manager" || user?.role === "hr";
   const canDeleteStaff = isAdmin || user?.role === "hr";
+  // Accountant + HR + Admin can *see* full staff details (bank / documents / etc.)
+  // in a read-only "View Details" drawer even when they cannot edit the record.
+  const canViewStaffFull = isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager";
+  const [viewStaffId, setViewStaffId] = useState(null);
 
   // Bulk archive staff (admin only)
   const [selectedStaff, setSelectedStaff] = useState(new Set());
@@ -1328,9 +1332,9 @@ export default function HRMS() {
               <th className="text-left p-3">Bank</th>
               <th className="text-right p-3">Salary</th>
               <th className="text-right p-3">Per-Day</th>
-              {canManageStaff && <th className="text-right p-3 no-print">Actions</th>}
+              {(canManageStaff || canViewStaffFull) && <th className="text-right p-3 no-print">Actions</th>}
             </tr></thead><tbody>
-              {staff.length === 0 ? <tr><td colSpan={(canManageStaff ? 10 : 9) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
+              {staff.length === 0 ? <tr><td colSpan={((canManageStaff || canViewStaffFull) ? 10 : 9) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
                 <tr key={s.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${s.is_active === false ? "opacity-50" : ""}`}>
                   {isAdmin && (
                     <td className="p-3">
@@ -1358,10 +1362,10 @@ export default function HRMS() {
                   </td>
                   <td className="p-3 num">{inr(s.monthly_salary)}</td>
                   <td className="p-3 num">{inr(s.per_day_rate)}</td>
-                  {canManageStaff && (
+                  {(canManageStaff || canViewStaffFull) && (
                     <td className="p-3 text-right no-print">
                       <div className="flex justify-end gap-1">
-                        {s.offer_letter_id && (
+                        {s.offer_letter_id && canManageStaff && (
                           <Button
                             size="sm" variant="outline"
                             onClick={() => window.open(`${api.defaults.baseURL}/offer-letters/${s.offer_letter_id}/download`, "_blank")}
@@ -1376,6 +1380,7 @@ export default function HRMS() {
                           className="rounded-none h-8 px-2"
                           data-testid={`staff-offer-send-${s.id}`}
                           title="Generate & email offer letter"
+                          style={{ display: canManageStaff ? undefined : "none" }}
                         ><Mail size={14} /></Button>
                         {isAdmin && (
                           <Button
@@ -1407,7 +1412,18 @@ export default function HRMS() {
                           data-testid={`staff-salary-${s.id}`}
                           title="Open salary detail"
                         ><User size={14} /></Button>
-                        <Button size="sm" variant="outline" onClick={() => openEditStaff(s)} className="rounded-none h-8 px-2" data-testid={`staff-edit-${s.id}`} title="Edit"><Pencil size={14} /></Button>
+                        {canViewStaffFull && (
+                          <Button
+                            size="sm" variant="outline"
+                            onClick={() => setViewStaffId(s.id)}
+                            className="rounded-none h-8 px-2"
+                            data-testid={`staff-view-${s.id}`}
+                            title="View full details (bank, documents, contact)"
+                          ><Eye size={14} /></Button>
+                        )}
+                        {canManageStaff && (
+                          <Button size="sm" variant="outline" onClick={() => openEditStaff(s)} className="rounded-none h-8 px-2" data-testid={`staff-edit-${s.id}`} title="Edit"><Pencil size={14} /></Button>
+                        )}
                         {canDeleteStaff && (
                           <Button size="sm" variant="outline" onClick={() => deleteStaff(s)} className="rounded-none h-8 px-2 text-[var(--danger)] hover:bg-red-50" data-testid={`staff-delete-${s.id}`} title="Delete"><Trash2 size={14} /></Button>
                         )}
@@ -2097,6 +2113,14 @@ export default function HRMS() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Read-only Staff Full-Details dialog — accessible to Accountant + HR + Admin + Manager
+          so they can view bank / documents / contact / joining info without an Edit permission. */}
+      <StaffFullDetailsDialog
+        staffId={viewStaffId}
+        onClose={() => setViewStaffId(null)}
+        staffList={staff}
+      />
     </div>
   );
 }
@@ -2132,6 +2156,172 @@ function StaffDocsView({ staffId }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   STAFF FULL-DETAILS DIALOG — read-only view for Accountant / HR / Admin / Manager.
+   Shows all persisted info (identity, contact, joining/exit, bank, documents,
+   emergency contact) without triggering an edit permission gate.
+   ============================================================ */
+function StaffFullDetailsDialog({ staffId, onClose, staffList }) {
+  const [row, setRow] = useState(null);
+  const [docs, setDocs] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!staffId) { setRow(null); setDocs([]); return; }
+    // Prefer the row already in memory to avoid an unnecessary roundtrip.
+    const local = (staffList || []).find((x) => x.id === staffId);
+    if (local) setRow(local);
+    setBusy(true);
+    (async () => {
+      try {
+        // Documents live on their own collection — fetch them (Accountant now allowed).
+        const d = await api.get(`/staff/${staffId}/documents`);
+        setDocs(d.data || []);
+      } catch { /* best effort */ }
+      finally { setBusy(false); }
+    })();
+  }, [staffId, staffList]);
+
+  const s = row || {};
+  const dash = (v) => (v == null || v === "" ? "—" : v);
+  const money = (v) => (v ? new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(+v) : "—");
+  const fmtDate = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—");
+
+  return (
+    <Dialog open={!!staffId} onOpenChange={(o) => !o && onClose?.()}>
+      <DialogContent className="rounded-none max-w-3xl" data-testid="staff-view-dialog">
+        <DialogHeader>
+          <DialogTitle className="font-heading flex items-center gap-2 text-lg">
+            {s.name || "Staff details"}
+            {s.employee_code && <span className="text-xs font-mono text-[var(--brand)]">{s.employee_code}</span>}
+            {s.bank_verified && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold uppercase border bg-emerald-50 text-emerald-700 border-emerald-300">
+                <ShieldCheck size={11} /> Bank Verified
+              </span>
+            )}
+          </DialogTitle>
+          <DialogDescription className="text-xs text-[var(--muted)]">
+            Read-only view of {s.name || "staff"}&apos;s complete record — identity, contact, bank, and uploaded documents.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-5 max-h-[70vh] overflow-y-auto pr-1" data-testid="staff-view-body">
+          {/* Identity */}
+          <div>
+            <div className="overline text-[10px] mb-2">Identity</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+              <ViewField label="Employee Code" value={dash(s.employee_code)} mono testid="view-empcode" />
+              <ViewField label="Name" value={dash(s.name)} />
+              <ViewField label="Designation" value={dash(s.designation)} />
+              <ViewField label="Joining Date" value={fmtDate(s.joining_date)} />
+              <ViewField label="Exit Date" value={fmtDate(s.exit_date)} />
+              <ViewField label="Status" value={s.exit_date ? <span className="text-red-700 font-semibold">Exited</span> : <span className="text-emerald-700 font-semibold">Active</span>} />
+            </div>
+          </div>
+
+          {/* Contact */}
+          <div>
+            <div className="overline text-[10px] mb-2">Contact</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+              <ViewField label="Email" value={dash(s.email)} testid="view-email" />
+              <ViewField label="Mobile" value={dash(s.mobile)} testid="view-mobile" />
+              <ViewField label="Date of Birth" value={fmtDate(s.date_of_birth)} />
+              <ViewField label="Gender" value={dash(s.gender)} />
+              <ViewField label="PAN" value={dash(s.pan)} mono />
+              <ViewField label="Aadhaar (last 4)" value={dash(s.aadhaar_last4)} mono />
+              <div className="col-span-2 md:col-span-3">
+                <ViewField label="Address" value={dash(s.address)} multiline />
+              </div>
+              <ViewField label="Emergency Contact" value={dash(s.emergency_contact_name)} />
+              <ViewField label="Emergency Mobile" value={dash(s.emergency_contact_mobile)} />
+            </div>
+          </div>
+
+          {/* Salary + Center */}
+          <div>
+            <div className="overline text-[10px] mb-2">Salary &amp; Center</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+              <ViewField label="Monthly Salary" value={money(s.monthly_salary)} testid="view-salary" />
+              <ViewField label="Per-Day Rate" value={money(s.per_day_rate)} />
+              <ViewField label="Center" value={dash(s.center_name || s.center_id)} />
+            </div>
+          </div>
+
+          {/* Bank */}
+          <div>
+            <div className="overline text-[10px] mb-2 flex items-center gap-2">
+              Bank Details
+              {s.bank_verified ? (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-semibold uppercase border bg-emerald-50 text-emerald-700 border-emerald-300">
+                  <ShieldCheck size={10} /> Verified
+                </span>
+              ) : (s.bank_account_no || s.ifsc) ? (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-semibold uppercase border bg-amber-50 text-amber-700 border-amber-300">
+                  <ShieldAlert size={10} /> Pending Verification
+                </span>
+              ) : null}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+              <ViewField label="Account Holder" value={dash(s.account_holder_name)} testid="view-holder" />
+              <ViewField label="Bank Name" value={dash(s.bank_name)} testid="view-bankname" />
+              <ViewField label="Account Number" value={dash(s.bank_account_no)} mono testid="view-accno" />
+              <ViewField label="IFSC" value={dash(s.ifsc)} mono testid="view-ifsc" />
+              <ViewField label="UPI ID" value={dash(s.upi_id)} />
+              {s.bank_verified && (
+                <ViewField label="Verified On" value={fmtDate(s.bank_verified_at)} />
+              )}
+            </div>
+          </div>
+
+          {/* Documents (read-only) */}
+          <div>
+            <div className="overline text-[10px] mb-2 flex items-center gap-2">
+              Documents <span className="text-[10px] text-[var(--muted)] normal-case">({docs.length} uploaded)</span>
+              {busy && <span className="text-[10px] text-[var(--muted)] normal-case">loading…</span>}
+            </div>
+            {docs.length === 0 ? (
+              <div className="text-xs text-[var(--muted)] py-2">No documents uploaded yet.</div>
+            ) : (
+              <div className="border border-[var(--border)] divide-y divide-[var(--border)] max-h-56 overflow-y-auto" data-testid="view-docs-list">
+                {docs.map((d) => (
+                  <div key={d.id} className="p-2 text-sm flex items-center justify-between gap-2" data-testid={`view-doc-${d.id}`}>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium truncate">{d.title || d.filename}</div>
+                      <div className="text-[10px] text-[var(--muted)] capitalize">
+                        {d.doc_type || "document"} · uploaded {new Date(d.uploaded_at).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <a
+                      href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(d.file_path)}`}
+                      target="_blank" rel="noreferrer"
+                      className="text-[var(--brand)] text-xs hover:underline inline-flex items-center gap-1"
+                    >
+                      <Eye size={12} /> View
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} className="rounded-none" data-testid="staff-view-close">Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ViewField({ label, value, mono, multiline, testid }) {
+  return (
+    <div data-testid={testid}>
+      <div className="overline text-[9px]">{label}</div>
+      <div className={`text-sm mt-0.5 ${mono ? "font-mono" : ""} ${multiline ? "whitespace-pre-wrap" : "truncate"}`}>{value}</div>
     </div>
   );
 }
