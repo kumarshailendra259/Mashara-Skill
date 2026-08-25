@@ -4794,13 +4794,14 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
     then upserts today's attendance with location + selfie metadata.
     Enforces geofence if any active fence is configured for the staff's center.
     """
-    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "center_id": 1})
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "center_id": 1, "shift_id": 1})
     if not staff:
         raise HTTPException(400, "Your user is not linked to any staff record. Ask admin to set it up.")
     # Enforce geofence if configured for the staff's center (or global fences exist)
     body_dict = body.model_dump(exclude_none=True)
     lat = body_dict.get("latitude")
     lng = body_dict.get("longitude")
+    nearest_dist_m = None
     if lat is not None and lng is not None:
         fence_q: dict = {"active": True}
         if staff.get("center_id"):
@@ -4818,16 +4819,26 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
             inside = False
             nearest_name = None
             nearest_dist = None
+            nearest_radius = 200.0
             for f in fences:
                 d = _haversine_m(lat, lng, f["latitude"], f["longitude"])
                 if nearest_dist is None or d < nearest_dist:
                     nearest_dist = d
                     nearest_name = f.get("name")
+                    nearest_radius = float(f.get("radius_m", 200))
                 if d <= float(f.get("radius_m", 200)):
                     inside = True
                     break
             if not inside:
-                raise HTTPException(400, f"Outside geofence. Nearest: {nearest_name or 'site'} (~{(nearest_dist or 0)/1000:.2f} km away). Move closer to mark attendance.")
+                # Return structured error so frontend can render "You are Xm away" with a Refresh button.
+                raise HTTPException(400, {
+                    "code": "outside_geofence",
+                    "distance_m": round(nearest_dist or 0, 1),
+                    "radius_m": nearest_radius,
+                    "site_name": nearest_name or "office",
+                    "message": f"You are {round(nearest_dist or 0, 1)}m away from {nearest_name or 'office'}. Please move closer and try again.",
+                })
+            nearest_dist_m = round(nearest_dist or 0, 1)
     today = (body.date or _today_ist())[:10]
     now_iso = datetime.now(timezone.utc).isoformat()
     # If a previous day's row is still open (staff forgot to punch out),
@@ -4854,6 +4865,23 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
     for k in ("status", "latitude", "longitude", "accuracy", "address", "selfie_path", "selfie_filename"):
         if k in body_dict:
             doc[k] = body_dict[k]
+    if nearest_dist_m is not None:
+        doc["office_distance_m"] = nearest_dist_m
+    # Compute is_late based on staff's shift start_time + grace_minutes (IST)
+    is_late = False
+    if staff.get("shift_id"):
+        _sh = await db.shifts.find_one({"id": staff["shift_id"]}, {"_id": 0, "start_time": 1, "grace_minutes": 1})
+        if _sh and _sh.get("start_time"):
+            try:
+                _sh_h, _sh_m = (int(x) for x in _sh["start_time"].split(":"))
+                _grace = int(_sh.get("grace_minutes") or 0)
+                _now_ist = datetime.now(timezone.utc).astimezone(BUSINESS_TZ)
+                _ci_min = _now_ist.hour * 60 + _now_ist.minute
+                if _ci_min > (_sh_h * 60 + _sh_m + _grace):
+                    is_late = True
+            except (ValueError, AttributeError):
+                pass
+    doc["is_late"] = is_late
     new_id = str(uuid.uuid4())
     await db.attendance.update_one(
         {"staff_id": staff["id"], "date": today},
@@ -4922,6 +4950,152 @@ async def my_today_attendance(user=Depends(get_current_user)):
     today = _today_ist()
     row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     return {"staff": staff, "attendance": row}
+
+
+_WEEKDAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+@api.get("/attendance/my-monthly")
+async def my_attendance_monthly(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    user=Depends(get_current_user),
+):
+    """Full monthly attendance calendar for the logged-in staff.
+    Returns per-day status merged with:
+      - attendance rows (present / absent / half / leave / late flag)
+      - approved leaves (paid vs unpaid based on leave_type.paid)
+      - holidays (name)
+      - weekly off (from HR policy `weekly_off_days`, default Sunday)
+    Also returns `summary` with counts (Present / Absent / Half / Paid Leave / Week Off).
+    """
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+    if not staff:
+        return {"days": {}, "summary": {"present": 0, "absent": 0, "half": 0, "paid_leave": 0, "week_off": 0}, "month": month, "year": year, "weekly_off_days": ["sunday"]}
+    import calendar as _cal
+    last_day = _cal.monthrange(year, month)[1]
+    month_start = f"{year:04d}-{month:02d}-01"
+    month_end = f"{year:04d}-{month:02d}-{last_day:02d}"
+    today_ist = _today_ist()
+    # Weekly off policy
+    pol = await db.hr_policy.find_one({"id": "singleton"}, {"_id": 0, "weekly_off_days": 1})
+    weekly_off_names = [str(d).lower() for d in ((pol or {}).get("weekly_off_days") or ["sunday"])]
+    weekly_off_weekday_idx = {_WEEKDAY_NAMES.index(w) for w in weekly_off_names if w in _WEEKDAY_NAMES}
+    # Attendance rows
+    att_rows = await db.attendance.find(
+        {"staff_id": staff["id"], "date": {"$gte": month_start, "$lte": month_end}},
+        {"_id": 0},
+    ).to_list(400)
+    att_by_date = {r["date"]: r for r in att_rows}
+    # Approved leaves overlapping the month
+    leave_rows = await db.leaves.find(
+        {
+            "staff_id": staff["id"],
+            "status": "approved",
+            "start_date": {"$lte": month_end},
+            "end_date": {"$gte": month_start},
+        },
+        {"_id": 0},
+    ).to_list(200)
+    leave_types = {t["id"]: t for t in await db.leave_types.find({}, {"_id": 0, "id": 1, "paid": 1, "name": 1, "code": 1}).to_list(50)}
+
+    def _is_paid_leave(row):
+        lt = leave_types.get(row.get("leave_type_id"))
+        # Default to paid=True if not resolvable (matches attendance policy)
+        return bool(lt.get("paid", True)) if lt else True
+
+    leaves_by_date = {}
+    for lv in leave_rows:
+        try:
+            ls = datetime.fromisoformat(lv["start_date"]).date()
+            le = datetime.fromisoformat(lv["end_date"]).date()
+        except (ValueError, KeyError):
+            continue
+        cur = ls
+        while cur <= le:
+            iso = cur.isoformat()
+            if month_start <= iso <= month_end:
+                leaves_by_date[iso] = {"paid": _is_paid_leave(lv), "leave_type_id": lv.get("leave_type_id"), "reason": lv.get("reason")}
+            cur = cur + timedelta(days=1)
+    # Holidays
+    hol_rows = await db.holidays.find(
+        {"date": {"$gte": month_start, "$lte": month_end}}, {"_id": 0, "date": 1, "name": 1, "type": 1},
+    ).to_list(60)
+    holidays_by_date = {h["date"]: h for h in hol_rows}
+    # Compose per-day payload
+    days = {}
+    counts = {"present": 0, "absent": 0, "half": 0, "paid_leave": 0, "week_off": 0}
+    for d in range(1, last_day + 1):
+        iso = f"{year:04d}-{month:02d}-{d:02d}"
+        dt = datetime(year, month, d)
+        wd = dt.weekday()  # 0=Mon
+        is_future = iso > today_ist
+        row = att_by_date.get(iso)
+        leave = leaves_by_date.get(iso)
+        holiday = holidays_by_date.get(iso)
+        is_week_off = wd in weekly_off_weekday_idx
+        # Priority: attendance row > approved leave > holiday > week_off > absent/future
+        status = None
+        is_late = False
+        details = {}
+        if row:
+            st = row.get("status")
+            if st == "present" and row.get("check_in_at") and not row.get("check_out_at"):
+                status = "present"  # incomplete but shown as present for calendar
+            else:
+                status = st or ("present" if row.get("check_in_at") else "absent")
+            is_late = bool(row.get("is_late"))
+            details = {
+                "check_in_at": row.get("check_in_at") or row.get("marked_at"),
+                "check_out_at": row.get("check_out_at"),
+                "latitude": row.get("latitude"),
+                "longitude": row.get("longitude"),
+                "address": row.get("address"),
+                "office_distance_m": row.get("office_distance_m"),
+                "selfie_path": row.get("selfie_path"),
+                "attendance_id": row.get("id"),
+            }
+        elif leave:
+            status = "paid_leave" if leave["paid"] else "leave"
+        elif holiday:
+            status = "holiday"
+        elif is_week_off:
+            status = "week_off"
+        elif is_future:
+            status = "future"
+        else:
+            status = "absent"
+        # Count summary (holiday counted under week_off bucket per screenshot semantics — visually
+        # they render like a rest day. Users can adjust later if they want separate holidays).
+        if status == "present":
+            counts["present"] += 1
+        elif status == "absent":
+            counts["absent"] += 1
+        elif status == "half":
+            counts["half"] += 1
+        elif status == "paid_leave":
+            counts["paid_leave"] += 1
+        elif status in ("week_off", "holiday"):
+            counts["week_off"] += 1
+        days[iso] = {
+            "date": iso,
+            "day_of_month": d,
+            "weekday": _WEEKDAY_NAMES[wd],
+            "status": status,
+            "is_late": is_late,
+            "is_today": iso == today_ist,
+            "is_future": is_future,
+            "holiday_name": (holiday or {}).get("name"),
+            **details,
+        }
+    return {
+        "month": month,
+        "year": year,
+        "days": days,
+        "summary": counts,
+        "weekly_off_days": weekly_off_names,
+        "total_days": last_day,
+    }
 
 
 @api.get("/attendance")

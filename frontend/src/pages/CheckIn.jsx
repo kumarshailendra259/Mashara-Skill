@@ -13,7 +13,7 @@ import {
   Bell, ChevronLeft, ChevronRight, Megaphone, Menu, Users, Inbox, XCircle, RotateCcw, Phone, Mail,
   UserCog, ShieldCheck, ShieldAlert, Upload as UploadIcon,
 } from "lucide-react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
@@ -63,6 +63,8 @@ export default function CheckIn() {
   const nav = useNavigate();
   const [tab, setTab] = useState("home");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Inline check-in flow — opened from Home page OR Attendance page.
+  const [checkInOpen, setCheckInOpen] = useState(false);
 
   // Login state
   const [email, setEmail] = useState("");
@@ -80,6 +82,14 @@ export default function CheckIn() {
   };
 
   useEffect(() => { if (user && user !== false) loadSummary(); }, [user]);
+
+  const openCheckIn = () => setCheckInOpen(true);
+  const closeCheckIn = () => setCheckInOpen(false);
+  const onCheckInSuccess = async () => {
+    setCheckInOpen(false);
+    await loadSummary();
+    toast.success("Attendance marked ✓");
+  };
 
   const doLogin = async (e) => {
     e.preventDefault();
@@ -429,8 +439,8 @@ export default function CheckIn() {
       {/* Tab content — pulls up over the hero so the top cards sit inside the
           gradient area like the mockup. */}
       <div className="p-4 md:p-6 max-w-none -mt-12 md:-mt-16 relative z-[5]">
-        {tab === "home" && <HomeTab summary={summary} reload={loadSummary} setTab={setTab} />}
-        {tab === "attendance" && <AttendanceTab />}
+        {tab === "home" && <HomeTab summary={summary} reload={loadSummary} setTab={setTab} openCheckIn={openCheckIn} />}
+        {tab === "attendance" && <AttendanceTab openCheckIn={openCheckIn} summary={summary} />}
         {tab === "leave" && <LeaveTab staffId={summary?.staff?.id} />}
         {tab === "reimburse" && <ReimburseTab staffId={summary?.staff?.id} />}
         {tab === "salary" && <SalaryTab />}
@@ -440,6 +450,9 @@ export default function CheckIn() {
         {tab === "approvals" && <PendingApprovalsTab />}
       </div>
       </div>
+
+      {/* Global inline Check-In flow — reachable from Home + Attendance */}
+      <CheckInFlowSheet open={checkInOpen} onClose={closeCheckIn} onSuccess={onCheckInSuccess} today={summary?.today} />
 
       {/* Bottom tab bar — mobile only */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-[var(--border)] flex justify-around py-2 shadow-lg z-10" data-testid="checkin-tabbar">
@@ -467,7 +480,7 @@ export default function CheckIn() {
 /* ============================================================
    HOME TAB — Today's check-in/out + quick stats + holidays
    ============================================================ */
-function HomeTab({ summary, reload, setTab }) {
+function HomeTab({ summary, reload, setTab, openCheckIn }) {
   const att = summary?.today;
   const checkedIn = !!att?.check_in_at || !!att?.marked_at;
   const checkedOut = !!att?.check_out_at;
@@ -478,6 +491,9 @@ function HomeTab({ summary, reload, setTab }) {
   const [showAllHolidays, setShowAllHolidays] = useState(false);
   const now = new Date();
   const nowLabel = now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  const checkInTimeLabel = att?.check_in_at || att?.marked_at
+    ? new Date(att.check_in_at || att.marked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
   const totalMonth = (stats.present || 0) + (stats.half || 0) + (stats.leave || 0) + (stats.absent || 0);
   const attendancePct = totalMonth > 0 ? Math.round(((stats.present || 0) + (stats.half || 0) * 0.5) / totalMonth * 100) : 0;
 
@@ -500,17 +516,19 @@ function HomeTab({ summary, reload, setTab }) {
 
           <div className="mt-3">
             {!checkedIn && (
-              <Button onClick={() => setTab("attendance")} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-none gap-2 h-12 text-base font-bold" data-testid="quick-check-in">
+              <Button onClick={openCheckIn} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-none gap-2 h-12 text-base font-bold" data-testid="quick-check-in">
                 CHECK IN <LogInIcon size={18} />
               </Button>
             )}
             {checkedIn && !checkedOut && (
-              <Button onClick={() => setTab("attendance")} className="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-none gap-2 h-12 text-base font-bold" data-testid="quick-check-out">
-                CHECK OUT <Clock size={18} />
+              <Button onClick={openCheckIn} className="w-full bg-amber-600 hover:bg-amber-700 text-white rounded-none gap-2 h-12 text-sm font-bold" data-testid="quick-check-out">
+                <CheckCircle2 size={16} />
+                <span>Checked In{checkInTimeLabel && ` – ${checkInTimeLabel}`} · CHECK OUT</span>
+                <Clock size={16} />
               </Button>
             )}
             {checkedIn && checkedOut && (
-              <div className="w-full h-12 flex items-center justify-center border border-emerald-300 bg-emerald-100 text-emerald-800 gap-2 font-bold">
+              <div className="w-full h-12 flex items-center justify-center border border-emerald-300 bg-emerald-100 text-emerald-800 gap-2 font-bold" data-testid="quick-check-done">
                 <CheckCircle2 size={18} /> Both punches recorded
               </div>
             )}
@@ -1026,293 +1044,166 @@ const QAction = ({ icon, bg, label, onClick, testid }) => (
 );
 
 /* ============================================================
-   ATTENDANCE TAB — Check in/out + history list + holidays badge
+   ATTENDANCE TAB — Monthly calendar (Present / Absent / Half / Paid Leave / Week Off)
+   + inline Check-In launcher + Regularisation
    ============================================================ */
-function AttendanceTab() {
-  const [todayInfo, setTodayInfo] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [holidays, setHolidays] = useState([]);
+const STATUS_TONES = {
+  present:    { bg: "bg-emerald-500",  text: "text-white",       label: "Present" },
+  half:       { bg: "bg-amber-400",    text: "text-white",       label: "Half Day" },
+  paid_leave: { bg: "bg-purple-500",   text: "text-white",       label: "Paid Leave" },
+  leave:      { bg: "bg-purple-300",   text: "text-white",       label: "Leave (LOP)" },
+  absent:     { bg: "bg-red-500",      text: "text-white",       label: "Absent" },
+  week_off:   { bg: "bg-gray-400",     text: "text-white",       label: "Week Off" },
+  holiday:    { bg: "bg-pink-400",     text: "text-white",       label: "Holiday" },
+  future:     { bg: "bg-gray-100",     text: "text-gray-400",    label: "Upcoming" },
+};
+
+function AttendanceTab({ openCheckIn, summary }) {
+  const now = new Date();
+  const [month, setMonth] = useState(now.getMonth() + 1); // 1-12
+  const [year, setYear] = useState(now.getFullYear());
+  const [monthly, setMonthly] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(null);
   const [myReg, setMyReg] = useState([]);
-  const [coords, setCoords] = useState(null);
-  const [locBusy, setLocBusy] = useState(false);
-  const [locErr, setLocErr] = useState("");
-  const [locDenied, setLocDenied] = useState(false);
-  const [selfie, setSelfie] = useState(null);
-  const [status, setStatus] = useState("present");
-  const [submitting, setSubmitting] = useState(false);
-  const [uploadingSelfie, setUploadingSelfie] = useState(false);
   const [regOpen, setRegOpen] = useState(false);
   const [regForm, setRegForm] = useState({ date: "", status: "present", reason: "" });
   const [regTrackId, setRegTrackId] = useState(null);
-  const selfieRef = useRef(null);
 
-  const load = async () => {
+  const todayInfo = summary?.today;
+  const checkedIn = !!todayInfo?.check_in_at || !!todayInfo?.marked_at;
+  const checkedOut = !!todayInfo?.check_out_at;
+  const todayLabel = new Date().toLocaleDateString(undefined, { day: "2-digit", month: "long", year: "numeric" });
+
+  const loadMonthly = async () => {
+    setLoading(true);
     try {
-      const [t, h, hol, reg] = await Promise.all([
-        api.get("/attendance/today"),
-        api.get("/attendance/my"),
-        api.get("/holidays"),
+      const [{ data: m }, { data: r }] = await Promise.all([
+        api.get(`/attendance/my-monthly?month=${month}&year=${year}`),
         api.get("/regularisations/my").catch(() => ({ data: [] })),
       ]);
-      setTodayInfo(t.data);
-      setHistory(h.data || []);
-      setHolidays(hol.data || []);
-      setMyReg(reg.data || []);
-    } catch {/* best-effort */}
+      setMonthly(m);
+      setMyReg(r || []);
+    } catch { /* best effort */ }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { loadMonthly(); }, [month, year]);
+
+  const changeMonth = (delta) => {
+    const nm = month + delta;
+    if (nm < 1) { setMonth(12); setYear((y) => y - 1); }
+    else if (nm > 12) { setMonth(1); setYear((y) => y + 1); }
+    else setMonth(nm);
   };
 
-  const captureLocation = () => {
-    setLocErr(""); setLocDenied(false); setLocBusy(true);
-    if (!navigator.geolocation) {
-      setLocErr("Geolocation not supported on this device"); setLocBusy(false); return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const { latitude, longitude, accuracy } = pos.coords;
-        // Immediately unblock check-in — we don't need the reverse-geocoded address to submit.
-        setCoords({ latitude, longitude, accuracy, address: null, addressLoading: true });
-        setLocBusy(false);
-        // Fire-and-forget reverse geocode; the check-in button is already enabled.
-        try {
-          const r = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
-            { headers: { "Accept-Language": "en" } },
-          );
-          if (r.ok) {
-            const j = await r.json();
-            const addr = j?.display_name || null;
-            const pincode = j?.address?.postcode || null;
-            setCoords((c) => c && c.latitude === latitude && c.longitude === longitude
-              ? { ...c, address: addr, pincode, addressLoading: false }
-              : c);
-          } else {
-            setCoords((c) => c ? { ...c, addressLoading: false } : c);
-          }
-        } catch {
-          setCoords((c) => c ? { ...c, addressLoading: false } : c);
-        }
-      },
-      (err) => {
-        setLocBusy(false);
-        // err.code 1 = PERMISSION_DENIED — show the clear "how-to-enable" panel.
-        const denied = err.code === 1 || /denied/i.test(err.message || "");
-        setLocDenied(denied);
-        setLocErr(denied
-          ? "Location permission blocked in browser."
-          : (err.message || "Could not read location. Try again."));
-      },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 },  // maximumAge lets us reuse a fresh fix, faster
-    );
-  };
+  const monthLabel = new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  const summaryCounts = monthly?.summary || { present: 0, absent: 0, half: 0, paid_leave: 0, week_off: 0 };
+  const days = monthly?.days || {};
 
-  // Auto-load history + auto-request location on mount so staff can check in with a single tap.
-  useEffect(() => {
-    load();
-    // Only auto-request location once per mount, and only if we aren't already checked in/out.
-    captureLocation();
-  }, []);
+  // Build the calendar grid: leading blanks for Sunday-first grid
+  const first = new Date(year, month - 1, 1);
+  const startWeekday = first.getDay(); // 0 = Sunday
+  const totalDays = monthly?.total_days || new Date(year, month, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= totalDays; d++) cells.push(d);
 
-  // Client-side image compression — shrinks large phone selfies (5-10MB) to ~150-300KB
-  // so the upload is 20-40x faster on 2G/3G and matches HR's 10MB backend limit comfortably.
-  const compressImage = (file, maxWidth = 900, quality = 0.78) => new Promise((resolve, reject) => {
-    if (!file.type.startsWith("image/")) { resolve(file); return; }
-    const img = new Image();
-    img.onerror = reject;
-    img.onload = () => {
-      try {
-        const scale = Math.min(1, maxWidth / img.width);
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob((blob) => {
-          if (!blob) { resolve(file); return; }
-          resolve(new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), { type: "image/jpeg" }));
-        }, "image/jpeg", quality);
-      } catch { resolve(file); }
-    };
-    img.src = URL.createObjectURL(file);
-  });
-
-  const onSelfieChange = async (e) => {
-    const raw = e.target.files?.[0]; if (!raw) return;
-    setUploadingSelfie(true);
-    try {
-      const f = await compressImage(raw).catch(() => raw);
-      const fd = new FormData(); fd.append("file", f);
-      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
-      const reader = new FileReader();
-      reader.onload = () => setSelfie({ ...data, preview: reader.result });
-      reader.readAsDataURL(f);
-    } catch (err) { toast.error(formatError(err)); }
-    finally { setUploadingSelfie(false); if (selfieRef.current) selfieRef.current.value = ""; }
-  };
-
-  const doCheckIn = async () => {
-    if (!coords) { toast.error("Enable location to check in"); return; }
-    if (!selfie) { toast.error("Take a selfie first"); return; }
-    setSubmitting(true);
-    try {
-      await api.post("/attendance/self", {
-        status, latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy,
-        address: coords.address || undefined,
-        selfie_path: selfie.path, selfie_filename: selfie.filename,
-      });
-      toast.success("Checked in ✓");
-      setCoords(null); setSelfie(null);
-      await load();
-    } catch (e) { toast.error(formatError(e)); }
-    finally { setSubmitting(false); }
-  };
-
-  const doCheckOut = async () => {
-    if (!coords) { toast.error("Enable location to check out"); return; }
-    setSubmitting(true);
-    try {
-      await api.post("/attendance/checkout", {
-        latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy,
-        address: coords.address || undefined,
-        selfie_path: selfie?.path, selfie_filename: selfie?.filename,
-      });
-      toast.success("Checked out ✓");
-      setCoords(null); setSelfie(null);
-      await load();
-    } catch (e) { toast.error(formatError(e)); }
-    finally { setSubmitting(false); }
-  };
-
-  const att = todayInfo?.attendance;
-  const checkedIn = !!att?.check_in_at || !!att?.marked_at;
-  const checkedOut = !!att?.check_out_at;
-  const holidayMap = Object.fromEntries(holidays.map((h) => [h.date, h]));
-  const canSubmit = !!coords && (checkedIn || !!selfie) && !submitting;
+  const dayKey = (d) => `${year.toString().padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const selected = selectedDate ? days[selectedDate] : null;
 
   return (
-    <div className="space-y-4">
-      {/* Action card */}
-      <div className="swiss-card p-4">
-        <div className="font-heading font-bold text-lg">
-          {!checkedIn ? "Mark Check-In" : (!checkedOut ? "Mark Check-Out" : "Attendance complete ✓")}
-        </div>
-        <div className="text-[11px] text-[var(--muted)] mt-0.5">
-          {!checkedIn ? "Just allow location, snap a selfie & tap Check In." : (!checkedOut ? "Tap Check Out to end your shift." : "")}
-        </div>
-
-        {!checkedOut && (
-          <div className="mt-3 space-y-3">
-            {/* Location — auto-fetched on open; friendly recovery if browser blocks it */}
-            <div className={`border p-3 ${locDenied ? "border-red-300 bg-red-50" : coords ? "border-emerald-200 bg-emerald-50/50" : "border-[var(--border)] bg-gray-50"}`}>
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-medium flex items-center gap-2">
-                  <MapPin size={14} className={locDenied ? "text-red-600" : coords ? "text-emerald-600" : ""} />
-                  Location
-                </div>
-                {coords && <CheckCircle2 className="text-[var(--success)]" size={18} />}
-                {locBusy && <div className="text-[10px] text-[var(--muted)]">Fetching…</div>}
-              </div>
-              {coords ? (
-                <div className="mt-1 space-y-1" data-testid="att-location-ok">
-                  {coords.address ? (
-                    <div className="text-xs text-[var(--ink)] leading-snug break-words" data-testid="att-address">
-                      {coords.address}
-                      {coords.pincode && !coords.address.includes(coords.pincode) && (
-                        <span className="ml-1 font-medium">· PIN {coords.pincode}</span>
-                      )}
-                    </div>
-                  ) : coords.addressLoading ? (
-                    <div className="text-xs text-[var(--muted)] italic">Fetching full address…</div>
-                  ) : (
-                    <div className="text-xs text-[var(--muted)] italic">Location captured.</div>
-                  )}
-                  <div className="text-[10px] text-[var(--muted)] num flex items-center gap-2">
-                    <span>{coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)}</span>
-                    <span>·</span>
-                    <span>±{Math.round(coords.accuracy)}m</span>
-                    <button
-                      type="button"
-                      onClick={captureLocation}
-                      className="ml-auto text-[var(--brand)] hover:underline"
-                      data-testid="att-refresh-loc"
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                </div>
-              ) : locDenied ? (
-                // Permission blocked in browser — show clear per-platform recovery steps.
-                <div className="mt-2 space-y-2" data-testid="att-loc-denied">
-                  <div className="text-xs text-red-800 font-medium">Aap ne location deny kar diya hai. Attendance ke liye location zaroori hai.</div>
-                  <div className="text-[11px] text-red-800 space-y-1">
-                    <div className="font-semibold">Enable karne ke steps:</div>
-                    <div>📱 <b>Chrome/Edge:</b> Address bar me lock/site icon → Permissions → Location → Allow</div>
-                    <div>🍎 <b>Safari (iOS):</b> Settings → Safari → Location → Allow → phir page refresh karo</div>
-                    <div>🤖 <b>Android app:</b> Phone Settings → Apps → Chrome → Permissions → Location → Allow</div>
-                  </div>
-                  <Button size="sm" onClick={captureLocation} disabled={locBusy} className="brand-btn rounded-none w-full mt-1" data-testid="att-loc-retry">
-                    <RefreshCw size={14} className="mr-1" /> {locBusy ? "Trying again…" : "Retry Now"}
-                  </Button>
-                </div>
-              ) : (
-                <div className="mt-2 space-y-2">
-                  {locErr && <div className="text-xs text-[var(--danger)]">{locErr}</div>}
-                  <Button size="sm" onClick={captureLocation} disabled={locBusy} className="brand-btn rounded-none w-full" data-testid="att-capture-loc">
-                    {locBusy ? "Fetching location…" : "Get Location"}
-                  </Button>
-                </div>
-              )}
+    <div className="space-y-4" data-testid="attendance-calendar-tab">
+      {/* Today status banner + Check-In launcher (mobile-first) */}
+      <div className={`swiss-card p-4 border-l-4 ${checkedIn && checkedOut ? "border-emerald-500" : checkedIn ? "border-amber-500" : "border-red-500"}`} data-testid="att-today-banner">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <div className="overline text-[10px]">Today · {todayLabel}</div>
+            <div className="font-heading font-bold text-base mt-0.5">
+              {checkedIn && checkedOut && <span className="text-emerald-700">Present · Day Complete</span>}
+              {checkedIn && !checkedOut && <span className="text-amber-700">Checked In {todayInfo?.check_in_at ? "– " + new Date(todayInfo.check_in_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}</span>}
+              {!checkedIn && <span className="text-red-700">Attendance Pending</span>}
             </div>
-
-            {/* Selfie (mandatory for check-in, optional for check-out) */}
-            {!checkedIn && (
-              <div className={`border p-3 ${selfie ? "border-emerald-200 bg-emerald-50/50" : "border-[var(--border)] bg-gray-50"}`}>
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium flex items-center gap-2"><Camera size={14} className={selfie ? "text-emerald-600" : ""} /> Selfie <span className="text-[var(--danger)]">*</span></div>
-                  {selfie && <CheckCircle2 className="text-[var(--success)]" size={18} />}
-                </div>
-                {selfie?.preview ? (
-                  <div className="mt-2 space-y-1">
-                    <img src={selfie.preview} alt="selfie" className="w-full max-h-48 object-cover border border-[var(--border)]" />
-                    <button type="button" onClick={() => selfieRef.current?.click()} className="text-[10px] text-[var(--brand)] hover:underline" data-testid="att-retake-selfie">Retake selfie</button>
-                  </div>
-                ) : (
-                  <Button size="sm" onClick={() => selfieRef.current?.click()} disabled={uploadingSelfie} variant="outline" className="rounded-none mt-2 w-full" data-testid="att-take-selfie">
-                    <Camera size={14} className="mr-1" /> {uploadingSelfie ? "Uploading…" : "Take Selfie"}
-                  </Button>
-                )}
-                <input ref={selfieRef} type="file" accept="image/*" capture="user" className="hidden" onChange={onSelfieChange} />
-              </div>
-            )}
-
-            {/* Status (only for check-in) */}
-            {!checkedIn && (
-              <div className="grid grid-cols-3 gap-2" data-testid="att-status-picker">
-                {STATUS_OPTIONS.map((o) => (
-                  <button key={o.v} onClick={() => setStatus(o.v)} className={`text-sm py-2.5 border font-medium ${status === o.v ? "border-[var(--brand)] bg-[var(--brand)] text-white" : "border-[var(--border)] bg-white hover:bg-gray-50"}`} data-testid={`att-status-${o.v}`}>{o.label}</button>
-                ))}
-              </div>
-            )}
-
-            <Button
-              onClick={checkedIn ? doCheckOut : doCheckIn}
-              disabled={!canSubmit}
-              className="brand-btn rounded-none w-full h-12 gap-2 disabled:opacity-50"
-              data-testid={checkedIn ? "att-checkout-submit" : "att-checkin-submit"}
-            >
-              {submitting ? "Saving…" : (checkedIn ? <><Clock size={16} /> Check Out</> : <><LogInIcon size={16} /> Check In</>)}
-            </Button>
           </div>
-        )}
-
-        {checkedOut && (
-          <div className="text-sm text-[var(--muted)] mt-2">In: {fmtDate(att?.check_in_at || att?.marked_at)} · Out: {fmtDate(att?.check_out_at)}</div>
-        )}
+          {!checkedOut && (
+            <Button onClick={openCheckIn} className="brand-btn rounded-none gap-2 h-11" data-testid="att-open-checkin">
+              {checkedIn ? <><Clock size={16} /> Check Out</> : <><LogInIcon size={16} /> Check In</>}
+            </Button>
+          )}
+        </div>
       </div>
 
-      {/* History list */}
+      {/* Attendance For [Month Year] */}
+      <div className="bg-amber-50 border border-amber-200 p-4 flex items-center gap-3" data-testid="att-month-toolbar">
+        <AlertCircle size={18} className="text-amber-600 shrink-0" />
+        <div className="font-heading font-bold text-sm text-amber-900">Attendance For</div>
+        <div className="ml-auto flex items-center gap-2 bg-white border border-amber-200 px-3 py-1.5">
+          <button onClick={() => changeMonth(-1)} className="p-0.5 hover:bg-gray-100" data-testid="att-prev-month"><ChevronLeft size={16} /></button>
+          <Calendar size={14} className="text-amber-700" />
+          <div className="text-sm font-semibold min-w-[92px] text-center" data-testid="att-month-label">{monthLabel}</div>
+          <button onClick={() => changeMonth(+1)} className="p-0.5 hover:bg-gray-100" data-testid="att-next-month"><ChevronRight size={16} /></button>
+        </div>
+      </div>
+
+      {/* Monthly Summary strip */}
+      <div className="grid grid-cols-5 gap-0 border border-[var(--border)] bg-white overflow-hidden" data-testid="att-summary-strip">
+        <SummaryCell label="Present"    value={summaryCounts.present}    tone="bg-emerald-50 text-emerald-800" edge="bg-emerald-500"  testid="sum-present" />
+        <SummaryCell label="Absent"     value={summaryCounts.absent}     tone="bg-red-50 text-red-800"        edge="bg-red-500"      testid="sum-absent" />
+        <SummaryCell label="Half day"   value={summaryCounts.half}       tone="bg-amber-50 text-amber-800"    edge="bg-amber-400"    testid="sum-half" />
+        <SummaryCell label="Paid Leave" value={(summaryCounts.paid_leave || 0).toFixed(1)} tone="bg-purple-50 text-purple-800" edge="bg-purple-500" testid="sum-paid-leave" />
+        <SummaryCell label="Week Off"   value={summaryCounts.week_off}   tone="bg-gray-100 text-gray-800"     edge="bg-gray-400"     testid="sum-week-off" />
+      </div>
+
+      {/* Weekday header */}
+      <div className="grid grid-cols-7 gap-2 text-center text-[13px] font-medium text-[var(--muted)] px-1" data-testid="att-weekday-header">
+        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => <div key={d}>{d}</div>)}
+      </div>
+
+      {/* Calendar grid */}
+      <div className="grid grid-cols-7 gap-2 px-1" data-testid="att-calendar-grid">
+        {loading && cells.map((_, i) => <div key={i} className="aspect-square bg-gray-50 animate-pulse" />)}
+        {!loading && cells.map((d, i) => {
+          if (!d) return <div key={i} />;
+          const iso = dayKey(d);
+          const info = days[iso];
+          const st = info?.status || "future";
+          const tone = STATUS_TONES[st] || STATUS_TONES.future;
+          const isToday = info?.is_today;
+          const isLate = info?.is_late;
+          return (
+            <button
+              key={i}
+              onClick={() => info && setSelectedDate(iso)}
+              className={`aspect-square flex flex-col items-center justify-center leading-none font-heading font-bold rounded-md ${tone.bg} ${tone.text} ${isToday ? "ring-2 ring-offset-1 ring-red-600" : ""} transition-transform active:scale-95`}
+              data-testid={`att-day-${d}`}
+            >
+              <span className="text-lg num">{String(d).padStart(2, "0")}</span>
+              {isLate && <span className="text-[9px] font-bold tracking-wider mt-0.5">LATE</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Legend */}
+      <div className="flex flex-wrap gap-3 text-[11px] px-1 pt-1" data-testid="att-legend">
+        {[
+          { k: "present", label: "Present" },
+          { k: "absent", label: "Absent" },
+          { k: "half", label: "Half Day" },
+          { k: "paid_leave", label: "Paid Leave" },
+          { k: "week_off", label: "Week Off" },
+          { k: "holiday", label: "Holiday" },
+        ].map((s) => (
+          <span key={s.k} className="inline-flex items-center gap-1.5">
+            <span className={`inline-block w-3 h-3 rounded ${STATUS_TONES[s.k].bg}`} />
+            <span className="text-[var(--muted)]">{s.label}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* Regularisation card — preserved from earlier flow so staff can still request retro attendance */}
       <div className="swiss-card p-4">
         <div className="flex items-center justify-between">
-          <div className="overline">Recent Attendance</div>
+          <div className="overline">Regularisation Requests</div>
           <Dialog open={regOpen} onOpenChange={setRegOpen}>
             <DialogTrigger asChild>
               <Button size="sm" variant="outline" className="rounded-none h-8 px-2 gap-1 text-xs" data-testid="reg-open"><AlertCircle size={12} /> Regularise</Button>
@@ -1342,7 +1233,7 @@ function AttendanceTab() {
                     await api.post("/regularisations", regForm);
                     setRegOpen(false);
                     setRegForm({ date: "", status: "present", reason: "" });
-                    load();
+                    loadMonthly();
                     toast.success("Submitted — awaiting approval");
                   } catch (e) { toast.error(formatError(e)); }
                 }} className="brand-btn rounded-none" data-testid="reg-submit">Submit</Button>
@@ -1350,109 +1241,127 @@ function AttendanceTab() {
             </DialogContent>
           </Dialog>
         </div>
-        {myReg.filter((r) => r.status === "pending").length > 0 && (() => {
-          const pending = myReg.filter((r) => r.status === "pending");
-          // Group by current step label (chain.snapshot[current_level-1].label or 'Approval')
-          const stepCounts = pending.reduce((acc, r) => {
-            const snap = r.chain_snapshot || [];
-            const step = snap.find((s) => s.level === r.current_level);
-            const label = step?.label || (r.chain_id ? `Level ${r.current_level || 1}` : "HR / Admin");
-            acc[label] = (acc[label] || 0) + 1;
-            return acc;
-          }, {});
-          return (
-            <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 mt-2" data-testid="reg-pending-banner">
-              {pending.length} regularisation request(s) awaiting:{" "}
-              {Object.entries(stepCounts).map(([lbl, n], i) => (
-                <span key={lbl}>{i > 0 ? ", " : ""}<b>{lbl}</b> ({n})</span>
-              ))}
-            </div>
-          );
-        })()}
-        {/* My Regularisation Requests — per-item cards with Track approval */}
-        {myReg.length > 0 && (
-          <div className="mt-3 pt-3 border-t border-[var(--border)]" data-testid="reg-list">
-            <div className="overline mb-2">My Regularisation Requests</div>
-            <ul className="divide-y divide-[var(--border)]">
-              {myReg.slice(0, 20).map((r) => {
-                const hasChain = (r.chain_snapshot || []).length > 0 || (r.chain_history || []).length > 0;
-                const inFlight = r.current_level > 0 && (r.chain_snapshot || []).length > 0;
-                return (
-                  <li key={r.id} className="py-2 text-sm" data-testid={`reg-row-${r.id}`}>
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium">
-                          {new Date(r.date).toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}
-                          <span className="text-xs text-[var(--muted)] font-normal"> · {r.attendance_status || r.status_requested}</span>
-                        </div>
-                        {r.reason && <div className="text-xs text-[var(--muted)] mt-0.5">{r.reason}</div>}
-                        {inFlight && (r.pending_with || []).length > 0 && (
-                          <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`reg-pending-${r.id}`}>
-                            ⏳ Pending with <strong>{r.current_step_label || `Level ${r.current_level}`}</strong> — {r.pending_with.slice(0, 2).map((u) => u.name).join(", ")}
-                            {r.pending_with.length > 2 && ` +${r.pending_with.length - 2}`}
-                          </div>
-                        )}
-                        {inFlight && (r.pending_with || []).length === 0 && (
-                          <div className="text-[10px] mt-1 text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5" data-testid={`reg-pending-${r.id}`}>
-                            ⏳ Pending at step: <strong>{r.current_step_label || `Level ${r.current_level}`}</strong> <span className="text-[var(--muted)] italic">(approver not resolved)</span>
-                          </div>
-                        )}
-                        {hasChain ? (
-                          <button
-                            onClick={() => setRegTrackId(r.id)}
-                            className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline"
-                            data-testid={`track-reg-${r.id}`}
-                          >
-                            Track approval {inFlight && `· Level ${r.current_level} of ${r.chain_snapshot.length}`} →
-                          </button>
-                        ) : r.status === "pending" ? (
-                          <div className="text-[10px] text-[var(--muted)] mt-1 italic">Awaiting approval — no chain configured yet</div>
-                        ) : null}
-                      </div>
-                      <span className={`text-[10px] uppercase font-bold px-2 py-0.5 shrink-0 ${
-                        r.status === "approved" ? "bg-green-100 text-green-700" :
-                        r.status === "rejected" ? "bg-red-100 text-red-700" :
-                        "bg-amber-100 text-amber-700"
-                      }`}>{r.status}</span>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        )}
-        {history.length === 0 ? (
-          <div className="text-sm text-[var(--muted)] mt-2">No history yet.</div>
+        {myReg.length === 0 ? (
+          <div className="text-xs text-[var(--muted)] mt-2">No regularisation requests yet.</div>
         ) : (
           <ul className="mt-2 divide-y divide-[var(--border)]">
-            {history.slice(0, 30).map((r) => {
-              const h = holidayMap[r.date];
+            {myReg.slice(0, 10).map((r) => {
+              const hasChain = (r.chain_snapshot || []).length > 0 || (r.chain_history || []).length > 0;
+              const inFlight = r.current_level > 0 && (r.chain_snapshot || []).length > 0;
               return (
-                <li key={r.id} className="py-2 text-sm flex items-center justify-between">
-                  <div>
-                    <div className="font-medium">{new Date(r.date).toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short" })}</div>
-                    <div className="text-xs text-[var(--muted)]">
-                      In: {r.check_in_at ? new Date(r.check_in_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : (r.marked_at ? new Date(r.marked_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—")}
-                      {" · "}Out: {r.check_out_at ? new Date(r.check_out_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}
-                      {h && <span className="ml-1 text-blue-600">· {h.name}</span>}
+                <li key={r.id} className="py-2 text-sm" data-testid={`reg-row-${r.id}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium">
+                        {new Date(r.date).toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}
+                        <span className="text-xs text-[var(--muted)] font-normal"> · {r.attendance_status || r.status_requested}</span>
+                      </div>
+                      {r.reason && <div className="text-xs text-[var(--muted)] mt-0.5">{r.reason}</div>}
+                      {hasChain && (
+                        <button
+                          onClick={() => setRegTrackId(r.id)}
+                          className="text-[10px] text-[var(--brand)] mt-1 font-medium hover:underline"
+                          data-testid={`track-reg-${r.id}`}
+                        >
+                          Track approval {inFlight && `· Level ${r.current_level} of ${r.chain_snapshot.length}`} →
+                        </button>
+                      )}
                     </div>
+                    <span className={`text-[10px] uppercase font-bold px-2 py-0.5 shrink-0 ${
+                      r.status === "approved" ? "bg-green-100 text-green-700" :
+                      r.status === "rejected" ? "bg-red-100 text-red-700" :
+                      "bg-amber-100 text-amber-700"
+                    }`}>{r.status}</span>
                   </div>
-                  <span className={`text-xs uppercase font-bold px-2 py-1 ${
-                    r.status === "present" ? "bg-green-100 text-green-700" :
-                    r.status === "absent" ? "bg-red-100 text-red-700" :
-                    r.status === "half" ? "bg-amber-100 text-amber-700" :
-                    "bg-blue-100 text-blue-700"
-                  }`}>{r.status}</span>
                 </li>
               );
             })}
           </ul>
         )}
       </div>
+
+      {/* Date detail modal */}
+      <Dialog open={!!selectedDate} onOpenChange={(o) => !o && setSelectedDate(null)}>
+        <DialogContent className="rounded-none max-w-sm" data-testid="att-date-detail">
+          <DialogHeader>
+            <DialogTitle className="font-heading">
+              {selectedDate && new Date(selectedDate).toLocaleDateString(undefined, { day: "2-digit", month: "long", year: "numeric" })}
+            </DialogTitle>
+            <DialogDescription className="text-xs text-[var(--muted)]">Attendance details for the selected day.</DialogDescription>
+          </DialogHeader>
+          {selected ? (
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center gap-2">
+                <span className={`inline-block w-3 h-3 rounded ${STATUS_TONES[selected.status]?.bg}`} />
+                <span className="font-semibold">{STATUS_TONES[selected.status]?.label}</span>
+                {selected.is_late && <span className="text-[10px] font-bold bg-red-100 text-red-700 px-1.5 py-0.5">LATE</span>}
+                {selected.is_today && <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5">TODAY</span>}
+              </div>
+              {selected.holiday_name && (
+                <div className="text-xs text-pink-800 bg-pink-50 border border-pink-200 px-2 py-1">🎉 {selected.holiday_name}</div>
+              )}
+              {selected.check_in_at && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="overline text-[9px]">Check In</div>
+                    <div className="font-medium num">{new Date(selected.check_in_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</div>
+                  </div>
+                  <div>
+                    <div className="overline text-[9px]">Check Out</div>
+                    <div className="font-medium num">{selected.check_out_at ? new Date(selected.check_out_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : <span className="text-amber-700">Pending</span>}</div>
+                  </div>
+                  {selected.check_in_at && selected.check_out_at && (() => {
+                    const ms = new Date(selected.check_out_at) - new Date(selected.check_in_at);
+                    const h = Math.floor(ms / 3600000);
+                    const m = Math.floor((ms % 3600000) / 60000);
+                    return (
+                      <div>
+                        <div className="overline text-[9px]">Working Hours</div>
+                        <div className="font-medium num">{h}h {m}m</div>
+                      </div>
+                    );
+                  })()}
+                  {selected.office_distance_m != null && (
+                    <div>
+                      <div className="overline text-[9px]">Office Distance</div>
+                      <div className="font-medium num">{Math.round(selected.office_distance_m)}m</div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {selected.address && (
+                <div>
+                  <div className="overline text-[9px]">Location</div>
+                  <div className="text-xs">{selected.address}</div>
+                </div>
+              )}
+              {selected.latitude != null && (
+                <a href={`https://www.google.com/maps?q=${selected.latitude},${selected.longitude}`} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-[var(--brand)] hover:underline">
+                  <MapPin size={12} /> Open on map
+                </a>
+              )}
+              {selected.status === "absent" && !selected.check_in_at && (
+                <div className="text-xs text-[var(--muted)] italic">No attendance marked for this day.</div>
+              )}
+            </div>
+          ) : (
+            <div className="text-xs text-[var(--muted)]">No details available.</div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       <ApprovalTimelineModal type="regularisation" requestId={regTrackId} onClose={() => setRegTrackId(null)} />
     </div>
   );
 }
+
+const SummaryCell = ({ label, value, tone, edge, testid }) => (
+  <div className={`relative px-3 py-3 ${tone}`} data-testid={testid}>
+    <div className={`absolute left-0 top-0 bottom-0 w-1 ${edge}`} />
+    <div className="text-[11px] font-medium leading-tight">{label}</div>
+    <div className="text-2xl font-heading font-black leading-none mt-1 num">{value}</div>
+  </div>
+);
 
 /* ============================================================
    LEAVE TAB — Apply + my list
@@ -2622,4 +2531,301 @@ function ProfileTab() {
       </div>
     </div>
   );
+}
+
+/* ============================================================
+   CHECK-IN FLOW SHEET — full-screen inline attendance marker.
+   Steps: request GPS → check geofence → capture selfie → submit.
+   Used by Home tab + Attendance tab so users NEVER leave home.
+   ============================================================ */
+function CheckInFlowSheet({ open, onClose, onSuccess, today }) {
+  const checkedIn = !!today?.check_in_at || !!today?.marked_at;
+  const checkedOut = !!today?.check_out_at;
+  const isCheckOut = checkedIn && !checkedOut;
+
+  const [step, setStep] = useState("location"); // location | out_of_range | selfie | submitting
+  const [coords, setCoords] = useState(null);
+  const [locBusy, setLocBusy] = useState(false);
+  const [locErr, setLocErr] = useState("");
+  const [locDenied, setLocDenied] = useState(false);
+  const [outOfRange, setOutOfRange] = useState(null); // {distance_m, site_name, radius_m, message}
+  const [selfieBusy, setSelfieBusy] = useState(false);
+  const [selfie, setSelfie] = useState(null); // {path, filename, preview}
+  const [submitting, setSubmitting] = useState(false);
+  const streamRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [facingMode, setFacingMode] = useState("user");
+  const [cameraErr, setCameraErr] = useState("");
+
+  // Reset state when opened
+  useEffect(() => {
+    if (open) {
+      setStep("location");
+      setCoords(null); setLocErr(""); setLocDenied(false); setOutOfRange(null);
+      setSelfie(null); setCameraErr("");
+      captureLocation();
+    } else {
+      // Stop camera on close
+      stopCamera();
+    }
+  }, [open]);
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+  };
+
+  const captureLocation = () => {
+    setLocErr(""); setLocDenied(false); setLocBusy(true); setOutOfRange(null);
+    if (!navigator.geolocation) {
+      setLocErr("Geolocation not supported on this device"); setLocBusy(false); return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude, longitude, accuracy } = pos.coords;
+        setCoords({ latitude, longitude, accuracy });
+        setLocBusy(false);
+        // Fire-and-forget reverse geocode
+        try {
+          const r = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
+            { headers: { "Accept-Language": "en" } },
+          );
+          if (r.ok) {
+            const j = await r.json();
+            setCoords((c) => c && c.latitude === latitude ? { ...c, address: j?.display_name || null } : c);
+          }
+        } catch {/* no-op */}
+        // Move to selfie step
+        setStep("selfie");
+      },
+      (err) => {
+        setLocBusy(false);
+        const denied = err.code === 1 || /denied/i.test(err.message || "");
+        setLocDenied(denied);
+        setLocErr(denied
+          ? "Location permission blocked. Enable it in your browser/app settings."
+          : (err.message || "Could not read location. Try again."));
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 },
+    );
+  };
+
+  // Start camera stream once we enter the selfie step
+  useEffect(() => {
+    if (step !== "selfie" || !open) return;
+    (async () => {
+      setCameraErr("");
+      stopCamera();
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+        streamRef.current = s;
+        if (videoRef.current) {
+          videoRef.current.srcObject = s;
+          try { await videoRef.current.play(); } catch {/* autoplay is fine */}
+        }
+      } catch (e) {
+        setCameraErr(e?.message || "Camera unavailable. Please grant camera permission.");
+      }
+    })();
+    return () => stopCamera();
+  }, [step, open, facingMode]);
+
+  const switchCamera = () => setFacingMode((f) => (f === "user" ? "environment" : "user"));
+
+  const captureSelfie = async () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    setSelfieBusy(true);
+    try {
+      const v = videoRef.current;
+      const c = canvasRef.current;
+      const w = v.videoWidth || 720;
+      const h = v.videoHeight || 720;
+      c.width = w; c.height = h;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(v, 0, 0, w, h);
+      const blob = await new Promise((resolve) => c.toBlob(resolve, "image/jpeg", 0.78));
+      if (!blob) throw new Error("Could not capture image");
+      const file = new File([blob], "selfie.jpg", { type: "image/jpeg" });
+      const fd = new FormData(); fd.append("file", file);
+      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      const preview = URL.createObjectURL(blob);
+      setSelfie({ ...data, preview });
+      // Auto-submit as soon as selfie is captured to match "one-tap" expectation
+      await submit({ ...data });
+    } catch (e) {
+      toast.error(formatError(e));
+    } finally {
+      setSelfieBusy(false);
+    }
+  };
+
+  const submit = async (selfieData) => {
+    if (!coords) { toast.error("Location missing — refresh and try again."); return; }
+    setSubmitting(true);
+    setStep("submitting");
+    try {
+      const payload = {
+        latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy,
+        address: coords.address || undefined,
+      };
+      if (selfieData?.path) {
+        payload.selfie_path = selfieData.path;
+        payload.selfie_filename = selfieData.filename;
+      }
+      if (isCheckOut) {
+        await api.post("/attendance/checkout", payload);
+      } else {
+        payload.status = "present";
+        await api.post("/attendance/self", payload);
+      }
+      stopCamera();
+      onSuccess?.();
+    } catch (e) {
+      // Handle structured geofence error → show "Xm away" screen
+      const detail = e?.response?.data?.detail;
+      if (detail && typeof detail === "object" && detail.code === "outside_geofence") {
+        setOutOfRange(detail);
+        setStep("out_of_range");
+      } else {
+        toast.error(formatError(e));
+        setStep("selfie");
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black flex flex-col" data-testid="checkin-sheet">
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-[var(--border)]">
+        <div className="flex items-center gap-2">
+          <button onClick={() => { stopCamera(); onClose(); }} className="p-1.5 hover:bg-gray-100" data-testid="checkin-close">
+            <ChevronLeft size={20} />
+          </button>
+          <div className="font-heading font-bold text-sm">
+            {new Date().toLocaleDateString(undefined, { day: "2-digit", month: "long" })}
+            <span className={`ml-2 text-xs font-semibold ${isCheckOut ? "text-amber-700" : "text-red-600"}`}>
+              {isCheckOut ? "Check Out" : "Absent"}
+            </span>
+          </div>
+        </div>
+        {step === "selfie" && (
+          <button onClick={switchCamera} className="p-1.5 hover:bg-gray-100 border border-[var(--border)]" data-testid="checkin-switch-cam" title="Switch camera">
+            <RotateCcw size={16} />
+          </button>
+        )}
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 relative overflow-hidden bg-black">
+        {step === "location" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-white p-6" data-testid="checkin-step-location">
+            <MapPin size={48} className="text-emerald-400 mb-4" />
+            {locBusy && <div className="text-lg font-heading font-bold">Locating you…</div>}
+            {!locBusy && locErr && (
+              <>
+                <div className="text-lg font-heading font-bold text-center">{locDenied ? "Location Permission Needed" : "Location Error"}</div>
+                <div className="text-sm text-white/80 mt-2 text-center max-w-xs">{locErr}</div>
+                <Button onClick={captureLocation} className="mt-6 bg-emerald-500 hover:bg-emerald-600 text-white rounded-none gap-2 h-12 px-6" data-testid="checkin-retry-loc">
+                  <RefreshCw size={16} /> Retry
+                </Button>
+              </>
+            )}
+          </div>
+        )}
+
+        {step === "selfie" && (
+          <div className="absolute inset-0" data-testid="checkin-step-selfie">
+            {/* Camera preview */}
+            <video ref={videoRef} playsInline autoPlay muted className={`absolute inset-0 w-full h-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`} />
+            <canvas ref={canvasRef} className="hidden" />
+            {/* Circular vignette overlay */}
+            <div className="absolute inset-0 pointer-events-none" style={{
+              background: "radial-gradient(circle at center, transparent 42%, rgba(0,0,0,0.55) 62%)",
+            }} />
+            {/* Circular selfie ring guide */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="w-64 h-64 rounded-full border-2 border-white/80" />
+            </div>
+            {cameraErr && (
+              <div className="absolute top-4 left-4 right-4 text-center text-white bg-red-600/80 px-3 py-2 text-sm">{cameraErr}</div>
+            )}
+            {/* Bottom capture area */}
+            <div className="absolute bottom-0 left-0 right-0 p-6 flex flex-col items-center gap-4 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
+              {coords?.address ? (
+                <div className="text-white/90 text-xs text-center max-w-sm line-clamp-2 flex items-center gap-1">
+                  <MapPin size={11} /> {coords.address}
+                </div>
+              ) : coords ? (
+                <div className="text-white/70 text-[11px] num">
+                  {coords.latitude.toFixed(5)}, {coords.longitude.toFixed(5)} · ±{Math.round(coords.accuracy)}m
+                </div>
+              ) : null}
+              <Button
+                onClick={captureSelfie}
+                disabled={selfieBusy || !!cameraErr}
+                className="w-20 h-20 rounded-full bg-white hover:bg-gray-100 text-black shadow-2xl border-4 border-white/50 p-0 disabled:opacity-50"
+                data-testid="checkin-capture-btn"
+              >
+                <div className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center">
+                  {selfieBusy ? <RefreshCw size={22} className="animate-spin text-white" /> : <Camera size={26} className="text-white" />}
+                </div>
+              </Button>
+              <div className="text-white/80 text-xs">
+                {selfieBusy ? "Uploading…" : "Tap to capture selfie & mark attendance"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === "out_of_range" && outOfRange && (
+          <div className="absolute inset-0" data-testid="checkin-step-out-of-range">
+            {/* Keep camera preview as backdrop */}
+            <video ref={videoRef} playsInline autoPlay muted className={`absolute inset-0 w-full h-full object-cover opacity-40 ${facingMode === "user" ? "scale-x-[-1]" : ""}`} />
+            <div className="absolute inset-0 bg-black/60" />
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="w-64 h-64 rounded-full border-2 border-white/80 opacity-40" />
+            </div>
+            <div className="absolute bottom-0 left-0 right-0 p-6 flex flex-col items-center gap-4">
+              <div className="text-white text-lg text-center font-semibold leading-tight">
+                You are <span className="font-heading font-black text-red-300">{formatMeters(outOfRange.distance_m)}</span> away from {outOfRange.site_name || "office"}
+              </div>
+              <div className="text-white/80 text-sm text-center">Please move closer and try again</div>
+              <Button
+                onClick={() => { setOutOfRange(null); setStep("location"); captureLocation(); }}
+                className="w-full max-w-xs h-12 bg-emerald-400 hover:bg-emerald-500 text-black font-bold rounded-md"
+                data-testid="checkin-refresh-location"
+              >
+                Refresh Location
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {step === "submitting" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-white" data-testid="checkin-step-submitting">
+            <RefreshCw size={40} className="animate-spin text-emerald-400 mb-3" />
+            <div className="text-lg font-heading font-bold">{isCheckOut ? "Checking you out…" : "Marking attendance…"}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Human-readable distance formatting: 199090 → "199.1 km" · 850 → "850m"
+function formatMeters(m) {
+  const n = Number(m || 0);
+  if (n >= 1000) return `${(n / 1000).toFixed(1)} km`;
+  return `${Math.round(n)}m`;
 }
