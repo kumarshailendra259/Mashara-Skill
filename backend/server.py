@@ -3777,7 +3777,7 @@ async def root():
 class StaffIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
-    designation: str
+    designation: Optional[str] = None
     # Auto-generated on create if left blank — human-readable staff code like
     # "EMP-2026-0001" used on offer letter, ID card, payslip etc.
     employee_code: Optional[str] = None

@@ -317,6 +317,9 @@ export default function HRMS() {
   const [payrollStatus, setPayrollStatus] = useState("all");
   const [payrollPage, setPayrollPage] = useState(0);
   const [payrollTotal, setPayrollTotal] = useState(0);
+  // Phase 50 — Hide zero-attendance staff by default so HR sees only rows
+  // that need real payroll action. Toggle-off reveals them for audit.
+  const [hideZero, setHideZero] = useState(true);
 
   const canMarkAttendance = isAdmin || user?.role === "manager" || user?.role === "center_manager";
 
@@ -1834,6 +1837,10 @@ export default function HRMS() {
               <Button onClick={() => downloadHRReport("attendance", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-attendance-btn"><Download size={14} /> Attendance CSV</Button>
               <Button onClick={() => downloadHRReport("payroll", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-payroll-btn"><Download size={14} /> Payroll CSV</Button>
               <Button onClick={() => downloadHRReport("consolidated", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-consolidated-btn"><Download size={14} /> Consolidated CSV</Button>
+              <label className="flex items-center gap-2 ml-auto text-[12px] cursor-pointer select-none" data-testid="hide-zero-toggle">
+                <input type="checkbox" checked={hideZero} onChange={(e) => setHideZero(e.target.checked)} />
+                <span>Hide zero-attendance</span>
+              </label>
             </div>
           )}
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
@@ -1844,7 +1851,23 @@ export default function HRMS() {
               <th className="text-right p-3">Net</th><th className="text-left p-3">Status</th>
               <th className="text-right p-3 w-32 no-print">Action</th>
             </tr></thead><tbody>
-              {payroll.length === 0 ? <tr><td colSpan={9} className="text-center py-8 overline">No payroll yet</td></tr> : payroll.map((p) => (
+              {(() => {
+                const filtered = hideZero
+                  ? payroll.filter((p) => {
+                      const present = (p.present_days ?? p.days_present) || 0;
+                      const paidLv = p.paid_leave_days || 0;
+                      const hasAny = present + paidLv + (p.half_days || 0) > 0;
+                      // Always keep non-draft rows (paid/approved) so audit history stays intact.
+                      return hasAny || p.status !== "draft";
+                    })
+                  : payroll;
+                return filtered.length === 0 ? (
+                  <tr><td colSpan={9} className="text-center py-8 overline">
+                    {hideZero && payroll.length > 0
+                      ? `${payroll.length} zero-attendance rows hidden — toggle "Show zero-attendance" to view them.`
+                      : "No payroll yet"}
+                  </td></tr>
+                ) : filtered.map((p) => (
                 <tr key={p.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                   <td className="p-3 num">{p.month}/{p.year}</td>
                   <td className="p-3">
@@ -1911,7 +1934,8 @@ export default function HRMS() {
                     </div>
                   </td>
                 </tr>
-              ))}
+              ));
+              })()}
             </tbody></table></div>
 
           {/* Edit Payslip Dialog */}

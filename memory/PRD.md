@@ -26,6 +26,25 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 51 — GET /api/staff Regression Fix (Done, Feb 2026)
+- **Testing agent iter-56 flagged CRITICAL**: `GET /api/staff` returned 500 because `StaffOut.designation: str` failed pydantic validation on legacy rows with `designation=None`. This silently broke the Staff Financial History employee search (showed empty results).
+- **Fix `/app/backend/server.py`**: `StaffIn.designation` changed from `str` to `Optional[str] = None` (StaffOut inherits from StaffIn). Matches other optional fields; no schema change required in DB.
+- **Verified curl**: `GET /api/staff?limit=5` → 200 (admin), 200 (hr@finance.app); `GET /api/staff?q=Auto` → 1 hit. SFH employee search functional again.
+
+### Phase 50 — Hide Zero-Attendance Rows from Payroll Table (Done, Feb 2026)
+- **User asked**: "Zero attendance wale staff show nahi hona chahiye payroll me" — hide staff who have zero attendance from the Payroll list so HR only sees rows that need real action.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`**:
+  - New `hideZero` state (default `true`) + toggle checkbox "Hide zero-attendance" in the Run Payroll toolbar (right-aligned via `ml-auto`).
+  - Payroll table body wrapped in IIFE that filters `payroll` when `hideZero=true`:
+    - Filter predicate: `hasAny = present + paid_leave + half_days > 0`. Row kept if `hasAny || status !== "draft"` — this preserves the audit rule: **paid/approved rows are always visible** even at zero attendance (historical safety).
+    - Empty-state message updated: when `hideZero=true` and rows are hidden, shows "N zero-attendance rows hidden — toggle Show zero-attendance to view them." instead of the plain "No payroll yet".
+- **Live verified as HR user**:
+  - Default view (hide=ON): 1 row visible (Auto Provisioned paid) — 24 zero-attendance drafts hidden ✅
+  - Toggle OFF: 24 zero-attendance draft rows appear with red "Zero attendance" badge for audit ✅
+  - Zero-attendance paid rows would remain visible either way (preserved audit trail).
+
+
+
 ### Phase 49 — HRD (HR Role) Payroll Toolbar + Pay Access + Duplicate-Month Confirmation (Done, Feb 2026)
 - **User reported**: HR user "HRD(Human Resorces Department)" logged in par Payroll tab pe **Run Payroll toolbar aur Pay button nahi dikh rahe** — jabki admin (Mashara Enterprises) ke paas full toolbar hai. User wants HR = admin functionality for payroll.
 - **Root cause**: `HRMS.jsx` had two frontend role gates that only accepted `admin` or `accountant`:
