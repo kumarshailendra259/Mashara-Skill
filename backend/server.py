@@ -10026,6 +10026,83 @@ async def reopen_payroll_row(pid: str, user=Depends(require_role("admin"))):
          "$unset": {"paid_at": "", "txn_id": ""}},
     )
     return {"ok": True, "id": pid, "status": "draft"}
+
+
+@api.delete("/payroll/{pid}")
+async def delete_payroll_row(pid: str, user=Depends(require_role("admin"))):
+    """Admin escape-hatch: delete a payroll row entirely. If the row is Paid, reverses
+    the linked transaction (income offset) and cancels the staff_payments row.
+    If the row is part of an active batch, decrements batch totals so the batch stays
+    consistent. Emits an audit trail row in `payroll_deletions` for compliance.
+    """
+    rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    now = datetime.now(timezone.utc).isoformat()
+
+    # If paid → reverse the linked transaction and cancel staff_payments.
+    if rec.get("status") == "paid" and rec.get("txn_id"):
+        orig = await db.transactions.find_one({"id": rec["txn_id"]}, {"_id": 0})
+        if orig and not orig.get("reversed_by_txn_id"):
+            # Only reverse the SLICE that belongs to this row (batch txn covers all rows).
+            row_net = float(rec.get("net") or 0)
+            if row_net > 0:
+                rev = {
+                    "id": str(uuid.uuid4()), "type": "income",
+                    "amount": row_net,
+                    "date": now[:10],
+                    "description": f"REVERSAL (row delete) — {orig.get('description','')} · staff {rec.get('staff_id')}",
+                    "company_id": orig.get("company_id"), "partner_id": orig.get("partner_id"),
+                    "center_id": orig.get("center_id"), "project_id": None,
+                    "items": [], "attachments": [], "source": "payroll_row_delete_reversal",
+                    "payroll_id": pid, "reverses_txn_id": rec["txn_id"],
+                    "created_by": user["id"], "created_at": now,
+                    "status": "approved", "approved_by": user["id"], "approved_at": now,
+                    "rejected_reason": "Admin deleted payroll row",
+                }
+                await db.transactions.insert_one(rev)
+        # Also cancel any staff_payments row linked to this payroll id
+        await db.staff_payments.update_many(
+            {"source_id": pid, "status": "paid"},
+            {"$set": {"status": "cancelled", "cancelled_at": now, "cancel_reason": "payroll row deleted by admin"}},
+        )
+
+    # If part of a batch, update batch counters + audit log so nothing goes stale.
+    if rec.get("batch_id"):
+        batch = await db.payroll_batches.find_one({"id": rec["batch_id"]}, {"_id": 0})
+        if batch:
+            audit_log = list(batch.get("audit_log") or [])
+            audit_log.append({
+                "action": "row_deleted", "at": now,
+                "by": user["id"], "by_name": user.get("name") or user.get("email"),
+                "old_status": rec.get("status"), "new_status": "deleted",
+                "remarks": f"Admin deleted row for staff {rec.get('staff_id')}",
+            })
+            new_ids = [x for x in (batch.get("payroll_ids") or []) if x != pid]
+            await db.payroll_batches.update_one(
+                {"id": rec["batch_id"]},
+                {"$set": {
+                    "payroll_ids": new_ids,
+                    "staff_count": len(new_ids),
+                    "gross": round(float(batch.get("gross") or 0) - float(rec.get("gross") or 0), 2),
+                    "deductions": round(float(batch.get("deductions") or 0) - float(rec.get("deductions") or 0), 2),
+                    "net_payable": round(float(batch.get("net_payable") or 0) - float(rec.get("net") or 0), 2),
+                    "amount": round(float(batch.get("amount") or 0) - float(rec.get("net") or 0), 2),
+                    "audit_log": audit_log,
+                }},
+            )
+
+    # Snapshot the row for compliance (payroll can be re-run to regenerate).
+    await db.payroll_deletions.insert_one({
+        "id": str(uuid.uuid4()),
+        "deleted_at": now,
+        "deleted_by": user["id"],
+        "deleted_by_name": user.get("name") or user.get("email"),
+        "snapshot": {k: v for k, v in rec.items() if k != "_id"},
+    })
+    await db.payroll.delete_one({"id": pid})
+    return {"ok": True, "id": pid, "deleted": True}
+
 # ---------- Stock View ----------
 @api.get("/stock")
 async def list_stock(

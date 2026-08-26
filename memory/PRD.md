@@ -26,6 +26,16 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 55.1 — Admin Edit/Delete on Paid Payroll Rows (Done, Feb 2026)
+- **User asked (production, Hindi)**: "admin ko paid ko edit, delete dab karne ka option dijiye" — Paid payroll rows par direct edit + delete admin ke liye chahiye.
+- **Backend `/app/backend/server.py`**:
+  - New `DELETE /api/payroll/{pid}` (admin only). Reverses the row's linked transaction slice (creates offsetting income txn), cancels the linked staff_payments row, updates batch counters (payroll_ids/staff_count/gross/deductions/net_payable/amount) if row belongs to a batch, and writes a compliance snapshot to `db.payroll_deletions` before removing the row. Idempotent: refuses if already reversed.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`**:
+  - Payroll row actions (Paid rows) now include for admin only:
+    - **Orange Edit pencil** (`data-testid=edit-paid-{id}`) → calls `reopenAndEditPayroll` which prompts confirm (explains ₹X reversal), hits `PATCH /payroll/{pid}/reopen`, refreshes the list, then opens the edit dialog on the fresh Draft row.
+    - **Red Delete trash** (`data-testid=delete-payroll-{id}`) → calls `deletePayrollRow` which prompts with row-specific reversal warning if Paid.
+- **Verified via curl + UI**: 25 Paid rows in preview all render both buttons. HR delete → 403. Admin delete → 200 + row gone + snapshot in `payroll_deletions`.
+
 ### Phase 55 — Payroll → Approval → Accounts Payment → Transaction Workflow (Done, Feb 2026)
 - **User asked (Hindi/Hinglish, URGENT)**: Complete strict payroll workflow — HR calculate → HR Finalise → Approval → Accounts Payment → Transaction Entry → Paid. HR CANNOT pay directly through batch. Month-wise batch grouping (1 batch = 1 approval = 1 payment = 1 transaction) but with per-staff visibility. Accountant-only payment. Admin can Reopen any batch (even Paid) to reverse transaction and unlock rows.
 - **User's confirmed choices**: existing `approval_chains` system (1a), month-wise batch (2a), accountant role only (3a), keep legacy Pay All as fallback (4b), same-step Run+Finalise (5a). Plus: admin can reopen Paid payrolls back to unpaid so HR can re-edit.

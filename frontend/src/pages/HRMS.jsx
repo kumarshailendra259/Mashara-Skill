@@ -838,6 +838,37 @@ export default function HRMS() {
     catch (e) { toast.error(formatError(e)); }
   };
 
+  // Admin escape hatch — reopen a paid payroll row (reverses txn), then open the
+  // regular edit dialog so HR-style fields can be corrected in-place.
+  const reopenAndEditPayroll = async (p) => {
+    if (!window.confirm(
+      `This payroll row is already PAID.\n\nReopening will:\n• Reverse the linked transaction (₹${(p.net || 0).toLocaleString("en-IN")} income offset)\n• Flip status back to Draft\n• If part of a Paid batch, the whole batch is also reopened\n\nContinue?`,
+    )) return;
+    try {
+      await api.patch(`/payroll/${p.id}/reopen`);
+      toast.success("Reopened — row is Draft. You can now edit it.");
+      await loadAll();
+      await loadBatches();
+      // Fetch the fresh row so status/txn_id are up-to-date, then open the edit dialog.
+      const { data } = await api.get(`/payroll?month=${p.month}&year=${p.year}`);
+      const fresh = (data || []).find((x) => x.id === p.id);
+      if (fresh) openEditPayroll(fresh);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const deletePayrollRow = async (p) => {
+    const paidWarn = p.status === "paid"
+      ? `\n\n⚠ This row is PAID — deleting will:\n• Reverse the ₹${(p.net || 0).toLocaleString("en-IN")} slice from the linked transaction\n• Cancel the staff_payments entry\n• Update the batch counters`
+      : "";
+    if (!window.confirm(`Delete payroll row for ${sName(p.staff_id)} · ${p.month}/${p.year}?${paidWarn}\n\nA compliance snapshot is stored in payroll_deletions.\n\nContinue?`)) return;
+    try {
+      await api.delete(`/payroll/${p.id}`);
+      toast.success("Deleted");
+      await loadAll();
+      await loadBatches();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
   // Phase 55 — Payroll batch workflow state
   const [batches, setBatches] = useState([]);
   const [openBatchId, setOpenBatchId] = useState(null);
@@ -1982,6 +2013,24 @@ export default function HRMS() {
                       )}
                       {p.status !== "paid" && (isAdmin || isAccountant || user?.role === "hr") && (
                         <Button size="sm" onClick={() => payPayroll(p.id)} className="brand-btn rounded-none h-8 px-3" data-testid={`pay-payroll-${p.id}`}>Pay</Button>
+                      )}
+                      {p.status === "paid" && isAdmin && (
+                        <Button
+                          size="sm" variant="outline"
+                          onClick={() => reopenAndEditPayroll(p)}
+                          className="rounded-none h-8 px-2 border-orange-500 text-orange-700 hover:bg-orange-50"
+                          data-testid={`edit-paid-${p.id}`}
+                          title="Reopen (reverses txn) + edit"
+                        ><Pencil size={14} /></Button>
+                      )}
+                      {isAdmin && (
+                        <Button
+                          size="sm" variant="outline"
+                          onClick={() => deletePayrollRow(p)}
+                          className="rounded-none h-8 px-2 border-red-500 text-red-700 hover:bg-red-50"
+                          data-testid={`delete-payroll-${p.id}`}
+                          title={p.status === "paid" ? "Delete paid row (reverses txn slice)" : "Delete row"}
+                        ><Trash2 size={14} /></Button>
                       )}
                     </div>
                   </td>
