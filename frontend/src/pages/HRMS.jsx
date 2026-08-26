@@ -14,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye, RefreshCw } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -836,6 +836,29 @@ export default function HRMS() {
   const payPayroll = async (id) => {
     try { await api.patch(`/payroll/${id}/pay`); loadAll(); toast.success("Paid"); }
     catch (e) { toast.error(formatError(e)); }
+  };
+
+  // Phase 55 — Payroll batch workflow state
+  const [batches, setBatches] = useState([]);
+  const [openBatchId, setOpenBatchId] = useState(null);
+  const loadBatches = useCallback(async () => {
+    try {
+      const { data } = await api.get(`/payroll-batches?month=${pMonth}&year=${pYear}`);
+      setBatches(data || []);
+    } catch { /* best-effort */ }
+  }, [pMonth, pYear]);
+  useEffect(() => { if (isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager" || user?.role === "senior_manager") { loadBatches(); } }, [loadBatches, isAdmin, isAccountant, user?.role]);
+  const currentBatch = batches[0] || null;
+
+  const finalisePayroll = async () => {
+    if (!window.confirm(`Finalise payroll for ${pMonth}/${pYear}?\n\nAfter finalisation, payroll cannot be edited unless it is reopened by an authorised user.\n\nContinue?`)) return;
+    try {
+      const remarks = window.prompt("Optional remarks for the approver:", "") || "";
+      const { data } = await api.post("/payroll/finalise", { month: pMonth, year: pYear, remarks });
+      toast.success(`Finalised ₹${(data.net_payable || 0).toLocaleString("en-IN")} — ${data.staff_count} staff → ${data.status.replace("_", " ")}`);
+      loadBatches();
+      loadAll();
+    } catch (e) { toast.error(formatError(e)); }
   };
 
   const sName = (id) => staff.find((s) => s.id === id)?.name || "—";
@@ -1849,6 +1872,11 @@ export default function HRMS() {
               <div><Label className="overline">Month</Label><Input type="number" min={1} max={12} value={pMonth} onChange={(e) => setPMonth(+e.target.value)} className="rounded-none w-24" /></div>
               <div><Label className="overline">Year</Label><Input type="number" value={pYear} onChange={(e) => setPYear(+e.target.value)} className="rounded-none w-28" /></div>
               <Button onClick={runPayroll} className="brand-btn rounded-none" data-testid="run-payroll">Run Payroll</Button>
+              {(isAdmin || user?.role === "hr") && !currentBatch && (
+                <Button onClick={finalisePayroll} className="rounded-none bg-purple-600 hover:bg-purple-700 text-white" data-testid="finalise-payroll" title="Finalise & send to Approval workflow">
+                  <ShieldCheck size={14} className="mr-1" /> Finalise Payroll
+                </Button>
+              )}
               <Button onClick={() => downloadBankCsv(pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="bank-csv-btn"><Download size={14} /> Bank Transfer CSV</Button>
               <Button onClick={() => downloadHRReport("attendance", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-attendance-btn"><Download size={14} /> Attendance CSV</Button>
               <Button onClick={() => downloadHRReport("payroll", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-payroll-btn"><Download size={14} /> Payroll CSV</Button>
@@ -1858,6 +1886,14 @@ export default function HRMS() {
                 <span>Hide zero-attendance</span>
               </label>
             </div>
+          )}
+
+          {/* Payroll batch status card — visible when a batch exists for the selected month/year */}
+          {currentBatch && (
+            <PayrollBatchStatusCard
+              batch={currentBatch}
+              onOpen={() => setOpenBatchId(currentBatch.id)}
+            />
           )}
           <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
             <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
@@ -2121,6 +2157,13 @@ export default function HRMS() {
         onClose={() => setViewStaffId(null)}
         staffList={staff}
       />
+
+      {/* Phase 55 — Payroll batch detail dialog (approve/pay/reopen depending on role + status) */}
+      <PayrollBatchDialog
+        batchId={openBatchId}
+        onClose={() => { setOpenBatchId(null); loadBatches(); loadAll(); }}
+        currentUser={user}
+      />
     </div>
   );
 }
@@ -2325,3 +2368,276 @@ function ViewField({ label, value, mono, multiline, testid }) {
     </div>
   );
 }
+
+/* ============================================================
+   PAYROLL BATCH WORKFLOW COMPONENTS (Phase 55)
+   ============================================================ */
+const BATCH_STATUS_TONE = {
+  pending_approval: { cls: "bg-amber-100 text-amber-700 border-amber-300", label: "Pending Approval" },
+  approved:        { cls: "bg-blue-100 text-blue-700 border-blue-300",   label: "Approved" },
+  pending_payment: { cls: "bg-indigo-100 text-indigo-700 border-indigo-300", label: "Accounts Pending Payment" },
+  processing:      { cls: "bg-cyan-100 text-cyan-700 border-cyan-300",   label: "Processing" },
+  paid:            { cls: "bg-emerald-100 text-emerald-700 border-emerald-300", label: "Paid" },
+  rejected:        { cls: "bg-red-100 text-red-700 border-red-300",       label: "Rejected" },
+  reopened:        { cls: "bg-orange-100 text-orange-700 border-orange-300", label: "Reopened" },
+};
+
+function PayrollBatchStatusCard({ batch, onOpen }) {
+  const tone = BATCH_STATUS_TONE[batch.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: batch.status };
+  const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  return (
+    <div className="swiss-card p-4 border-l-4 border-purple-500" data-testid="payroll-batch-status">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div>
+            <div className="overline text-[10px]">Payroll Batch · {String(batch.month).padStart(2, "0")}/{batch.year}</div>
+            <div className="text-xs mt-0.5">
+              <span className="font-heading font-bold text-sm">{batch.staff_count} staff</span>
+              <span className="text-[var(--muted)]"> · Net {inr(batch.net_payable)}</span>
+              {batch.finalised_by_name && <span className="text-[var(--muted)]"> · Finalised by {batch.finalised_by_name}</span>}
+            </div>
+          </div>
+          <span className={`inline-block text-[10px] font-bold uppercase px-2 py-0.5 border ${tone.cls}`} data-testid="batch-status-chip">{tone.label}</span>
+        </div>
+        <Button onClick={onOpen} size="sm" className="rounded-none brand-btn" data-testid="open-payroll-batch">
+          <Receipt size={12} className="mr-1" /> Open Batch
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function PayrollBatchDialog({ batchId, onClose, currentUser }) {
+  const [batch, setBatch] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [payOpen, setPayOpen] = useState(false);
+  const [payForm, setPayForm] = useState({ method: "neft", payment_date: new Date().toISOString().slice(0, 10), utr: "", remarks: "" });
+  const [bankAccounts, setBankAccounts] = useState([]);
+
+  const load = React.useCallback(async () => {
+    if (!batchId) { setBatch(null); return; }
+    try {
+      const { data } = await api.get(`/payroll-batches/${batchId}`);
+      setBatch(data);
+    } catch (e) { toast.error(formatError(e)); }
+  }, [batchId]);
+
+  useEffect(() => {
+    if (!batchId) return;
+    load();
+    api.get("/bank-accounts").then((r) => setBankAccounts(r.data || [])).catch(() => {});
+  }, [batchId, load]);
+
+  if (!batchId) return null;
+  const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+  const tone = batch ? (BATCH_STATUS_TONE[batch.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: batch.status }) : null;
+  const isAdmin = currentUser?.role === "admin";
+  const isAccountant = currentUser?.role === "accountant";
+  const canPay = (isAdmin || isAccountant) && batch?.status === "pending_payment";
+  const canReopen = isAdmin && ["paid", "pending_payment", "approved", "rejected", "processing"].includes(batch?.status);
+
+  const submitPay = async () => {
+    if (!payForm.payment_date) { toast.error("Payment date is required"); return; }
+    setBusy(true);
+    try {
+      await api.post(`/payroll-batches/${batchId}/pay`, payForm);
+      toast.success("Payment recorded — transaction created");
+      setPayOpen(false);
+      load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const submitReopen = async () => {
+    const reason = window.prompt("Reason for reopening this batch? (audit trail)", "") || "";
+    if (!window.confirm(
+      batch.status === "paid"
+        ? "This will REVERSE the linked transaction and unlock all payroll rows so HR can re-edit. Continue?"
+        : "This will unlock all payroll rows so HR can re-edit. Continue?"
+    )) return;
+    setBusy(true);
+    try {
+      await api.post(`/payroll-batches/${batchId}/reopen`, { reason, reverse_transaction: true });
+      toast.success("Batch reopened — rows unlocked");
+      onClose?.();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Dialog open={!!batchId} onOpenChange={(o) => !o && onClose?.()}>
+      <DialogContent className="rounded-none max-w-4xl" data-testid="payroll-batch-dialog">
+        <DialogHeader>
+          <DialogTitle className="font-heading flex items-center gap-2 text-lg">
+            Payroll Batch · {batch ? `${String(batch.month).padStart(2, "0")}/${batch.year}` : "…"}
+            {batch && tone && (
+              <span className={`text-[10px] font-bold uppercase px-2 py-0.5 border ${tone.cls}`} data-testid="batch-detail-status">{tone.label}</span>
+            )}
+          </DialogTitle>
+          <DialogDescription className="text-xs text-[var(--muted)]">
+            Approval workflow, staff-wise breakdown and payment audit for the selected batch.
+          </DialogDescription>
+        </DialogHeader>
+
+        {!batch ? (
+          <div className="py-8 text-center text-sm text-[var(--muted)]">Loading…</div>
+        ) : (
+          <div className="space-y-4 max-h-[68vh] overflow-y-auto pr-1">
+            {/* Totals strip */}
+            <div className="grid grid-cols-4 gap-0 border border-[var(--border)] bg-white" data-testid="batch-totals">
+              <TotalCell label="Staff Count" value={batch.staff_count} tone="bg-slate-50" />
+              <TotalCell label="Gross" value={inr(batch.gross)} tone="bg-slate-50" />
+              <TotalCell label="Deductions" value={`- ${inr(batch.deductions)}`} tone="bg-red-50 text-red-800" />
+              <TotalCell label="Net Payable" value={inr(batch.net_payable)} tone="bg-emerald-50 text-emerald-800" bold />
+            </div>
+
+            {/* Payment info (if paid) */}
+            {batch.payment && (
+              <div className="swiss-card p-3 border-l-4 border-emerald-500" data-testid="batch-payment-details">
+                <div className="overline text-[10px] mb-1">Payment Details</div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                  <div><div className="overline text-[9px]">Method</div><div className="uppercase font-semibold">{batch.payment.method}</div></div>
+                  <div><div className="overline text-[9px]">Date</div><div>{batch.payment.payment_date}</div></div>
+                  <div><div className="overline text-[9px]">UTR / Ref</div><div className="font-mono">{batch.payment.utr || "—"}</div></div>
+                  <div><div className="overline text-[9px]">Txn ID</div><div className="font-mono truncate text-[10px]">{batch.transaction_id || "—"}</div></div>
+                  {batch.payment.remarks && <div className="col-span-2 md:col-span-4"><div className="overline text-[9px]">Remarks</div><div>{batch.payment.remarks}</div></div>}
+                </div>
+              </div>
+            )}
+
+            {/* Staff-wise table */}
+            <div>
+              <div className="overline text-[10px] mb-2">Staff-wise Breakdown</div>
+              <div className="max-h-64 overflow-y-auto border border-[var(--border)]">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-gray-50 border-b border-[var(--border)] overline text-[10px]">
+                    <tr>
+                      <th className="text-left p-2">Emp Code</th>
+                      <th className="text-left p-2">Name</th>
+                      <th className="text-left p-2">Bank A/c</th>
+                      <th className="text-right p-2">Gross</th>
+                      <th className="text-right p-2">Deduct</th>
+                      <th className="text-right p-2">Net</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(batch.rows || []).map((r) => (
+                      <tr key={r.id} className="border-b border-[var(--border)]" data-testid={`batch-row-${r.id}`}>
+                        <td className="p-2 font-mono text-[10px]">{r.employee_code || "—"}</td>
+                        <td className="p-2">{r.staff_name || r.staff_id?.slice(0, 8)}</td>
+                        <td className="p-2 font-mono text-[10px]">{r.bank_account_no_masked || "—"} <span className="text-[var(--muted)]">{r.ifsc || ""}</span></td>
+                        <td className="p-2 text-right num">{inr(r.gross)}</td>
+                        <td className="p-2 text-right num text-red-600">-{inr(r.deductions)}</td>
+                        <td className="p-2 text-right num font-semibold">{inr(r.net)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Audit log */}
+            <div>
+              <div className="overline text-[10px] mb-2">Audit Trail</div>
+              <div className="border border-[var(--border)] divide-y divide-[var(--border)] max-h-40 overflow-y-auto" data-testid="batch-audit">
+                {(batch.audit_log || []).map((a, i) => (
+                  <div key={i} className="p-2 text-xs flex items-start gap-2">
+                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 bg-slate-100 text-slate-700">{a.action}</span>
+                    <div className="flex-1">
+                      <div className="font-medium">{a.by_name || a.by} <span className="text-[var(--muted)] font-normal">· {new Date(a.at).toLocaleString()}</span></div>
+                      <div className="text-[var(--muted)]">
+                        {a.old_status} → <span className="font-semibold text-slate-700">{a.new_status}</span>
+                        {a.remarks && <span> · {a.remarks}</span>}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <DialogFooter className="gap-2 flex-wrap">
+          <Button variant="outline" onClick={onClose} className="rounded-none" data-testid="batch-close">Close</Button>
+          {canReopen && (
+            <Button onClick={submitReopen} disabled={busy} variant="outline" className="rounded-none border-orange-500 text-orange-700 hover:bg-orange-50" data-testid="batch-reopen">
+              <RefreshCw size={13} className="mr-1" /> Reopen (Admin)
+            </Button>
+          )}
+          {canPay && (
+            <Button onClick={() => setPayOpen(true)} disabled={busy} className="rounded-none bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="batch-pay-open">
+              <Wallet size={13} className="mr-1" /> Process Payment
+            </Button>
+          )}
+        </DialogFooter>
+
+        {/* Payment sub-dialog */}
+        <Dialog open={payOpen} onOpenChange={setPayOpen}>
+          <DialogContent className="rounded-none max-w-md" data-testid="batch-pay-dialog">
+            <DialogHeader>
+              <DialogTitle className="font-heading">Record Payroll Payment</DialogTitle>
+              <DialogDescription className="text-xs text-[var(--muted)]">
+                {batch ? `Net payable ${inr(batch.net_payable)} for ${batch.staff_count} staff.` : ""} This creates a Transaction entry linked to this batch and marks each employee as paid.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="overline">Payment Method</Label>
+                  <Select value={payForm.method} onValueChange={(v) => setPayForm({ ...payForm, method: v })}>
+                    <SelectTrigger className="rounded-none h-10" data-testid="pay-method"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="neft">NEFT</SelectItem>
+                      <SelectItem value="rtgs">RTGS</SelectItem>
+                      <SelectItem value="imps">IMPS</SelectItem>
+                      <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
+                      <SelectItem value="cheque">Cheque</SelectItem>
+                      <SelectItem value="upi">UPI</SelectItem>
+                      <SelectItem value="cash">Cash</SelectItem>
+                      <SelectItem value="other">Other</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="overline">Payment Date</Label>
+                  <Input type="date" value={payForm.payment_date} onChange={(e) => setPayForm({ ...payForm, payment_date: e.target.value })} className="rounded-none h-10" data-testid="pay-date" />
+                </div>
+              </div>
+              <div>
+                <Label className="overline">Bank Account (debit)</Label>
+                <Select value={payForm.bank_account_id || "__none"} onValueChange={(v) => setPayForm({ ...payForm, bank_account_id: v === "__none" ? "" : v })}>
+                  <SelectTrigger className="rounded-none h-10" data-testid="pay-bank"><SelectValue placeholder="Optional — select bank/cash account" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none">— None —</SelectItem>
+                    {bankAccounts.map((b) => (
+                      <SelectItem key={b.id} value={b.id}>{b.name} · {b.account_number ? `****${b.account_number.slice(-4)}` : ""}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="overline">Transaction / UTR Reference</Label>
+                <Input value={payForm.utr} onChange={(e) => setPayForm({ ...payForm, utr: e.target.value })} placeholder="e.g. UTR12345678" className="rounded-none h-10 font-mono" data-testid="pay-utr" />
+              </div>
+              <div>
+                <Label className="overline">Remarks</Label>
+                <Textarea value={payForm.remarks} onChange={(e) => setPayForm({ ...payForm, remarks: e.target.value })} rows={2} className="rounded-none" data-testid="pay-remarks" />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setPayOpen(false)} className="rounded-none">Cancel</Button>
+              <Button onClick={submitPay} disabled={busy} className="rounded-none bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="pay-submit">Record Payment</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const TotalCell = ({ label, value, tone, bold }) => (
+  <div className={`px-3 py-2 ${tone || ""}`}>
+    <div className="overline text-[9px]">{label}</div>
+    <div className={`text-lg font-heading ${bold ? "font-black" : "font-bold"} num mt-0.5`}>{value}</div>
+  </div>
+);

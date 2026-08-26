@@ -385,7 +385,7 @@ class RejectIn(BaseModel):
 # ============================================================================
 # Approval Chains — configurable multi-level approval workflows
 # ============================================================================
-ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement"]
+ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement", "payroll"]
 ApproverKind = Literal["role", "staff", "user", "reports_to"]
 
 # Central mapping from approval-type → backing collection. Used by /approvals/act, /approvals/pending,
@@ -402,6 +402,7 @@ APPROVAL_TYPE_COLL: dict = {
     "payment":           "payments",
     "advance_request":   "advance_requests",
     "advance_settlement":"advance_settlements",
+    "payroll":           "payroll_batches",
 }
 
 
@@ -848,7 +849,7 @@ async def _ensure_libreoffice_installed() -> None:
 async def on_startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters", "vendors", "announcements"):
+    for col in ("companies", "partners", "centers", "projects", "transactions", "staff", "attendance", "leaves", "reimbursements", "payroll", "notifications", "batches", "batch_payments", "fooding_entries", "approval_chains", "holidays", "geofences", "shifts", "regularisations", "staff_documents", "assets", "asset_purchase_requests", "asset_transfers", "employee_transfers", "leave_types", "leave_balances", "offer_letter_templates", "offer_letters", "quotations", "payments", "qrn_counters", "vendors", "announcements", "payroll_batches"):
         await db[col].create_index("id", unique=True)
     await db.notifications.create_index([("user_id", 1), ("created_at", -1)])
     await db.batches.create_index([("project_id", 1), ("center_id", 1)])
@@ -5818,6 +5819,25 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 {"id": rec["quotation_id"]},
                 {"$set": {"payment_id": None, "status": "approved"}},
             )
+        # Payroll batch rejection — unlock the underlying payroll rows so HR can edit
+        # and re-finalise. Rows stay marked as belonging to this batch until re-finalise
+        # (or admin reopen) so HR sees the audit trail.
+        if body.request_type == "payroll":
+            audit_log = list(rec.get("audit_log") or [])
+            audit_log.append({
+                "action": "rejected",
+                "at": datetime.now(timezone.utc).isoformat(),
+                "by": user["id"],
+                "by_name": user.get("name"),
+                "remarks": body.remarks or "",
+                "old_status": rec.get("status"),
+                "new_status": "rejected",
+            })
+            await coll.update_one({"id": body.request_id}, {"$set": {"audit_log": audit_log}})
+            await db.payroll.update_many(
+                {"batch_id": body.request_id},
+                {"$set": {"locked": False, "batch_status": "rejected"}},
+            )
         # Notify creator
         if rec.get("created_by") and rec["created_by"] != user["id"]:
             await _notify(rec["created_by"],
@@ -6211,6 +6231,38 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                     update["voucher_generated_at"] = voucher["generated_at"]
             except Exception as _voucher_err:  # noqa: BLE001
                 logger.exception("Payment voucher auto-generation failed for payment %s", rec.get("id"))
+        elif body.request_type == "payroll":
+            # Phase 55 — Payroll batch final approval. Move the batch into "pending_payment"
+            # so Accounts can process the disbursement. NO transaction is created here;
+            # that happens on POST /payroll-batches/{id}/pay by the accountant.
+            now = datetime.now(timezone.utc).isoformat()
+            audit_log = list(rec.get("audit_log") or [])
+            audit_log.append({
+                "action": "approved",
+                "at": now,
+                "by": user["id"],
+                "by_name": user.get("name"),
+                "remarks": body.remarks or "",
+                "old_status": rec.get("status"),
+                "new_status": "pending_payment",
+            })
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "pending_payment",
+                "approved_by": user["id"],
+                "approved_at": now,
+                "rejected_reason": None,
+                "audit_log": audit_log,
+            }
+            # Notify accountants that a batch is ready for payment.
+            accs = await db.users.find({"role": "accountant"}, {"_id": 0, "id": 1}).to_list(200)
+            for _acc in accs:
+                await _notify(
+                    _acc["id"],
+                    f"Payroll {rec.get('month'):02d}/{rec.get('year')} approved — ₹{float(rec.get('net_payable') or 0):,.0f} ready for payment",
+                    ntype="payroll_ready", ref_id=rec["id"], link="/payroll-batches",
+                )
         else:  # transaction OR advance_request (both share the generic approved+audit path)
             update = {
                 "current_level": 0,
@@ -9570,6 +9622,410 @@ async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant",
     return res
 
 
+
+# =========================================================================
+# PAYROLL BATCH WORKFLOW (Phase 55) — Finalise → Approval → Accounts Pay → Transaction.
+# Business rule: HR calculates & finalises. Accountant pays. Admin can reopen.
+# =========================================================================
+
+
+class PayrollFinaliseIn(BaseModel):
+    month: int = Field(ge=1, le=12)
+    year: int = Field(ge=2020, le=2100)
+    remarks: Optional[str] = None
+
+
+class PayrollBatchPayIn(BaseModel):
+    method: Literal["bank_transfer", "neft", "rtgs", "imps", "cheque", "cash", "upi", "other"] = "bank_transfer"
+    bank_account_id: Optional[str] = None
+    payment_date: str  # YYYY-MM-DD
+    utr: Optional[str] = None
+    remarks: Optional[str] = None
+    attachment_path: Optional[str] = None
+    attachment_filename: Optional[str] = None
+
+
+class PayrollBatchReopenIn(BaseModel):
+    reason: Optional[str] = None
+    reverse_transaction: bool = True  # If batch was already paid, reverse the txn too.
+
+
+@api.post("/payroll/finalise")
+async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("admin", "hr"))):
+    """HR (or admin) locks the month's Draft payroll rows into a batch and pushes it into
+    the approval workflow. Existing rows already in a batch (finalised/approved/paid) are ignored.
+    """
+    m, y = body.month, body.year
+    # Only rows that are still editable are candidates for finalisation.
+    draft_rows = await db.payroll.find(
+        {"month": m, "year": y, "status": {"$in": [None, "draft", "reopened"]}},
+        {"_id": 0},
+    ).to_list(2000)
+    if not draft_rows:
+        raise HTTPException(400, f"No Draft payroll rows found for {m:02d}/{y}. Run Payroll first.")
+
+    # Guard: refuse to create a duplicate active batch for the same month/year.
+    dup = await db.payroll_batches.find_one({
+        "month": m, "year": y,
+        "status": {"$in": ["pending_approval", "approved", "pending_payment", "processing", "paid"]},
+    }, {"_id": 0, "id": 1, "status": 1})
+    if dup:
+        raise HTTPException(409, f"An active payroll batch already exists for {m:02d}/{y} (status: {dup['status']}). Reopen it first to re-finalise.")
+
+    # Zero-attendance filter (already enforced by payroll_run, but be defensive):
+    # rows with payable_days == 0 are still included in the batch (they resolve to ₹0 nets),
+    # but net_payable totals only non-zero rows.
+    payroll_ids = [r["id"] for r in draft_rows]
+    gross = sum(float(r.get("gross") or 0) for r in draft_rows)
+    deductions = sum(float(r.get("deductions") or 0) for r in draft_rows)
+    net_payable = sum(float(r.get("net") or 0) for r in draft_rows)
+
+    now = datetime.now(timezone.utc).isoformat()
+    batch_id = str(uuid.uuid4())
+    doc = {
+        "id": batch_id,
+        "month": m, "year": y,
+        "staff_count": len(payroll_ids),
+        "payroll_ids": payroll_ids,
+        "gross": round(gross, 2),
+        "deductions": round(deductions, 2),
+        "net_payable": round(net_payable, 2),
+        "amount": round(net_payable, 2),  # used by amount-based chain matching
+        "status": "pending_approval",
+        "created_by": user["id"], "created_at": now,
+        "finalised_by": user["id"], "finalised_at": now,
+        "finalised_by_name": user.get("name") or user.get("email"),
+        "remarks": body.remarks or "",
+        "audit_log": [
+            {"action": "finalised", "at": now, "by": user["id"], "by_name": user.get("name") or user.get("email"),
+             "old_status": "draft", "new_status": "pending_approval", "remarks": body.remarks or ""},
+        ],
+        # center_id is left None — payroll batches are org-wide by default. Amount-based
+        # approval chains that don't scope by center will still match.
+    }
+    # Attach approval chain (falls back to admin auto-approve if none configured).
+    await _attach_chain_to_request("payroll", doc)
+    await db.payroll_batches.insert_one(doc)
+
+    # Lock all included payroll rows against edit.
+    await db.payroll.update_many(
+        {"id": {"$in": payroll_ids}},
+        {"$set": {"batch_id": batch_id, "batch_status": "pending_approval", "locked": True,
+                  "finalised_at": now, "finalised_by": user["id"]}},
+    )
+
+    # If chain resolved to auto-approve at Lv1 (no approvers), flip straight to pending_payment.
+    if not doc.get("chain_snapshot") and doc.get("status") == "pending_approval":
+        # No chain configured → treat as immediate approval by admin/hr who finalised it.
+        await db.payroll_batches.update_one(
+            {"id": batch_id},
+            {"$set": {"status": "pending_payment", "approved_at": now, "approved_by": user["id"],
+                      "audit_log": doc["audit_log"] + [{"action": "auto_approved", "at": now,
+                                                       "by": user["id"], "by_name": user.get("name") or user.get("email"),
+                                                       "remarks": "No approval chain configured — auto-approved",
+                                                       "old_status": "pending_approval", "new_status": "pending_payment"}]}},
+        )
+    return await _payroll_batch_out(batch_id)
+
+
+async def _payroll_batch_out(batch_id: str) -> dict:
+    """Fetch a batch + inline its payroll rows for the UI."""
+    b = await db.payroll_batches.find_one({"id": batch_id}, {"_id": 0})
+    if not b:
+        raise HTTPException(404, "Payroll batch not found")
+    rows = await db.payroll.find({"batch_id": batch_id}, {"_id": 0}).to_list(2000)
+    # Enrich rows with staff name/emp_code for the review UI.
+    sids = list({r.get("staff_id") for r in rows if r.get("staff_id")})
+    if sids:
+        srows = await db.staff.find({"id": {"$in": sids}}, {"_id": 0, "id": 1, "name": 1, "employee_code": 1, "bank_account_no": 1, "ifsc": 1}).to_list(2000)
+        by_id = {s["id"]: s for s in srows}
+        for r in rows:
+            s = by_id.get(r.get("staff_id"))
+            if s:
+                r["staff_name"] = s.get("name")
+                r["employee_code"] = s.get("employee_code")
+                r["bank_account_no_masked"] = ("****" + (s.get("bank_account_no") or "")[-4:]) if s.get("bank_account_no") else None
+                r["ifsc"] = s.get("ifsc")
+    b["rows"] = rows
+    return b
+
+
+@api.get("/payroll-batches")
+async def list_payroll_batches(
+    status: Optional[str] = None,
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager")),
+):
+    q: dict = {}
+    if status:
+        q["status"] = status
+    if month:
+        q["month"] = month
+    if year:
+        q["year"] = year
+    rows = await db.payroll_batches.find(q, {"_id": 0}).sort([("year", -1), ("month", -1), ("created_at", -1)]).to_list(500)
+    return rows
+
+
+@api.get("/payroll-batches/{batch_id}")
+async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager"))):
+    return await _payroll_batch_out(batch_id)
+
+
+@api.post("/payroll-batches/{batch_id}/pay")
+async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends(require_role("admin", "accountant"))):
+    """Accountant marks the approved batch as paid — creates ONE Transaction entry
+    (type=expense, source=payroll_batch, amount=net_payable) and flips every payroll
+    row + the batch to `paid`. Idempotent: guards against double-payment.
+    """
+    batch = await db.payroll_batches.find_one({"id": batch_id}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    if batch.get("status") == "paid":
+        raise HTTPException(400, "Batch already paid — cannot pay twice")
+    if batch.get("status") != "pending_payment":
+        raise HTTPException(400, f"Batch is in status '{batch.get('status')}' — payment requires 'pending_payment' (approved) state")
+    # Guard: refuse to pay a batch whose net is <= 0. Negative nets mean advance recoveries
+    # exceed gross — that scenario is a bookkeeping adjustment, not a payment. HR must
+    # correct the underlying rows (or exclude those staff via reopen) first. Zero-net
+    # batches would create a ₹0 transaction which is noise; also refuse.
+    net_pay = float(batch.get("net_payable") or 0)
+    if net_pay <= 0:
+        raise HTTPException(
+            400,
+            f"Cannot pay a batch with non-positive net (₹{net_pay:,.2f}). Reopen the batch and correct payroll rows first — negative nets usually mean advance recoveries exceed gross for some staff.",
+        )
+
+    # Optionally require a configured bank account for the debit. Same behaviour as vendor payments.
+    acct = None
+    if body.bank_account_id:
+        acct = await db.bank_accounts.find_one({"id": body.bank_account_id, "active": True}, {"_id": 0})
+        if not acct:
+            raise HTTPException(400, "Bank account not found or inactive")
+
+    now = datetime.now(timezone.utc).isoformat()
+    # Set processing early so the UI can show intermediate state (idempotency window).
+    await db.payroll_batches.update_one({"id": batch_id}, {"$set": {"status": "processing"}})
+
+    payroll_rows = await db.payroll.find({"batch_id": batch_id}, {"_id": 0}).to_list(2000)
+    # Derive company / partner context from first staff's center for the txn attribution.
+    first_sid = payroll_rows[0]["staff_id"] if payroll_rows else None
+    first_staff = await db.staff.find_one({"id": first_sid}, {"_id": 0, "center_id": 1}) if first_sid else None
+    ctx = await _derive_context_for_center((first_staff or {}).get("center_id"))
+    txn_amount = float(batch.get("net_payable") or 0)
+    txn = {
+        "id": str(uuid.uuid4()),
+        "type": "expense",
+        "amount": txn_amount,
+        "date": body.payment_date or now[:10],
+        "description": f"Payroll {batch['month']:02d}/{batch['year']} · {batch['staff_count']} staff · Net ₹{txn_amount:,.0f}",
+        "company_id": ctx["company_id"],
+        "partner_id": ctx["partner_id"],
+        "center_id": (first_staff or {}).get("center_id"),
+        "project_id": None,
+        "items": [], "attachments": [{"path": body.attachment_path, "filename": body.attachment_filename}] if body.attachment_path else [],
+        "source": "payroll_batch",
+        "payroll_batch_id": batch_id,
+        "payment_mode": body.method,
+        "utr": body.utr,
+        "bank_account_id": body.bank_account_id,
+        "remarks": body.remarks,
+        "created_by": user["id"], "created_at": now,
+        "status": "approved", "approved_by": user["id"], "approved_at": now,
+        "rejected_reason": None,
+    }
+    await db.transactions.insert_one(txn)
+    # Also debit the bank account ledger if configured.
+    if acct and txn_amount > 0:
+        await _post_bank_ledger(
+            account_id=acct["id"], direction="debit", amount=txn_amount,
+            source="payroll_batch", source_id=batch_id,
+            remarks=f"Payroll {batch['month']:02d}/{batch['year']} · {batch['staff_count']} staff" + (f" · UTR {body.utr}" if body.utr else ""),
+            vendor_name=None, center_id=(first_staff or {}).get("center_id"),
+            center_name=None, date=body.payment_date or now[:10], user=user,
+        )
+
+    # Mark each payroll row as paid + link to the transaction (kept per-row for legacy queries).
+    await db.payroll.update_many(
+        {"batch_id": batch_id},
+        {"$set": {"status": "paid", "paid_at": now, "txn_id": txn["id"], "batch_status": "paid"}},
+    )
+
+    # Also emit a staff_payments row per employee so Staff Financial History aggregator picks them up.
+    for r in payroll_rows:
+        sp = {
+            "id": str(uuid.uuid4()),
+            "employee_id": r["staff_id"],
+            "transaction_type": "salary",
+            "source_module": "payroll_batch",
+            "source_id": r["id"],
+            "amount": float(r.get("net") or 0),
+            "net_amount": float(r.get("net") or 0),
+            "status": "paid",
+            "payment_date": body.payment_date or now[:10],
+            "payment_mode": body.method,
+            "utr": body.utr,
+            "batch_id": batch_id,
+            "txn_id": txn["id"],
+            "month": batch["month"],
+            "year": batch["year"],
+            "created_by": user["id"],
+            "created_at": now,
+        }
+        await db.staff_payments.insert_one(sp)
+        # Notify staff (best-effort).
+        _u = await db.staff.find_one({"id": r["staff_id"]}, {"_id": 0, "user_id": 1, "name": 1})
+        if _u and _u.get("user_id"):
+            await _notify(_u["user_id"],
+                          f"Salary ₹{float(r.get('net') or 0):,.0f} paid for {batch['month']:02d}/{batch['year']}",
+                          ntype="salary_paid", ref_id=r["id"], link="/check-in")
+
+    audit_log = list(batch.get("audit_log") or [])
+    audit_log.append({
+        "action": "paid", "at": now, "by": user["id"],
+        "by_name": user.get("name") or user.get("email"),
+        "old_status": "pending_payment", "new_status": "paid",
+        "remarks": body.remarks or "",
+        "payment": {"method": body.method, "utr": body.utr, "date": body.payment_date, "bank_account_id": body.bank_account_id},
+    })
+    await db.payroll_batches.update_one(
+        {"id": batch_id},
+        {"$set": {
+            "status": "paid",
+            "paid_at": now, "paid_by": user["id"],
+            "paid_by_name": user.get("name") or user.get("email"),
+            "transaction_id": txn["id"],
+            "payment": {
+                "method": body.method, "bank_account_id": body.bank_account_id,
+                "payment_date": body.payment_date, "utr": body.utr,
+                "remarks": body.remarks, "attachment_path": body.attachment_path,
+                "attachment_filename": body.attachment_filename,
+            },
+            "audit_log": audit_log,
+        }},
+    )
+    return await _payroll_batch_out(batch_id)
+
+
+@api.post("/payroll-batches/{batch_id}/reopen")
+async def reopen_payroll_batch(batch_id: str, body: PayrollBatchReopenIn, user=Depends(require_role("admin"))):
+    """Admin-only escape hatch. Reverses a paid batch's transaction (if requested)
+    and unlocks the underlying payroll rows so HR can re-edit them.
+    """
+    batch = await db.payroll_batches.find_one({"id": batch_id}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+
+    now = datetime.now(timezone.utc).isoformat()
+    old_status = batch.get("status")
+    # Reverse the linked transaction only if the batch was actually paid.
+    if old_status == "paid" and body.reverse_transaction and batch.get("transaction_id"):
+        rev_id = str(uuid.uuid4())
+        # Create a reversal transaction (type=income) to net out the original expense.
+        orig = await db.transactions.find_one({"id": batch["transaction_id"]}, {"_id": 0})
+        if orig:
+            rev = {
+                "id": rev_id,
+                "type": "income",
+                "amount": float(orig.get("amount") or 0),
+                "date": now[:10],
+                "description": f"REVERSAL — {orig.get('description','')} (reopened by admin)",
+                "company_id": orig.get("company_id"),
+                "partner_id": orig.get("partner_id"),
+                "center_id": orig.get("center_id"),
+                "project_id": None, "items": [], "attachments": [],
+                "source": "payroll_batch_reversal",
+                "payroll_batch_id": batch_id,
+                "reverses_txn_id": batch["transaction_id"],
+                "created_by": user["id"], "created_at": now,
+                "status": "approved", "approved_by": user["id"], "approved_at": now,
+                "rejected_reason": body.reason or "Admin reopened payroll batch",
+            }
+            await db.transactions.insert_one(rev)
+            # Mark original transaction as reversed for audit clarity.
+            await db.transactions.update_one(
+                {"id": batch["transaction_id"]},
+                {"$set": {"reversed_by_txn_id": rev_id, "reversed_at": now, "reversed_by": user["id"]}},
+            )
+            # Also reverse the bank ledger row if one was posted.
+            if orig.get("bank_account_id"):
+                await _post_bank_ledger(
+                    account_id=orig["bank_account_id"], direction="credit",
+                    amount=float(orig.get("amount") or 0),
+                    source="payroll_batch_reversal", source_id=batch_id,
+                    remarks=f"REVERSAL of payroll {batch['month']:02d}/{batch['year']}: {body.reason or 'admin reopen'}",
+                    vendor_name=None, center_id=orig.get("center_id"),
+                    center_name=None, date=now[:10], user=user,
+                )
+        # Also flip the staff_payments rows to "cancelled" so Financial History reflects the reversal.
+        await db.staff_payments.update_many(
+            {"batch_id": batch_id, "status": "paid"},
+            {"$set": {"status": "cancelled", "cancelled_at": now, "cancel_reason": body.reason or "admin reopen"}},
+        )
+
+    # Return payroll rows to Draft so HR can edit + re-finalise. Preserve batch_id
+    # so admins can see the history until the next re-finalise overwrites it.
+    await db.payroll.update_many(
+        {"batch_id": batch_id},
+        {"$set": {"status": "draft", "locked": False, "batch_status": "reopened", "reopened_at": now},
+         "$unset": {"paid_at": "", "txn_id": ""}},
+    )
+
+    audit_log = list(batch.get("audit_log") or [])
+    audit_log.append({
+        "action": "reopened", "at": now, "by": user["id"],
+        "by_name": user.get("name") or user.get("email"),
+        "old_status": old_status, "new_status": "reopened",
+        "remarks": body.reason or "",
+    })
+    await db.payroll_batches.update_one(
+        {"id": batch_id},
+        {"$set": {"status": "reopened", "reopened_at": now, "reopened_by": user["id"], "audit_log": audit_log}},
+    )
+    return await _payroll_batch_out(batch_id)
+
+
+@api.patch("/payroll/{pid}/reopen")
+async def reopen_payroll_row(pid: str, user=Depends(require_role("admin"))):
+    """Admin can reopen a single paid payroll row (fine-grained). Reverses the linked
+    transaction (if any) and flips status back to Draft. If the row belongs to a
+    Paid batch, the batch is also flipped to 'reopened' so it can be re-finalised.
+    """
+    rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Not found")
+    if rec.get("status") != "paid":
+        raise HTTPException(400, "Only Paid payroll rows can be reopened")
+    now = datetime.now(timezone.utc).isoformat()
+    if rec.get("batch_id"):
+        # Reopen the whole batch to keep totals consistent.
+        return await reopen_payroll_batch(rec["batch_id"], PayrollBatchReopenIn(reason="Row-level admin reopen"), user)
+    # Legacy per-row Pay All path — reverse just this row's transaction.
+    if rec.get("txn_id"):
+        orig = await db.transactions.find_one({"id": rec["txn_id"]}, {"_id": 0})
+        if orig:
+            rev = {
+                "id": str(uuid.uuid4()), "type": "income", "amount": float(orig.get("amount") or 0),
+                "date": now[:10], "description": f"REVERSAL — {orig.get('description','')}",
+                "company_id": orig.get("company_id"), "partner_id": orig.get("partner_id"),
+                "center_id": orig.get("center_id"), "project_id": None,
+                "items": [], "attachments": [], "source": "payroll_row_reversal",
+                "payroll_id": pid, "reverses_txn_id": rec["txn_id"],
+                "created_by": user["id"], "created_at": now,
+                "status": "approved", "approved_by": user["id"], "approved_at": now,
+                "rejected_reason": "Admin reopened payroll row",
+            }
+            await db.transactions.insert_one(rev)
+            await db.transactions.update_one(
+                {"id": rec["txn_id"]}, {"$set": {"reversed_by_txn_id": rev["id"], "reversed_at": now, "reversed_by": user["id"]}},
+            )
+    await db.payroll.update_one(
+        {"id": pid},
+        {"$set": {"status": "draft", "locked": False, "reopened_at": now, "reopened_by": user["id"]},
+         "$unset": {"paid_at": "", "txn_id": ""}},
+    )
+    return {"ok": True, "id": pid, "status": "draft"}
 # ---------- Stock View ----------
 @api.get("/stock")
 async def list_stock(

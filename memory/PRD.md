@@ -26,6 +26,36 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 55 — Payroll → Approval → Accounts Payment → Transaction Workflow (Done, Feb 2026)
+- **User asked (Hindi/Hinglish, URGENT)**: Complete strict payroll workflow — HR calculate → HR Finalise → Approval → Accounts Payment → Transaction Entry → Paid. HR CANNOT pay directly through batch. Month-wise batch grouping (1 batch = 1 approval = 1 payment = 1 transaction) but with per-staff visibility. Accountant-only payment. Admin can Reopen any batch (even Paid) to reverse transaction and unlock rows.
+- **User's confirmed choices**: existing `approval_chains` system (1a), month-wise batch (2a), accountant role only (3a), keep legacy Pay All as fallback (4b), same-step Run+Finalise (5a). Plus: admin can reopen Paid payrolls back to unpaid so HR can re-edit.
+- **Backend `/app/backend/server.py`**:
+  - `ApprovalType` Literal extended with `"payroll"` + `APPROVAL_TYPE_COLL` maps to `payroll_batches`. Startup collection list includes `payroll_batches`.
+  - `approvals/act` endpoint: new **payroll** branch on approve → sets batch status = `pending_payment` + notifies all accountants. Reject branch: unlocks payroll rows so HR can re-edit.
+  - **5 new endpoints** (`~L9625`):
+    1. `POST /payroll/finalise` (admin/hr) — locks all Draft rows for month/year into a `payroll_batches` doc, attaches approval chain (or auto-approves if no chain), sets rows `locked=true, batch_id=X`.
+    2. `GET /payroll-batches?status&month&year` (admin/hr/accountant/senior_manager/manager) — list.
+    3. `GET /payroll-batches/{id}` — full detail with inlined staff rows (name, emp_code, masked bank a/c, IFSC).
+    4. `POST /payroll-batches/{id}/pay` (admin/accountant) — creates `transactions` row (source=payroll_batch, type=expense) + `staff_payments` per employee (transaction_type=salary) + posts bank ledger debit + marks batch/rows paid. Idempotent: refuses second pay + refuses non-positive net (business rule: negative nets mean advance recovery > gross — reopen and fix).
+    5. `POST /payroll-batches/{id}/reopen` (admin) — reverses transaction (creates offsetting income txn + credits bank ledger), cancels staff_payments, unlocks rows back to Draft. Works on any status.
+    6. `PATCH /payroll/{pid}/reopen` (admin) — individual row reopen (legacy Pay All path).
+  - Audit log on batch: every state transition appends `{action, at, by, by_name, old_status, new_status, remarks}`.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`**:
+  - New state: `batches`, `openBatchId`, `loadBatches` + `finalisePayroll` fn. Batches auto-refresh on month/year change.
+  - **Finalise Payroll button** (purple, `data-testid=finalise-payroll`) next to Run Payroll — visible to admin/hr when no active batch exists for the month.
+  - **PayrollBatchStatusCard** — appears below toolbar when a batch exists. Shows staff count, net, finalised-by name, colored status chip (`data-testid=batch-status-chip`), Open Batch button.
+  - **PayrollBatchDialog** — full drawer with: (a) 4-cell totals strip (staff / gross / deductions / net), (b) staff-wise breakdown table (emp code, name, bank a/c masked, gross/deduct/net), (c) audit trail with per-step chips, (d) role-scoped footer buttons: Process Payment (admin/accountant, when pending_payment), Reopen Admin (orange, admin only).
+  - **PaymentSub-dialog** — accountant enters method (NEFT/RTGS/IMPS/Cheque/UPI/Cash/Other) + date + optional bank account + UTR + remarks.
+- **Business rules enforced**:
+  - HR cannot pay a batch (403). HR can only finalise + trigger workflow.
+  - Accountant cannot finalise (403), cannot reopen (403), can only pay approved batches.
+  - Admin can do everything including reopen a Paid batch (reverses transaction).
+  - Same batch cannot be paid twice (400 "already paid").
+  - Batch with non-positive net cannot be paid (400 with actionable message).
+  - Duplicate active batch for same month/year rejected (409).
+- **Testing agent iter-59**: 20/20 backend pytest PASS + frontend flows verified for admin/HR/accountant. Discovered CRITICAL bug (`TransactionOut.amount ge=0` broke `/transactions` when a paid batch had negative net) — fixed by refusing non-positive net payments upfront. Auto-approve audit entry now includes `by_name`. Admin `canReopen` list widened to include `processing` state.
+- **Preview only** — production redeploy required to push changes to `finance.masharaskills.com`.
+
 ### Phase 54 — HRMS Attendance Report Fix (All-Dates + Regularised Status) (Done, Feb 2026)
 - **User reported (Hinglish, URGENT, production)**: (1) approved regularisation rows dikha rahe hain "INCOMPLETE" instead of PRESENT, (2) selected month me har date show nahi ho rahi (e.g., 07-01 ke baad seedhe 07-08 aa raha hai), (3) missing dates ka status calculate hi nahi ho raha.
 - **Root cause**: (a) auto-closure sweep in POST `/api/attendance/self` (line ~4855) was flipping any prior row with `check_in_at != null AND check_out_at empty` to status='incomplete', which included regularised rows. (b) `GET /api/payroll/staff/{sid}/summary` returned raw `att_rows` from Mongo — only dates with an existing record made it into the response, so missing dates disappeared.
