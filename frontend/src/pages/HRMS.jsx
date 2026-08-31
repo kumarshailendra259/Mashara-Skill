@@ -14,7 +14,8 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye, RefreshCw } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye, RefreshCw, MoreVertical, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, Calendar, Circle } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
@@ -872,6 +873,9 @@ export default function HRMS() {
   // Phase 55 — Payroll batch workflow state
   const [batches, setBatches] = useState([]);
   const [openBatchId, setOpenBatchId] = useState(null);
+  // Phase 56 — Redesign state: quick filter chip + expandable row
+  const [payrollQuickFilter, setPayrollQuickFilter] = useState("all"); // all | issues | pending | ready | paid
+  const [expandedPayrollId, setExpandedPayrollId] = useState(null);
   const loadBatches = useCallback(async () => {
     try {
       const { data } = await api.get(`/payroll-batches?month=${pMonth}&year=${pYear}`);
@@ -1869,176 +1873,156 @@ export default function HRMS() {
           </div>
         </TabsContent>
 
-        {/* Payroll */}
-        <TabsContent value="payroll" className="mt-4 space-y-4">
-          {/* Search + status filter + pagination */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
-              <Input
-                type="search"
-                placeholder="Search staff name"
-                value={payrollQ}
-                onChange={(e) => { setPayrollQ(e.target.value); setPayrollPage(0); }}
-                className="rounded-none w-64"
-                data-testid="payroll-search"
-              />
-              <Select value={payrollStatus} onValueChange={(v) => { setPayrollStatus(v); setPayrollPage(0); }}>
-                <SelectTrigger className="rounded-none w-36" data-testid="payroll-status-filter"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All statuses</SelectItem>
-                  <SelectItem value="draft">Draft</SelectItem>
-                  <SelectItem value="paid">Paid</SelectItem>
-                </SelectContent>
-              </Select>
-              <span className="text-xs text-[var(--muted)]">Showing {payroll.length} of {payrollTotal}</span>
+        {/* ============================================================
+            Payroll — Redesigned enterprise-finance layout (Phase 56)
+            ONLY UI/UX changes. Every existing handler + API call preserved.
+            ============================================================ */}
+        <TabsContent value="payroll" className="mt-4 space-y-5" data-testid="tab-payroll-panel">
+          {/* --- Header: single month selector + primary actions --- */}
+          {(isAdmin || isAccountant || user?.role === "hr") && (
+            <div className="bg-white border border-slate-200 rounded-lg p-5" data-testid="payroll-header">
+              <div className="flex flex-wrap items-start gap-4 justify-between">
+                <div className="flex-1 min-w-[240px]">
+                  <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Payroll</div>
+                  <div className="flex items-baseline gap-3 flex-wrap">
+                    <PayrollPeriodPicker month={pMonth} year={pYear} onChange={(m, y) => { setPMonth(m); setPYear(y); }} />
+                    <span className="text-sm text-slate-500">· Monthly salary processing</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button onClick={runPayroll} className="rounded-md bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 gap-1.5" data-testid="run-payroll">
+                    <TrendingUp size={14} /> Run Payroll
+                  </Button>
+                  {(isAdmin || user?.role === "hr") && !currentBatch && (
+                    <Button
+                      onClick={finalisePayroll}
+                      className="rounded-md bg-white border border-purple-500 text-purple-700 hover:bg-purple-50 h-9 px-4 gap-1.5"
+                      data-testid="finalise-payroll"
+                      title="Locks payroll & sends to Approval workflow"
+                    >
+                      <ShieldCheck size={14} /> Finalise Payroll
+                    </Button>
+                  )}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" className="rounded-md h-9 px-4 gap-1.5" data-testid="payroll-export-menu">
+                        <Download size={14} /> Export
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="rounded-md">
+                      <DropdownMenuItem onClick={() => downloadBankCsv(pMonth, pYear)} data-testid="bank-csv-btn">Bank Transfer CSV</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => downloadHRReport("attendance", pMonth, pYear)} data-testid="rep-attendance-btn">Attendance CSV</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => downloadHRReport("payroll", pMonth, pYear)} data-testid="rep-payroll-btn">Payroll CSV</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => downloadHRReport("consolidated", pMonth, pYear)} data-testid="rep-consolidated-btn">Consolidated CSV</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => Math.max(0, p - 1))} disabled={payrollPage === 0} className="rounded-none" data-testid="payroll-prev">Prev</Button>
+          )}
+
+          {/* --- Summary cards + progress + attention --- */}
+          <PayrollSummary payroll={payroll} total={payrollTotal} />
+
+          {/* --- Payroll batch status card (existing, kept intact) --- */}
+          {currentBatch && (
+            <PayrollBatchStatusCard batch={currentBatch} onOpen={() => setOpenBatchId(currentBatch.id)} />
+          )}
+
+          {/* --- Filter bar with quick chips + search + status --- */}
+          <div className="bg-white border border-slate-200 rounded-lg p-3 flex flex-wrap items-center gap-3" data-testid="payroll-filterbar">
+            <Input
+              type="search"
+              placeholder="Search employee…"
+              value={payrollQ}
+              onChange={(e) => { setPayrollQ(e.target.value); setPayrollPage(0); }}
+              className="rounded-md w-56 h-9 text-sm"
+              data-testid="payroll-search"
+            />
+            <Select value={payrollStatus} onValueChange={(v) => { setPayrollStatus(v); setPayrollPage(0); }}>
+              <SelectTrigger className="rounded-md w-36 h-9 text-sm" data-testid="payroll-status-filter"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All statuses</SelectItem>
+                <SelectItem value="draft">Draft</SelectItem>
+                <SelectItem value="paid">Paid</SelectItem>
+              </SelectContent>
+            </Select>
+            {/* Quick chip filters — client-side view filters that reuse existing payroll state */}
+            <QuickFilterChips
+              value={payrollQuickFilter}
+              onChange={(v) => setPayrollQuickFilter(v)}
+              counts={_countPayroll(payroll)}
+            />
+            <label className="flex items-center gap-2 text-[12px] cursor-pointer select-none text-slate-600" data-testid="hide-zero-toggle" title="Hide staff whose attendance is 0 for the whole month">
+              <input type="checkbox" checked={hideZero} onChange={(e) => setHideZero(e.target.checked)} />
+              <span>Hide zero-attendance</span>
+            </label>
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-xs text-slate-500" data-testid="payroll-count">Showing {payroll.length} of {payrollTotal}</span>
+              <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => Math.max(0, p - 1))} disabled={payrollPage === 0} className="rounded-md h-8" data-testid="payroll-prev">Prev</Button>
               <span className="text-xs">Page {payrollPage + 1} / {Math.max(1, Math.ceil(payrollTotal / PAGE))}</span>
-              <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => p + 1)} disabled={(payrollPage + 1) * PAGE >= payrollTotal} className="rounded-none" data-testid="payroll-next">Next</Button>
+              <Button size="sm" variant="outline" onClick={() => setPayrollPage((p) => p + 1)} disabled={(payrollPage + 1) * PAGE >= payrollTotal} className="rounded-md h-8" data-testid="payroll-next">Next</Button>
             </div>
           </div>
-          {(isAdmin || isAccountant || user?.role === "hr") && (
-            <div className="swiss-card p-4 flex items-end gap-3 flex-wrap">
-              <div><Label className="overline">Month</Label><Input type="number" min={1} max={12} value={pMonth} onChange={(e) => setPMonth(+e.target.value)} className="rounded-none w-24" /></div>
-              <div><Label className="overline">Year</Label><Input type="number" value={pYear} onChange={(e) => setPYear(+e.target.value)} className="rounded-none w-28" /></div>
-              <Button onClick={runPayroll} className="brand-btn rounded-none" data-testid="run-payroll">Run Payroll</Button>
-              {(isAdmin || user?.role === "hr") && !currentBatch && (
-                <Button onClick={finalisePayroll} className="rounded-none bg-purple-600 hover:bg-purple-700 text-white" data-testid="finalise-payroll" title="Finalise & send to Approval workflow">
-                  <ShieldCheck size={14} className="mr-1" /> Finalise Payroll
-                </Button>
-              )}
-              <Button onClick={() => downloadBankCsv(pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="bank-csv-btn"><Download size={14} /> Bank Transfer CSV</Button>
-              <Button onClick={() => downloadHRReport("attendance", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-attendance-btn"><Download size={14} /> Attendance CSV</Button>
-              <Button onClick={() => downloadHRReport("payroll", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-payroll-btn"><Download size={14} /> Payroll CSV</Button>
-              <Button onClick={() => downloadHRReport("consolidated", pMonth, pYear)} variant="outline" className="rounded-none gap-2" data-testid="rep-consolidated-btn"><Download size={14} /> Consolidated CSV</Button>
-              <label className="flex items-center gap-2 ml-auto text-[12px] cursor-pointer select-none" data-testid="hide-zero-toggle">
-                <input type="checkbox" checked={hideZero} onChange={(e) => setHideZero(e.target.checked)} />
-                <span>Hide zero-attendance</span>
-              </label>
+
+          {/* --- Employee payroll table --- */}
+          <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200">
+                  <tr className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+                    <th className="text-left p-3 w-8"></th>
+                    <th className="text-left p-3">Employee</th>
+                    <th className="text-left p-3">Attendance</th>
+                    <th className="text-right p-3">Gross</th>
+                    <th className="text-right p-3">Deductions</th>
+                    <th className="text-right p-3">Net Pay</th>
+                    <th className="text-left p-3">Status</th>
+                    <th className="text-right p-3 w-40 no-print">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    const filtered = _applyPayrollFilters(payroll, hideZero, payrollQuickFilter);
+                    if (filtered.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={8} className="text-center py-10 text-slate-500">
+                            {hideZero && payroll.length > 0
+                              ? `${payroll.length} zero-attendance rows hidden — toggle "Hide zero-attendance" off to view them.`
+                              : "No payroll rows for this period. Click Run Payroll to generate."}
+                          </td>
+                        </tr>
+                      );
+                    }
+                    return filtered.map((p) => (
+                      <PayrollTableRow
+                        key={p.id}
+                        p={p}
+                        sName={sName}
+                        isAdmin={isAdmin}
+                        isAccountant={isAccountant}
+                        userRole={user?.role}
+                        canManageStaff={canManageStaff}
+                        expanded={expandedPayrollId === p.id}
+                        onToggleExpand={() => setExpandedPayrollId(expandedPayrollId === p.id ? null : p.id)}
+                        onSalary={() => nav(`/hrms/staff/${p.staff_id}/salary?month=${p.month}&year=${p.year}`)}
+                        onRecalc={() => recalcPayroll(p.id)}
+                        onPrint={() => printPayslip(p)}
+                        onSlipGenerate={() => generateSlip(p.id)}
+                        onSlipDownload={() => downloadSlip(p.id, p.slip_filename)}
+                        onSlipRelease={() => releaseSlip(p.id, !p.slip_released_at)}
+                        onEdit={() => openEditPayroll(p)}
+                        onPay={() => payPayroll(p.id)}
+                        onEditPaid={() => reopenAndEditPayroll(p)}
+                        onDelete={() => deletePayrollRow(p)}
+                      />
+                    ));
+                  })()}
+                </tbody>
+              </table>
             </div>
-          )}
-
-          {/* Payroll batch status card — visible when a batch exists for the selected month/year */}
-          {currentBatch && (
-            <PayrollBatchStatusCard
-              batch={currentBatch}
-              onOpen={() => setOpenBatchId(currentBatch.id)}
-            />
-          )}
-          <div className="swiss-card overflow-x-auto"><table className="w-full text-sm">
-            <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
-              <th className="text-left p-3">Period</th><th className="text-left p-3">Staff</th>
-              <th className="text-right p-3">Days</th><th className="text-right p-3">Late Days</th>
-              <th className="text-right p-3">Gross</th><th className="text-right p-3">Deduct</th>
-              <th className="text-right p-3">Net</th><th className="text-left p-3">Status</th>
-              <th className="text-right p-3 w-32 no-print">Action</th>
-            </tr></thead><tbody>
-              {(() => {
-                const filtered = hideZero
-                  ? payroll.filter((p) => {
-                      const present = (p.present_days ?? p.days_present) || 0;
-                      const paidLv = p.paid_leave_days || 0;
-                      const hasAny = present + paidLv + (p.half_days || 0) > 0;
-                      // Always keep non-draft rows (paid/approved) so audit history stays intact.
-                      return hasAny || p.status !== "draft";
-                    })
-                  : payroll;
-                return filtered.length === 0 ? (
-                  <tr><td colSpan={9} className="text-center py-8 overline">
-                    {hideZero && payroll.length > 0
-                      ? `${payroll.length} zero-attendance rows hidden — toggle "Show zero-attendance" to view them.`
-                      : "No payroll yet"}
-                  </td></tr>
-                ) : filtered.map((p) => (
-                <tr key={p.id} className="border-b border-[var(--border)] hover:bg-gray-50">
-                  <td className="p-3 num">{p.month}/{p.year}</td>
-                  <td className="p-3">
-                    <div>{p.staff_name || sName(p.staff_id)}</div>
-                    {(((p.present_days ?? p.days_present) || 0) === 0 && (p.paid_leave_days || 0) === 0 && p.status === "draft") && (
-                      <span className="inline-block mt-0.5 text-[10px] px-1 border border-red-300 bg-red-50 text-red-700" title="0 attendance days — salary is fully attendance-deducted. Verify attendance or recalculate after uploading.">Zero attendance</span>
-                    )}
-                  </td>
-                  <td className="p-3 num text-xs">
-                    <div>{p.present_days ?? p.days_present ?? 0} / {p.working_days}</div>
-                    {(p.paid_leave_days > 0 || p.unpaid_leave_days > 0 || p.unmarked_absent_days > 0) && (
-                      <div className="text-[10px] text-[var(--muted)] mt-0.5">
-                        {p.paid_leave_days > 0 && <span className="mr-1">PL {p.paid_leave_days}</span>}
-                        {p.unpaid_leave_days > 0 && <span className="mr-1 text-amber-700">LOP {p.unpaid_leave_days}</span>}
-                        {p.unmarked_absent_days > 0 && <span className="text-red-700">Unmk {p.unmarked_absent_days}</span>}
-                      </div>
-                    )}
-                  </td>
-                  <td className="p-3 num text-xs">
-                    {p.late_days ? (
-                      <span title={`<2h: ${p.late_buckets?.minor || 0} · 2-6h: ${p.late_buckets?.half_day || 0} · ≥6h: ${p.late_buckets?.full_day || 0}`}>{p.late_days}</span>
-                    ) : "—"}
-                  </td>
-                  <td className="p-3 num">{inr(p.gross)}</td>
-                  <td className="p-3 num text-[var(--danger)]">{p.deductions ? inr(p.deductions) : "—"}</td>
-                  <td className="p-3 num font-medium">{inr(p.net)}</td>
-                  <td className="p-3"><span className={`inline-block px-2 py-0.5 text-xs border ${p.status === "paid" ? "border-[var(--success)] text-[var(--success)]" : "border-[var(--warning)] text-[#9a7a00]"}`}>{p.status}</span></td>
-                  <td className="p-3 text-right no-print">
-                    <div className="flex gap-1 justify-end">
-                      <Button size="sm" variant="outline" onClick={() => nav(`/hrms/staff/${p.staff_id}/salary?month=${p.month}&year=${p.year}`)} className="rounded-none h-8 px-2" title="Salary Detail" data-testid={`view-detail-${p.id}`}>
-                        <User size={14} />
-                      </Button>
-                      {p.status === "draft" && canManageStaff && (
-                        <Button size="sm" variant="outline" onClick={() => recalcPayroll(p.id)} className="rounded-none h-8 px-2" title="Recalculate with latest attendance + approved leaves" data-testid={`recalc-payroll-${p.id}`}>
-                          <TrendingUp size={14} />
-                        </Button>
-                      )}
-                      <Button size="sm" variant="outline" onClick={() => printPayslip(p)} className="rounded-none h-8 px-2" title="Print payslip (local)" data-testid={`payslip-pdf-${p.id}`}><FileText size={14} /></Button>
-                      {/* Salary Slip actions (Phase B): Generate → Download → Release */}
-                      {(isAdmin || isAccountant || user?.role === "hr") && !p.slip_id && (
-                        <Button size="sm" variant="outline" onClick={() => generateSlip(p.id)} className="rounded-none h-8 px-2" title="Generate salary slip (DOCX/PDF)" data-testid={`slip-gen-${p.id}`}><Receipt size={14} /></Button>
-                      )}
-                      {p.slip_id && (
-                        <Button size="sm" variant="outline" onClick={() => downloadSlip(p.id, p.slip_filename)} className="rounded-none h-8 px-2" title="Download generated slip" data-testid={`slip-dl-${p.id}`}><FileDown size={14} /></Button>
-                      )}
-                      {p.slip_id && (isAdmin || user?.role === "hr") && (
-                        <Button
-                          size="sm"
-                          variant={p.slip_released_at ? "default" : "outline"}
-                          onClick={() => releaseSlip(p.id, !p.slip_released_at)}
-                          className={`rounded-none h-8 px-2 ${p.slip_released_at ? "brand-btn" : ""}`}
-                          title={p.slip_released_at ? "Un-release slip (hide from employee)" : "Release slip to employee"}
-                          data-testid={`slip-release-${p.id}`}
-                        >
-                          {p.slip_released_at ? "Released" : "Release"}
-                        </Button>
-                      )}
-                      {p.status !== "paid" && canManageStaff && (
-                        <Button size="sm" variant="outline" onClick={() => openEditPayroll(p)} className="rounded-none h-8 px-2" data-testid={`edit-payroll-${p.id}`} title="Edit"><Pencil size={14} /></Button>
-                      )}
-                      {p.status !== "paid" && (isAdmin || isAccountant || user?.role === "hr") && (
-                        <Button size="sm" onClick={() => payPayroll(p.id)} className="brand-btn rounded-none h-8 px-3" data-testid={`pay-payroll-${p.id}`}>Pay</Button>
-                      )}
-                      {p.status === "paid" && isAdmin && (
-                        <Button
-                          size="sm" variant="outline"
-                          onClick={() => reopenAndEditPayroll(p)}
-                          className="rounded-none h-8 px-2 border-orange-500 text-orange-700 hover:bg-orange-50"
-                          data-testid={`edit-paid-${p.id}`}
-                          title="Reopen (reverses txn) + edit"
-                        ><Pencil size={14} /></Button>
-                      )}
-                      {isAdmin && (
-                        <Button
-                          size="sm" variant="outline"
-                          onClick={() => deletePayrollRow(p)}
-                          className="rounded-none h-8 px-2 border-red-500 text-red-700 hover:bg-red-50"
-                          data-testid={`delete-payroll-${p.id}`}
-                          title={p.status === "paid" ? "Delete paid row (reverses txn slice)" : "Delete row"}
-                        ><Trash2 size={14} /></Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ));
-              })()}
-            </tbody></table></div>
-
+          </div>
           {/* Edit Payslip Dialog */}
           <Dialog open={payrollOpen} onOpenChange={(o) => { setPayrollOpen(o); if (!o) setEditingPayroll(null); }}>
             <DialogContent className="rounded-none max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -2690,3 +2674,401 @@ const TotalCell = ({ label, value, tone, bold }) => (
     <div className={`text-lg font-heading ${bold ? "font-black" : "font-bold"} num mt-0.5`}>{value}</div>
   </div>
 );
+
+/* ============================================================
+   PAYROLL REDESIGN COMPONENTS (Phase 56)
+   Pure UI/UX — every call reuses existing handlers + state.
+   ============================================================ */
+
+// Month picker as a single dropdown-like control (fixes the "July selected but
+// August data" confusion the user reported).
+const _MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function PayrollPeriodPicker({ month, year, onChange }) {
+  const label = `${_MONTHS[month - 1]} ${year}`;
+  const years = [];
+  for (let y = year + 1; y >= year - 3; y--) years.push(y);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="inline-flex items-center gap-2 text-2xl font-heading font-black tracking-tight text-slate-900 hover:text-blue-700 transition-colors"
+          data-testid="payroll-period-picker"
+        >
+          {label}
+          <ChevronDown size={20} className="text-slate-400" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="rounded-md p-2 min-w-[260px]" data-testid="payroll-period-menu">
+        <div className="grid grid-cols-4 gap-1 mb-2">
+          {_MONTHS.map((m, i) => (
+            <button
+              key={m}
+              onClick={() => onChange(i + 1, year)}
+              className={`h-8 rounded text-xs font-semibold ${(i + 1 === month) ? "bg-blue-600 text-white" : "text-slate-700 hover:bg-slate-100"}`}
+              data-testid={`period-month-${i + 1}`}
+            >{m}</button>
+          ))}
+        </div>
+        <div className="grid grid-cols-4 gap-1 border-t border-slate-100 pt-2">
+          {years.map((y) => (
+            <button
+              key={y}
+              onClick={() => onChange(month, y)}
+              className={`h-8 rounded text-xs font-semibold ${(y === year) ? "bg-blue-600 text-white" : "text-slate-700 hover:bg-slate-100"}`}
+              data-testid={`period-year-${y}`}
+            >{y}</button>
+          ))}
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// Compact ₹ formatting for KPI cards — "8.42L", "1.24Cr" etc.
+function _inrCompact(n) {
+  const v = Number(n || 0);
+  if (Math.abs(v) >= 10000000) return `₹${(v / 10000000).toFixed(2)}Cr`;
+  if (Math.abs(v) >= 100000) return `₹${(v / 100000).toFixed(2)}L`;
+  if (Math.abs(v) >= 1000) return `₹${(v / 1000).toFixed(1)}K`;
+  return `₹${v.toFixed(0)}`;
+}
+
+function _payrollStage(p) {
+  // Derive a UI stage from raw payroll fields + attendance signals.
+  if (p.status === "paid") return "paid";
+  const present = (p.present_days ?? p.days_present) || 0;
+  const paidLv = p.paid_leave_days || 0;
+  const half = p.half_days || 0;
+  const workedFraction = present + paidLv + half;
+  if (workedFraction === 0) return "issue"; // zero-attendance draft
+  if (p.unmarked_absent_days > 0) return "issue"; // missing punches
+  if ((p.deductions || 0) > (p.gross || 0)) return "issue"; // deductions > gross
+  if (p.slip_released_at) return "ready";
+  if (p.locked || p.batch_status === "pending_approval") return "review";
+  return "pending"; // draft, still editable
+}
+
+function _countPayroll(rows) {
+  const c = { all: rows.length, issues: 0, pending: 0, ready: 0, paid: 0 };
+  for (const p of rows) {
+    const s = _payrollStage(p);
+    if (s === "issue") c.issues++;
+    else if (s === "pending" || s === "review") c.pending++;
+    else if (s === "ready") c.ready++;
+    else if (s === "paid") c.paid++;
+  }
+  return c;
+}
+
+function _applyPayrollFilters(rows, hideZero, quick) {
+  let out = rows;
+  if (hideZero) {
+    out = out.filter((p) => {
+      const present = (p.present_days ?? p.days_present) || 0;
+      const paidLv = p.paid_leave_days || 0;
+      const hasAny = present + paidLv + (p.half_days || 0) > 0;
+      return hasAny || p.status !== "draft";
+    });
+  }
+  if (quick && quick !== "all") {
+    out = out.filter((p) => {
+      const s = _payrollStage(p);
+      if (quick === "issues") return s === "issue";
+      if (quick === "pending") return s === "pending" || s === "review";
+      if (quick === "ready") return s === "ready";
+      if (quick === "paid") return s === "paid";
+      return true;
+    });
+  }
+  return out;
+}
+
+function QuickFilterChips({ value, onChange, counts }) {
+  const chips = [
+    { key: "all",     label: "All",         count: counts.all,     tone: "bg-slate-100 text-slate-700" },
+    { key: "issues",  label: "Issues",      count: counts.issues,  tone: "bg-red-50 text-red-700" },
+    { key: "pending", label: "Pending",     count: counts.pending, tone: "bg-amber-50 text-amber-800" },
+    { key: "ready",   label: "Ready to Pay",count: counts.ready,   tone: "bg-blue-50 text-blue-700" },
+    { key: "paid",    label: "Paid",        count: counts.paid,    tone: "bg-emerald-50 text-emerald-700" },
+  ];
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap" data-testid="payroll-quick-chips">
+      {chips.map((c) => {
+        const active = value === c.key;
+        return (
+          <button
+            key={c.key}
+            onClick={() => onChange(c.key)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors ${active ? "bg-slate-900 text-white border-slate-900" : `${c.tone} border-transparent hover:border-slate-300`}`}
+            data-testid={`chip-${c.key}`}
+          >
+            {c.label}
+            <span className={`px-1.5 py-0 rounded-full text-[10px] font-bold ${active ? "bg-white/20 text-white" : "bg-white/70 text-slate-700"}`}>{c.count}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function PayrollSummary({ payroll, total }) {
+  const totalStaff = total;
+  const processed = payroll.filter((p) => p.status === "paid").length;
+  const rowsForCounts = payroll;
+  const c = _countPayroll(rowsForCounts);
+  const gross = rowsForCounts.reduce((s, p) => s + (p.gross || 0), 0);
+  const net = rowsForCounts.reduce((s, p) => s + (p.net || 0), 0);
+  const pct = totalStaff > 0 ? Math.round((processed / totalStaff) * 100) : 0;
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3" data-testid="payroll-summary-cards">
+      <SummaryTile label="Total Employees" value={totalStaff} tone="text-slate-900" ring="ring-slate-200" testid="kpi-total" />
+      <SummaryTile label="Processed"        value={processed} tone="text-emerald-700" ring="ring-emerald-200" testid="kpi-processed" />
+      <SummaryTile label="Pending"          value={c.pending} tone="text-amber-700"  ring="ring-amber-200"  testid="kpi-pending" />
+      <SummaryTile label="Attendance Issues" value={c.issues}  tone="text-red-700"     ring="ring-red-200"     testid="kpi-issues" />
+      <SummaryTile label="Gross Payroll"    value={_inrCompact(gross)} tone="text-slate-900" ring="ring-slate-200" testid="kpi-gross" hint={`Total gross across ${payroll.length} rows`} />
+      <SummaryTile label="Net Payable"      value={_inrCompact(net)}   tone="text-blue-700"  ring="ring-blue-200"  testid="kpi-net" hint="Sum of net pay across rows" />
+      <div className="col-span-full bg-white border border-slate-200 rounded-lg p-4" data-testid="payroll-progress">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Payroll Processing</div>
+            <div className="text-lg font-heading font-bold text-slate-900">{pct}% Complete <span className="text-sm text-slate-500 font-normal">· {processed} of {totalStaff} employees</span></div>
+          </div>
+          {c.issues > 0 && (
+            <div className="inline-flex items-start gap-2 text-xs text-red-700 bg-red-50 border border-red-200 px-3 py-1.5 rounded-md">
+              <AlertCircle size={14} className="mt-[1px]" />
+              <span>
+                <b>{c.issues}</b> employee{c.issues === 1 ? "" : "s"} need attention — attendance or salary issues detected.
+              </span>
+            </div>
+          )}
+        </div>
+        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryTile({ label, value, tone, ring, testid, hint }) {
+  return (
+    <div className={`bg-white border border-slate-200 rounded-lg p-3 ring-1 ring-inset ${ring}`} data-testid={testid} title={hint}>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{label}</div>
+      <div className={`text-2xl font-heading font-black leading-tight mt-1 ${tone}`}>{value}</div>
+    </div>
+  );
+}
+
+// Status pill mapped to enterprise-grade labels.
+function PayrollStatusPill({ p }) {
+  const s = _payrollStage(p);
+  const map = {
+    paid:    { cls: "bg-emerald-100 text-emerald-800 border-emerald-200", label: "Paid" },
+    ready:   { cls: "bg-blue-100 text-blue-800 border-blue-200",         label: "Ready to Pay" },
+    issue:   { cls: "bg-red-100 text-red-800 border-red-200",             label: "Issue" },
+    review:  { cls: "bg-indigo-100 text-indigo-800 border-indigo-200",   label: "Pending Review" },
+    pending: { cls: "bg-amber-100 text-amber-800 border-amber-200",       label: "Draft" },
+  };
+  const e = map[s] || map.pending;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${e.cls}`} data-testid={`status-pill-${p.id}`}>
+      {e.label}
+    </span>
+  );
+}
+
+// Attendance display — "X / Y days" + issue chip.
+function AttendanceCell({ p }) {
+  const present = (p.present_days ?? p.days_present) || 0;
+  const working = p.working_days || 0;
+  const unmarked = p.unmarked_absent_days || 0;
+  const paidLv = p.paid_leave_days || 0;
+  const unpaidLv = p.unpaid_leave_days || 0;
+  const late = p.late_days || 0;
+  const hasIssue = unmarked > 0 || (present + paidLv + (p.half_days || 0) === 0 && p.status === "draft");
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-semibold text-slate-900 num">{present} / {working} <span className="text-slate-500 font-normal">days</span></span>
+        {hasIssue ? (
+          <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-red-700 bg-red-50 px-1.5 py-0.5 rounded" title="Missing attendance / zero-day">
+            <AlertCircle size={10} /> {unmarked > 0 ? `${unmarked} Unmarked` : "Zero attendance"}
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-700" title="All days accounted for">
+            <CheckCircle2 size={10} /> Complete
+          </span>
+        )}
+      </div>
+      {(paidLv || unpaidLv || late) ? (
+        <div className="text-[10px] text-slate-500 mt-0.5 flex gap-2">
+          {paidLv > 0 && <span>PL {paidLv}</span>}
+          {unpaidLv > 0 && <span className="text-amber-700">LOP {unpaidLv}</span>}
+          {late > 0 && <span className="text-orange-600">Late {late}</span>}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PayrollTableRow(props) {
+  const {
+    p, sName, isAdmin, isAccountant, userRole, canManageStaff, expanded, onToggleExpand,
+    onSalary, onRecalc, onPrint, onSlipGenerate, onSlipDownload, onSlipRelease,
+    onEdit, onPay, onEditPaid, onDelete,
+  } = props;
+  const stage = _payrollStage(p);
+  const isPaid = p.status === "paid";
+  const isIssue = stage === "issue";
+  return (
+    <>
+      <tr className="border-b border-slate-100 hover:bg-slate-50 transition-colors" data-testid={`payroll-row-${p.id}`}>
+        <td className="p-3">
+          <button
+            onClick={onToggleExpand}
+            className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-200 text-slate-500"
+            data-testid={`expand-payroll-${p.id}`}
+            aria-label={expanded ? "Collapse row" : "Expand row"}
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        </td>
+        <td className="p-3">
+          <div className="font-semibold text-slate-900">{p.staff_name || sName(p.staff_id)}</div>
+          <div className="text-[10px] text-slate-500 font-mono">{p.employee_code || ""}</div>
+        </td>
+        <td className="p-3"><AttendanceCell p={p} /></td>
+        <td className="p-3 text-right"><span className="text-sm text-slate-900 num">{inr(p.gross)}</span></td>
+        <td className="p-3 text-right"><span className="text-sm num text-red-600">{p.deductions ? `− ${inr(p.deductions)}` : "—"}</span></td>
+        <td className="p-3 text-right"><span className="text-base font-heading font-bold text-slate-900 num">{inr(p.net)}</span></td>
+        <td className="p-3"><PayrollStatusPill p={p} /></td>
+        <td className="p-3 text-right no-print">
+          <div className="flex items-center justify-end gap-1.5">
+            {isPaid ? (
+              <Button size="sm" variant="outline" onClick={onSalary} className="rounded-md h-8 px-3 text-xs" data-testid={`view-detail-${p.id}`}>
+                View Payroll
+              </Button>
+            ) : isIssue ? (
+              <Button
+                size="sm"
+                onClick={onSalary}
+                className="rounded-md h-8 px-3 text-xs bg-red-50 border border-red-300 text-red-700 hover:bg-red-100"
+                data-testid={`resolve-issues-${p.id}`}
+                title="Attendance or salary issue — resolve before paying"
+              >
+                <AlertCircle size={12} className="mr-1" /> Resolve Issues
+              </Button>
+            ) : (
+              (isAdmin || isAccountant || userRole === "hr") && (
+                <Button size="sm" onClick={onPay} className="rounded-md h-8 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white" data-testid={`pay-payroll-${p.id}`}>
+                  Pay
+                </Button>
+              )
+            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  className="w-8 h-8 flex items-center justify-center rounded-md border border-slate-200 hover:bg-slate-100"
+                  aria-label="More actions"
+                  data-testid={`row-menu-${p.id}`}
+                >
+                  <MoreVertical size={14} className="text-slate-600" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="rounded-md">
+                <DropdownMenuItem onClick={onSalary} data-testid={`menu-salary-${p.id}`}><User size={13} className="mr-2" /> Salary Breakdown</DropdownMenuItem>
+                <DropdownMenuItem onClick={onPrint} data-testid={`payslip-pdf-${p.id}`}><FileText size={13} className="mr-2" /> Print Payslip</DropdownMenuItem>
+                {p.status === "draft" && canManageStaff && (
+                  <DropdownMenuItem onClick={onRecalc} data-testid={`recalc-payroll-${p.id}`}><TrendingUp size={13} className="mr-2" /> Recalculate</DropdownMenuItem>
+                )}
+                {(isAdmin || isAccountant || userRole === "hr") && !p.slip_id && (
+                  <DropdownMenuItem onClick={onSlipGenerate} data-testid={`slip-gen-${p.id}`}><Receipt size={13} className="mr-2" /> Generate Slip</DropdownMenuItem>
+                )}
+                {p.slip_id && (
+                  <DropdownMenuItem onClick={onSlipDownload} data-testid={`slip-dl-${p.id}`}><FileDown size={13} className="mr-2" /> Download Slip</DropdownMenuItem>
+                )}
+                {p.slip_id && (isAdmin || userRole === "hr") && (
+                  <DropdownMenuItem onClick={onSlipRelease} data-testid={`slip-release-${p.id}`}>
+                    <Mail size={13} className="mr-2" /> {p.slip_released_at ? "Un-release Slip" : "Release Slip"}
+                  </DropdownMenuItem>
+                )}
+                {!isPaid && canManageStaff && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={onEdit} data-testid={`edit-payroll-${p.id}`}><Pencil size={13} className="mr-2" /> Edit Payroll</DropdownMenuItem>
+                  </>
+                )}
+                {isPaid && isAdmin && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={onEditPaid} className="text-orange-700" data-testid={`edit-paid-${p.id}`}>
+                      <Pencil size={13} className="mr-2" /> Reopen + Edit (Admin)
+                    </DropdownMenuItem>
+                  </>
+                )}
+                {isAdmin && (
+                  <DropdownMenuItem onClick={onDelete} className="text-red-700" data-testid={`delete-payroll-${p.id}`}>
+                    <Trash2 size={13} className="mr-2" /> Delete Row
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="bg-slate-50/60 border-b border-slate-200" data-testid={`payroll-expand-${p.id}`}>
+          <td></td>
+          <td colSpan={7} className="p-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-2">Salary Breakdown</div>
+                <dl className="text-xs space-y-1.5">
+                  <BreakRow label="Basic" value={inr(p.basic)} />
+                  {p.hra ? <BreakRow label="HRA" value={inr(p.hra)} /> : null}
+                  {p.da ? <BreakRow label="DA" value={inr(p.da)} /> : null}
+                  {p.conveyance ? <BreakRow label="Conveyance" value={inr(p.conveyance)} /> : null}
+                  {p.bonus ? <BreakRow label="Bonus" value={inr(p.bonus)} /> : null}
+                  {p.incentive ? <BreakRow label="Incentive" value={inr(p.incentive)} /> : null}
+                  <BreakRow label="Gross Salary" value={inr(p.gross)} bold />
+                  {p.pf ? <BreakRow label="PF" value={`− ${inr(p.pf)}`} tone="text-red-600" /> : null}
+                  {p.esi ? <BreakRow label="ESI" value={`− ${inr(p.esi)}`} tone="text-red-600" /> : null}
+                  {p.tds ? <BreakRow label="TDS" value={`− ${inr(p.tds)}`} tone="text-red-600" /> : null}
+                  {p.other_deduction ? <BreakRow label="Other" value={`− ${inr(p.other_deduction)}`} tone="text-red-600" /> : null}
+                  {p.advance_recovery ? <BreakRow label="Advance Recovery" value={`− ${inr(p.advance_recovery)}`} tone="text-red-600" /> : null}
+                  <BreakRow label="Total Deductions" value={p.deductions ? `− ${inr(p.deductions)}` : "—"} tone="text-red-700" bold />
+                  <BreakRow label="Net Salary" value={inr(p.net)} bold big />
+                </dl>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold mb-2">Attendance Summary</div>
+                <dl className="text-xs space-y-1.5">
+                  <BreakRow label="Present"  value={p.present_days ?? p.days_present ?? 0} />
+                  <BreakRow label="Working days" value={p.working_days || "—"} />
+                  <BreakRow label="Half day" value={p.half_days || 0} />
+                  <BreakRow label="Paid leave" value={p.paid_leave_days || 0} />
+                  <BreakRow label="LOP (unpaid leave)" value={p.unpaid_leave_days || 0} tone={p.unpaid_leave_days ? "text-amber-700" : ""} />
+                  <BreakRow label="Late" value={p.late_days || 0} tone={p.late_days ? "text-orange-600" : ""} />
+                  <BreakRow label="Unmarked / Absent" value={p.unmarked_absent_days || 0} tone={p.unmarked_absent_days ? "text-red-700" : ""} />
+                  <BreakRow label="Payable days" value={p.payable_days ?? "—"} bold />
+                </dl>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function BreakRow({ label, value, bold, big, tone }) {
+  return (
+    <div className={`flex items-center justify-between ${bold ? "border-t border-slate-200 pt-1.5 mt-1" : ""}`}>
+      <dt className={`text-slate-600 ${bold ? "font-semibold text-slate-800" : ""}`}>{label}</dt>
+      <dd className={`num ${bold ? "font-heading font-bold" : ""} ${big ? "text-base text-slate-900" : ""} ${tone || ""}`}>{value}</dd>
+    </div>
+  );
+}

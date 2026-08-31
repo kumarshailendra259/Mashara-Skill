@@ -26,6 +26,23 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 56 — HRMS Payroll UI/UX Redesign (Done, Feb 2026)
+- **User asked (Hinglish)**: Complete redesign of HRMS Payroll page into a clean, modern, enterprise finance dashboard — 20-point spec covering header, KPI cards, progress bar, exception panel, filter bar, table redesign, expandable rows, meaningful statuses, 3-dot menu, responsive design. Strict rule: NO backend/logic changes, all functionality preserved.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`** — full Payroll tab replacement (L1873–2040 → new layout), zero backend touched:
+  - **New Header**: bold H2 period picker (single dropdown showing "Aug 2026 ▼" instead of 2 separate month/year inputs — fixes user's "Jul selected but Aug data" bug). 4x3 month grid + 5-year picker inside a DropdownMenu. Primary "Run Payroll" (blue) + "Finalise Payroll" (protected purple ring) + Export dropdown (consolidates 4 CSV buttons into one menu).
+  - **KPI Strip**: 6 compact SummaryTile cards (Total Employees / Processed / Pending / Attendance Issues / Gross Payroll / Net Payable) with color-coded rings. Gross + Net use compact ₹ formatting (₹8.42L, ₹1.24Cr).
+  - **Payroll Processing bar**: `Payroll Processing 66% Complete · 52 of 79 employees` + red exception panel `N employees need attention` when issues detected.
+  - **QuickFilterChips**: All / Issues / Pending / Ready to Pay / Paid — each with count badge, applied client-side via `_applyPayrollFilters`.
+  - **New Filter Bar**: search + status dropdown + quick chips + hide-zero toggle + row count + pagination — all in one clean row.
+  - **New Table**: 8 columns (chevron / Employee / Attendance / Gross / Deductions / Net Pay / Status / Actions). Sticky header. No repeated period column. AttendanceCell shows `20 / 24 days` + `✓ Complete` or `⚠ N Unmarked`. Deductions rendered as `− ₹677` (red). Net Pay visually strongest.
+  - **PayrollStatusPill**: derived from `_payrollStage(p)` — Paid / Ready to Pay / Issue / Pending Review / Draft. Colored rounded pills.
+  - **Row Actions**: single primary "View Payroll" (paid), "Resolve Issues" (issue), or "Pay" (draft) + 3-dot menu with Salary Breakdown, Print Payslip, Recalculate, Generate/Download/Release Slip, Edit Payroll (or admin Reopen+Edit / Delete). Prevents accidental payment when issues unresolved.
+  - **Expandable Row**: chevron on left opens inline drawer with 2-col grid — Salary Breakdown (Basic/HRA/DA/Bonus/PF/ESI/TDS/Advance Recovery/Net) + Attendance Summary (Present/Working/Half/PL/LOP/Late/Unmarked/Payable). Uses `expandedPayrollId` state, no route change.
+  - **Handlers reused**: runPayroll, finalisePayroll, downloadBankCsv, downloadHRReport, openEditPayroll, payPayroll, recalcPayroll, printPayslip, generateSlip, downloadSlip, releaseSlip, reopenAndEditPayroll, deletePayrollRow — all existing handlers preserved 1:1.
+- **New state**: `payrollQuickFilter` (all/issues/pending/ready/paid) + `expandedPayrollId`. New imports: DropdownMenu + MoreVertical + ChevronDown + ChevronRight + AlertCircle + CheckCircle2 icons.
+- **Design tokens**: white cards on slate-50 bg, blue-600 primary, emerald-600 success, red-600 error, amber warning, minimal purple, 8-12px radius, 1px slate-200 borders, uppercase 10px overline labels, num class for right-aligned currency, sticky slate-50 header.
+- **Verified live**: Aug 2026 view + Jul 2026 view + period picker dropdown + expandable rows + quick chip filters all render correctly. All 25 existing testids kept (payroll-search, payroll-status-filter, run-payroll, finalise-payroll, bank-csv-btn, rep-*-btn, hide-zero-toggle, pay-payroll-*, edit-payroll-*, edit-paid-*, delete-payroll-*, view-detail-*, recalc-payroll-*, payslip-pdf-*, slip-*).
+
 ### Phase 55.2 — Partner Cross-Approval: Center Name Missing (Done, Feb 2026)
 - **User reported (production, Hindi)**: "Partner Cross Approval me Center ka naam show nahi kar raha hai partner ko use laaye" — /pending-approvals page pe partner cross-approve transactions ke row me center chip missing tha.
 - **Root cause**: `GET /api/approvals/pending` ke `partner_cross` branch me `center_id_of_request`, `center_name_of_request`, `requester_id`, `requester_name` populate nahi ho rahe the — frontend `PendingApprovals.jsx:313-317` par `item.center_name_of_request` chip pehle se ready thi lekin data khaali tha.
