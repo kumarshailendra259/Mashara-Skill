@@ -2967,16 +2967,32 @@ function PayrollTableRow(props) {
                 onClick={onSalary}
                 className="rounded-md h-8 px-3 text-xs bg-red-50 border border-red-300 text-red-700 hover:bg-red-100"
                 data-testid={`resolve-issues-${p.id}`}
-                title="Attendance or salary issue — resolve before paying"
+                title="Attendance or salary issue — resolve before submitting"
               >
                 <AlertCircle size={12} className="mr-1" /> Resolve Issues
               </Button>
-            ) : (
-              (isAdmin || isAccountant || userRole === "hr") && (
-                <Button size="sm" onClick={onPay} className="rounded-md h-8 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white" data-testid={`pay-payroll-${p.id}`}>
-                  Pay
-                </Button>
-              )
+            ) : p.batch_id ? (
+              // Row already inside an active/paid batch — show contextual "Awaiting" chip.
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200"
+                data-testid={`awaiting-${p.id}`}
+              >
+                <Clock size={11} /> Awaiting Accounts
+              </span>
+            ) : userRole === "hr" ? (
+              // Phase 59 — HR CANNOT pay directly. Route them to the batch-finalise flow.
+              <span
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-slate-100 text-slate-700 border border-slate-200"
+                data-testid={`hr-submit-${p.id}`}
+                title="HR: click Finalise Payroll at the top to submit this row for approval"
+              >
+                <ShieldCheck size={11} /> Submit via Finalise
+              </span>
+            ) : (isAdmin || isAccountant) && (
+              // Admin emergency fallback + Accountant per-row pay path
+              <Button size="sm" onClick={onPay} className="rounded-md h-8 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white" data-testid={`pay-payroll-${p.id}`}>
+                Pay
+              </Button>
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

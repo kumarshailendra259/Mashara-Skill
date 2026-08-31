@@ -26,6 +26,24 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 59 — Payroll Segregation of Duties: HR Cannot Pay (Done, Feb 2026)
+- **User asked (Hinglish, URGENT)**: HR must not be able to mark payroll Paid directly. Complete workflow: HR prepare/finalise → HR Approver review → Approved → Accounts pays → Paid. Enforcement must be at API level, not just UI hiding.
+- **Bulk of workflow already existed** (Phase 55): batch model, approval chain integration, accountant-only `POST /payroll-batches/{id}/pay`, audit log, notifications, admin reopen. Only per-row PATCH endpoint was still allowing HR.
+- **Backend fix `/app/backend/server.py:9545`**: `PATCH /api/payroll/{pid}/pay` role list changed from `("admin", "accountant", "hr")` → `("admin", "accountant")`. Docstring added declaring the SoD rule. Admin retains this legacy path as emergency fallback; Accountant uses it for one-off approved rows; HR ALWAYS gets 403.
+- **Frontend fix `/app/frontend/src/pages/HRMS.jsx` (PayrollTableRow actions)**: HR users no longer see a **Pay** button. They now see either:
+  - `Awaiting Accounts` indigo chip if the row is inside an active batch (already submitted for approval)
+  - `Submit via Finalise` slate chip if the row is still Draft (with tooltip: "click Finalise Payroll at the top to submit this row for approval")
+  - `Resolve Issues` red button when the row has attendance/salary issues
+  - `View Payroll` outline button when Paid
+- **Verified via curl**: HR PATCH `/payroll/{pid}/pay` → 403 Forbidden. Accountant → 200. Admin fallback → 200.
+- **Existing workflow preserved**: HR still finalises via `Finalise Payroll` header button → `POST /payroll/finalise` → batch enters approval chain → accountant sees it in `/payroll-batches?status=pending_payment` → `POST /payroll-batches/{id}/pay` creates transaction + marks batch Paid.
+- **RBAC roles in play** (all pre-existing):
+  - `hr` — payroll.view / create / edit / resolve_issues / submit-for-approval (via finalise)
+  - `manager`/`senior_manager` — approval via `/approvals/act` type=payroll
+  - `accountant` — payroll.view_approved / process_payment / view_payment_history
+  - `admin` — full override + reopen paid rows
+- **Audit log intact** — every state transition on `payroll_batches` still appends `{action, at, by, by_name, old_status, new_status, remarks}`.
+
 ### Phase 58 — Payable Days Formula: Include Weekly Off + Holidays (Done, Feb 2026)
 - **User's revised policy (Hinglish)**: Payable Days = Present + Half×0.5 + Paid Leave + **Weekly Off** + **Holidays**. Working Days = Total Calendar Days − Weekly Off − Holidays (unchanged).
 - **For July 2026 (screenshot example)**: Present=26, WO=4, H=1 → Working Days = 31 − 4 − 1 = 26, Payable Days = 26 + 0 + 0 + 4 + 1 = 31. Previously Phase 45 explicitly excluded WO from payable, so an all-present employee got only 27 payable days instead of 31.

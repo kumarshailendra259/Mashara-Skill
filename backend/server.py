@@ -9543,7 +9543,11 @@ async def my_team(user=Depends(get_current_user)):
 
 
 @api.patch("/payroll/{pid}/pay")
-async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant", "hr"))):
+async def payroll_pay(pid: str, user=Depends(require_role("admin", "accountant"))):
+    """Segregation of Duties (Phase 59): HR CANNOT hit this endpoint directly.
+    HR must use POST /payroll/finalise → Approval workflow → accountant `/payroll-batches/{id}/pay`.
+    Admin retains this legacy per-row Pay path as an emergency fallback only.
+    """
     rec = await db.payroll.find_one({"id": pid}, {"_id": 0})
     if not rec:
         raise HTTPException(404, "Not found")
