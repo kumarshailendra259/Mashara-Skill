@@ -26,6 +26,20 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 57 — Payroll Month/Year Data-Refetch Fix (Done, Feb 2026)
+- **User reported (production, Hinglish)**: Screenshots showed IDENTICAL data for Jul 2024 and Aug 2025 (79 employees, 1 processed, 23 issues, same ₹19K gross, same 3 rows). Changing the period picker was NOT refetching payroll data — all months showed the same numbers.
+- **Root cause `/app/frontend/src/pages/HRMS.jsx` L336-346**: `loadPayroll` was calling `GET /api/payroll` without ever passing `month`/`year` params. Backend `list_payroll` supports these query params but was defaulting to a global result (`query={}`) when neither was sent, returning the whole payroll history sorted by year/month desc — so the UI always showed the *most-recent* payroll rows regardless of what the picker said.
+- **Fix**:
+  - Added `month: pMonth, year: pYear` to the `loadPayroll` params.
+  - Added `pMonth, pYear` to the `useCallback` dependency array — `loadPayroll` now re-runs on period change.
+  - `setPayroll([])` + `setPayrollTotal(0)` before the fetch — prevents stale rows from lingering during in-flight requests.
+  - Period picker `onChange` now also resets `payrollPage=0` and clears `expandedPayrollId` for a clean transition.
+- **Verified live (preview)**:
+  - Default Aug 2026 → Total 236 · rows 0 (hide-zero on)
+  - Switch to Jul 2026 → Total 252 · Attendance Issues 25 · Gross ₹1.9K · Net ₹1.6K · 1 row visible with ISSUE badge + 26 Unmarked chip + batch card auto-swaps to "07/2026 REOPENED"
+  - Data genuinely changes per month; no stale values.
+- **Backend untouched** — `list_payroll` already supported `month`/`year` and staff eligibility (joining/exit clipping) since Phase 45. All Active Employee / joining-date / exit-date rules from the spec (points 2–7) are already enforced inside `_compute_payroll_for_staff`. This fix simply wires the UI to hit the right query.
+
 ### Phase 56 — HRMS Payroll UI/UX Redesign (Done, Feb 2026)
 - **User asked (Hinglish)**: Complete redesign of HRMS Payroll page into a clean, modern, enterprise finance dashboard — 20-point spec covering header, KPI cards, progress bar, exception panel, filter bar, table redesign, expandable rows, meaningful statuses, 3-dot menu, responsive design. Strict rule: NO backend/logic changes, all functionality preserved.
 - **Frontend `/app/frontend/src/pages/HRMS.jsx`** — full Payroll tab replacement (L1873–2040 → new layout), zero backend touched:

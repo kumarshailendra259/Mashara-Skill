@@ -335,15 +335,25 @@ export default function HRMS() {
 
   const loadPayroll = useCallback(async () => {
     try {
-      const params = { skip: payrollPage * PAGE, limit: PAGE };
+      // Phase 57 — pMonth + pYear are now the single source of truth.
+      // Every payroll call MUST include them so the dashboard swaps datasets
+      // when the period picker changes (never mixes months).
+      const params = {
+        skip: payrollPage * PAGE, limit: PAGE,
+        month: pMonth, year: pYear,
+      };
       if (payrollQ) params.q = payrollQ;
       if (payrollStatus && payrollStatus !== "all") params.status = payrollStatus;
+      // Clear old data first so no stale rows from the previous month linger
+      // while the new fetch is in flight.
+      setPayroll([]);
+      setPayrollTotal(0);
       const res = await api.get("/payroll", { params });
       setPayroll(res.data || []);
       const total = res.headers?.["x-total-count"];
       if (total != null) setPayrollTotal(Number(total));
     } catch { /* silent */ }
-  }, [payrollQ, payrollPage, payrollStatus]);
+  }, [payrollQ, payrollPage, payrollStatus, pMonth, pYear]);
 
   const loadAll = () => Promise.all([
     loadStaff(),
@@ -1885,7 +1895,7 @@ export default function HRMS() {
                 <div className="flex-1 min-w-[240px]">
                   <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-1">Payroll</div>
                   <div className="flex items-baseline gap-3 flex-wrap">
-                    <PayrollPeriodPicker month={pMonth} year={pYear} onChange={(m, y) => { setPMonth(m); setPYear(y); }} />
+                    <PayrollPeriodPicker month={pMonth} year={pYear} onChange={(m, y) => { setPMonth(m); setPYear(y); setPayrollPage(0); setExpandedPayrollId(null); }} />
                     <span className="text-sm text-slate-500">· Monthly salary processing</span>
                   </div>
                 </div>
