@@ -22,6 +22,7 @@ const TYPES = [
   { v: "quotation", label: "Quotation Request" },
   { v: "payment", label: "Payment Request (against QRN)" },
   { v: "advance_request", label: "Advance Request" },
+  { v: "payroll", label: "Payroll Approval" },
 ];
 
 const KINDS = [

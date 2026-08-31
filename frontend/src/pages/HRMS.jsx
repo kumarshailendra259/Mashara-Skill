@@ -2428,6 +2428,15 @@ const BATCH_STATUS_TONE = {
 function PayrollBatchStatusCard({ batch, onOpen }) {
   const tone = BATCH_STATUS_TONE[batch.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: batch.status };
   const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+  // Dynamic "Pending Approval at [Name]" — batch.pending_with is populated by
+  // the backend for pending_approval status. Falls back to level/step label.
+  const pendingApprovers = Array.isArray(batch.pending_with) ? batch.pending_with : [];
+  const pendingLine =
+    batch.status === "pending_approval"
+      ? (pendingApprovers.length > 0
+          ? pendingApprovers.map((u) => u.name || u.email).join(", ")
+          : (batch.current_step_label ? `Level ${batch.current_level} · ${batch.current_step_label}` : "Approval chain"))
+      : null;
   return (
     <div className="swiss-card p-4 border-l-4 border-purple-500" data-testid="payroll-batch-status">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2446,6 +2455,20 @@ function PayrollBatchStatusCard({ batch, onOpen }) {
           <Receipt size={12} className="mr-1" /> Open Batch
         </Button>
       </div>
+      {pendingLine && (
+        <div
+          className="mt-3 border-t border-amber-200 pt-2 text-[12px] flex items-center gap-2 flex-wrap"
+          data-testid="batch-pending-with"
+        >
+          <span className="overline text-amber-800">Pending Approval at</span>
+          <span className="font-bold text-amber-900">{pendingLine}</span>
+          {batch.total_steps > 0 && (
+            <span className="text-[10px] text-amber-800/70">
+              (Step {batch.current_level} of {batch.total_steps})
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2533,6 +2556,22 @@ function PayrollBatchDialog({ batchId, onClose, currentUser }) {
               <TotalCell label="Deductions" value={`- ${inr(batch.deductions)}`} tone="bg-red-50 text-red-800" />
               <TotalCell label="Net Payable" value={inr(batch.net_payable)} tone="bg-emerald-50 text-emerald-800" bold />
             </div>
+
+            {/* Pending Approval banner — shown while the batch is awaiting HR Approver.
+                Displays the current approver name(s) so HR can nudge them if needed. */}
+            {batch.status === "pending_approval" && (
+              <div className="swiss-card p-3 border-l-4 border-amber-500 bg-amber-50/40" data-testid="batch-pending-with-dialog">
+                <div className="overline text-[10px] text-amber-900">Pending Approval at</div>
+                <div className="text-sm font-bold text-amber-900 mt-1">
+                  {(batch.pending_with && batch.pending_with.length > 0)
+                    ? batch.pending_with.map((u) => `${u.name || u.email}${u.role ? ` (${u.role})` : ""}`).join(", ")
+                    : (batch.current_step_label ? `Level ${batch.current_level} · ${batch.current_step_label}` : "No approver resolvable — please contact admin")}
+                </div>
+                {batch.total_steps > 0 && (
+                  <div className="text-[11px] text-amber-800/80 mt-0.5">Step {batch.current_level} of {batch.total_steps}</div>
+                )}
+              </div>
+            )}
 
             {/* Payment info (if paid) */}
             {batch.payment && (

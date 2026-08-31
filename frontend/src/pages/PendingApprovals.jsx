@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet, Users,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -31,6 +31,7 @@ const TYPE_META = {
   quotation:         { icon: FileSignature,  label: "Quotation",          color: "bg-indigo-50 text-indigo-700" },
   payment:           { icon: IndianRupee,    label: "Payment",            color: "bg-teal-50 text-teal-700" },
   advance_request:   { icon: Wallet,         label: "Advance",            color: "bg-cyan-50 text-cyan-700" },
+  payroll:           { icon: Users,          label: "Payroll Batch",      color: "bg-purple-50 text-purple-800" },
 };
 const FALLBACK_META = { icon: Inbox, label: "Approval", color: "bg-gray-100 text-gray-700" };
 
@@ -87,7 +88,7 @@ export default function PendingApprovals() {
       all: items.length,
       transaction: 0, leave: 0, reimbursement: 0, asset_purchase: 0,
       employee_transfer: 0, regularisation: 0,
-      quotation: 0, payment: 0, advance_request: 0,
+      quotation: 0, payment: 0, advance_request: 0, payroll: 0,
     };
     items.forEach((i) => { c[i.request_type] = (c[i.request_type] || 0) + 1; });
     return c;
@@ -96,6 +97,18 @@ export default function PendingApprovals() {
   const totalAmount = useMemo(
     () => filtered.reduce((s, i) => s + (Number(i.summary?.amount) || 0), 0),
     [filtered],
+  );
+
+  // Dedicated Payroll queue metrics — HR Approvers see a distinct card so
+  // Payroll batches (which carry the largest amounts) never get lost in the
+  // mixed inbox stream.
+  const payrollItems = useMemo(
+    () => items.filter((i) => i.request_type === "payroll"),
+    [items],
+  );
+  const payrollTotal = useMemo(
+    () => payrollItems.reduce((s, i) => s + (Number(i.summary?.amount) || 0), 0),
+    [payrollItems],
   );
 
   const openAct = (item, action) => {
@@ -206,6 +219,7 @@ export default function PendingApprovals() {
     else if (item.request_type === "regularisation") nav("/pending-approvals");
     else if (item.request_type === "quotation" || item.request_type === "payment") nav("/quotations");
     else if (item.request_type === "advance_request") nav("/advances");
+    else if (item.request_type === "payroll") nav("/hrms?tab=payroll");
     else nav("/hrms");
   };
 
@@ -240,6 +254,7 @@ export default function PendingApprovals() {
           { key: "quotation",         label: "Quotations" },
           { key: "payment",           label: "Payments" },
           { key: "advance_request",   label: "Advances" },
+          { key: "payroll",           label: "Payrolls" },
         ].map((t) => (
           <button
             key={t.key}
@@ -268,6 +283,59 @@ export default function PendingApprovals() {
         <div className="swiss-card p-3"><div className="overline">Oldest (days)</div><div className="num font-bold text-2xl">{oldestDays(filtered)}</div></div>
         <div className="swiss-card p-3"><div className="overline">Updated</div><div className="text-xs num font-medium pt-2">{new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</div></div>
       </div>
+
+      {/* Payroll Approvals — dedicated queue card for HR Approvers so batches
+          (which carry the largest amounts) don't drown in the mixed inbox. */}
+      {payrollItems.length > 0 && (
+        <div
+          className="swiss-card p-5 border-l-4 border-purple-600 bg-gradient-to-r from-purple-50 to-white"
+          data-testid="payroll-approvals-card"
+        >
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-3">
+              <div className="bg-purple-600 text-white p-2.5">
+                <Users size={22} />
+              </div>
+              <div>
+                <div className="overline text-purple-800">Payroll Approvals</div>
+                <div className="font-heading font-black text-2xl text-purple-900 mt-0.5">
+                  {payrollItems.length} <span className="text-sm font-medium text-purple-700">batch{payrollItems.length > 1 ? "es" : ""} awaiting</span>
+                </div>
+                <div className="text-xs text-purple-800 num font-bold mt-0.5">
+                  Net Payable: {inr(payrollTotal)}
+                </div>
+              </div>
+            </div>
+            <Button
+              size="sm"
+              onClick={() => setFilterType("payroll")}
+              className="bg-purple-600 text-white hover:bg-purple-700 rounded-none gap-1"
+              data-testid="view-payroll-queue-btn"
+            >
+              <Users size={12} /> Review Payroll Queue
+            </Button>
+          </div>
+          {payrollItems.slice(0, 3).map((p) => (
+            <div
+              key={p.request_id}
+              className="mt-3 flex items-center justify-between gap-3 flex-wrap text-xs border-t border-purple-200 pt-2"
+              data-testid={`payroll-queue-preview-${p.request_id}`}
+            >
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-purple-900">{p.summary?.purpose}</span>
+                {p.requester_name && <span className="text-purple-700">· Finalised by <b>{p.requester_name}</b></span>}
+                {p.step_label && <span className="text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-800 border border-purple-300">{p.step_label}</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="num font-black text-emerald-800">{inr(p.summary?.amount)}</span>
+                <Button size="sm" onClick={() => openAct(p, "approve")} className="brand-btn rounded-none h-7 gap-1" data-testid={`payroll-quick-approve-${p.request_id}`}>
+                  <Check size={12} /> Approve
+                </Button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* List */}
       {loading ? (

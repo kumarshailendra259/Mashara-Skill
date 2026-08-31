@@ -5503,7 +5503,7 @@ async def _resolve_pending_approvers(request_doc: dict) -> List[dict]:
     """Return the list of users who can act on the CURRENT step of the request.
     Each entry: {id, name, email, role}. Used for creator-visible tracking so
     they can see whose approval is holding up their submission."""
-    if request_doc.get("status") not in ("pending", "in_progress", "payment_pending"):
+    if request_doc.get("status") not in ("pending", "in_progress", "payment_pending", "pending_approval"):
         return []
     step = await _current_step(request_doc)
     if not step:
@@ -6407,17 +6407,23 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                 "is_final_step": is_final_step,
                 "total_steps": len(snap),
                 "requester_id": rec.get("created_by"),
-                "requester_name": rec.get("created_by_name") or rec.get("employee_name"),
+                "requester_name": (
+                    rec.get("created_by_name")
+                    or rec.get("employee_name")
+                    or (rec.get("finalised_by_name") if req_type == "payroll" else None)
+                ),
                 "center_id_of_request": rec.get("center_id"),
                 "center_name_of_request": rec.get("center_name"),
                 "summary": {
-                    "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount"),
+                    "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount") or (rec.get("net_payable") if req_type == "payroll" else None),
                     "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
                     "purpose": (
                         rec.get("purpose")
                         or rec.get("reason")
                         or (f"QRN {rec.get('qrn') or ''}"
                             if req_type in ("payment", "quotation") and rec.get("qrn") else None)
+                        or (f"Payroll Batch · {int(rec.get('month') or 0):02d}/{rec.get('year')}"
+                            if req_type == "payroll" else None)
                         or None
                     ),
                     "description": (
@@ -6429,6 +6435,8 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                             if req_type == "employee_transfer" else None)
                         or (f"Regularise {rec.get('attendance_status','present').upper()} on {rec.get('date','')}"
                             if req_type == "regularisation" else None)
+                        or (f"{rec.get('staff_count') or 0} staff · Net payable ₹{float(rec.get('net_payable') or 0):,.0f}"
+                            if req_type == "payroll" else None)
                     ),
                     "vendor_name": rec.get("vendor_name") or (rec.get("employee_name") if req_type == "advance_request" else None),
                     "qrn": rec.get("qrn") or (rec.get("advance_no") if req_type == "advance_request" else None),
@@ -9773,6 +9781,10 @@ async def _payroll_batch_out(batch_id: str) -> dict:
                 r["bank_account_no_masked"] = ("****" + (s.get("bank_account_no") or "")[-4:]) if s.get("bank_account_no") else None
                 r["ifsc"] = s.get("ifsc")
     b["rows"] = rows
+    # Enrich with pending approval visibility — HR needs to see "Pending Approval at [Name]"
+    # while the batch is in the pending_approval state. No-op for other statuses.
+    if b.get("status") == "pending_approval":
+        await _enrich_with_approval_status(b)
     return b
 
 
@@ -9791,6 +9803,10 @@ async def list_payroll_batches(
     if year:
         q["year"] = year
     rows = await db.payroll_batches.find(q, {"_id": 0}).sort([("year", -1), ("month", -1), ("created_at", -1)]).to_list(500)
+    # Enrich pending_approval batches with pending_with so HR sees who to nudge.
+    for r in rows:
+        if r.get("status") == "pending_approval":
+            await _enrich_with_approval_status(r)
     return rows
 
 

@@ -26,6 +26,31 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 60 — HR Approver Dashboard: Payroll Approvals Queue & "Pending Approval at [Name]" Mapping (Done, Feb 2026)
+- **User asked (Hinglish)**: `/pending-approvals` par ek dedicated visual card/queue ho "Payroll Approvals" ke liye, aur HR ke Payroll Management page par jo batches `pending_approval` state me hain unke saamne "Pending Approval at [Approver Name]" dynamically show ho — taaki HR ko exactly pata rahe kis approver ke paas payroll batch ruka hai aur wahin se nudge kar sake.
+- **Backend `/app/backend/server.py`**:
+  1. `_resolve_pending_approvers()` L5506 — added `pending_approval` to the status whitelist so payroll batch chain resolution actually returns approvers (earlier it silently returned `[]` for payroll because batch status is `pending_approval`, not `pending`/`in_progress`).
+  2. `_payroll_batch_out()` — enriches the batch response with `pending_with`, `current_step_label`, `current_level`, `total_steps` whenever `status == "pending_approval"`.
+  3. `list_payroll_batches` (GET `/api/payroll-batches`) — same enrichment applied per-row so the HRMS Payroll dashboard can display "Pending Approval at [Name]" without a second fetch.
+  4. `list_pending_approvals` (GET `/api/approvals/pending`) — payroll rows now carry a human summary: `purpose = "Payroll Batch · MM/YYYY"`, `description = "N staff · Net payable ₹X"`, `amount = net_payable`, `requester_name` falls back to `finalised_by_name` when `created_by_name` is missing.
+- **Frontend `/app/frontend/src/pages/PendingApprovals.jsx`**:
+  1. Added `payroll` to `TYPE_META` (Users icon, purple accent).
+  2. Added `Payrolls` tab in the filter tab-bar with count badge.
+  3. Added a prominent **Payroll Approvals** card just below the KPI strip — shows batch count, total net payable, "Review Payroll Queue" button and inline previews of up to 3 pending batches with one-click Approve.
+  4. `openDetail` routes payroll rows to `/hrms?tab=payroll`.
+- **Frontend `/app/frontend/src/pages/HRMS.jsx`**:
+  1. `PayrollBatchStatusCard` — when status is `pending_approval`, renders a "Pending Approval at ..." row showing `batch.pending_with[*].name` (comma-separated) plus `Step X of Y`.
+  2. `PayrollBatchDialog` — added the same amber "Pending Approval at" banner near the top when a batch is `pending_approval`.
+- **Frontend `/app/frontend/src/pages/ApprovalWorkflows.jsx`**:
+  - Added `{ v: "payroll", label: "Payroll Approval" }` to the TYPES list so admins can configure the Payroll chain from the same UI as other approval types.
+- **Verified**:
+  - Curl: `/api/payroll-batches` returns `pending_with: [{id, email, name, role}]` when status is `pending_approval`; falls back to `None` for other statuses.
+  - Curl: HR `/api/approvals/pending` returns the payroll batch with purpose/description/amount populated.
+  - Screenshot (HR login, `/pending-approvals`): dedicated purple "Payroll Approvals" card visible with net payable and Review Payroll Queue CTA. Payrolls tab shows count `1`.
+  - Screenshot (HR login, `/hrms` → Payroll → Jul 2026): batch card shows `PENDING APPROVAL AT HR Test (Step 1 of 1)`.
+- **RBAC note**: The enrichment respects the existing role scoping — non-approvers only see the batch status, they don't gain any new permission from seeing the approver's name.
+
+
 ### Phase 59 — Payroll Segregation of Duties: HR Cannot Pay (Done, Feb 2026)
 - **User asked (Hinglish, URGENT)**: HR must not be able to mark payroll Paid directly. Complete workflow: HR prepare/finalise → HR Approver review → Approved → Accounts pays → Paid. Enforcement must be at API level, not just UI hiding.
 - **Bulk of workflow already existed** (Phase 55): batch model, approval chain integration, accountant-only `POST /payroll-batches/{id}/pay`, audit log, notifications, admin reopen. Only per-row PATCH endpoint was still allowing HR.
