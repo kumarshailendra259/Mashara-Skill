@@ -4606,7 +4606,8 @@ async def upload_my_profile_photo(file: UploadFile = File(...), user=Depends(get
     except Exception as e:
         logger.exception("photo upload failed")
         raise HTTPException(502, f"Storage upload failed: {e}")
-    url = _public_object_url(key) if callable(globals().get("_public_object_url")) else f"/api/objects/{key}"
+    _pou = globals().get("_public_object_url")
+    url = _pou(key) if callable(_pou) else f"/api/objects/{key}"
     if s:
         await db.staff.update_one({"id": s["id"]}, {"$set": {"photo_url": url, "photo_key": key}})
     else:
@@ -6453,20 +6454,39 @@ async def list_pending_approvals(user=Depends(get_current_user)):
         pending_txns = await db.transactions.find(
             {"status": "pending"}, {"_id": 0},
         ).sort("created_at", -1).to_list(2000)
+        # Batch-fetch center names + requester names to avoid N+1 lookups.
+        _cids = {t.get("center_id") for t in pending_txns if t.get("center_id")}
+        _center_map = {}
+        if _cids:
+            _center_rows = await db.centers.find({"id": {"$in": list(_cids)}}, {"_id": 0, "id": 1, "name": 1}).to_list(500)
+            _center_map = {c["id"]: c.get("name") for c in _center_rows}
+        _uids = {t.get("created_by") for t in pending_txns if t.get("created_by")}
+        _user_map = {}
+        if _uids:
+            _user_rows = await db.users.find({"id": {"$in": list(_uids)}}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(500)
+            _user_map = {u["id"]: (u.get("name") or u.get("email")) for u in _user_rows}
         for t in pending_txns:
             if t["id"] in seen_txn_ids:
                 continue
             allowed, _reason = await _can_partner_approve(user, t)
             if allowed:
+                _cid = t.get("center_id")
+                _cname = t.get("center_name") or _center_map.get(_cid)
                 out.append({
                     "request_type": "transaction",
                     "request_id": t["id"],
                     "current_level": t.get("current_level"),
                     "step_label": "Partner cross-approval",
+                    "requester_id": t.get("created_by"),
+                    "requester_name": t.get("created_by_name") or _user_map.get(t.get("created_by")),
+                    "center_id_of_request": _cid,
+                    "center_name_of_request": _cname,
                     "summary": {
                         "amount": t.get("amount"),
                         "date": t.get("date"),
                         "description": t.get("description"),
+                        "center_id": _cid,
+                        "center_name": _cname,
                     },
                     "created_at": t.get("created_at"),
                     "via": "partner_cross",
@@ -18162,7 +18182,7 @@ async def mis_alerts(_=Depends(require_role(*MIS_READ_ROLES))):
 
     # ---- BG Expired — bg_validity_date < today ----
     bg_expired_q = {"is_deleted": {"$ne": True},
-                    "bg_validity_date": {"$lt": tstr, "$ne": None, "$ne": ""}}
+                    "bg_validity_date": {"$lt": tstr, "$nin": [None, ""]}}
     bg_expired_docs = await _query(db.mis_sip_centers, bg_expired_q,
                                     {"id": 1, "center_name": 1, "center_id_code": 1,
                                      "bg_validity_date": 1})

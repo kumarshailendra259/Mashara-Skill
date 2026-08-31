@@ -26,6 +26,13 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 55.2 — Partner Cross-Approval: Center Name Missing (Done, Feb 2026)
+- **User reported (production, Hindi)**: "Partner Cross Approval me Center ka naam show nahi kar raha hai partner ko use laaye" — /pending-approvals page pe partner cross-approve transactions ke row me center chip missing tha.
+- **Root cause**: `GET /api/approvals/pending` ke `partner_cross` branch me `center_id_of_request`, `center_name_of_request`, `requester_id`, `requester_name` populate nahi ho rahe the — frontend `PendingApprovals.jsx:313-317` par `item.center_name_of_request` chip pehle se ready thi lekin data khaali tha.
+- **Backend fix `/app/backend/server.py:6452-6497`**: `list_pending_approvals` ke partner_cross branch me batch-fetch add kiya — `db.centers.find({id: {$in: unique_center_ids}})` + `db.users.find({id: {$in: unique_creator_ids}})` — dono N+1 se bachne ke liye. Response payload me center_id_of_request, center_name_of_request, requester_id, requester_name aur summary.center_id/center_name ab populate hote hain.
+- **Frontend unchanged** — cyan-chip renderer already existed.
+- **Preview verification**: preview DB me koi partner_cross-eligible transaction nahi tha, but code path curl-tested ok (partner login → /approvals/pending returns 200). Production redeploy ke baad chip dikhne lagega.
+
 ### Phase 55.1 — Admin Edit/Delete on Paid Payroll Rows (Done, Feb 2026)
 - **User asked (production, Hindi)**: "admin ko paid ko edit, delete dab karne ka option dijiye" — Paid payroll rows par direct edit + delete admin ke liye chahiye.
 - **Backend `/app/backend/server.py`**:
