@@ -26,6 +26,13 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 58 — Payable Days Formula: Include Weekly Off + Holidays (Done, Feb 2026)
+- **User's revised policy (Hinglish)**: Payable Days = Present + Half×0.5 + Paid Leave + **Weekly Off** + **Holidays**. Working Days = Total Calendar Days − Weekly Off − Holidays (unchanged).
+- **For July 2026 (screenshot example)**: Present=26, WO=4, H=1 → Working Days = 31 − 4 − 1 = 26, Payable Days = 26 + 0 + 0 + 4 + 1 = 31. Previously Phase 45 explicitly excluded WO from payable, so an all-present employee got only 27 payable days instead of 31.
+- **Fix `/app/backend/server.py:_compute_payroll_for_staff` L7186**: added `weekly_off_count` to the payable_days sum. Formula now: `payable_days = present_days + (half_days × 0.5) + paid_leave_days + weekly_off_count + holiday_count`. Zero-attendance override (Phase 47) still forces payable_days=0 when the employee never worked.
+- **Verified via curl on staff `bb0b247d…` Jul 2026**: attendance summary payable_days=5 (1 present + 4 weekly-off + 0 holidays) — recalc endpoint agrees. Working_days remains 27 (31 − 4 − 0). No UI code changed — existing labels/cards keep working as-is because backend keys are unchanged.
+- **Historical rows**: existing paid payroll rows retain their old payable_days snapshot (audit-preserved). New Run Payroll or Recalc will pick up the new formula. Recommend admin runs `/payroll/{pid}/recalc` on any draft row that needs updating before finalising.
+
 ### Phase 57 — Payroll Month/Year Data-Refetch Fix (Done, Feb 2026)
 - **User reported (production, Hinglish)**: Screenshots showed IDENTICAL data for Jul 2024 and Aug 2025 (79 employees, 1 processed, 23 issues, same ₹19K gross, same 3 rows). Changing the period picker was NOT refetching payroll data — all months showed the same numbers.
 - **Root cause `/app/frontend/src/pages/HRMS.jsx` L336-346**: `loadPayroll` was calling `GET /api/payroll` without ever passing `month`/`year` params. Backend `list_payroll` supports these query params but was defaulting to a global result (`query={}`) when neither was sent, returning the whole payroll history sorted by year/month desc — so the UI always showed the *most-recent* payroll rows regardless of what the picker said.

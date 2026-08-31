@@ -7180,10 +7180,12 @@ async def _compute_payroll_for_staff(s: dict, month: int, year: int,
         per_day = 0
     late_deduction = round(late_days * per_day, 2)
 
-    # PHASE 45 — Payable Days = Present + Holidays + Paid Leave + Half×0.5.
-    # Weekly Off is intentionally EXCLUDED from payable per revised policy.
-    # (Half-day is retained because a half-day worked is still partially paid.)
-    payable_days = present_days + (half_days * 0.5) + paid_leave_days + holiday_count
+    # PHASE 58 — Payable Days = Present + Half×0.5 + Paid Leave + Weekly Off + Holidays.
+    # Per revised policy (Feb 2026): BOTH weekly-off and holidays count toward payable days
+    # so an employee who was present every working day is paid for the full calendar month.
+    # Working Days (denominator for progress display) stays = total_days − weekly_off − holidays.
+    # (Half-day contributes 0.5 because a half-day worked is still partially paid.)
+    payable_days = present_days + (half_days * 0.5) + paid_leave_days + weekly_off_count + holiday_count
 
     # PHASE 47 — Zero-Attendance Rule (highest priority). If the employee has
     # NO valid attendance days in the effective window (no present, no half,
