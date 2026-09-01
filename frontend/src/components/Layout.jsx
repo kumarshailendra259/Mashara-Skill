@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
   ChevronDown, ChevronRight, Star, ChevronsRight, FileText,
 } from "lucide-react";
@@ -71,6 +71,7 @@ const navGroups = [
       { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
       { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
       { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
+      { to: "/notifications", key: "notifications", icon: MessageSquare, adminOnly: true },
     ],
   },
   {

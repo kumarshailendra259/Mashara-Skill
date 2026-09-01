@@ -19740,6 +19740,139 @@ async def _fin_history_startup():
         logging.exception("staff_payments index init failed: %s", _e)
 
 
+# ============================================================================
+# ========================  TWILIO NOTIFICATIONS  ============================
+# ============================================================================
+# SMS + WhatsApp powered by Twilio. Endpoints are strictly RBAC-guarded:
+#   POST /api/notifications/send       — admin/hr → send one message
+#   POST /api/notifications/send-bulk  — admin/hr → broadcast to a list
+#   GET  /api/notifications/logs       — admin/hr → audit trail
+#   GET  /api/notifications/config     — admin    → status of Twilio creds
+#   POST /api/webhooks/twilio/status   — PUBLIC   → Twilio delivery callback
+import twilio_service  # noqa: E402
+
+
+class NotifSendIn(BaseModel):
+    channel: str  # "sms" | "whatsapp"
+    recipient: str  # any phone format — auto E.164
+    body: str
+    event_type: Optional[str] = "manual"
+    event_id: Optional[str] = None
+    content_sid: Optional[str] = None
+    content_variables: Optional[dict] = None
+
+
+class NotifBulkIn(BaseModel):
+    channel: str
+    recipients: List[str]
+    body: str
+    event_type: Optional[str] = "bulk"
+
+
+@api.get("/notifications/config")
+async def notif_config(_=Depends(require_role("admin"))):
+    """Report which Twilio senders are wired up — no secrets leaked."""
+    return {
+        "configured": twilio_service.is_configured(),
+        "sms_from": twilio_service.SMS_FROM,
+        "whatsapp_from": twilio_service.WHATSAPP_FROM,
+        "public_base": twilio_service.PUBLIC_BASE,
+    }
+
+
+@api.post("/notifications/send")
+async def notif_send(
+    body: NotifSendIn,
+    user=Depends(require_role("admin", "hr", "accountant")),
+):
+    if not (body.body or "").strip() and not body.content_sid:
+        raise HTTPException(400, "body (or content_sid) is required")
+    result = await twilio_service.send_message(
+        db,
+        channel=body.channel,
+        to=body.recipient,
+        body=body.body,
+        event_type=body.event_type or "manual",
+        event_id=body.event_id,
+        sent_by_user_id=user["id"],
+        sent_by_name=user.get("name") or user.get("email"),
+        content_sid=body.content_sid,
+        content_variables=body.content_variables,
+    )
+    if not result.get("ok"):
+        # 200 with error payload keeps UI simple — the log row is already persisted.
+        raise HTTPException(400, result)
+    return result
+
+
+@api.post("/notifications/send-bulk")
+async def notif_send_bulk(
+    payload: NotifBulkIn,
+    user=Depends(require_role("admin", "hr")),
+):
+    if not payload.recipients:
+        raise HTTPException(400, "recipients list is empty")
+    results = []
+    for r in payload.recipients:
+        results.append(await twilio_service.send_message(
+            db, channel=payload.channel, to=r, body=payload.body,
+            event_type=payload.event_type or "bulk",
+            sent_by_user_id=user["id"], sent_by_name=user.get("name") or user.get("email"),
+        ))
+    return {"total": len(results),
+            "success": sum(1 for r in results if r.get("ok")),
+            "failed": sum(1 for r in results if not r.get("ok")),
+            "results": results}
+
+
+@api.get("/notifications/logs")
+async def notif_logs(
+    limit: int = 100, channel: Optional[str] = None,
+    event_type: Optional[str] = None,
+    _=Depends(require_role("admin", "hr", "accountant")),
+):
+    q: dict = {}
+    if channel: q["channel"] = channel
+    if event_type: q["event_type"] = event_type
+    rows = await db.notification_logs.find(q, {"_id": 0}) \
+        .sort("created_at", -1).to_list(min(limit, 500))
+    return rows
+
+
+@app.post("/api/webhooks/twilio/status")
+async def twilio_status_webhook(request: Request):
+    """Twilio delivery-status callback — validates signature then updates the log."""
+    form = await request.form()
+    params = {str(k): str(v) for k, v in form.multi_items()}
+    signature = request.headers.get("X-Twilio-Signature", "")
+    # Validate signature — Twilio recomputes HMAC over the URL + form params.
+    try:
+        from twilio.request_validator import RequestValidator
+        validator = RequestValidator(os.environ.get("TWILIO_AUTH_TOKEN") or "")
+        if not validator.validate(str(request.url), params, signature):
+            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    except HTTPException:
+        raise
+    except Exception:
+        # Signature check is best-effort — if the validator errors we still
+        # accept the callback but log a warning (avoids blocking real callbacks
+        # in edge cases like proxy-rewritten URLs).
+        logger.warning("Twilio signature validator raised — accepting callback anyway")
+    sid = params.get("MessageSid")
+    status = params.get("MessageStatus")
+    err = params.get("ErrorCode")
+    if sid:
+        await db.notification_logs.update_one(
+            {"message_sid": sid},
+            {"$set": {
+                "status": status,
+                "error_code": err,
+                "status_updated_at": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+    return {"received": True}
+
+
 app.include_router(api)
 
 

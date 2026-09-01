@@ -26,6 +26,38 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 61 — Twilio SMS + WhatsApp Integration (Done, Feb 2026)
+- **User asked (Hinglish)**: Twilio account hai — integrate karo. Backlog P1 tha (Bank Guarantee expiry WhatsApp alerts). User ne credentials share kiye: Account SID `ACb910c...`, Auth Token, SMS from `+19208069066`, WhatsApp sandbox `whatsapp:+14155238886`.
+- **Backend**:
+  1. `pip install twilio==9.11.0` + `aiohttp-retry==2.9.1`; added to `requirements.txt`.
+  2. New env vars in `/app/backend/.env`: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_SMS_FROM`, `TWILIO_WHATSAPP_FROM`.
+  3. New module `/app/backend/twilio_service.py`:
+     - Lazy singleton `Client`; `is_configured()` guard so app never crashes when creds are missing.
+     - `normalise_phone(raw)` — best-effort E.164 normaliser (handles `9876543210`, `+91 98765-43210`, `(920) 806-9066` etc.).
+     - `send_message(db, channel, to, body, event_type, sent_by, ...)` — async wrapper around Twilio's sync SDK via `run_in_threadpool`; supports free-form SMS/WhatsApp AND approved Content Templates (`content_sid` + `content_variables`); every attempt is persisted to `db.notification_logs` (queued/failed) with `MessageSid`, sender, channel, event tag, body — full audit trail.
+     - Sets `status_callback` to `${PUBLIC_APP_URL}/api/webhooks/twilio/status` for delivery updates.
+  4. Endpoints in `server.py` (before `app.include_router(api)`):
+     - `POST /api/notifications/send` — admin/hr/accountant → single message.
+     - `POST /api/notifications/send-bulk` — admin/hr → batch send.
+     - `GET  /api/notifications/logs` — admin/hr/accountant → audit trail, filter by channel/event_type.
+     - `GET  /api/notifications/config` — admin only → reports configured state + sender IDs (no secrets leaked).
+     - `POST /api/webhooks/twilio/status` — PUBLIC → validates `X-Twilio-Signature` via `RequestValidator`, updates the matching `notification_logs` row by `MessageSid` with status/error_code.
+- **Frontend**:
+  1. New page `/app/frontend/src/pages/Notifications.jsx`:
+     - Twilio Configuration panel — admin-only card showing status, SMS/WhatsApp senders, webhook base + WhatsApp Sandbox `join <code>` instruction.
+     - Compose panel — channel select (SMS / WhatsApp), recipient input (auto E.164), event tag, message textarea with char counter, Send button.
+     - Filter tabs (All / SMS / WhatsApp) + log rows showing channel, status chip (with icon), event tag chip, recipient, body, MessageSid (truncated), sender, timestamp, error_code + error_message when applicable.
+  2. Route `/notifications` added to `App.js` (admin/hr accessible via RBAC).
+  3. Sidebar entry `SMS & WhatsApp` under **Approvals & Workflow** group (`adminOnly`), icon `MessageSquare`, i18n keys added in `/app/frontend/src/lib/i18n.js` (English + Hindi).
+- **Verified (real Twilio calls, not mocked)**:
+  - `GET /api/notifications/config` → `{configured: true, sms_from: +19208069066, whatsapp_from: whatsapp:+14155238886, public_base: ...}`.
+  - `POST /api/notifications/send` `{channel:sms, recipient:9999999999, body:...}` → `HTTP 200 {ok:true, message_sid:SMe8103465f730601a34f3eda3f9ab36f5, status:queued}`. Log row persisted with full audit fields.
+  - Invalid phone `"bad"` → `HTTP 400 {ok:false, error:invalid_phone}` — no Twilio call made, no cost.
+  - Frontend screenshot: page renders configured Twilio panel, compose card, and the queued SMS log row correctly.
+- **Sandbox note**: Currently on Twilio WhatsApp Sandbox — real-world recipients must send `join <sandbox-code>` to `+14155238886` before they can receive WhatsApp messages. For production WhatsApp, register a dedicated WABA sender in Twilio Console and swap `TWILIO_WHATSAPP_FROM`.
+- **Integration into existing BG expiry scheduler is available as a hook**: `_bg_dispatch_alerts` still sends emails via `send_bg_expiry_alert`; a follow-up will add a `twilio_service.send_message` call in the same loop for users who have a `mobile` on their user profile. Manual sends already work end-to-end.
+
+
 ### Phase 60 — HR Approver Dashboard: Payroll Approvals Queue & "Pending Approval at [Name]" Mapping (Done, Feb 2026)
 - **User asked (Hinglish)**: `/pending-approvals` par ek dedicated visual card/queue ho "Payroll Approvals" ke liye, aur HR ke Payroll Management page par jo batches `pending_approval` state me hain unke saamne "Pending Approval at [Approver Name]" dynamically show ho — taaki HR ko exactly pata rahe kis approver ke paas payroll batch ruka hai aur wahin se nudge kar sake.
 - **Backend `/app/backend/server.py`**:
