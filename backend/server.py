@@ -19750,6 +19750,7 @@ async def _fin_history_startup():
 #   GET  /api/notifications/config     — admin    → status of Twilio creds
 #   POST /api/webhooks/twilio/status   — PUBLIC   → Twilio delivery callback
 import twilio_service  # noqa: E402
+from fastapi.concurrency import run_in_threadpool  # noqa: E402
 
 
 class NotifSendIn(BaseModel):
@@ -19837,6 +19838,42 @@ async def notif_logs(
     rows = await db.notification_logs.find(q, {"_id": 0}) \
         .sort("created_at", -1).to_list(min(limit, 500))
     return rows
+
+
+@api.post("/notifications/sync-status")
+async def notif_sync_status(_=Depends(require_role("admin", "hr", "accountant"))):
+    """Pull fresh status from Twilio for every message that is still in a
+    non-terminal state (queued / sending / sent) in our log. Terminal statuses
+    (delivered / failed / undelivered / read) are skipped. Called on-demand
+    from the UI so users always see the real state, even when the async
+    delivery webhook doesn't reach us (e.g. production env mis-configured to
+    point at preview)."""
+    if not twilio_service.is_configured():
+        raise HTTPException(400, "Twilio not configured")
+    client = twilio_service.get_client()
+    stale = await db.notification_logs.find(
+        {"status": {"$in": ["queued", "sending", "sent", "accepted"]},
+         "message_sid": {"$exists": True, "$ne": None}},
+        {"_id": 0, "id": 1, "message_sid": 1},
+    ).sort("created_at", -1).to_list(200)
+    updated = 0
+    errors = 0
+    for row in stale:
+        try:
+            msg = await run_in_threadpool(lambda: client.messages(row["message_sid"]).fetch())
+            await db.notification_logs.update_one(
+                {"id": row["id"]},
+                {"$set": {
+                    "status": msg.status,
+                    "error_code": msg.error_code,
+                    "error_message": msg.error_message,
+                    "status_updated_at": datetime.now(timezone.utc).isoformat(),
+                }},
+            )
+            updated += 1
+        except Exception:  # noqa: BLE001
+            errors += 1
+    return {"synced": updated, "errors": errors, "scanned": len(stale)}
 
 
 @app.post("/api/webhooks/twilio/status")

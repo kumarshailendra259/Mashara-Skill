@@ -26,6 +26,7 @@ export default function Notifications() {
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState([]);
   const [filter, setFilter] = useState("all");
+  const [syncing, setSyncing] = useState(false);
 
   const loadConfig = async () => {
     try { const r = await api.get("/notifications/config"); setConfig(r.data); }
@@ -35,7 +36,25 @@ export default function Notifications() {
     try { const r = await api.get("/notifications/logs?limit=100"); setLogs(r.data || []); }
     catch (e) { toast.error(formatError(e)); }
   };
-  useEffect(() => { loadConfig(); loadLogs(); }, []);
+  const syncStatus = async (silent = false) => {
+    setSyncing(true);
+    try {
+      const r = await api.post("/notifications/sync-status");
+      if (!silent && r.data.synced > 0) toast.success(`Synced ${r.data.synced} message${r.data.synced > 1 ? "s" : ""} from Twilio`);
+      await loadLogs();
+    } catch (e) { if (!silent) toast.error(formatError(e)); }
+    finally { setSyncing(false); }
+  };
+  useEffect(() => {
+    (async () => {
+      await loadConfig();
+      await loadLogs();
+      // Auto-sync once on mount so users see fresh Twilio status even if the
+      // async delivery webhook didn't reach us (e.g. env pointing at preview).
+      await syncStatus(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const send = async () => {
     if (!form.recipient.trim()) { toast.error("Recipient phone required"); return; }
@@ -43,9 +62,13 @@ export default function Notifications() {
     setBusy(true);
     try {
       const r = await api.post("/notifications/send", form);
-      toast.success(`Sent — ${r.data.message_sid}`);
+      toast.success(`Queued — ${r.data.message_sid}. Fetching real Twilio status…`);
       setForm({ ...form, body: "" });
-      loadLogs();
+      // Twilio needs a moment to move from queued → sent/delivered/failed.
+      // Poll twice: at 2 s and 8 s for a snappy UX.
+      await loadLogs();
+      setTimeout(() => syncStatus(true), 2000);
+      setTimeout(() => syncStatus(true), 8000);
     } catch (e) {
       toast.error(formatError(e));
     } finally { setBusy(false); }
@@ -72,6 +95,9 @@ export default function Notifications() {
         <Button variant="outline" onClick={loadLogs} className="rounded-none gap-1" data-testid="btn-refresh-logs">
           <RefreshCw size={14} /> Refresh
         </Button>
+        <Button onClick={() => syncStatus(false)} disabled={syncing} className="brand-btn rounded-none gap-1" data-testid="btn-sync-twilio">
+          <RefreshCw size={14} className={syncing ? "animate-spin" : ""} /> {syncing ? "Syncing…" : "Sync from Twilio"}
+        </Button>
       </div>
 
       {/* Twilio config panel — admin only */}
@@ -84,8 +110,37 @@ export default function Notifications() {
             <div><div className="overline text-[9px]">WhatsApp From</div><div className="font-mono">{config.whatsapp_from || "—"}</div></div>
             <div><div className="overline text-[9px]">Webhook Base</div><div className="font-mono truncate" title={config.public_base}>{config.public_base || "—"}</div></div>
           </div>
-          <div className="mt-2 text-[11px] text-[var(--muted)]">
-            💡 WhatsApp Sandbox: recipients must first send <span className="font-mono bg-slate-100 px-1">join &lt;code&gt;</span> to <span className="font-mono">{config.whatsapp_from?.replace("whatsapp:", "")}</span> before they can receive messages.
+        </div>
+      )}
+
+      {/* Sandbox alert — huge, prominent so nobody misses it. */}
+      {config?.whatsapp_from?.includes("+14155238886") && (
+        <div className="swiss-card p-4 border-l-4 border-amber-500 bg-amber-50/60" data-testid="sandbox-alert">
+          <div className="flex items-start gap-3">
+            <div className="bg-amber-500 text-white p-2 shrink-0"><MessageSquare size={18} /></div>
+            <div className="flex-1 text-sm space-y-1.5">
+              <div className="font-bold text-amber-900">⚠️ WhatsApp is in TWILIO SANDBOX mode</div>
+              <div className="text-amber-900">
+                Har recipient ko <b>ek baar</b> apne WhatsApp se ye message bhejna zaroori hai — warna message
+                <span className="font-mono bg-red-100 text-red-800 px-1 mx-1">Error 63015 (channel not enabled)</span>
+                ke saath fail hoga:
+              </div>
+              <div className="my-2 border border-amber-300 bg-white p-3 font-mono text-sm text-amber-900">
+                📩 Send WhatsApp message: <b className="font-mono">join &lt;your-sandbox-code&gt;</b><br />
+                &nbsp;&nbsp;&nbsp;&nbsp;To: <b className="font-mono">+1 415 523 8886</b>
+              </div>
+              <div className="text-[12px] text-amber-800">
+                Sandbox code aapko Twilio Console → Messaging → <b>Try it out</b> → <b>Send a WhatsApp message</b> se milega
+                (usually looks like <span className="font-mono bg-amber-100 px-1">join abc-defg</span>). Ek baar join karne ke baad recipient WhatsApp messages receive kar sakega. Production ke liye Twilio pe WhatsApp Business Sender register karna hoga.
+              </div>
+              <a
+                href="https://console.twilio.com/us1/develop/sms/try-it-out/whatsapp-learn"
+                target="_blank" rel="noreferrer"
+                className="inline-block text-xs text-amber-900 underline mt-1"
+              >
+                → Twilio Sandbox setup guide
+              </a>
+            </div>
           </div>
         </div>
       )}
@@ -195,8 +250,34 @@ export default function Notifications() {
                     {l.message_sid && <span className="font-mono">SID: {l.message_sid.slice(0, 14)}…</span>}
                     {l.sent_by_name && <span>· by <b>{l.sent_by_name}</b></span>}
                     <span>· {new Date(l.created_at).toLocaleString("en-IN")}</span>
-                    {l.error_code && <span className="text-red-700">· Err {l.error_code}: {l.error_message}</span>}
+                    {l.error_code && <span className="text-red-700">· Err {l.error_code}: {l.error_message || "(no detail)"}</span>}
                   </div>
+                  {/* Human-readable fix hint for the most common Twilio errors. */}
+                  {l.error_code == 63015 && (
+                    <div className="mt-2 text-[11px] bg-amber-50 border border-amber-300 text-amber-900 px-2 py-1.5">
+                      🩹 <b>Fix:</b> Recipient ne abhi tak WhatsApp Sandbox join nahi kiya. Unse kehna hai ki <b className="font-mono">join &lt;sandbox-code&gt;</b> message bhejein Twilio ke sandbox number pe (<span className="font-mono">+14155238886</span>).
+                    </div>
+                  )}
+                  {(l.error_code == 30003 || l.error_code == 30005 || l.error_code == 30006) && (
+                    <div className="mt-2 text-[11px] bg-amber-50 border border-amber-300 text-amber-900 px-2 py-1.5">
+                      🩹 <b>Fix:</b> Recipient device / carrier reachable nahi hai. Number verify karo aur dobara try karo.
+                    </div>
+                  )}
+                  {l.error_code == 30008 && (
+                    <div className="mt-2 text-[11px] bg-amber-50 border border-amber-300 text-amber-900 px-2 py-1.5">
+                      🩹 <b>Fix:</b> Number invalid ya unreachable — Twilio ne "Unknown error" return kiya. Real, verified E.164 number try karo.
+                    </div>
+                  )}
+                  {l.error_code == 21608 && (
+                    <div className="mt-2 text-[11px] bg-amber-50 border border-amber-300 text-amber-900 px-2 py-1.5">
+                      🩹 <b>Fix:</b> Twilio trial account — recipient number Twilio Console → Verified Caller IDs me add karo pehle.
+                    </div>
+                  )}
+                  {l.error_code == 63016 && (
+                    <div className="mt-2 text-[11px] bg-amber-50 border border-amber-300 text-amber-900 px-2 py-1.5">
+                      🩹 <b>Fix:</b> Business-initiated WhatsApp message 24-hour window ke bahar bheja — approved Content Template use karo (<span className="font-mono">content_sid</span>).
+                    </div>
+                  )}
                 </div>
               </div>
             );
