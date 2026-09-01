@@ -924,26 +924,36 @@ export default function HRMS() {
             </div>
             <PrintButton />
           </div>
-          {/* KPI strip */}
-          <div className="mt-5 grid grid-cols-2 md:grid-cols-5 gap-3">
-            {[
-              { key: "staff", icon: Users, label: "Total Staff", value: staffTotal || staff.length, tone: "text-indigo-700 bg-indigo-50 border-indigo-200" },
-              { key: "attendance", icon: CalendarCheck, label: "Attendance Rows", value: attRecent.length, tone: "text-emerald-700 bg-emerald-50 border-emerald-200" },
-              { key: "leaves", icon: CalendarDays, label: "Leave Requests", value: leaves.length, tone: "text-amber-700 bg-amber-50 border-amber-200" },
-              { key: "reimb", icon: Receipt, label: "Reimbursements", value: reimbs.length, tone: "text-blue-700 bg-blue-50 border-blue-200" },
-              { key: "payroll", icon: Wallet, label: "Payroll Rows", value: payrollTotal || payroll.length, tone: "text-slate-700 bg-slate-50 border-slate-200" },
-            ].map((k) => {
-              const Icon = k.icon;
-              return (
-                <div key={k.key} className={`border p-3 ${k.tone}`} data-testid={`hrms-kpi-${k.key}`}>
-                  <div className="flex items-center gap-2">
-                    <Icon size={14} strokeWidth={2} />
-                    <div className="overline text-[10px] font-semibold">{k.label}</div>
+          {/* KPI strip — Attendance-focused snapshot for the selected date.
+              All 4 counters derive from `attMap` (staff_id → status for `attDate`)
+              so numbers stay perfectly aligned with the employee attendance grid
+              below and refresh automatically whenever the date changes. */}
+          <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-3">
+            {(() => {
+              const statuses = Object.values(attMap || {});
+              const presentCount = statuses.filter((s) => s === "present" || s === "half").length;
+              const absentCount  = statuses.filter((s) => s === "absent").length;
+              const leaveCount   = statuses.filter((s) => s === "leave").length;
+              const totalEmployees = staffTotal || staff.length || 0;
+              const cards = [
+                { key: "total",   icon: Users,         label: "Total Employees", value: totalEmployees, tone: "text-indigo-700 bg-indigo-50 border-indigo-200" },
+                { key: "present", icon: CheckCircle2,  label: "Present Today",   value: presentCount,   tone: "text-emerald-700 bg-emerald-50 border-emerald-200" },
+                { key: "absent",  icon: AlertCircle,   label: "Absent Today",    value: absentCount,    tone: "text-red-700 bg-red-50 border-red-200" },
+                { key: "leave",   icon: CalendarDays,  label: "Leave Today",     value: leaveCount,     tone: "text-amber-700 bg-amber-50 border-amber-200" },
+              ];
+              return cards.map((k) => {
+                const Icon = k.icon;
+                return (
+                  <div key={k.key} className={`border p-3 flex items-center justify-between gap-3 ${k.tone}`} data-testid={`hrms-kpi-${k.key}`}>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Icon size={16} strokeWidth={2} className="shrink-0" />
+                      <div className="overline text-[10px] font-semibold truncate">{k.label}</div>
+                    </div>
+                    <div className="font-heading font-black text-3xl tracking-tight num" data-testid={`hrms-kpi-${k.key}-value`}>{k.value}</div>
                   </div>
-                  <div className="font-heading font-black text-2xl tracking-tight num mt-1">{k.value}</div>
-                </div>
-              );
-            })}
+                );
+              });
+            })()}
           </div>
         </div>
       </div>
