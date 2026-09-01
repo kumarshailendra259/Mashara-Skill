@@ -26,6 +26,37 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 63 — Security Hardening: CORS Allowlist, CSRF Double-Submit, File BOLA, Webhook Fail-Closed (Done, Feb 2026)
+- **User asked**: Run Security Audit on deployed app + fix all 4 findings (2 HIGH + 1 MEDIUM + 1 LOW).
+- **SEC-001 [HIGH] — CORS allowlist (`server.py:20050`)**:
+  1. Replaced `allow_origin_regex=".*"` with `allow_origins=[…]` sourced from `CORS_ORIGINS` env (comma-separated).
+  2. Default allowlist: `https://finance.masharaskills.com`, `https://invest-analytics-24.preview.emergentagent.com`, `http://localhost:3000`.
+  3. Preview infra still rewrites ACAO to `*` at the ingress — but browsers refuse to send credentials with wildcard, so cross-site data theft is blocked regardless. On self-hosted production our allowlist takes full effect.
+- **SEC-002 [HIGH] — CSRF (double-submit cookie)**:
+  1. `set_auth_cookie` now sets TWO cookies: `access_token` (httpOnly, `SameSite=lax`) AND `csrf_token` (non-httpOnly, readable by JS, `SameSite=lax`).
+  2. `SameSite=none` → `SameSite=lax` on the access cookie stops the browser from sending it on cross-site POST/PUT/PATCH/DELETE.
+  3. New app-level `csrf_middleware` intercepts every state-changing request; if the caller uses cookie-auth, `X-CSRF-Token` header MUST match the `csrf_token` cookie or 403 is returned. Bearer-token API clients are unaffected.
+  4. Exempt paths: `/api/auth/login`, `/api/auth/register`, `/api/auth/forgot-password`, `/api/auth/reset-password*`, `/api/webhooks/*`, `/api/health`.
+  5. Frontend `/app/frontend/src/lib/api.js` interceptor reads `csrf_token` via `document.cookie` and auto-attaches `X-CSRF-Token` on every POST/PUT/PATCH/DELETE. Zero manual changes needed across screens.
+  6. `logout()` now clears both cookies.
+- **SEC-003 [MEDIUM] — File BOLA + token-in-URL (`GET /api/files/view`)**:
+  1. Removed the `?auth=<jwt>` query fallback so JWTs never leak into access logs / referrers.
+  2. Added per-object authorization:
+     - Privileged roles (admin, hr, accountant, manager, senior_manager) — full visibility (matches their existing data access).
+     - Uploader — can always view their own uploads.
+     - Others — must be linked to the record that references the path (staff_documents, reimbursements, leaves, advance_requests, quotations, payments, regularisations, asset_purchase_requests, employee_transfers). Staff also see their own personal staff_documents.
+     - Otherwise → **403**.
+- **SEC-004 [LOW] — Twilio webhook fail-open (`POST /api/webhooks/twilio/status`)**:
+  1. Removed the broad `except Exception` that silently accepted callbacks after validator errors.
+  2. Any validation error OR invalid signature → **403** (strict fail-closed).
+- **Verified via curl** (all 12 assertions passed):
+  - CSRF: no header → 403; wrong header → 403; correct header → 200; GET without CSRF → 200; exempt login POST → 200.
+  - Twilio webhook: no signature → 403.
+  - File view: no auth → 401; `?auth=<jwt>` query → 401 (query fallback removed).
+  - Frontend smoke: CSRF cookie readable by JS (`document.cookie` starts with `csrf_token=…`); Notifications page state-change POST succeeded via the axios interceptor.
+- **Preview limitation acknowledged**: Emergent preview ingress rewrites cookies to `SameSite=None; Partitioned` (Chrome CHIPS). Partitioning already isolates cookies per top-level site so the SameSite=None behavior in preview is safe. On self-hosted production the app-level `SameSite=lax` header takes effect.
+
+
 ### Phase 62 — BG Alerts on WhatsApp/SMS + Production Sender Swap UI (Done, Feb 2026)
 - **User asked (Hinglish)**: 1) BG Alert flow ko Twilio se bhi wire karo (email ke saath-saath WhatsApp/SMS jaaye) 2) Production WhatsApp Business Sender ko sandbox se easily swap kar sakein.
 - **Backend `_bg_dispatch_alerts` (`server.py`)**:

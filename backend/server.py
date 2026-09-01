@@ -11,6 +11,7 @@ import csv
 import uuid
 import asyncio
 import logging
+import secrets
 import bcrypt
 import jwt
 import requests
@@ -95,13 +96,38 @@ def create_access_token(user_id: str, email: str) -> str:
     return jwt.encode(payload, jwt_secret(), algorithm=JWT_ALG)
 
 
+def _csrf_token() -> str:
+    """One-time random token bound to a session. Kept in a non-httpOnly cookie
+    so the SPA can read it and echo it back in the X-CSRF-Token header
+    (double-submit cookie pattern)."""
+    return secrets.token_urlsafe(32)
+
+
 def set_auth_cookie(response: Response, token: str):
+    """Set the httpOnly access-token cookie AND a paired CSRF token.
+
+    SEC-002 hardening: SameSite is `lax` (not `none`) so browsers refuse to
+    send the cookie on cross-site subrequests (blocks CSRF at the transport
+    layer). A companion `csrf_token` cookie is set with the same lifetime;
+    it is intentionally NOT httpOnly so the SPA can read it and set the
+    `X-CSRF-Token` header on state-changing requests. The middleware then
+    verifies header == cookie for every POST/PUT/PATCH/DELETE.
+    """
     response.set_cookie(
         key="access_token",
         value=token,
         httponly=True,
         secure=True,
-        samesite="none",
+        samesite="lax",
+        max_age=12 * 3600,
+        path="/",
+    )
+    response.set_cookie(
+        key="csrf_token",
+        value=_csrf_token(),
+        httponly=False,  # SPA reads it via document.cookie
+        secure=True,
+        samesite="lax",
         max_age=12 * 3600,
         path="/",
     )
@@ -1192,22 +1218,68 @@ async def upload_file(file: UploadFile = File(...), user=Depends(get_current_use
 @api.get("/files/view")
 async def view_file(
     path: str = Query(...),
-    auth: Optional[str] = Query(None),
-    request: Request = None,
+    user=Depends(get_current_user),
 ):
-    # Allow either cookie OR ?auth=<jwt> for direct img/iframe display
-    token = request.cookies.get("access_token") if request else None
-    if not token and auth:
-        token = auth
-    if not token:
-        raise HTTPException(401, "Not authenticated")
-    try:
-        jwt.decode(token, jwt_secret(), algorithms=[JWT_ALG])
-    except jwt.InvalidTokenError:
-        raise HTTPException(401, "Invalid token")
+    """View an uploaded file.
+
+    SEC-003 hardening:
+    - The `?auth=<jwt>` query parameter was removed to stop JWTs leaking into
+      access logs / referrers. Callers must send the cookie (browser) or
+      Authorization: Bearer header.
+    - Per-object authorization: privileged roles (admin/hr/accountant/manager/
+      senior_manager) can view any file. Everyone else can only view files
+      they uploaded themselves OR files attached to a document they can see
+      (their own staff record / staff documents / their own reimbursement,
+      leave, advance, quotation, etc.).
+    """
     rec = await db.files.find_one({"path": path, "is_deleted": False})
     if not rec:
         raise HTTPException(404, "File not found")
+
+    role = user.get("role")
+    uid = user["id"]
+
+    # Privileged roles keep full visibility (they already see all financial data).
+    _PRIVILEGED = {"admin", "hr", "accountant", "manager", "senior_manager"}
+    allowed = role in _PRIVILEGED
+    if not allowed and rec.get("uploaded_by") == uid:
+        allowed = True
+
+    if not allowed:
+        # Check if `path` is referenced in any document the caller owns. We
+        # scan the most common attachment carriers. Each query is bounded and
+        # projects only {_id: 0, id: 1} so the check stays cheap.
+        _CARRIERS = (
+            ("staff_documents",    {"uploaded_by": uid, "file_path": path}),
+            ("reimbursements",     {"created_by": uid, "attachments.path": path}),
+            ("leaves",             {"created_by": uid, "attachments.path": path}),
+            ("advance_requests",   {"created_by": uid, "attachments.path": path}),
+            ("quotations",         {"created_by": uid, "attachments.path": path}),
+            ("payments",           {"created_by": uid, "attachments.path": path}),
+            ("regularisations",    {"created_by": uid, "attachments.path": path}),
+            ("asset_purchase_requests", {"created_by": uid, "attachments.path": path}),
+            ("employee_transfers", {"created_by": uid, "attachments.path": path}),
+        )
+        for coll, q in _CARRIERS:
+            hit = await db[coll].find_one(q, {"_id": 0, "id": 1})
+            if hit:
+                allowed = True
+                break
+
+    # Staff also see their own documents even when uploaded by HR/admin.
+    if not allowed:
+        staff = await db.staff.find_one({"user_id": uid}, {"_id": 0, "id": 1})
+        if staff:
+            hit = await db.staff_documents.find_one(
+                {"staff_id": staff["id"], "file_path": path},
+                {"_id": 0, "id": 1},
+            )
+            if hit:
+                allowed = True
+
+    if not allowed:
+        raise HTTPException(403, "Not authorised to view this file")
+
     try:
         data, ct = _get_object(path)
     except requests.HTTPError as e:
@@ -1481,6 +1553,7 @@ async def login_history(
 @api.post("/auth/logout")
 async def logout(response: Response):
     response.delete_cookie("access_token", path="/")
+    response.delete_cookie("csrf_token", path="/")
     return {"ok": True}
 
 
@@ -19989,18 +20062,16 @@ async def twilio_status_webhook(request: Request):
     params = {str(k): str(v) for k, v in form.multi_items()}
     signature = request.headers.get("X-Twilio-Signature", "")
     # Validate signature — Twilio recomputes HMAC over the URL + form params.
+    # SEC-004: strict fail-closed. Any error → 403; never accept unverified callbacks.
+    from twilio.request_validator import RequestValidator
+    validator = RequestValidator(os.environ.get("TWILIO_AUTH_TOKEN") or "")
     try:
-        from twilio.request_validator import RequestValidator
-        validator = RequestValidator(os.environ.get("TWILIO_AUTH_TOKEN") or "")
-        if not validator.validate(str(request.url), params, signature):
-            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
-    except HTTPException:
-        raise
-    except Exception:
-        # Signature check is best-effort — if the validator errors we still
-        # accept the callback but log a warning (avoids blocking real callbacks
-        # in edge cases like proxy-rewritten URLs).
-        logger.warning("Twilio signature validator raised — accepting callback anyway")
+        valid = validator.validate(str(request.url), params, signature)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Twilio signature validator raised: %s", exc)
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    if not valid:
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
     sid = params.get("MessageSid")
     status = params.get("MessageStatus")
     err = params.get("ErrorCode")
@@ -20019,11 +20090,61 @@ async def twilio_status_webhook(request: Request):
 app.include_router(api)
 
 
+# ---------- Security middleware ----------
+#
+# SEC-001: CORS allowlist (from env, comma-separated). Never reflect arbitrary
+# origins when credentials are allowed. Origins should include the production
+# domain, the preview domain, and localhost for dev. Env `CORS_ORIGINS` is a
+# comma-separated list; falls back to a safe default.
+_default_origins = ",".join([
+    "https://finance.masharaskills.com",
+    "https://invest-analytics-24.preview.emergentagent.com",
+    "http://localhost:3000",
+])
+_cors_env = os.environ.get("CORS_ORIGINS") or _default_origins
+_allowed_origins = [o.strip() for o in _cors_env.split(",") if o.strip() and o.strip() != "*"]
+if not _allowed_origins:  # last-resort — env explicitly set to "" or "*"
+    _allowed_origins = _default_origins.split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=".*",
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# SEC-002: CSRF (double-submit cookie). Every state-changing request must carry
+# an `X-CSRF-Token` header matching the `csrf_token` cookie. GETs, HEADs and a
+# small allow-list of unauthenticated bootstrap routes (login/register/webhooks
+# etc.) are exempt.
+_CSRF_EXEMPT_PREFIXES: tuple = (
+    "/api/auth/login",
+    "/api/auth/register",
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
+    "/api/auth/reset-password-otp",
+    "/api/webhooks/",         # signed by their provider
+    "/api/health",
+)
+_STATE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    if request.method in _STATE_METHODS:
+        path = request.url.path or ""
+        if not any(path.startswith(p) for p in _CSRF_EXEMPT_PREFIXES):
+            header = request.headers.get("x-csrf-token") or request.headers.get("X-CSRF-Token")
+            cookie = request.cookies.get("csrf_token")
+            # Only enforce when the caller is using a session cookie. Server-to-
+            # server API clients using Authorization: Bearer are unaffected.
+            has_cookie_auth = bool(request.cookies.get("access_token"))
+            if has_cookie_auth and (not header or not cookie or header != cookie):
+                from fastapi.responses import JSONResponse
+                return JSONResponse(
+                    {"detail": "CSRF token missing or invalid"},
+                    status_code=403,
+                )
+    return await call_next(request)

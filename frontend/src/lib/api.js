@@ -9,20 +9,40 @@ export const api = axios.create({
 });
 
 /**
+ * Read a cookie value from document.cookie by name. Returns null if missing.
+ */
+function readCookie(name) {
+  if (typeof document === "undefined" || !document.cookie) return null;
+  const parts = document.cookie.split("; ");
+  for (const part of parts) {
+    const [k, ...rest] = part.split("=");
+    if (k === name) return decodeURIComponent(rest.join("="));
+  }
+  return null;
+}
+
+/**
  * Auto-attach a fresh `Idempotency-Key` to every POST / PUT / PATCH so the
- * server's per-key store can dedupe double-submits (Phase 32). Callers can
- * override by passing their own header explicitly.
+ * server's per-key store can dedupe double-submits (Phase 32). Also attach
+ * the SEC-002 `X-CSRF-Token` header (double-submit cookie pattern) — the
+ * backend rejects state-changing requests when this header does not match
+ * the `csrf_token` cookie.
+ * Callers can override by passing their own header explicitly.
  */
 api.interceptors.request.use((config) => {
   const method = (config.method || "get").toLowerCase();
-  if (["post", "put", "patch"].includes(method)) {
+  if (["post", "put", "patch", "delete"].includes(method)) {
     config.headers = config.headers || {};
-    if (!config.headers["Idempotency-Key"]) {
-      // Use browser crypto if available, else fall back to a timestamped random.
+    if (!config.headers["Idempotency-Key"] && method !== "delete") {
       const uuid =
         (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
         `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       config.headers["Idempotency-Key"] = uuid;
+    }
+    // SEC-002: attach CSRF token from the paired non-httpOnly cookie.
+    if (!config.headers["X-CSRF-Token"]) {
+      const csrf = readCookie("csrf_token");
+      if (csrf) config.headers["X-CSRF-Token"] = csrf;
     }
   }
   return config;
