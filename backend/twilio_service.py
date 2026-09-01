@@ -26,6 +26,50 @@ SMS_FROM     = os.environ.get("TWILIO_SMS_FROM")           # +E164
 WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM")     # whatsapp:+E164
 PUBLIC_BASE  = (os.environ.get("PUBLIC_APP_URL") or "").rstrip("/")
 
+# Runtime overrides — populated from db.notification_settings on startup so
+# admins can swap the WhatsApp Business Sender (sandbox → prod WABA) from the
+# UI without an env change + restart.
+_RUNTIME_SMS_FROM: Optional[str] = None
+_RUNTIME_WHATSAPP_FROM: Optional[str] = None
+
+
+def get_sms_from() -> Optional[str]:
+    return _RUNTIME_SMS_FROM or SMS_FROM
+
+
+def get_whatsapp_from() -> Optional[str]:
+    return _RUNTIME_WHATSAPP_FROM or WHATSAPP_FROM
+
+
+async def load_runtime_overrides(db) -> None:
+    """Hydrate the runtime senders from db.notification_settings (singleton doc).
+    Idempotent — safe to call from startup and after each admin update."""
+    global _RUNTIME_SMS_FROM, _RUNTIME_WHATSAPP_FROM
+    try:
+        doc = await db.notification_settings.find_one({"id": "twilio"}, {"_id": 0})
+    except Exception:  # noqa: BLE001
+        doc = None
+    if doc:
+        _RUNTIME_SMS_FROM = doc.get("sms_from") or None
+        _RUNTIME_WHATSAPP_FROM = doc.get("whatsapp_from") or None
+    else:
+        _RUNTIME_SMS_FROM = None
+        _RUNTIME_WHATSAPP_FROM = None
+
+
+async def save_runtime_overrides(db, sms_from: Optional[str], whatsapp_from: Optional[str]) -> dict:
+    """Persist admin's chosen sender IDs. Passing empty/None clears the override
+    (falls back to env). Returns the effective senders after the update."""
+    upd: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    upd["sms_from"] = (sms_from or "").strip() or None
+    upd["whatsapp_from"] = (whatsapp_from or "").strip() or None
+    await db.notification_settings.update_one(
+        {"id": "twilio"}, {"$set": {"id": "twilio", **upd}}, upsert=True,
+    )
+    await load_runtime_overrides(db)
+    return {"sms_from": get_sms_from(), "whatsapp_from": get_whatsapp_from()}
+
+
 _client: Optional[Client] = None
 
 
@@ -106,7 +150,7 @@ async def send_message(
     if not to_e164:
         return {"ok": False, "error": "invalid_phone", "recipient": to}
 
-    from_addr = WHATSAPP_FROM if channel == "whatsapp" else SMS_FROM
+    from_addr = get_whatsapp_from() if channel == "whatsapp" else get_sms_from()
     if not from_addr:
         return {"ok": False, "error": f"missing_from_for_{channel}"}
     to_addr = f"whatsapp:{to_e164}" if channel == "whatsapp" else to_e164

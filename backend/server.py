@@ -1064,6 +1064,12 @@ async def on_startup():
     asyncio.create_task(_ensure_libreoffice_installed())
     # Daily BG expiry scheduler — fires at ~08:15 IST once a day.
     asyncio.create_task(_bg_alert_scheduler())
+    # Hydrate Twilio sender overrides (DB-first, env-fallback).
+    try:
+        import twilio_service as _twilio_svc  # local import to avoid cycles
+        await _twilio_svc.load_runtime_overrides(db)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("Twilio runtime override load failed: %s", _e)
 
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pwd = os.environ["ADMIN_PASSWORD"]
@@ -16516,7 +16522,7 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
     global_users = await db.users.find(
         {"role": {"$in": ["admin", "accountant"]}, "is_active": {"$ne": False},
          "email": {"$exists": True, "$ne": None}},
-        {"_id": 0, "email": 1, "id": 1, "assigned_center_ids": 1, "role": 1},
+        {"_id": 0, "email": 1, "id": 1, "assigned_center_ids": 1, "role": 1, "mobile": 1, "name": 1},
     ).to_list(500)
     # For each unique center in triggered BGs, resolve center-linked users (partner
     # + accountant + center_manager assigned to that center).
@@ -16528,7 +16534,7 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
         assigned = await db.users.find(
             {"assigned_center_ids": cid, "is_active": {"$ne": False},
              "email": {"$exists": True, "$ne": None}},
-            {"_id": 0, "email": 1, "id": 1, "role": 1, "assigned_partner_id": 1},
+            {"_id": 0, "email": 1, "id": 1, "role": 1, "assigned_partner_id": 1, "mobile": 1, "name": 1},
         ).to_list(200)
         # (b) partners associated with the center via batches / transactions.
         center_partner_ids: set = set()
@@ -16541,7 +16547,7 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
                 {"assigned_partner_id": {"$in": list(center_partner_ids)},
                  "role": "partner", "is_active": {"$ne": False},
                  "email": {"$exists": True, "$ne": None}},
-                {"_id": 0, "email": 1, "id": 1, "role": 1},
+                {"_id": 0, "email": 1, "id": 1, "role": 1, "mobile": 1, "name": 1},
             ).to_list(200)
             assigned.extend(partner_users)
         center_users_map[cid] = assigned
@@ -16590,7 +16596,67 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
         email_results.append({"to": rcpt, "count": len(bgs_for_user), "sent": r.get("sent"), "id": r.get("id"), "reason": r.get("reason")})
         if r.get("sent"): sends_ok += 1
 
-    if sends_ok:
+    # ---------- Twilio fan-out (WhatsApp + SMS) ----------
+    # Same recipient resolution reused: for every user we already collected (both
+    # global admins/accountants and center-scoped users), send a Twilio message
+    # if they have a `mobile` on file. WhatsApp attempted first; SMS is the
+    # fallback so we always try to reach the person somehow.
+    twilio_results: list = []
+    if twilio_service.is_configured():
+        # Build user_id -> {mobile, name, bgs[]} taking the union of global +
+        # center-scoped users so we don't double-notify the same person.
+        by_user: dict = {}
+        for u in global_users:
+            if not u.get("mobile"): continue
+            by_user.setdefault(u["id"], {"mobile": u["mobile"], "name": u.get("name") or u.get("email"),
+                                          "bgs": list(to_send_bgs)})
+        for bg in to_send_bgs:
+            cid = bg.get("center_id")
+            for u in center_users_map.get(cid, []) if cid else []:
+                if not u.get("mobile"): continue
+                rec = by_user.setdefault(u["id"], {"mobile": u["mobile"], "name": u.get("name") or u.get("email"),
+                                                    "bgs": []})
+                if bg not in rec["bgs"]:
+                    rec["bgs"].append(bg)
+
+        for uid, ctx in by_user.items():
+            # Compose one compact message per recipient — top 3 BGs so SMS stays
+            # under the 160-char GSM-7 limit; email already carries the full detail.
+            bgs = ctx["bgs"][:3]
+            lines: list = []
+            for bg in bgs:
+                d = days_left_map.get(bg["id"])
+                lbl = "EXPIRED" if (d is not None and d < 0) else f"in {d} days"
+                lines.append(f"BG {bg.get('bg_number') or bg.get('id','?')[:8]} {lbl} ({bg.get('bg_claim_expiry_date','')[:10]})")
+            more = len(ctx["bgs"]) - len(bgs)
+            body = "🏦 Bank Guarantee Alert\n" + "\n".join(lines)
+            if more > 0:
+                body += f"\n(+{more} more)"
+            body += f"\n{portal_url}/bank-guarantees"
+
+            # WhatsApp first (richer channel — supports emoji + line breaks).
+            wr = await twilio_service.send_message(
+                db, channel="whatsapp", to=ctx["mobile"], body=body,
+                event_type="bg_expiry", event_id=f"{tstr}:{uid}",
+                sent_by_name="System (BG scheduler)",
+            )
+            # SMS fallback (shorter, GSM-7 safe subset).
+            sr = await twilio_service.send_message(
+                db, channel="sms", to=ctx["mobile"],
+                body=body.replace("🏦 ", "").replace("\n", " | ")[:300],
+                event_type="bg_expiry", event_id=f"{tstr}:{uid}:sms",
+                sent_by_name="System (BG scheduler)",
+            )
+            twilio_results.append({
+                "user_id": uid, "mobile": ctx["mobile"], "name": ctx["name"],
+                "bgs": len(ctx["bgs"]),
+                "whatsapp_ok": wr.get("ok"), "whatsapp_sid": wr.get("message_sid"),
+                "whatsapp_error": wr.get("error"),
+                "sms_ok": sr.get("ok"), "sms_sid": sr.get("message_sid"),
+                "sms_error": sr.get("error"),
+            })
+
+    if sends_ok or any(r.get("whatsapp_ok") or r.get("sms_ok") for r in twilio_results):
         # Record markers to prevent re-sends today.
         for m in dispatch_log_ids:
             await db.bg_alert_log.insert_one({"marker": m, "sent_at": datetime.now(timezone.utc).isoformat()})
@@ -16598,6 +16664,8 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
         "sent": sends_ok,
         "recipients": list(per_recipient.keys()),
         "email_results": email_results,
+        "twilio_results": twilio_results,
+        "twilio_sent_count": sum(1 for r in twilio_results if r.get("whatsapp_ok") or r.get("sms_ok")),
         "triggered_bgs": [{"id": b["id"], "bg_number": b.get("bg_number"),
                           "days_left": days_left_map[b["id"]], "center_id": b.get("center_id")}
                          for b in to_send_bgs],
@@ -19773,12 +19841,50 @@ class NotifBulkIn(BaseModel):
 @api.get("/notifications/config")
 async def notif_config(_=Depends(require_role("admin"))):
     """Report which Twilio senders are wired up — no secrets leaked."""
+    # Refresh runtime overrides so a DB update from another instance is visible.
+    await twilio_service.load_runtime_overrides(db)
     return {
         "configured": twilio_service.is_configured(),
-        "sms_from": twilio_service.SMS_FROM,
-        "whatsapp_from": twilio_service.WHATSAPP_FROM,
+        "sms_from": twilio_service.get_sms_from(),
+        "whatsapp_from": twilio_service.get_whatsapp_from(),
+        "sms_from_env": twilio_service.SMS_FROM,
+        "whatsapp_from_env": twilio_service.WHATSAPP_FROM,
+        "sms_override_active": bool(twilio_service._RUNTIME_SMS_FROM),
+        "whatsapp_override_active": bool(twilio_service._RUNTIME_WHATSAPP_FROM),
         "public_base": twilio_service.PUBLIC_BASE,
     }
+
+
+class NotifConfigUpdate(BaseModel):
+    sms_from: Optional[str] = None       # empty string → clears override
+    whatsapp_from: Optional[str] = None  # e.g. "whatsapp:+919999999999"
+
+
+@api.patch("/notifications/config")
+async def notif_config_update(
+    body: NotifConfigUpdate,
+    _=Depends(require_role("admin")),
+):
+    """Swap the SMS / WhatsApp sender number without touching env vars.
+
+    Use this after registering a production WhatsApp Business Sender on
+    Twilio (Console → Messaging → Senders → WhatsApp) — put the new number as
+    `whatsapp:+919999999999`. Clear the field (empty string) to revert to the
+    env-var default (sandbox).
+    """
+    # Validate: WhatsApp must be prefixed, SMS must be E.164.
+    if body.whatsapp_from and body.whatsapp_from.strip():
+        wa = body.whatsapp_from.strip()
+        if not wa.startswith("whatsapp:+"):
+            raise HTTPException(400, "whatsapp_from must be in the form 'whatsapp:+<E164>'")
+    if body.sms_from and body.sms_from.strip():
+        sf = body.sms_from.strip()
+        if not sf.startswith("+"):
+            raise HTTPException(400, "sms_from must be in E.164 format, e.g. +14155551234")
+    effective = await twilio_service.save_runtime_overrides(
+        db, sms_from=body.sms_from, whatsapp_from=body.whatsapp_from,
+    )
+    return {"ok": True, **effective}
 
 
 @api.post("/notifications/send")

@@ -27,10 +27,29 @@ export default function Notifications() {
   const [logs, setLogs] = useState([]);
   const [filter, setFilter] = useState("all");
   const [syncing, setSyncing] = useState(false);
+  const [editingSender, setEditingSender] = useState(false);
+  const [senderForm, setSenderForm] = useState({ sms_from: "", whatsapp_from: "" });
+  const [savingSender, setSavingSender] = useState(false);
 
   const loadConfig = async () => {
-    try { const r = await api.get("/notifications/config"); setConfig(r.data); }
-    catch { /* admin-only — hide config panel for non-admin */ }
+    try {
+      const r = await api.get("/notifications/config");
+      setConfig(r.data);
+      setSenderForm({
+        sms_from: r.data.sms_override_active ? r.data.sms_from : "",
+        whatsapp_from: r.data.whatsapp_override_active ? r.data.whatsapp_from : "",
+      });
+    } catch { /* admin-only — hide config panel for non-admin */ }
+  };
+  const saveSender = async () => {
+    setSavingSender(true);
+    try {
+      await api.patch("/notifications/config", senderForm);
+      toast.success("Twilio senders updated");
+      setEditingSender(false);
+      await loadConfig();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setSavingSender(false); }
   };
   const loadLogs = async () => {
     try { const r = await api.get("/notifications/logs?limit=100"); setLogs(r.data || []); }
@@ -103,13 +122,68 @@ export default function Notifications() {
       {/* Twilio config panel — admin only */}
       {config && (
         <div className="swiss-card p-4 border-l-4 border-purple-500" data-testid="notif-config">
-          <div className="overline text-[10px] mb-2">Twilio Configuration</div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div className="overline text-[10px]">Twilio Configuration</div>
+            <Button
+              size="sm" variant="outline"
+              onClick={() => setEditingSender(!editingSender)}
+              className="rounded-none h-7 text-xs"
+              data-testid="btn-edit-sender"
+            >
+              {editingSender ? "Cancel" : "Edit Senders"}
+            </Button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs mt-2">
             <div><div className="overline text-[9px]">Status</div><div className="font-bold">{config.configured ? <span className="text-emerald-700">✓ Configured</span> : <span className="text-red-700">✗ Not Configured</span>}</div></div>
-            <div><div className="overline text-[9px]">SMS From</div><div className="font-mono">{config.sms_from || "—"}</div></div>
-            <div><div className="overline text-[9px]">WhatsApp From</div><div className="font-mono">{config.whatsapp_from || "—"}</div></div>
+            <div>
+              <div className="overline text-[9px]">SMS From {config.sms_override_active && <span className="ml-1 text-[9px] bg-indigo-100 text-indigo-800 px-1 border border-indigo-200 font-bold">DB Override</span>}</div>
+              <div className="font-mono">{config.sms_from || "—"}</div>
+            </div>
+            <div>
+              <div className="overline text-[9px]">WhatsApp From {config.whatsapp_override_active && <span className="ml-1 text-[9px] bg-indigo-100 text-indigo-800 px-1 border border-indigo-200 font-bold">DB Override</span>}</div>
+              <div className="font-mono">{config.whatsapp_from || "—"}</div>
+            </div>
             <div><div className="overline text-[9px]">Webhook Base</div><div className="font-mono truncate" title={config.public_base}>{config.public_base || "—"}</div></div>
           </div>
+
+          {editingSender && (
+            <div className="mt-4 p-3 border border-purple-300 bg-purple-50/40" data-testid="sender-editor">
+              <div className="overline text-[10px] mb-2 text-purple-900">Swap Senders (no restart needed)</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-xs">SMS From (E.164)</Label>
+                  <Input
+                    value={senderForm.sms_from}
+                    onChange={(e) => setSenderForm({ ...senderForm, sms_from: e.target.value })}
+                    placeholder={`Env default: ${config.sms_from_env || "—"}`}
+                    className="rounded-none font-mono"
+                    data-testid="sender-sms-input"
+                  />
+                  <div className="text-[10px] text-purple-800 mt-1">Leave empty to use env default</div>
+                </div>
+                <div>
+                  <Label className="text-xs">WhatsApp From (whatsapp:+E164)</Label>
+                  <Input
+                    value={senderForm.whatsapp_from}
+                    onChange={(e) => setSenderForm({ ...senderForm, whatsapp_from: e.target.value })}
+                    placeholder={`Env default: ${config.whatsapp_from_env || "—"}`}
+                    className="rounded-none font-mono"
+                    data-testid="sender-wa-input"
+                  />
+                  <div className="text-[10px] text-purple-800 mt-1">e.g. <span className="font-mono">whatsapp:+919876543210</span> (production WABA)</div>
+                </div>
+              </div>
+              <div className="mt-3 text-[11px] text-purple-900 bg-white border border-purple-200 p-2">
+                📖 <b>Production ke liye:</b> Twilio Console → Messaging → Senders → <a href="https://console.twilio.com/us1/develop/sms/senders/whatsapp-senders" target="_blank" rel="noreferrer" className="underline font-bold">WhatsApp Senders</a> pe naya WhatsApp Business Sender register karo (Meta business verification chahiye hoga). Approve hone ke baad wo number yahaan paste kar do — Sandbox se production pe swap ho jayega, zero downtime.
+              </div>
+              <div className="mt-3 flex justify-end gap-2">
+                <Button size="sm" variant="outline" onClick={() => setEditingSender(false)} className="rounded-none">Cancel</Button>
+                <Button size="sm" onClick={saveSender} disabled={savingSender} className="brand-btn rounded-none" data-testid="btn-save-sender">
+                  {savingSender ? "Saving…" : "Save Senders"}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -26,6 +26,36 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 62 — BG Alerts on WhatsApp/SMS + Production Sender Swap UI (Done, Feb 2026)
+- **User asked (Hinglish)**: 1) BG Alert flow ko Twilio se bhi wire karo (email ke saath-saath WhatsApp/SMS jaaye) 2) Production WhatsApp Business Sender ko sandbox se easily swap kar sakein.
+- **Backend `_bg_dispatch_alerts` (`server.py`)**:
+  1. User queries (global admins/accountants + center-scoped users) ab `mobile` + `name` bhi project karti hain.
+  2. Email dispatch ke baad naya "Twilio fan-out" block: har unique user (jo already resolved hai email ke liye) ka mobile lekar `twilio_service.send_message` call karta hai — pehle WhatsApp, then SMS fallback. Compact body: "🏦 Bank Guarantee Alert\nBG XXX in N days (YYYY-MM-DD)\n… (+K more)\n{portal}/bank-guarantees". SMS body normalized (no emoji, `|` join) aur 300 chars cap.
+  3. Har send `db.notification_logs` mein `event_type="bg_expiry"` + `event_id="{today}:{user_id}[:sms]"` ke saath log hota hai — full audit trail + idempotency.
+  4. Return payload ab `twilio_results[]` + `twilio_sent_count` bhi carry karta hai.
+- **Backend `twilio_service.py`**:
+  1. Runtime override state — `_RUNTIME_SMS_FROM`, `_RUNTIME_WHATSAPP_FROM` module vars.
+  2. `get_sms_from()` / `get_whatsapp_from()` accessors — DB override first, env fallback.
+  3. `load_runtime_overrides(db)` — hydrates from `db.notification_settings` (singleton doc `id=twilio`). Called on startup + after every admin update.
+  4. `save_runtime_overrides(db, sms_from, whatsapp_from)` — upserts DB doc, reloads state, returns effective senders.
+- **New endpoint**: `PATCH /api/notifications/config` (admin only) — validates that `whatsapp_from` starts with `whatsapp:+` and `sms_from` starts with `+`. Empty string clears the override (revert to env default).
+- **Updated endpoint**: `GET /api/notifications/config` now also returns `sms_from_env`, `whatsapp_from_env`, `sms_override_active`, `whatsapp_override_active` so the UI can render the swap panel and show which side (DB/env) is currently effective.
+- **Frontend `Notifications.jsx`**:
+  1. Twilio Configuration card ab "Edit Senders" button + inline collapsible editor dikhata hai.
+  2. Editor: SMS From (E.164) + WhatsApp From (`whatsapp:+E164`) inputs, env-default placeholders, "Leave empty to use env default" hint, prominent guide with direct link to Twilio Console → WhatsApp Senders + Meta business verification workflow explanation.
+  3. Status chips inline — "DB Override" pill agar admin ne production sender set kiya ho.
+- **Verified end-to-end**:
+  - `POST /api/bank-guarantees/run-alerts?force=true` on a synthetic BG expiring in 7 days:
+    - 29 email results all `sent:true`
+    - `twilio_results: [{user_id: Admin, mobile: 9876543210, whatsapp_ok: true, whatsapp_sid: SMb8625..., sms_ok: true, sms_sid: SMb05cf...}]`
+    - `twilio_sent_count: 1`
+  - `PATCH /api/notifications/config {whatsapp_from: "whatsapp:+918888888888"}` → override active, `GET` returns `whatsapp_from: whatsapp:+918888888888, whatsapp_override_active: true, whatsapp_from_env: whatsapp:+14155238886`.
+  - Validation: `PATCH {whatsapp_from: "+919999999999"}` → 400 "must be in form whatsapp:+<E164>".
+  - Clearing: `PATCH {whatsapp_from: ""}` → reverts to sandbox env default.
+  - Screenshot confirms Edit Senders panel opens with the Twilio Console guidance link.
+- **What USER still needs to do (Twilio-side, outside code)**: Register a production WABA sender at [Twilio Console → Senders → WhatsApp Senders](https://console.twilio.com/us1/develop/sms/senders/whatsapp-senders) (Meta Business verification required). Once approved, paste the new `whatsapp:+91XXXXXXXXXX` into the Edit Senders UI — zero-downtime swap.
+
+
 ### Phase 61 — Twilio SMS + WhatsApp Integration (Done, Feb 2026)
 - **User asked (Hinglish)**: Twilio account hai — integrate karo. Backlog P1 tha (Bank Guarantee expiry WhatsApp alerts). User ne credentials share kiye: Account SID `ACb910c...`, Auth Token, SMS from `+19208069066`, WhatsApp sandbox `whatsapp:+14155238886`.
 - **Backend**:
