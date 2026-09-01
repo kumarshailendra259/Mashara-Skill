@@ -5,7 +5,7 @@ import { useLang } from "@/context/LangContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
-  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare,
+  ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare, AlertCircle,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
   ChevronDown, ChevronRight, Star, ChevronsRight, FileText,
 } from "lucide-react";
@@ -208,7 +208,7 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
 }
 
 export default function Layout({ children }) {
-  const { user, logout } = useAuth();
+  const { user, logout, scope } = useAuth();
   const { lang, switchLang, t } = useLang();
   const nav = useNavigate();
   const location = useLocation();
@@ -512,6 +512,29 @@ export default function Layout({ children }) {
         </header>
 
         <AnnouncementBanner />
+
+        {/* Phase 65 — Fail-closed banner for scoped users without any center
+            mapping. Without this the app looks "broken" (empty lists everywhere)
+            when the real issue is a missing admin assignment. */}
+        {scope?.needs_mapping && (
+          <div
+            className="mx-4 md:mx-6 mt-3 mb-1 bg-amber-50 border-l-4 border-amber-500 text-amber-900 px-4 py-3 flex items-start gap-3"
+            data-testid="no-center-mapping-banner"
+          >
+            <div className="bg-amber-500 text-white p-1.5 shrink-0 mt-0.5">
+              <AlertCircle size={16} />
+            </div>
+            <div className="text-sm">
+              <div className="font-bold">No Centers Assigned</div>
+              <div className="text-xs mt-0.5">
+                Aapko abhi tak koi center map nahi hua hai — isliye data lists khali dikh rahi hain.
+                <br />
+                Apne <b>Admin</b> ko contact karein aur unhe kaho ki <b>User Management</b> me aapko relevant centers assign karein.
+                Aapka role: <span className="font-mono bg-amber-100 px-1 border border-amber-200">{scope.role}</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         <main
           className="flex-1 overflow-auto p-4 md:p-6 bg-[var(--bg)] pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-6"

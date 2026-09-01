@@ -6,14 +6,23 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null); // null = unknown, false = guest, object = user
   const [loading, setLoading] = useState(true);
+  // Phase 65 — Center-based data isolation scope: which centers this user
+  // may access. `null` = head-level (all centers). Empty list on a scoped
+  // role → the "No Centers Assigned" warning banner fires.
+  const [scope, setScope] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
       const { data } = await api.get("/auth/me");
       setUser(data);
+      try {
+        const s = await api.get("/auth/me/scope");
+        setScope(s.data);
+      } catch { setScope(null); }
     } catch {
       // Any failure (401/403/network) is treated as "not logged in".
       setUser(false);
+      setScope(null);
     } finally {
       setLoading(false);
     }
@@ -54,8 +63,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, loading, login, register, logout, refresh }),
-    [user, loading, login, register, logout, refresh],
+    () => ({ user, loading, scope, login, register, logout, refresh }),
+    [user, loading, scope, login, register, logout, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

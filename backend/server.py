@@ -496,40 +496,90 @@ class ApprovalActionIn(BaseModel):
 def _txn_scope_for_user(user: dict) -> dict:
     """Return Mongo query filter restricting transactions to user's scope.
 
-    - admin / manager / senior_manager / accountant / hr: all transactions
-    - center_manager / center_staff: only transactions where center_id is in their assigned_center_ids
-    - partner: scoped to centers where this partner is mapped via batches/center.partner_id
-              (i.e. partner X at center A also sees co-partner Y's txns at A, but NOT Y's txns elsewhere)
-    - viewer: only their own created transactions
+    PHASE 65 — Strict center-based data isolation policy:
+    - **admin / senior_manager**: unrestricted (org-wide "head-level" access).
+    - **partner**: scoped to centers where this partner is mapped via batches /
+      centers.partner_id.
+    - **every other role** (hr, accountant, manager, center_manager,
+      center_staff, ops, trainer, mobilizer, project_manager, etc.):
+      strictly scoped to their `assigned_center_ids`. Users with no
+      assigned_center_ids see NOTHING (fail-closed).
+    - **viewer**: only their own created transactions.
 
     The caller MUST ensure `_associated_center_ids` is populated on the user (via
     `_enrich_user_with_associations`) when the role is partner — otherwise the
     legacy partner-id-based filter is used as a safe fallback.
     """
     role = user.get("role")
-    if role in ("admin", "manager", "senior_manager", "accountant", "hr"):
+    # Head-level users see everything org-wide.
+    if role in ("admin", "senior_manager"):
         return {}
-    if role in ("center_manager", "center_staff"):
-        return {"center_id": {"$in": user.get("assigned_center_ids") or []}}
     if role == "partner":
         pid = user.get("assigned_partner_id")
         if not pid:
             return {"_never_": True}
-        # NEW: center-based scoping. A partner sees everything that happens at the centers
+        # Center-based scoping. A partner sees everything that happens at the centers
         # where they are mapped. This matches the user's mental model: "X is partnered at
         # Center A and Center B → X sees all of A and B".
         center_ids = user.get("_associated_center_ids")
         if center_ids is not None:
             if not center_ids:
-                # Mapped to a partner but not yet linked to any center → show nothing.
                 return {"_never_": True}
             return {"center_id": {"$in": center_ids}}
-        # Fallback (should not normally happen): partner-id-based filter retained for safety
         extras = user.get("_associated_partner_ids") or []
         all_pids = list({pid, *extras})
         return {"partner_id": {"$in": all_pids}}
-    # viewer / any other → own data only
-    return {"created_by": user["id"]}
+    if role == "viewer":
+        return {"created_by": user["id"]}
+    # Every other role (hr, accountant, manager, center_manager, center_staff,
+    # ops, trainer, mobilizer, project_manager, ...): strict center mapping.
+    cids = user.get("assigned_center_ids") or []
+    if not cids:
+        # Fail-closed: no mapping → no data (dashboard/UI shows a warning banner).
+        return {"_never_": True}
+    return {"center_id": {"$in": cids}}
+
+
+def _scoped_center_ids(user: dict) -> Optional[List[str]]:
+    """Return the list of center_ids this user is allowed to see, or None if
+    the user is head-level (org-wide access).
+
+    Phase 65 — single source of truth for center-based scoping decisions
+    outside of transactions (staff, payroll batches, reimbursements,
+    dashboards, etc.). Callers that receive `None` MUST bypass the filter;
+    callers that receive `[]` MUST return an empty result (fail-closed).
+    """
+    role = user.get("role")
+    if role in ("admin", "senior_manager"):
+        return None  # unrestricted
+    if role == "partner":
+        cids = user.get("_associated_center_ids")
+        if cids is not None:
+            return list(cids)
+        return []  # partner without associations → nothing
+    if role == "viewer":
+        return []  # never scoped by center
+    return list(user.get("assigned_center_ids") or [])
+
+
+def _center_scope_query(user: dict, field: str = "center_id",
+                        include_null_for_admin: bool = True) -> dict:
+    """Build a Mongo filter that restricts records by center for the given user.
+
+    - Head-level users (admin/senior_manager) → `{}` (no restriction). They
+      also see records with `center_id=null` since `include_null_for_admin=True`.
+    - Scoped users → `{field: {"$in": [<their centers>]}}`. Records with
+      `center_id=null` are hidden from scoped users unless the caller
+      explicitly opts in.
+    - Users with no assigned centers → `{"_never_": True}` (guarantees empty
+      result — routes check this and short-circuit).
+    """
+    cids = _scoped_center_ids(user)
+    if cids is None:
+        return {}  # head-level: unrestricted (also sees null center_id records)
+    if not cids:
+        return {"_never_": True}
+    return {field: {"$in": cids}}
 
 
 async def _centers_for_partner(partner_id: str) -> list:
@@ -721,7 +771,11 @@ async def _store_idempotency(key: Optional[str], user_id: str, response: dict) -
 # Entity list scoping (Companies / Partners / Centers / Projects)
 # ---------------------------------------------------------------------------
 # Global-visibility roles: they see EVERY entity regardless of assignment.
-_ENTITY_FULL_ACCESS_ROLES = {"admin", "manager", "senior_manager", "hr", "accountant"}
+# Phase 65 — center-based data isolation applies here too. Only admin +
+# senior_manager have full org-wide entity access. Every other role (hr,
+# accountant, manager, center_manager, ...) sees only entities linked to
+# their assigned centers.
+_ENTITY_FULL_ACCESS_ROLES = {"admin", "senior_manager"}
 
 
 async def _visible_entity_ids(user: dict, etype: str):
@@ -746,7 +800,10 @@ async def _visible_entity_ids(user: dict, etype: str):
     center_ids: set = set()
     partner_ids: set = set()
 
-    if role in ("center_manager", "center_staff", "staff"):
+    if role in ("center_manager", "center_staff", "staff",
+                "hr", "accountant", "manager", "ops", "trainer",
+                "mobilizer", "project_manager", "finance"):
+        # Phase 65 — every non-head-level role is now center-scoped.
         center_ids.update(user.get("assigned_center_ids") or [])
         # Partners that are mapped to those centers (via batches, legacy field
         # centers.partner_id, or transaction history).
@@ -1573,6 +1630,37 @@ async def partners_mapped_centers(pid: str, _=Depends(require_role("admin", "hr"
 @api.get("/auth/me", response_model=UserOut)
 async def me(user=Depends(get_current_user)):
     return UserOut(**user)
+
+
+@api.get("/auth/me/scope")
+async def my_scope(user=Depends(get_current_user)):
+    """Phase 65 — return the caller's effective center-scope.
+
+    Frontend uses this to (a) drive the "No Centers Assigned" warning banner
+    for scoped roles with an empty mapping, (b) show only mapped centers in
+    dropdowns, and (c) know when to hide "All Centers" toggles.
+    """
+    role = user.get("role")
+    allowed = _scoped_center_ids(user)
+    is_head_level = allowed is None
+    center_ids = allowed or []
+    center_docs = []
+    if center_ids:
+        rows = await db.centers.find(
+            {"id": {"$in": center_ids}}, {"_id": 0, "id": 1, "name": 1, "code": 1},
+        ).to_list(500)
+        center_docs = rows
+    elif is_head_level:
+        rows = await db.centers.find({}, {"_id": 0, "id": 1, "name": 1, "code": 1}).to_list(2000)
+        center_docs = rows
+    return {
+        "role": role,
+        "is_head_level": is_head_level,
+        "assigned_center_ids": center_ids,
+        "assigned_centers": center_docs,
+        # Fail-closed for scoped roles with no mapping — UI shows a warning.
+        "needs_mapping": (not is_head_level) and role not in ("partner", "viewer") and not center_ids,
+    }
 
 
 @api.get("/auth/users", response_model=List[UserOut])
@@ -4107,9 +4195,16 @@ async def list_staff(
     can render color-coded chips (green/red/blue/yellow) without a second call.
     """
     query: dict = {}
-    role = user.get("role")
-    if role in ("center_manager", "center_staff"):
-        query["center_id"] = {"$in": user.get("assigned_center_ids") or []}
+    # Phase 65 — strict center-based data isolation. Head-level users
+    # (admin/senior_manager) see everyone; scoped roles see only staff at
+    # their assigned centers. Users with no mapping → empty list.
+    scope = _center_scope_query(user, field="center_id")
+    if scope.get("_never_"):
+        from starlette.responses import JSONResponse
+        return JSONResponse(content=[], headers={"X-Total-Count": "0",
+            "Access-Control-Expose-Headers": "X-Total-Count"})
+    if scope:
+        query.update(scope)
     if not include_inactive:
         query["active"] = {"$ne": False}
     if q:
@@ -5228,9 +5323,26 @@ async def list_attendance(
     staff_id: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
-    _=Depends(get_current_user),
+    user=Depends(get_current_user),
 ):
     q: dict = {}
+    # Phase 65 — center-based scoping via staff_id lookup. Head-level users
+    # (admin/senior_manager) see all attendance; scoped roles see only rows
+    # for staff at their assigned centers. Self-view (a staff user querying
+    # their own attendance via `?staff_id=self`) is preserved.
+    allowed = _scoped_center_ids(user)
+    if allowed is not None:
+        if not allowed:
+            return []
+        allowed_staff = await db.staff.find(
+            {"center_id": {"$in": allowed}}, {"_id": 0, "id": 1},
+        ).to_list(10000)
+        scoped_ids = {s["id"] for s in allowed_staff}
+        if staff_id:
+            if staff_id not in scoped_ids:
+                raise HTTPException(403, "Not authorised to view this staff's attendance")
+        else:
+            q["staff_id"] = {"$in": list(scoped_ids)}
     if staff_id:
         q["staff_id"] = staff_id
     if start or end:
@@ -5305,9 +5417,23 @@ async def apply_leave(body: LeaveIn, user=Depends(get_current_user)):
 async def list_leaves(
     staff_id: Optional[str] = None,
     status: Optional[str] = None,
-    _=Depends(get_current_user),
+    user=Depends(get_current_user),
 ):
     q: dict = {}
+    # Phase 65 — center-scoped: only leaves by staff at the user's centers.
+    allowed = _scoped_center_ids(user)
+    if allowed is not None:
+        if not allowed:
+            return []
+        allowed_staff = await db.staff.find(
+            {"center_id": {"$in": allowed}}, {"_id": 0, "id": 1},
+        ).to_list(10000)
+        scoped_ids = {s["id"] for s in allowed_staff}
+        if staff_id:
+            if staff_id not in scoped_ids:
+                raise HTTPException(403, "Not authorised to view this staff's leaves")
+        else:
+            q["staff_id"] = {"$in": list(scoped_ids)}
     if staff_id:
         q["staff_id"] = staff_id
     if status:
@@ -7554,12 +7680,25 @@ async def list_payroll(
     limit: int = 5000,
     user=Depends(get_current_user),
 ):
-    # Payroll rows are salary-sensitive: only admin/hr/accountant/senior_manager
-    # can see the whole roster. Staff (or any other role) must use `/payroll/my`
-    # which scopes to their own linked staff record.
-    if user.get("role") not in ("admin", "hr", "accountant", "senior_manager"):
+    # Payroll rows are salary-sensitive: only admin/hr/accountant/senior_manager/manager
+    # /center_manager/center_staff can see the payroll roster. Staff (or any other role)
+    # must use `/payroll/my` which scopes to their own linked staff record.
+    if user.get("role") not in ("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff"):
         raise HTTPException(403, "Only HR / Accounts / Admin can view the full payroll list. Use /payroll/my for your own salary.")
     query: dict = {}
+    # Phase 65 — center-based scoping. Payroll rows carry the staff_id, so we
+    # first resolve which staff belong to the user's scope, then filter by
+    # staff_id. Head-level users skip this entirely.
+    allowed = _scoped_center_ids(user)
+    if allowed is not None:
+        if not allowed:
+            from starlette.responses import JSONResponse
+            return JSONResponse(content=[], headers={"X-Total-Count": "0",
+                "Access-Control-Expose-Headers": "X-Total-Count"})
+        allowed_staff = await db.staff.find(
+            {"center_id": {"$in": allowed}}, {"_id": 0, "id": 1},
+        ).to_list(10000)
+        query["staff_id"] = {"$in": [s["id"] for s in allowed_staff]}
     if month:
         query["month"] = month
     if year:
@@ -7570,7 +7709,6 @@ async def list_payroll(
         needle = q.strip()
         if needle:
             rx = {"$regex": needle, "$options": "i"}
-            # Search by staff_name persisted on the payroll doc.
             query["staff_name"] = rx
     total = await db.payroll.count_documents(query)
     cursor = db.payroll.find(query, {"_id": 0}).sort([("year", -1), ("month", -1), ("staff_name", 1)])
@@ -10007,9 +10145,17 @@ async def list_payroll_batches(
     year: Optional[int] = None,
     center_id: Optional[str] = None,
     pending_at_role: Optional[str] = None,
-    user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager")),
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff")),
 ):
     q: dict = {}
+    # Phase 65 — strict center-based data isolation. Head-level users
+    # (admin/senior_manager) see everything; scoped users see only their
+    # assigned centers. `center_id=null` batches are visible only to head-level.
+    scope = _center_scope_query(user, field="center_id")
+    if scope.get("_never_"):
+        return []
+    if scope:
+        q.update(scope)
     if status:
         q["status"] = status
     if month:
@@ -10017,8 +10163,15 @@ async def list_payroll_batches(
     if year:
         q["year"] = year
     if center_id == "unassigned":
+        # Only head-level users can filter for unassigned (center_id=null).
+        if _scoped_center_ids(user) is not None:
+            return []
         q["center_id"] = None
     elif center_id and center_id != "all":
+        # Requested center MUST be within the caller's scope.
+        allowed = _scoped_center_ids(user)
+        if allowed is not None and center_id not in allowed:
+            return []
         q["center_id"] = center_id
     rows = await db.payroll_batches.find(q, {"_id": 0}).sort([("year", -1), ("month", -1), ("created_at", -1)]).to_list(500)
     # Enrich every batch with dynamic pending_at so filters + list rendering
@@ -10038,8 +10191,17 @@ async def list_payroll_batches(
 
 
 @api.get("/payroll-batches/{batch_id}")
-async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager"))):
-    return await _payroll_batch_out(batch_id)
+async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff"))):
+    b = await _payroll_batch_out(batch_id)
+    # Phase 65 — IDOR guard. Scoped users MUST be mapped to the batch's center.
+    allowed = _scoped_center_ids(user)
+    if allowed is not None:
+        if b.get("center_id") and b["center_id"] not in allowed:
+            raise HTTPException(403, "Not authorised to view this payroll batch")
+        if not b.get("center_id"):
+            # center_id=null (Unassigned) → head-level only.
+            raise HTTPException(403, "Not authorised to view this payroll batch")
+    return b
 
 
 @api.post("/payroll-batches/{batch_id}/pay")
