@@ -26,6 +26,45 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 64 — Center-wise Payroll Batches + Fully Dynamic Approval-Workflow Integration (Done, Feb 2026)
+- **User asked**: (1) Payroll should follow the configured Approval Workflow — status + "Pending At" must be fully driven by the chain, not hardcoded strings. (2) Add Center selection before running payroll — "All Centers" or a specific center. (3) One batch per (center, month, year) — no duplicates. (4) Batch detail must show Center Name, Total Employees, Payroll Status, Pending At, Created By, Created Date & Time, Final Approval Date & Time. (5) Filters: Payroll Month, Center, Status, Pending At. (6) Do NOT disturb existing modules — extend, don't rewrite.
+- **Backend `server.py`**:
+  1. New helper **`_derive_pending_at(batch)`** — computes `pending_at_label`, `pending_at_role`, `pending_at_names`, `is_terminal` for EVERY status:
+     - `draft`/`reopened` → "Draft — awaiting finalisation" (hr)
+     - `pending_approval` → "Pending at {step_label}: {approver names}" (role from resolved approver)
+     - `pending_payment` → "Pending at Accounts (Final Payment)" (accountant)
+     - `paid` → "Paid" (terminal)
+     - `rejected` → "Rejected" (terminal)
+  2. **`PayrollFinaliseIn`** gained an optional `center_id` field. `None`/`"all"` splits draft rows by `staff.center_id` and creates ONE batch per unique center (staff without a center → "Unassigned" batch). Specific ID → single batch for that center.
+  3. **`POST /payroll/run`** accepts `center_id` query param — filters staff to that center before generating drafts.
+  4. **`POST /payroll/finalise`** — completely reworked:
+     - Duplicate guard now on `(center_id, month, year, active_status)` — allows one batch per center per month.
+     - Groups draft rows by center_id, creates one batch per group.
+     - Returns `{batches: [...], skipped_duplicates: [...]}` — HR sees exactly which centers already had a batch.
+     - Every batch stores `center_id`, `center_name`, `created_by_name`, `by_role` in audit_log entries.
+  5. **`GET /payroll-batches`** — added filters: `center_id` (accepts specific ID, `"all"`, `"unassigned"`), `pending_at_role` (server-side filter). Every returned batch is enriched with `pending_at_label`, `pending_at_role`, `pending_with`, `center_name` (backfilled for legacy batches).
+  6. **`GET /payroll-batches/{id}`** — enriches every response with the same dynamic fields + `is_terminal`.
+  7. **Approval action** (`/api/approvals/act` for `request_type=payroll`) — the `approved` audit_log entry now carries `by_role`, `level`, and `step_label` so the Approval Timeline UI shows exactly which chain step was actioned.
+- **Frontend `HRMS.jsx`**:
+  1. New state `pCenterId` — Center dropdown right below the Month/Year picker in the Payroll tab. Options: "All Centers (per-center batches)" + every active center. Clear button for quick reset.
+  2. `runPayroll` passes `center_id` query param when set.
+  3. `finalisePayroll` sends `center_id` in body, handles the new multi-batch response with a summary toast (`Finalised N batches · X staff · ₹YY,YYY`).
+  4. New **`PayrollBatchesSection`** component — replaces the old single-batch card. Shows a filterable table (Center / Status / Pending At filters + Clear all) with columns: Month, Center, Staff, Net Payable, Status, **Pending At** (label + role tag), Created (by + date), Approved (date), Action.
+  5. **`PayrollBatchDialog`** upgraded:
+     - New **meta strip** at top: Center, Month/Year, Created By (name + timestamp), Final Approval (timestamp or "Not yet approved").
+     - **"Pending At" banner** shown whenever status is non-terminal — value read from `batch.pending_at_label` (fully workflow-driven).
+     - **"Approval Timeline"** section (formerly "Audit Trail") — richer rendering: colored action chip (approved=emerald, rejected=red, paid=blue, finalised=purple, reopened=orange), by_name + by_role, step_label + level, transition arrow, remarks in italic quotes.
+- **Verified end-to-end via curl (11/11 assertions)**:
+  - Run for specific center — only that center's staff processed (3/3).
+  - Finalise for specific center → 1 batch with `center_name` = "TEST_iter28_C_5f3eac", `pending_at_label` = "Pending at Accounts (Final Payment)", 2 audit_log entries.
+  - Duplicate finalise → 0 new batches, 1 skipped (returns `existing_batch_id`).
+  - `center_id` filter → returns exactly that center's batch.
+  - `pending_at_role=accountant` filter → 2 pending-payment batches surfaced.
+  - "All Centers" mode split 247 staff into **34 batches** (one per unique center, unassigned staff into a single "Unassigned" batch).
+- **Verified on frontend**: Payroll tab shows Center dropdown (213 options), Payroll Batches table with filters, batch dialog with meta strip, "PENDING AT: Pending at Accounts (Final Payment)" banner, Approval Timeline showing FINALISED → AUTO_APPROVED events with role + step labels.
+- **Backwards compatible**: Existing org-wide batches (center_id=null created before Phase 60) still render — labeled "Unassigned", untouched otherwise.
+
+
 ### Phase 63 — Security Hardening: CORS Allowlist, CSRF Double-Submit, File BOLA, Webhook Fail-Closed (Done, Feb 2026)
 - **User asked**: Run Security Audit on deployed app + fix all 4 findings (2 HIGH + 1 MEDIUM + 1 LOW).
 - **SEC-001 [HIGH] — CORS allowlist (`server.py:20050`)**:

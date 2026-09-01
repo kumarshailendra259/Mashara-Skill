@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
@@ -117,6 +117,9 @@ export default function HRMS() {
 
   const [pMonth, setPMonth] = useState(new Date().getMonth() + 1);
   const [pYear, setPYear] = useState(new Date().getFullYear());
+  // Phase 60 — center scoping for payroll run/finalise.
+  // Empty string == "All Centers" (org-wide split into per-center batches).
+  const [pCenterId, setPCenterId] = useState("");
 
   // Approval timeline modal state
   const [trackTimeline, setTrackTimeline] = useState({ type: null, id: null });
@@ -826,13 +829,19 @@ export default function HRMS() {
         );
         if (!ok) return;
       }
-      const r = await api.post(`/payroll/run?month=${pMonth}&year=${pYear}`);
+      // Phase 60 — Include the selected center_id so only that center's staff
+      // are processed. Empty string / "all" means every active staff.
+      const centerQ = pCenterId ? `&center_id=${encodeURIComponent(pCenterId)}` : "";
+      const r = await api.post(`/payroll/run?month=${pMonth}&year=${pYear}${centerQ}`);
       loadAll();
       const c = r.data.created || 0;
       const u = r.data.updated || 0;
       const l = r.data.skipped_locked || 0;
       const sne = r.data.skipped_not_employed || 0;
-      toast.success(`Created ${c}, Updated ${u}${l ? `, Skipped locked ${l}` : ""}${sne ? `, Ineligible ${sne}` : ""}`);
+      const centerLabel = pCenterId
+        ? ` for ${centers.find((x) => x.id === pCenterId)?.name || "selected center"}`
+        : "";
+      toast.success(`Created ${c}, Updated ${u}${l ? `, Skipped locked ${l}` : ""}${sne ? `, Ineligible ${sne}` : ""}${centerLabel}`);
     } catch (e) { toast.error(formatError(e)); }
   };
 
@@ -896,11 +905,28 @@ export default function HRMS() {
   const currentBatch = batches[0] || null;
 
   const finalisePayroll = async () => {
-    if (!window.confirm(`Finalise payroll for ${pMonth}/${pYear}?\n\nAfter finalisation, payroll cannot be edited unless it is reopened by an authorised user.\n\nContinue?`)) return;
+    const centerLabel = pCenterId
+      ? centers.find((x) => x.id === pCenterId)?.name || "selected center"
+      : "ALL centers (one batch per center)";
+    if (!window.confirm(
+      `Finalise payroll for ${pMonth}/${pYear}?\n\n` +
+      `Scope: ${centerLabel}\n\n` +
+      `After finalisation, payroll cannot be edited unless it is reopened by an authorised user.\n\nContinue?`,
+    )) return;
     try {
       const remarks = window.prompt("Optional remarks for the approver:", "") || "";
-      const { data } = await api.post("/payroll/finalise", { month: pMonth, year: pYear, remarks });
-      toast.success(`Finalised ₹${(data.net_payable || 0).toLocaleString("en-IN")} — ${data.staff_count} staff → ${data.status.replace("_", " ")}`);
+      const { data } = await api.post("/payroll/finalise", {
+        month: pMonth, year: pYear, remarks,
+        center_id: pCenterId || null,
+      });
+      const batches = data.batches || [];
+      const dupes = data.skipped_duplicates || [];
+      const staffTotal = batches.reduce((s, b) => s + (b.staff_count || 0), 0);
+      const netTotal = batches.reduce((s, b) => s + (b.net_payable || 0), 0);
+      toast.success(
+        `Finalised ${batches.length} batch${batches.length > 1 ? "es" : ""} · ${staffTotal} staff · ₹${netTotal.toLocaleString("en-IN")}` +
+        (dupes.length ? ` — ${dupes.length} skipped (already exist)` : ""),
+      );
       loadBatches();
       loadAll();
     } catch (e) { toast.error(formatError(e)); }
@@ -1908,6 +1934,31 @@ export default function HRMS() {
                     <PayrollPeriodPicker month={pMonth} year={pYear} onChange={(m, y) => { setPMonth(m); setPYear(y); setPayrollPage(0); setExpandedPayrollId(null); }} />
                     <span className="text-sm text-slate-500">· Monthly salary processing</span>
                   </div>
+                  {/* Phase 60 — Center selector: HR/admin can scope Run + Finalise
+                      to one center OR "All Centers" (org-wide split into per-center batches). */}
+                  <div className="mt-3 flex items-center gap-2 flex-wrap">
+                    <label className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Center</label>
+                    <select
+                      value={pCenterId}
+                      onChange={(e) => setPCenterId(e.target.value)}
+                      data-testid="payroll-center-select"
+                      className="h-9 min-w-[220px] border border-slate-300 rounded-md px-2 text-sm bg-white"
+                    >
+                      <option value="">All Centers (per-center batches)</option>
+                      {centers.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                    {pCenterId && (
+                      <button
+                        onClick={() => setPCenterId("")}
+                        className="text-[11px] text-slate-500 hover:text-slate-800 underline"
+                        data-testid="payroll-center-clear"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <Button onClick={runPayroll} className="rounded-md bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 gap-1.5" data-testid="run-payroll">
@@ -1944,9 +1995,14 @@ export default function HRMS() {
           {/* --- Summary cards + progress + attention --- */}
           <PayrollSummary payroll={payroll} total={payrollTotal} />
 
-          {/* --- Payroll batch status card (existing, kept intact) --- */}
-          {currentBatch && (
-            <PayrollBatchStatusCard batch={currentBatch} onOpen={() => setOpenBatchId(currentBatch.id)} />
+          {/* --- Payroll batches list (Phase 60) — every center's batch for
+              the selected month/year, with dynamic "Pending At" + filters. --- */}
+          {batches.length > 0 && (
+            <PayrollBatchesSection
+              batches={batches}
+              centers={centers}
+              onOpen={(id) => setOpenBatchId(id)}
+            />
           )}
 
           {/* --- Filter bar with quick chips + search + status --- */}
@@ -2435,24 +2491,187 @@ const BATCH_STATUS_TONE = {
   reopened:        { cls: "bg-orange-100 text-orange-700 border-orange-300", label: "Reopened" },
 };
 
+/* ============================================================
+   PAYROLL BATCHES SECTION (Phase 60) — center-scoped list with filters
+   ============================================================ */
+function PayrollBatchesSection({ batches, centers, onOpen }) {
+  const [fCenter, setFCenter] = useState("all");
+  const [fStatus, setFStatus] = useState("all");
+  const [fPendingAt, setFPendingAt] = useState("all");
+  const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+
+  // Unique pending_at roles present in the data.
+  const uniqueRoles = useMemo(() => {
+    const set = new Set();
+    for (const b of batches) if (b.pending_at_role) set.add(b.pending_at_role);
+    return Array.from(set);
+  }, [batches]);
+
+  const filtered = useMemo(() => {
+    return batches.filter((b) => {
+      if (fCenter !== "all") {
+        if (fCenter === "unassigned") { if (b.center_id) return false; }
+        else if (b.center_id !== fCenter) return false;
+      }
+      if (fStatus !== "all" && b.status !== fStatus) return false;
+      if (fPendingAt !== "all" && (b.pending_at_role || "") !== fPendingAt) return false;
+      return true;
+    });
+  }, [batches, fCenter, fStatus, fPendingAt]);
+
+  const clearFilters = () => { setFCenter("all"); setFStatus("all"); setFPendingAt("all"); };
+  const hasFilters = fCenter !== "all" || fStatus !== "all" || fPendingAt !== "all";
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-4" data-testid="payroll-batches-section">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Payroll Batches</div>
+          <div className="text-sm text-slate-700">
+            {filtered.length} of {batches.length} batch{batches.length !== 1 ? "es" : ""}
+            {hasFilters && <span className="ml-2 text-[11px] text-purple-700">· filters active</span>}
+          </div>
+        </div>
+        {hasFilters && (
+          <button onClick={clearFilters} className="text-xs text-slate-500 underline hover:text-slate-800" data-testid="pb-clear-filters">
+            Clear all
+          </button>
+        )}
+      </div>
+
+      {/* Filter bar */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <label className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Center</label>
+          <select
+            value={fCenter}
+            onChange={(e) => setFCenter(e.target.value)}
+            data-testid="pb-filter-center"
+            className="h-9 w-full border border-slate-300 rounded-md px-2 text-sm bg-white"
+          >
+            <option value="all">All Centers</option>
+            <option value="unassigned">— Unassigned —</option>
+            {centers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Status</label>
+          <select
+            value={fStatus}
+            onChange={(e) => setFStatus(e.target.value)}
+            data-testid="pb-filter-status"
+            className="h-9 w-full border border-slate-300 rounded-md px-2 text-sm bg-white"
+          >
+            <option value="all">All statuses</option>
+            {["pending_approval", "pending_payment", "paid", "reopened", "rejected"].map((s) => (
+              <option key={s} value={s}>{BATCH_STATUS_TONE[s]?.label || s}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Pending At</label>
+          <select
+            value={fPendingAt}
+            onChange={(e) => setFPendingAt(e.target.value)}
+            data-testid="pb-filter-pending-at"
+            className="h-9 w-full border border-slate-300 rounded-md px-2 text-sm bg-white"
+          >
+            <option value="all">Any</option>
+            {uniqueRoles.map((r) => (
+              <option key={r} value={r}>{r.toUpperCase()}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Table */}
+      {filtered.length === 0 ? (
+        <div className="text-center py-8 text-sm text-slate-500 overline">No batches match the current filters.</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[10px] uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                <th className="py-2 pr-3">Month</th>
+                <th className="py-2 pr-3">Center</th>
+                <th className="py-2 pr-3 text-right">Staff</th>
+                <th className="py-2 pr-3 text-right">Net Payable</th>
+                <th className="py-2 pr-3">Status</th>
+                <th className="py-2 pr-3">Pending At</th>
+                <th className="py-2 pr-3">Created</th>
+                <th className="py-2 pr-3">Approved</th>
+                <th className="py-2 pr-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((b) => {
+                const tone = BATCH_STATUS_TONE[b.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: b.status };
+                return (
+                  <tr key={b.id} className="border-b border-slate-100 hover:bg-slate-50" data-testid={`pb-row-${b.id}`}>
+                    <td className="py-2 pr-3 font-mono">{String(b.month).padStart(2, "0")}/{b.year}</td>
+                    <td className="py-2 pr-3 font-medium">{b.center_name || "Unassigned"}</td>
+                    <td className="py-2 pr-3 text-right">{b.staff_count}</td>
+                    <td className="py-2 pr-3 text-right font-semibold">{inr(b.net_payable)}</td>
+                    <td className="py-2 pr-3">
+                      <span className={`inline-block text-[10px] font-bold uppercase px-1.5 py-0.5 border ${tone.cls}`}>{tone.label}</span>
+                    </td>
+                    <td className="py-2 pr-3 text-[11px] text-amber-900 max-w-[220px]" title={b.pending_at_label}>
+                      <div className="truncate">{b.pending_at_label || "—"}</div>
+                      {b.pending_at_role && (
+                        <div className="text-[9px] uppercase tracking-wider text-slate-500">{b.pending_at_role}</div>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 text-[11px] text-slate-600">
+                      <div>{b.created_by_name || b.finalised_by_name || "—"}</div>
+                      <div className="text-[9px] text-slate-500">{b.created_at ? new Date(b.created_at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" }) : "—"}</div>
+                    </td>
+                    <td className="py-2 pr-3 text-[11px] text-slate-600">
+                      {b.approved_at
+                        ? new Date(b.approved_at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })
+                        : <span className="text-slate-400">—</span>}
+                    </td>
+                    <td className="py-2 pr-3 text-right">
+                      <Button
+                        size="sm" onClick={() => onOpen(b.id)}
+                        className="rounded-md h-7 px-2 text-xs bg-blue-600 hover:bg-blue-700 text-white gap-1"
+                        data-testid={`pb-open-${b.id}`}
+                      >
+                        <Receipt size={11} /> Open
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function PayrollBatchStatusCard({ batch, onOpen }) {
   const tone = BATCH_STATUS_TONE[batch.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: batch.status };
   const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-  // Dynamic "Pending Approval at [Name]" — batch.pending_with is populated by
-  // the backend for pending_approval status. Falls back to level/step label.
+  // Phase 60 — `pending_at_label` is derived server-side for EVERY status so
+  // the card never falls back to hardcoded stage names. Falls back to
+  // `pending_with` (approver names) for finer-grained context when available.
   const pendingApprovers = Array.isArray(batch.pending_with) ? batch.pending_with : [];
-  const pendingLine =
-    batch.status === "pending_approval"
-      ? (pendingApprovers.length > 0
-          ? pendingApprovers.map((u) => u.name || u.email).join(", ")
-          : (batch.current_step_label ? `Level ${batch.current_level} · ${batch.current_step_label}` : "Approval chain"))
-      : null;
+  const pendingLine = batch.pending_at_label || (
+    batch.status === "pending_approval" && pendingApprovers.length > 0
+      ? pendingApprovers.map((u) => u.name || u.email).join(", ")
+      : null
+  );
   return (
     <div className="swiss-card p-4 border-l-4 border-purple-500" data-testid="payroll-batch-status">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div>
-            <div className="overline text-[10px]">Payroll Batch · {String(batch.month).padStart(2, "0")}/{batch.year}</div>
+            <div className="overline text-[10px]">
+              Payroll Batch · {String(batch.month).padStart(2, "0")}/{batch.year}
+              {batch.center_name && <span className="ml-2 text-purple-800 font-bold">· {batch.center_name}</span>}
+            </div>
             <div className="text-xs mt-0.5">
               <span className="font-heading font-bold text-sm">{batch.staff_count} staff</span>
               <span className="text-[var(--muted)]"> · Net {inr(batch.net_payable)}</span>
@@ -2470,9 +2689,9 @@ function PayrollBatchStatusCard({ batch, onOpen }) {
           className="mt-3 border-t border-amber-200 pt-2 text-[12px] flex items-center gap-2 flex-wrap"
           data-testid="batch-pending-with"
         >
-          <span className="overline text-amber-800">Pending Approval at</span>
+          <span className="overline text-amber-800">Pending At</span>
           <span className="font-bold text-amber-900">{pendingLine}</span>
-          {batch.total_steps > 0 && (
+          {batch.total_steps > 0 && batch.status === "pending_approval" && (
             <span className="text-[10px] text-amber-800/70">
               (Step {batch.current_level} of {batch.total_steps})
             </span>
@@ -2559,6 +2778,26 @@ function PayrollBatchDialog({ batchId, onClose, currentUser }) {
           <div className="py-8 text-center text-sm text-[var(--muted)]">Loading…</div>
         ) : (
           <div className="space-y-4 max-h-[68vh] overflow-y-auto pr-1">
+            {/* Meta strip — center, month/year, created/approved timestamps.
+                Phase 60 — Always visible so HR immediately sees the batch's identity. */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs bg-slate-50 border border-[var(--border)] p-3" data-testid="batch-meta-strip">
+              <div><div className="overline text-[9px]">Center</div><div className="font-bold">{batch.center_name || "Unassigned"}</div></div>
+              <div><div className="overline text-[9px]">Month / Year</div><div className="font-bold font-mono">{String(batch.month).padStart(2, "0")}/{batch.year}</div></div>
+              <div>
+                <div className="overline text-[9px]">Created By</div>
+                <div className="font-medium">{batch.created_by_name || batch.finalised_by_name || "—"}</div>
+                <div className="text-[10px] text-slate-500">{batch.created_at ? new Date(batch.created_at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" }) : "—"}</div>
+              </div>
+              <div>
+                <div className="overline text-[9px]">Final Approval</div>
+                <div className="font-medium">
+                  {batch.approved_at
+                    ? new Date(batch.approved_at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })
+                    : <span className="text-slate-400">Not yet approved</span>}
+                </div>
+              </div>
+            </div>
+
             {/* Totals strip */}
             <div className="grid grid-cols-4 gap-0 border border-[var(--border)] bg-white" data-testid="batch-totals">
               <TotalCell label="Staff Count" value={batch.staff_count} tone="bg-slate-50" />
@@ -2567,17 +2806,15 @@ function PayrollBatchDialog({ batchId, onClose, currentUser }) {
               <TotalCell label="Net Payable" value={inr(batch.net_payable)} tone="bg-emerald-50 text-emerald-800" bold />
             </div>
 
-            {/* Pending Approval banner — shown while the batch is awaiting HR Approver.
-                Displays the current approver name(s) so HR can nudge them if needed. */}
-            {batch.status === "pending_approval" && (
+            {/* Pending At banner — dynamically driven by approval workflow.
+                Shown whenever the batch is NOT terminal (paid / rejected). */}
+            {batch.pending_at_label && !batch.is_terminal && batch.status !== "paid" && batch.status !== "rejected" && (
               <div className="swiss-card p-3 border-l-4 border-amber-500 bg-amber-50/40" data-testid="batch-pending-with-dialog">
-                <div className="overline text-[10px] text-amber-900">Pending Approval at</div>
+                <div className="overline text-[10px] text-amber-900">Pending At</div>
                 <div className="text-sm font-bold text-amber-900 mt-1">
-                  {(batch.pending_with && batch.pending_with.length > 0)
-                    ? batch.pending_with.map((u) => `${u.name || u.email}${u.role ? ` (${u.role})` : ""}`).join(", ")
-                    : (batch.current_step_label ? `Level ${batch.current_level} · ${batch.current_step_label}` : "No approver resolvable — please contact admin")}
+                  {batch.pending_at_label}
                 </div>
-                {batch.total_steps > 0 && (
+                {batch.total_steps > 0 && batch.status === "pending_approval" && (
                   <div className="text-[11px] text-amber-800/80 mt-0.5">Step {batch.current_level} of {batch.total_steps}</div>
                 )}
               </div>
@@ -2628,18 +2865,35 @@ function PayrollBatchDialog({ batchId, onClose, currentUser }) {
               </div>
             </div>
 
-            {/* Audit log */}
+            {/* Audit log — full approval history (Phase 60 enriched). */}
             <div>
-              <div className="overline text-[10px] mb-2">Audit Trail</div>
-              <div className="border border-[var(--border)] divide-y divide-[var(--border)] max-h-40 overflow-y-auto" data-testid="batch-audit">
+              <div className="overline text-[10px] mb-2">Approval Timeline</div>
+              <div className="border border-[var(--border)] divide-y divide-[var(--border)] max-h-52 overflow-y-auto" data-testid="batch-audit">
+                {(batch.audit_log || []).length === 0 && (
+                  <div className="p-3 text-xs text-slate-500 italic">No workflow events yet.</div>
+                )}
                 {(batch.audit_log || []).map((a, i) => (
-                  <div key={i} className="p-2 text-xs flex items-start gap-2">
-                    <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 bg-slate-100 text-slate-700">{a.action}</span>
-                    <div className="flex-1">
-                      <div className="font-medium">{a.by_name || a.by} <span className="text-[var(--muted)] font-normal">· {new Date(a.at).toLocaleString()}</span></div>
-                      <div className="text-[var(--muted)]">
+                  <div key={i} className="p-2.5 text-xs flex items-start gap-2 hover:bg-slate-50">
+                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded-sm ${
+                      a.action === "approved" ? "bg-emerald-100 text-emerald-800" :
+                      a.action === "rejected" ? "bg-red-100 text-red-800" :
+                      a.action === "paid" ? "bg-blue-100 text-blue-800" :
+                      a.action === "finalised" ? "bg-purple-100 text-purple-800" :
+                      a.action === "reopened" ? "bg-orange-100 text-orange-800" :
+                      "bg-slate-100 text-slate-700"
+                    }`}>{a.action}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium">
+                        {a.by_name || a.by || "System"}
+                        {a.by_role && <span className="ml-1 text-[10px] uppercase tracking-wider text-slate-500">({a.by_role})</span>}
+                        <span className="text-[var(--muted)] font-normal ml-2">· {a.at ? new Date(a.at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" }) : "—"}</span>
+                      </div>
+                      {a.step_label && (
+                        <div className="text-[10px] text-slate-600 mt-0.5">Step: <b>{a.step_label}</b>{a.level ? ` · Level ${a.level}` : ""}</div>
+                      )}
+                      <div className="text-[var(--muted)] text-[11px] mt-0.5">
                         {a.old_status} → <span className="font-semibold text-slate-700">{a.new_status}</span>
-                        {a.remarks && <span> · {a.remarks}</span>}
+                        {a.remarks && <span className="italic"> · "{a.remarks}"</span>}
                       </div>
                     </div>
                   </div>

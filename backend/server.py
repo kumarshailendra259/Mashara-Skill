@@ -6322,6 +6322,9 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "at": now,
                 "by": user["id"],
                 "by_name": user.get("name"),
+                "by_role": user.get("role"),
+                "level": rec.get("current_level"),
+                "step_label": (rec.get("chain_snapshot") or [{}])[max(0, (rec.get("current_level") or 1) - 1)].get("label"),
                 "remarks": body.remarks or "",
                 "old_status": rec.get("status"),
                 "new_status": "pending_payment",
@@ -7362,11 +7365,17 @@ def _compute_late_buckets(rows: List[dict], shift: Optional[dict]) -> dict:
 async def payroll_run(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020, le=2100),
+    center_id: Optional[str] = Query(None, description="Center to run payroll for. Omit or 'all' for every center."),
     _=Depends(require_role("admin", "accountant", "hr")),
 ):
     """Generate payroll rows for staff who were actually employed in the given month.
 
-    Employment window filter (added Jul 2026):
+    Phase 60 — Center scoping:
+      * `center_id=<id>` → only staff mapped to that center are processed
+      * `center_id="all"` or omitted → every active staff record is processed
+        (the finalise step later splits them into one batch per center)
+
+    Employment window filter:
       * Skip staff who joined AFTER the month (joining_date > month-end).
       * Skip staff who exited BEFORE the month (exit_date < month-start).
       * For staff joining or exiting mid-month, `working_days` is set to the
@@ -7392,7 +7401,10 @@ async def payroll_run(
     # PHASE 42 — Load holiday + weekly-off dates for the month ONCE.
     paid_off_dates, weekly_off_weekdays = await _paid_off_dates_in(start, end)
 
-    staff_docs = await db.staff.find({"active": {"$ne": False}}, {"_id": 0}).to_list(5000)
+    staff_query: dict = {"active": {"$ne": False}}
+    if center_id and center_id not in ("all", ""):
+        staff_query["center_id"] = center_id
+    staff_docs = await db.staff.find(staff_query, {"_id": 0}).to_list(5000)
     created: list = []
     updated: list = []
     skipped_not_employed = 0
@@ -9746,6 +9758,10 @@ class PayrollFinaliseIn(BaseModel):
     month: int = Field(ge=1, le=12)
     year: int = Field(ge=2020, le=2100)
     remarks: Optional[str] = None
+    # None or "all" → split by staff.center_id and create one batch per center
+    # (staff without a center are grouped into an "Unassigned" batch).
+    # Any specific ID → single batch for that center only.
+    center_id: Optional[str] = None
 
 
 class PayrollBatchPayIn(BaseModel):
@@ -9763,86 +9779,196 @@ class PayrollBatchReopenIn(BaseModel):
     reverse_transaction: bool = True  # If batch was already paid, reverse the txn too.
 
 
+async def _derive_pending_at(batch: dict) -> dict:
+    """Compute a dynamic 'Pending At' label + role for a payroll batch.
+
+    Fully driven by the configured Approval Workflow — no hardcoded stage names.
+    Falls back gracefully when the chain has no active step (accounts-payment
+    stage, terminal states, or when no chain was configured at all).
+
+    Returns a dict with keys: `pending_at_label`, `pending_at_role`,
+    `pending_at_names`, `is_terminal`.
+    """
+    status = batch.get("status")
+    # Terminal states — no pending action.
+    if status == "paid":
+        return {"pending_at_label": "Paid", "pending_at_role": None,
+                "pending_at_names": [], "is_terminal": True}
+    if status == "rejected":
+        return {"pending_at_label": "Rejected", "pending_at_role": None,
+                "pending_at_names": [], "is_terminal": True}
+    if status in ("draft", "reopened", None):
+        return {"pending_at_label": "Draft — awaiting finalisation",
+                "pending_at_role": "hr", "pending_at_names": [], "is_terminal": False}
+
+    # Active workflow states.
+    if status == "pending_approval":
+        # Chain step is the authoritative source. `pending_with` was populated
+        # by `_enrich_with_approval_status`; names come from user resolution.
+        step_label = batch.get("current_step_label") or "Approver"
+        pw = batch.get("pending_with") or []
+        names = [(u.get("name") or u.get("email")) for u in pw if u]
+        if names:
+            label = f"Pending at {step_label}: {', '.join(names[:3])}"
+            if len(names) > 3:
+                label += f" +{len(names) - 3}"
+        else:
+            label = f"Pending at {step_label}"
+        # Best-effort role tag from the first approver.
+        role = pw[0].get("role") if pw else None
+        return {"pending_at_label": label, "pending_at_role": role,
+                "pending_at_names": names, "is_terminal": False}
+
+    if status == "pending_payment":
+        # Post-approval stage — Accounts must disburse. Not part of the
+        # configured chain (payment is out-of-band by design), so this label
+        # is deterministic across every deployment.
+        return {"pending_at_label": "Pending at Accounts (Final Payment)",
+                "pending_at_role": "accountant", "pending_at_names": [],
+                "is_terminal": False}
+
+    # Unknown status — expose it as-is.
+    return {"pending_at_label": f"Pending — {status}", "pending_at_role": None,
+            "pending_at_names": [], "is_terminal": False}
+
+
 @api.post("/payroll/finalise")
 async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("admin", "hr"))):
-    """HR (or admin) locks the month's Draft payroll rows into a batch and pushes it into
-    the approval workflow. Existing rows already in a batch (finalised/approved/paid) are ignored.
+    """HR (or admin) locks the month's Draft payroll rows into a batch and pushes
+    it into the approval workflow.
+
+    Phase 60 — Center scoping:
+      * body.center_id="<id>" → creates ONE batch for that center only.
+        Duplicate guard on (center_id, month, year, active_status).
+      * body.center_id=None or "all" → splits draft rows by staff.center_id and
+        creates ONE batch per unique center (staff without a center land in an
+        "Unassigned" batch with center_id=None).
+
+    Existing rows already in a batch (finalised/approved/paid) are ignored.
     """
     m, y = body.month, body.year
-    # Only rows that are still editable are candidates for finalisation.
+    center_id = body.center_id if (body.center_id and body.center_id != "all") else None
+
+    # Load draft rows for the month.
     draft_rows = await db.payroll.find(
         {"month": m, "year": y, "status": {"$in": [None, "draft", "reopened"]}},
         {"_id": 0},
-    ).to_list(2000)
+    ).to_list(5000)
     if not draft_rows:
         raise HTTPException(400, f"No Draft payroll rows found for {m:02d}/{y}. Run Payroll first.")
 
-    # Guard: refuse to create a duplicate active batch for the same month/year.
-    dup = await db.payroll_batches.find_one({
-        "month": m, "year": y,
-        "status": {"$in": ["pending_approval", "approved", "pending_payment", "processing", "paid"]},
-    }, {"_id": 0, "id": 1, "status": 1})
-    if dup:
-        raise HTTPException(409, f"An active payroll batch already exists for {m:02d}/{y} (status: {dup['status']}). Reopen it first to re-finalise.")
+    # Enrich rows with their staff.center_id + center_name so we can group.
+    staff_ids = list({r["staff_id"] for r in draft_rows if r.get("staff_id")})
+    staff_by_id = {}
+    if staff_ids:
+        for s in await db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0, "id": 1, "center_id": 1}).to_list(5000):
+            staff_by_id[s["id"]] = s
+    center_ids_used = {(staff_by_id.get(r["staff_id"]) or {}).get("center_id") for r in draft_rows}
+    center_ids_used = {c for c in center_ids_used}
+    center_name_by_id: dict = {}
+    real_ids = [c for c in center_ids_used if c]
+    if real_ids:
+        for c in await db.centers.find({"id": {"$in": real_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(2000):
+            center_name_by_id[c["id"]] = c.get("name")
 
-    # Zero-attendance filter (already enforced by payroll_run, but be defensive):
-    # rows with payable_days == 0 are still included in the batch (they resolve to ₹0 nets),
-    # but net_payable totals only non-zero rows.
-    payroll_ids = [r["id"] for r in draft_rows]
-    gross = sum(float(r.get("gross") or 0) for r in draft_rows)
-    deductions = sum(float(r.get("deductions") or 0) for r in draft_rows)
-    net_payable = sum(float(r.get("net") or 0) for r in draft_rows)
+    # Decide which center → rows mapping to finalise.
+    grouped: dict = {}  # center_id (or None) -> list of rows
+    if body.center_id and body.center_id != "all":
+        # Single-center finalisation — only rows whose staff belong to that center.
+        for r in draft_rows:
+            s = staff_by_id.get(r["staff_id"]) or {}
+            if s.get("center_id") == body.center_id:
+                grouped.setdefault(body.center_id, []).append(r)
+        if not grouped:
+            raise HTTPException(400, f"No Draft payroll rows for center {body.center_id} in {m:02d}/{y}.")
+    else:
+        # All-centers finalisation — split by staff.center_id.
+        for r in draft_rows:
+            s = staff_by_id.get(r["staff_id"]) or {}
+            grouped.setdefault(s.get("center_id"), []).append(r)
 
     now = datetime.now(timezone.utc).isoformat()
-    batch_id = str(uuid.uuid4())
-    doc = {
-        "id": batch_id,
-        "month": m, "year": y,
-        "staff_count": len(payroll_ids),
-        "payroll_ids": payroll_ids,
-        "gross": round(gross, 2),
-        "deductions": round(deductions, 2),
-        "net_payable": round(net_payable, 2),
-        "amount": round(net_payable, 2),  # used by amount-based chain matching
-        "status": "pending_approval",
-        "created_by": user["id"], "created_at": now,
-        "finalised_by": user["id"], "finalised_at": now,
-        "finalised_by_name": user.get("name") or user.get("email"),
-        "remarks": body.remarks or "",
-        "audit_log": [
-            {"action": "finalised", "at": now, "by": user["id"], "by_name": user.get("name") or user.get("email"),
-             "old_status": "draft", "new_status": "pending_approval", "remarks": body.remarks or ""},
-        ],
-        # center_id is left None — payroll batches are org-wide by default. Amount-based
-        # approval chains that don't scope by center will still match.
-    }
-    # Attach approval chain (falls back to admin auto-approve if none configured).
-    await _attach_chain_to_request("payroll", doc)
-    await db.payroll_batches.insert_one(doc)
+    created_batches: list = []
+    skipped_dupes: list = []
 
-    # Lock all included payroll rows against edit.
-    await db.payroll.update_many(
-        {"id": {"$in": payroll_ids}},
-        {"$set": {"batch_id": batch_id, "batch_status": "pending_approval", "locked": True,
-                  "finalised_at": now, "finalised_by": user["id"]}},
-    )
-
-    # If chain resolved to auto-approve at Lv1 (no approvers), flip straight to pending_payment.
-    if not doc.get("chain_snapshot") and doc.get("status") == "pending_approval":
-        # No chain configured → treat as immediate approval by admin/hr who finalised it.
-        await db.payroll_batches.update_one(
-            {"id": batch_id},
-            {"$set": {"status": "pending_payment", "approved_at": now, "approved_by": user["id"],
-                      "audit_log": doc["audit_log"] + [{"action": "auto_approved", "at": now,
-                                                       "by": user["id"], "by_name": user.get("name") or user.get("email"),
-                                                       "remarks": "No approval chain configured — auto-approved",
-                                                       "old_status": "pending_approval", "new_status": "pending_payment"}]}},
+    for cid, rows_for_center in grouped.items():
+        # Duplicate guard — enforced per (center_id, month, year, active_status).
+        dup = await db.payroll_batches.find_one(
+            {"month": m, "year": y, "center_id": cid,
+             "status": {"$in": ["pending_approval", "approved", "pending_payment", "processing", "paid"]}},
+            {"_id": 0, "id": 1, "status": 1},
         )
-    return await _payroll_batch_out(batch_id)
+        if dup:
+            skipped_dupes.append({"center_id": cid, "existing_batch_id": dup["id"], "status": dup["status"]})
+            continue
+
+        payroll_ids = [r["id"] for r in rows_for_center]
+        gross = sum(float(r.get("gross") or 0) for r in rows_for_center)
+        deductions = sum(float(r.get("deductions") or 0) for r in rows_for_center)
+        net_payable = sum(float(r.get("net") or 0) for r in rows_for_center)
+        c_name = center_name_by_id.get(cid) if cid else "Unassigned"
+
+        batch_id = str(uuid.uuid4())
+        doc = {
+            "id": batch_id,
+            "month": m, "year": y,
+            "center_id": cid,
+            "center_name": c_name,
+            "staff_count": len(payroll_ids),
+            "payroll_ids": payroll_ids,
+            "gross": round(gross, 2),
+            "deductions": round(deductions, 2),
+            "net_payable": round(net_payable, 2),
+            "amount": round(net_payable, 2),  # used by amount-based chain matching
+            "status": "pending_approval",
+            "created_by": user["id"], "created_at": now,
+            "created_by_name": user.get("name") or user.get("email"),
+            "finalised_by": user["id"], "finalised_at": now,
+            "finalised_by_name": user.get("name") or user.get("email"),
+            "remarks": body.remarks or "",
+            "audit_log": [
+                {"action": "finalised", "at": now, "by": user["id"],
+                 "by_name": user.get("name") or user.get("email"),
+                 "by_role": user.get("role"),
+                 "old_status": "draft", "new_status": "pending_approval",
+                 "remarks": body.remarks or ""},
+            ],
+        }
+        # Attach approval chain (falls back to admin auto-approve if none configured).
+        await _attach_chain_to_request("payroll", doc)
+        await db.payroll_batches.insert_one(doc)
+
+        # Lock all included payroll rows against edit.
+        await db.payroll.update_many(
+            {"id": {"$in": payroll_ids}},
+            {"$set": {"batch_id": batch_id, "batch_status": "pending_approval", "locked": True,
+                      "finalised_at": now, "finalised_by": user["id"]}},
+        )
+
+        # If chain resolved to auto-approve at Lv1 (no approvers), flip straight to pending_payment.
+        if not doc.get("chain_snapshot") and doc.get("status") == "pending_approval":
+            await db.payroll_batches.update_one(
+                {"id": batch_id},
+                {"$set": {"status": "pending_payment", "approved_at": now, "approved_by": user["id"],
+                          "audit_log": doc["audit_log"] + [{"action": "auto_approved", "at": now,
+                                                           "by": user["id"], "by_name": user.get("name") or user.get("email"),
+                                                           "by_role": user.get("role"),
+                                                           "remarks": "No approval chain configured — auto-approved",
+                                                           "old_status": "pending_approval", "new_status": "pending_payment"}]}},
+            )
+        created_batches.append(await _payroll_batch_out(batch_id))
+
+    return {"batches": created_batches, "skipped_duplicates": skipped_dupes}
 
 
 async def _payroll_batch_out(batch_id: str) -> dict:
-    """Fetch a batch + inline its payroll rows for the UI."""
+    """Fetch a batch + inline its payroll rows for the UI.
+
+    Phase 60 — always enriched with `pending_at_label`, `pending_at_role`,
+    `pending_with` (when in an approval-based state), `center_name` and the
+    full `audit_log` so HR sees a consistent workflow view regardless of
+    which stage the batch is in.
+    """
     b = await db.payroll_batches.find_one({"id": batch_id}, {"_id": 0})
     if not b:
         raise HTTPException(404, "Payroll batch not found")
@@ -9860,10 +9986,17 @@ async def _payroll_batch_out(batch_id: str) -> dict:
                 r["bank_account_no_masked"] = ("****" + (s.get("bank_account_no") or "")[-4:]) if s.get("bank_account_no") else None
                 r["ifsc"] = s.get("ifsc")
     b["rows"] = rows
-    # Enrich with pending approval visibility — HR needs to see "Pending Approval at [Name]"
-    # while the batch is in the pending_approval state. No-op for other statuses.
+    # Backfill center_name for legacy batches created before Phase 60.
+    if b.get("center_id") and not b.get("center_name"):
+        c = await db.centers.find_one({"id": b["center_id"]}, {"_id": 0, "name": 1})
+        b["center_name"] = (c or {}).get("name") or None
+    if not b.get("center_id"):
+        b.setdefault("center_name", "Unassigned")
+    # Pending-approval batches carry live chain-resolution info; other statuses
+    # get a static label from `_derive_pending_at`.
     if b.get("status") == "pending_approval":
         await _enrich_with_approval_status(b)
+    b.update(await _derive_pending_at(b))
     return b
 
 
@@ -9872,6 +10005,8 @@ async def list_payroll_batches(
     status: Optional[str] = None,
     month: Optional[int] = None,
     year: Optional[int] = None,
+    center_id: Optional[str] = None,
+    pending_at_role: Optional[str] = None,
     user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager")),
 ):
     q: dict = {}
@@ -9881,11 +10016,24 @@ async def list_payroll_batches(
         q["month"] = month
     if year:
         q["year"] = year
+    if center_id == "unassigned":
+        q["center_id"] = None
+    elif center_id and center_id != "all":
+        q["center_id"] = center_id
     rows = await db.payroll_batches.find(q, {"_id": 0}).sort([("year", -1), ("month", -1), ("created_at", -1)]).to_list(500)
-    # Enrich pending_approval batches with pending_with so HR sees who to nudge.
+    # Enrich every batch with dynamic pending_at so filters + list rendering
+    # can drive off a single, stable field.
     for r in rows:
+        if r.get("center_id") and not r.get("center_name"):
+            c = await db.centers.find_one({"id": r["center_id"]}, {"_id": 0, "name": 1})
+            r["center_name"] = (c or {}).get("name") or None
+        if not r.get("center_id"):
+            r.setdefault("center_name", "Unassigned")
         if r.get("status") == "pending_approval":
             await _enrich_with_approval_status(r)
+        r.update(await _derive_pending_at(r))
+    if pending_at_role:
+        rows = [r for r in rows if (r.get("pending_at_role") or "") == pending_at_role]
     return rows
 
 
