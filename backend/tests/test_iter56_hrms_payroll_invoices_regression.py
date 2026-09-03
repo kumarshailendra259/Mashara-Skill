@@ -115,7 +115,7 @@ class TestInvoiceModule:
         data = r.json()
         assert data["invoice_no"] == payload["invoice_no"]
         assert data["net_payable"] == 95000.0
-        assert data.get("stages", {}).get("generated", {}).get("completed") is True
+        assert data.get("stages", {}).get("generated", {}).get("completed") == True
         TestInvoiceModule.inv_id = data["id"]
         TestInvoiceModule.inv_no = data["invoice_no"]
 
@@ -128,7 +128,7 @@ class TestInvoiceModule:
 
     def test_advance_out_of_sequence_rejected(self, admin):
         assert TestInvoiceModule.inv_id is not None
-        # current stage is 1; try jumping to 3
+        # current stage == 1; try jumping to 3
         r = admin.post(
             f"{API}/invoices/{TestInvoiceModule.inv_id}/advance",
             json={"to_stage": 3, "remarks": "skip"},

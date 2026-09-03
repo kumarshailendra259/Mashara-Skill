@@ -220,7 +220,7 @@ class TestVoucherEmail:
         }, timeout=20)
         assert r.status_code == 200, r.text
         j = r.json()
-        assert j.get("ok") is True
+        assert j.get("ok") == True
         assert j.get("to") == "vendor_test@example.com"
 
         # DB write happened
@@ -316,25 +316,25 @@ class TestOverdueAdvances:
         hit = [r for r in rows if r["id"] == aid]
         assert hit, f"advance {aid} not in overdue list: {rows}"
         r = hit[0]
-        assert r["is_overdue"] is True
+        assert r["is_overdue"] == True
         assert r["days_overdue"] > 0
 
         # Individual GET should also enrich
         row = _get(admin, f"/api/advance-requests/{aid}")
-        assert row.get("is_overdue") is True
+        assert row.get("is_overdue") == True
         assert row.get("days_overdue", 0) > 0
 
         # List endpoint enrichment
         rows_all = _get(admin, "/api/advance-requests")
         found = [x for x in rows_all if x.get("id") == aid]
         if found:
-            assert found[0].get("is_overdue") is True
+            assert found[0].get("is_overdue") == True
 
         # my_advance_requests enrichment (admin created it)
         mine = _get(admin, "/api/advance-requests/my")
         fmine = [x for x in mine if x.get("id") == aid]
         if fmine:
-            assert fmine[0].get("is_overdue") is True
+            assert fmine[0].get("is_overdue") == True
 
         # Notify — must return 200 with counters
         r = admin.post(f"{API}/advance-requests/overdue/notify", timeout=25)

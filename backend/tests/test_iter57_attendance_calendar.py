@@ -81,7 +81,7 @@ class TestMonthlyCalendar:
             for key in ("status", "is_late", "is_today", "is_future", "weekday"):
                 assert key in day
             if d > today:
-                assert day["is_future"] is True
+                assert day["is_future"] == True
                 # future can be status=future OR week_off/holiday (all fine per priority)
             # Sundays with no att/leave/holiday should be week_off
             if d.weekday() == 6 and day["status"] not in ("present", "half", "absent", "paid_leave", "leave", "holiday"):
@@ -133,7 +133,7 @@ class TestMonthlyCalendar:
         assert r2.status_code == 200
         day = r2.json()["days"][today.isoformat()]
         assert day["status"] == "present", f"today should be present, got {day['status']}"
-        assert day["is_today"] is True
+        assert day["is_today"] == True
 
 
 # ---------------- Backend: /attendance/self structured errors ----------------

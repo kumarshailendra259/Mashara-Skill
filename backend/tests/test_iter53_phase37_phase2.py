@@ -428,10 +428,10 @@ class TestAutoClose:
             assert b["id"] in d["closed_ids"]
             # Verify batch is closed and locked
             bd = _get_batch(admin_session, b['id'])
-            assert bd.get("closed") is True
+            assert bd.get("closed") == True
             assert bd.get("lifecycle_status") == "Closed"
             for lk in ("basic_locked", "attendance_locked", "assessment_locked", "placement_locked"):
-                assert bd.get(lk) is True, f"{lk} should be True"
+                assert bd.get(lk) == True, f"{lk} should be True"
             # auto_closed_at is stored in DB but stripped by BatchOut response model
             # (not exposed in list endpoint) — verified via closed=True + lifecycle_status
             # lifecycle_history entry from system
@@ -456,10 +456,10 @@ class TestAutoClose:
             r = admin_session.patch(f"{BASE_URL}/api/batch-extension-requests/{rid}/approve")
             assert r.status_code == 200
             bd = _get_batch(admin_session, b['id'])
-            assert bd.get("closed") is False
+            assert bd.get("closed") == False
             assert bd.get("lifecycle_status") == "Active"
             for lk in ("basic_locked", "attendance_locked", "assessment_locked", "placement_locked"):
-                assert bd.get(lk) is False, f"{lk} should be reset to False"
+                assert bd.get(lk) == False, f"{lk} should be reset to False"
         finally:
             admin_session.delete(f"{BASE_URL}/api/batches/{b['id']}")
 

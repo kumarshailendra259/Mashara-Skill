@@ -74,7 +74,7 @@ class TestLoginHistory:
         assert "success" in latest
         # Newest record should belong to the admin we just authenticated
         assert latest.get("email") == ADMIN_EMAIL.lower()
-        assert latest.get("success") is True
+        assert latest.get("success") == True
 
     def test_login_history_admin_visible(self, admin_session):
         r = admin_session.get(f"{BASE_URL}/api/auth/login-history?limit=10", timeout=15)
@@ -354,7 +354,7 @@ class TestCenterScopedChain:
         assert r.status_code == 200, r.text
         ch = r.json()
         assert ch["center_id"] == center_id
-        assert ch["active"] is True
+        assert ch["active"] == True
         # Verify it shows up in list
         r2 = admin_session.get(f"{BASE_URL}/api/approval-chains", timeout=15)
         assert r2.status_code == 200

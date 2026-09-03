@@ -20631,7 +20631,9 @@ async def notif_sync_status(_=Depends(require_role("admin", "hr", "accountant"))
     errors = 0
     for row in stale:
         try:
-            msg = await run_in_threadpool(lambda: client.messages(row["message_sid"]).fetch())
+            # Bind `row` explicitly to avoid late-binding closure bugs when
+            # this is later awaited concurrently in loops.
+            msg = await run_in_threadpool(lambda r=row: client.messages(r["message_sid"]).fetch())
             await db.notification_logs.update_one(
                 {"id": row["id"]},
                 {"$set": {

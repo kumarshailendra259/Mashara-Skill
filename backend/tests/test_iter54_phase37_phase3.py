@@ -151,7 +151,7 @@ class TestCandidateAssessment:
         assert r.status_code == 200, r.text
         d = r.json()
         assert d["assessment_status"] == "passed"
-        assert d["certified"] is True
+        assert d["certified"] == True
         assert d["assessment_marks"] == 85
         # Batch counters resynced
         got = _get_batch(admin_session, b["id"])
@@ -165,7 +165,7 @@ class TestCandidateAssessment:
             f"{BASE_URL}/api/batches/{b['id']}/candidates/{cands[0]['id']}/assessment",
             json={"status": "failed"})
         assert r.status_code == 200
-        assert r.json()["certified"] is False
+        assert r.json()["certified"] == False
         got = _get_batch(admin_session, b["id"])
         assert got["fail_count"] == 1
         assert got["passed_candidates"] == 0

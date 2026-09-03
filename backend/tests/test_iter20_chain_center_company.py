@@ -94,7 +94,7 @@ class TestApprovalChainCenterScope:
     def test_create_global_chain_accepts_no_center(self, admin):
         chain = _make_chain(admin, f"TEST_iter20_global_{TAG}", "transaction", None, active=True)
         assert chain.get("center_id") in (None, "")
-        assert chain["active"] is True
+        assert chain["active"] == True
 
     def test_two_active_chains_coexist_when_centers_differ(self, admin, center_a):
         # Center-A specific chain should remain active alongside the global default
@@ -126,7 +126,7 @@ class TestApprovalChainCenterScope:
         after = r.json()
         # Global still active
         g_after = [c for c in after if c["id"] == global_id]
-        assert g_after and g_after[0]["active"] is True, "global default must NOT be deactivated"
+        assert g_after and g_after[0]["active"] == True, "global default must NOT be deactivated"
         # Only ONE center-A active chain
         center_a_active = [c for c in after if c["type"] == "transaction" and c.get("active") and c.get("center_id") == center_a]
         assert len(center_a_active) == 1
@@ -202,7 +202,7 @@ class TestApprovalChainCenterScope:
         assert r.status_code == 200, r.text
         updated = r.json()
         assert updated["center_id"] == center_a
-        assert updated["active"] is True
+        assert updated["active"] == True
         # Global still active
         r = admin.get(f"{API}/approval-chains", timeout=15)
         chains2 = r.json()

@@ -58,7 +58,7 @@ class TestSalarySlipTemplates:
         body = r.json()
         assert body.get("id")
         assert body.get("filename") == "global_slip.docx"
-        assert body.get("is_active") is True
+        assert body.get("is_active") == True
         TestSalarySlipTemplates.tpl_id = body["id"]
 
     def test_upload_deactivates_previous(self, admin, docx_bytes):
@@ -71,8 +71,8 @@ class TestSalarySlipTemplates:
         # Older template must now be inactive.
         lst = admin.get(f"{API}/salary-slip-templates", timeout=30).json()
         by_id = {t["id"]: t for t in lst}
-        assert by_id[TestSalarySlipTemplates.tpl_id]["is_active"] is False
-        assert by_id[new_id]["is_active"] is True
+        assert by_id[TestSalarySlipTemplates.tpl_id]["is_active"] == False
+        assert by_id[new_id]["is_active"] == True
         TestSalarySlipTemplates.tpl_id = new_id  # keep the active one
 
     def test_list_templates(self, admin):
@@ -147,11 +147,11 @@ class TestPayrollEmploymentWindow:
             assert TestPayrollEmploymentWindow.ids[k] in rows, f"{k} missing in June"
         b_row = rows[TestPayrollEmploymentWindow.ids["B"]]
         assert b_row["working_days"] == 16, f"B working_days expected 16, got {b_row['working_days']}"
-        assert b_row.get("is_partial_month") is True
+        assert b_row.get("is_partial_month") == True
         # A had a full month
         a_row = rows[TestPayrollEmploymentWindow.ids["A"]]
         assert a_row["working_days"] == 30
-        assert a_row.get("is_partial_month") is False
+        assert a_row.get("is_partial_month") == False
 
     def test_july_a_and_c_prorated(self, admin):
         rows = self._run_and_map(admin, 7, 2026)
@@ -159,7 +159,7 @@ class TestPayrollEmploymentWindow:
         assert TestPayrollEmploymentWindow.ids["C"] in rows
         c_row = rows[TestPayrollEmploymentWindow.ids["C"]]
         assert c_row["working_days"] == 15, f"C working_days expected 15, got {c_row['working_days']}"
-        assert c_row.get("is_partial_month") is True
+        assert c_row.get("is_partial_month") == True
 
     def test_august_only_a(self, admin):
         rows = self._run_and_map(admin, 8, 2026)
@@ -186,7 +186,7 @@ class TestSlipLifecycle:
         r = admin.post(f"{API}/payroll/{TestSlipLifecycle.pid}/generate-slip", timeout=90)
         assert r.status_code == 200, f"{r.status_code} {r.text[:300]}"
         body = r.json()
-        assert body.get("ok") is True
+        assert body.get("ok") == True
         assert body.get("slip_id")
         assert body.get("extension") in ("pdf", "docx")
 
@@ -199,7 +199,7 @@ class TestSlipLifecycle:
         r = admin.patch(f"{API}/payroll/{TestSlipLifecycle.pid}/release-slip",
                         params={"released": True}, timeout=30)
         assert r.status_code == 200
-        assert r.json().get("released") is True
+        assert r.json().get("released") == True
         # Verify slip_released_at is set on the payroll doc
         pr = admin.get(f"{API}/payroll", params={"month": 7, "year": 2026, "limit": 5000}, timeout=30).json()
         row = next(x for x in pr if x["id"] == TestSlipLifecycle.pid)
@@ -209,7 +209,7 @@ class TestSlipLifecycle:
         r = admin.patch(f"{API}/payroll/{TestSlipLifecycle.pid}/release-slip",
                         params={"released": False}, timeout=30)
         assert r.status_code == 200
-        assert r.json().get("released") is False
+        assert r.json().get("released") == False
 
 
 # ---------------------------------------------------------------

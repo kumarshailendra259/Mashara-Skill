@@ -265,7 +265,7 @@ class TestLeaveAllocation:
         r = admin_session.post(f"{BASE_URL}/api/leave-balances/allocate", json=body, timeout=20)
         assert r.status_code == 200, r.text[:200]
         data = r.json()
-        assert data["ok"] is True
+        assert data["ok"] == True
         assert data["updated"] >= 1
 
         # verify via GET

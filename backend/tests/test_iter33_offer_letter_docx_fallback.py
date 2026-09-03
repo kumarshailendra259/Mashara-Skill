@@ -181,7 +181,7 @@ class TestPdfHappyPath:
         created["staff"].append(data["id"])
 
         ols = data.get("offer_letter_status") or {}
-        assert ols.get("generated") is True, f"not generated: {ols}"
+        assert ols.get("generated") == True, f"not generated: {ols}"
         assert ols.get("letter_id"), f"no letter_id: {ols}"
         assert ols.get("extension") == "pdf", \
             f"expected extension='pdf', got '{ols.get('extension')}' — LibreOffice may be missing on preview! full ols={ols}"

@@ -92,7 +92,7 @@ class TestRateMatrix:
         assert j["final_rate"] == 61.985
         assert j["work_order_value"] == 4958.80
         assert j["slab_label"] == "2026-27 & later"
-        assert j["is_lwe"] is True
+        assert j["is_lwe"] == True
         assert j["base_rate"] == 56.35
 
 
@@ -122,7 +122,7 @@ class TestDistrictLWELookup:
         r = admin_session.patch(f"{API}/districts/{center_id}/lwe",
                                  json={"is_lwe": True})
         assert r.status_code == 200
-        assert r.json().get("is_lwe") is True
+        assert r.json().get("is_lwe") == True
 
         # Now calculate without passing is_lwe — should use center's is_lwe=True
         r = admin_session.post(f"{API}/work-order/calculate",
@@ -131,7 +131,7 @@ class TestDistrictLWELookup:
                                        "num_candidates": 1, "job_role_hours": 1})
         assert r.status_code == 200
         j = r.json()
-        assert j["is_lwe"] is True
+        assert j["is_lwe"] == True
         assert j["final_rate"] == 61.985
 
         # cleanup — reset to False
@@ -174,7 +174,7 @@ class TestJobRoleMaster:
         data = r.json()
         assert data["name"] == name
         assert data["default_hours"] == 8
-        assert data["active"] is True
+        assert data["active"] == True
         TestJobRoleMaster._created_id = data["id"]
 
         # Dedupe (case-insensitive)
@@ -200,7 +200,7 @@ class TestJobRoleMaster:
         assert not any(x["id"] == rid for x in actives)
         # Confirm still exists when active_only=false
         all_roles = admin_session.get(f"{API}/job-role-master?active_only=false").json()
-        assert any(x["id"] == rid and x.get("active") is False for x in all_roles)
+        assert any(x["id"] == rid and x.get("active") == False for x in all_roles)
 
 
 # ============  7. Batch create/update authoritative rate  ============
@@ -228,7 +228,7 @@ class TestBatchAuthoritativeRate:
             b = r.json()
             assert b["base_rate"] == 56.35
             assert b["final_rate"] == 61.985
-            assert b["is_lwe"] is True
+            assert b["is_lwe"] == True
             assert b["work_order_value"] == 4958.80
             bid = b["id"]
 

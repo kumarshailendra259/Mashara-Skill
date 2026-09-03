@@ -156,7 +156,7 @@ class TestApprovalActAdvanceOptional:
     def test_final_approve_advance_without_attribution_succeeds(self, admin):
         adv = _create_advance_bank(admin, tag=f"noattr-{uuid.uuid4().hex[:6]}")
         item = _walk_and_get_final_step(admin, adv["id"])
-        assert item["is_final_step"] is True
+        assert item["is_final_step"] == True
         r = admin.post(f"{BASE_URL}/api/approvals/act",
                        json={"request_type": "advance_request", "request_id": adv["id"],
                              "action": "approve", "remarks": "no attribution"},
@@ -174,7 +174,7 @@ class TestApprovalActAdvanceOptional:
             self, admin, sample_center, sample_partner, admin_me):
         adv = _create_advance_bank(admin, tag=f"full-{uuid.uuid4().hex[:6]}")
         item = _walk_and_get_final_step(admin, adv["id"])
-        assert item["is_final_step"] is True
+        assert item["is_final_step"] == True
         body = {
             "request_type": "advance_request",
             "request_id": adv["id"],

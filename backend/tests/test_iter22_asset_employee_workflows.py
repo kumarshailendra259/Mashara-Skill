@@ -214,7 +214,7 @@ class TestAssetCRUD:
         assert r.status_code == 200, r.text
         data = r.json()
         assert data["name"] == payload["name"]
-        assert data.get("manual_entry") is True
+        assert data.get("manual_entry") == True
         TestAssetCRUD.aid = data["id"]
 
     def test_patch_asset(self, admin_session):
@@ -325,8 +325,8 @@ class TestEmployeeTransfer:
                 and x.get("request_id") == TestEmployeeTransfer.transfer_id]
         assert rows, "employee_transfer not in /approvals/pending"
         desc = rows[0]["summary"].get("description") or ""
-        # description is "reason" when present (fallback to staff_name → center otherwise).
-        # Our reason is "regional rotation"; either should be non-empty + amount None for employee transfer.
+        # description == "reason" when present (fallback to staff_name → center otherwise).
+        # Our reason == "regional rotation"; either should be non-empty + amount None for employee transfer.
         assert desc, "summary.description must not be empty for employee_transfer"
         assert rows[0]["summary"].get("amount") is None  # employee transfers have no amount
         assert rows[0]["summary"].get("date") == "2026-02-01"

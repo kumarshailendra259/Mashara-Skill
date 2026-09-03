@@ -74,7 +74,7 @@ class TestForgotPasswordFlow:
                           json={"email": f"nobody_{TAG}@example.com"}, timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert data.get("ok") is True
+        assert data.get("ok") == True
 
     def test_forgot_password_valid_email_creates_otp_doc(self, db):
         # Use a fresh user so admin's rate limit isn't affected
@@ -196,7 +196,7 @@ class TestVerifyAndResetFlow:
 
         # Verify the other open OTP was invalidated (used=True)
         other = _run(db.password_reset_otps.find_one({"email": email, "otp_hash": _sha256("111111")}))
-        assert other.get("used") is True, "other open OTPs were not invalidated"
+        assert other.get("used") == True, "other open OTPs were not invalidated"
 
     def test_admin_password_unchanged_at_end(self):
         """Sanity check: admin login still works with Admin@123 (we never touched admin)."""
@@ -387,7 +387,7 @@ class TestPartnerCrossApprove:
         # Confirm eligibility check matches
         elig = f["unrelated_sess"].get(f"{API}/transactions/{tid}/partner-approve-eligibility", timeout=15)
         assert elig.status_code == 200
-        assert elig.json()["eligible"] is False
+        assert elig.json()["eligible"] == False
         r = f["unrelated_sess"].post(f"{API}/transactions/{tid}/partner-approve", timeout=15)
         assert r.status_code == 403, r.text
 
@@ -397,7 +397,7 @@ class TestPartnerCrossApprove:
         # Approver's partner P2 has a seed txn in same project — should be eligible
         elig = f["approver_sess"].get(f"{API}/transactions/{tid}/partner-approve-eligibility", timeout=15)
         assert elig.status_code == 200
-        assert elig.json()["eligible"] is True, elig.json()
+        assert elig.json()["eligible"] == True, elig.json()
         r = f["approver_sess"].post(f"{API}/transactions/{tid}/partner-approve", timeout=15)
         assert r.status_code == 200, r.text
         body = r.json()
@@ -422,7 +422,7 @@ class TestPartnerCrossApprove:
 
         # Unrelated session (P3) — before pairing, should fail
         r_pre = f["unrelated_sess"].get(f"{API}/transactions/{tid}/partner-approve-eligibility", timeout=15)
-        assert r_pre.json()["eligible"] is False
+        assert r_pre.json()["eligible"] == False
 
         # Admin creates P1<->P3 pairing
         rc = admin.post(f"{API}/partner-associations",
@@ -431,7 +431,7 @@ class TestPartnerCrossApprove:
 
         # Now eligible
         r_post = f["unrelated_sess"].get(f"{API}/transactions/{tid}/partner-approve-eligibility", timeout=15)
-        assert r_post.json()["eligible"] is True, r_post.json()
+        assert r_post.json()["eligible"] == True, r_post.json()
 
         # Approve succeeds
         ra = f["unrelated_sess"].post(f"{API}/transactions/{tid}/partner-approve", timeout=15)

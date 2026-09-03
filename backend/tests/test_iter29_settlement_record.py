@@ -179,7 +179,7 @@ class TestSettlementCutoff:
         assert ctr["center_id"] == seed["center"]
         assert ctr["settled_till"] == "2026-06-30"
         assert ctr["last_settlement"]["id"] == rec["id"]
-        # All txns are on/before cutoff -> current is 0
+        # All txns are on/before cutoff -> current == 0
         assert ctr["total_contribution"] == 0
         assert ctr["partner_count"] == 0
         assert ctr["partners"] == []

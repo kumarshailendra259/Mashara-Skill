@@ -111,7 +111,7 @@ class TestSelfCheckIn:
         r = admin.post(f"{API}/attendance/self", json=payload, timeout=15)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["ok"] is True
+        assert body["ok"] == True
         assert body["staff_id"] == admin_staff_id
         assert body["date"] == TODAY
         assert body.get("marked_at")
@@ -157,7 +157,7 @@ class TestSelfCheckIn:
         r = admin.post(f"{API}/attendance/self", json={"status": "present"}, timeout=15)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["ok"] is True
+        assert body["ok"] == True
         assert body["date"] == TODAY
 
     def test_self_checkin_requires_auth(self):

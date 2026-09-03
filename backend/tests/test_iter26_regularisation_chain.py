@@ -137,7 +137,7 @@ class TestRegularisationFinalApprove:
                                timeout=20)
         assert r.status_code == 200, f"act failed: {r.status_code} {r.text}"
         body = r.json()
-        assert body.get("ok") is True
+        assert body.get("ok") == True
         assert body.get("status") == "approved"
 
         # verify regularisation doc updated
@@ -158,7 +158,7 @@ class TestRegularisationFinalApprove:
         match = [a for a in rows if a.get("date") == "2025-12-15" and a.get("staff_id") == staff_user_session["staff_id"]]
         assert match, f"attendance row not created: {rows}"
         a = match[0]
-        assert a.get("regularised") is True
+        assert a.get("regularised") == True
         assert a.get("marked_via") == "regularised"
         assert a.get("status") == "present"
         assert a.get("regularisation_id") == rid

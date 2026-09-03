@@ -141,7 +141,7 @@ class TestNotifications:
         msgs = [n for n in items if n.get("ref_id") == tid]
         assert len(msgs) >= 1
         assert msgs[0]["type"] == "txn_approved"
-        assert msgs[0]["read"] is False
+        assert msgs[0]["read"] == False
 
     def test_txn_reject_notifies_creator(self, admin, manager_user):
         r = manager_user["session"].post(f"{BASE_URL}/api/transactions", json={
@@ -187,7 +187,7 @@ class TestNotifications:
         assert r.status_code == 200
         items = manager_user["session"].get(f"{BASE_URL}/api/notifications").json()["items"]
         rec = next(n for n in items if n["id"] == nid)
-        assert rec["read"] is True
+        assert rec["read"] == True
 
     def test_mark_one_read_404(self, admin):
         r = admin.patch(f"{BASE_URL}/api/notifications/nonexistent-id/read")

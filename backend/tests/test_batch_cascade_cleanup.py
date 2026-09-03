@@ -97,7 +97,7 @@ def test_batch_delete_cascades_milestone_txns_and_cleanup_endpoint():
             body = rc.json()
             assert body["orphans"] >= 1, body
             assert body["deleted"] == 0
-            assert body["dry_run"] is True
+            assert body["dry_run"] == True
 
             # Real cleanup should delete it
             rc2 = s.post(f"{API_BASE}/batches/cleanup-orphan-txns", headers=hdrs)

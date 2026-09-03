@@ -261,7 +261,7 @@ class TestAdvanceAdjustmentHappyPath:
 
         txn = asyncio.new_event_loop().run_until_complete(_fetch())
         assert txn, f"txn {p_final['txn_id']} not found in db"
-        assert txn.get("is_advance_adjustment") is True
+        assert txn.get("is_advance_adjustment") == True
         assert txn.get("funded_by_advance_id") == adv_id
         assert txn.get("advance_no") == rel["advance_no"]
 

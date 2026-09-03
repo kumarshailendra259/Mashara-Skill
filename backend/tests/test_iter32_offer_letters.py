@@ -201,7 +201,7 @@ class TestTemplateUpload:
         data = r.json()
         assert data["id"] and data["filename"].endswith(".docx")
         assert data["company_id"] is None  # global
-        assert data["is_active"] is True
+        assert data["is_active"] == True
         created_ids["templates"].append(data["id"])
         created_ids["_global_tpl_id"] = data["id"]
 
@@ -218,7 +218,7 @@ class TestTemplateUpload:
         data = r.json()
         assert data["company_id"] == seed["company_id"]
         assert data["company_name"] == seed["company_name"]
-        assert data["is_active"] is True
+        assert data["is_active"] == True
         created_ids["templates"].append(data["id"])
         created_ids["_perco_tpl_id"] = data["id"]
 
@@ -253,14 +253,14 @@ class TestTemplateUpload:
         )
         assert r.status_code == 201, r.text
         new_data = r.json()
-        assert new_data["is_active"] is True
+        assert new_data["is_active"] == True
         created_ids["templates"].append(new_data["id"])
         # The old per-company template should now have is_active=False
         listing = admin.get(f"{BASE_URL}/api/offer-letter-templates", timeout=15).json()
         by_id = {t["id"]: t for t in listing}
         old = by_id.get(created_ids["_perco_tpl_id"])
         assert old is not None, "old per-company template missing from listing"
-        assert old["is_active"] is False, \
+        assert old["is_active"] == False, \
             f"previous per-company template should be deactivated, got is_active={old['is_active']}"
         # Ensure new one is the only active one for that company
         actives = [t for t in listing if t.get("company_id") == seed["company_id"] and t["is_active"]]
@@ -278,14 +278,14 @@ class TestTemplateUpload:
         assert r.status_code == 201, r.text
         new_data = r.json()
         assert new_data["company_id"] is None
-        assert new_data["is_active"] is True
+        assert new_data["is_active"] == True
         created_ids["templates"].append(new_data["id"])
         created_ids["_global_tpl_id_v2"] = new_data["id"]
         # Verify previous global is now inactive
         listing = admin.get(f"{BASE_URL}/api/offer-letter-templates", timeout=15).json()
         by_id = {t["id"]: t for t in listing}
         prev = by_id.get(created_ids["_global_tpl_id"])
-        assert prev and prev["is_active"] is False, "prior global template should be deactivated"
+        assert prev and prev["is_active"] == False, "prior global template should be deactivated"
         # Only one active global
         active_globals = [t for t in listing if t.get("company_id") is None and t["is_active"]]
         assert len(active_globals) == 1 and active_globals[0]["id"] == new_data["id"]
@@ -414,7 +414,7 @@ class TestStaffCreationTriggersOfferLetter:
         # Response should carry offer_letter_status
         ols = data.get("offer_letter_status")
         assert ols is not None, f"missing offer_letter_status in response: {data}"
-        assert ols.get("generated") is True, f"offer letter not generated: {ols}"
+        assert ols.get("generated") == True, f"offer letter not generated: {ols}"
         assert ols.get("letter_id"), f"no letter_id: {ols}"
         assert ols.get("pdf_path"), f"no pdf_path: {ols}"
         assert isinstance(ols.get("emailed"), bool), \
@@ -538,7 +538,7 @@ class TestNoTemplateFallback:
         created_ids["staff"].append(data["id"])
         created_ids["users_emails"].append(staff_email)
         ols = data.get("offer_letter_status") or {}
-        assert ols.get("generated") is False, f"expected generated=false: {ols}"
+        assert ols.get("generated") == False, f"expected generated=false: {ols}"
         assert ols.get("reason") == "no_template_uploaded", \
             f"expected reason=no_template_uploaded, got {ols}"
 
@@ -566,7 +566,7 @@ class TestResendEndpoint:
                        timeout=120)
         assert r.status_code == 200, f"{r.status_code} {r.text}"
         res = r.json()
-        assert res.get("generated") is True, f"resend not generated: {res}"
+        assert res.get("generated") == True, f"resend not generated: {res}"
         assert res.get("letter_id")
         # Should be a NEW letter id
         assert res["letter_id"] != created_ids["_letter_id"], \
@@ -631,6 +631,6 @@ class TestGlobalFallbackForCenterWithoutCompany:
         created_ids["staff"].append(data["id"])
         created_ids["users_emails"].append(staff_email)
         ols = data.get("offer_letter_status") or {}
-        assert ols.get("generated") is True, \
+        assert ols.get("generated") == True, \
             f"expected generation via global template, got {ols}"
         assert ols.get("letter_id")

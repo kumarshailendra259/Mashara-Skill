@@ -90,7 +90,7 @@ def test_sundays_without_row_are_week_off(admin_client):
         # If NO real row exists AND weekly_off_days contains sunday, expect week_off
         if row["synthetic"]:
             assert row["status"] == "week_off", f"{iso} expected week_off, got {row['status']}"
-            assert row["is_week_off"] is True
+            assert row["is_week_off"] == True
             assert row["marked_via"] == "policy"
 
 
@@ -102,9 +102,9 @@ def test_regularised_row_shows_present_not_incomplete(admin_client):
     target = by_date.get("2026-04-15")
     assert target is not None, "2026-04-15 missing from response"
     assert target["status"] == "present", f"expected 'present', got {target['status']} row={target}"
-    assert target["is_regularised"] is True
+    assert target["is_regularised"] == True
     assert target.get("marked_via") == "regularised"
-    assert target["synthetic"] is False
+    assert target["synthetic"] == False
 
 
 # ----- Test 4: future dates get 'upcoming' or 'week_off' -------------------
@@ -114,7 +114,7 @@ def test_future_dates_are_upcoming_or_off(admin_client):
     rows = j["current"]["attendance_rows"]
     assert len(rows) == 31
     for r in rows:
-        assert r["synthetic"] is True
+        assert r["synthetic"] == True
         assert r["status"] in ("upcoming", "week_off", "holiday"), r
 
 

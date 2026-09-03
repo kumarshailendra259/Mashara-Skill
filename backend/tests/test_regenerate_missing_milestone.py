@@ -64,7 +64,7 @@ def test_regenerate_missing_milestone_txns():
             r1 = s.post(f"{API_BASE}/batches/regenerate-missing-milestone-txns?dry_run=true", headers=hdrs)
             assert r1.status_code == 200, r1.text
             d = r1.json()
-            assert d["dry_run"] is True
+            assert d["dry_run"] == True
             assert d["regenerated_payments"] >= 1
             assert d["transactions_created"] >= 1
             # DB should still be empty since it's a dry run
