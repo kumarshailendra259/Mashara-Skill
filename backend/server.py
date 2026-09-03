@@ -1302,6 +1302,57 @@ async def view_file(
     if not allowed and rec.get("uploaded_by") == uid:
         allowed = True
 
+    # Phase 65 — center-scoped visibility: partner, center_manager, center_staff,
+    # ops, trainer, mobilizer, etc. see any file that is attached to a record
+    # sitting at one of their mapped centers. This mirrors the same isolation
+    # policy that scopes their list/detail endpoints, so an attachment
+    # embedded in a record they CAN see is not falsely blocked.
+    if not allowed:
+        # Partners need their center-list computed lazily — `get_current_user`
+        # does not enrich by default because the resolution can hit multiple
+        # collections.
+        if role == "partner" and user.get("_associated_center_ids") is None:
+            try:
+                await _enrich_user_with_associations(user)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            scope_center_ids = _scoped_center_ids(user)
+        except Exception:  # noqa: BLE001
+            scope_center_ids = []
+        if scope_center_ids:
+            _CENTER_CARRIERS = (
+                ("transactions",       {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("quotations",         {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("payments",           {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("reimbursements",     {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("advance_requests",   {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("asset_purchase_requests", {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("bank_guarantees",    {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("expenses",           {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("vendor_bills",       {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("purchase_orders",    {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("candidates",         {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("batches",            {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                # Staff documents are center-scoped via the parent staff record.
+            )
+            for coll, q in _CENTER_CARRIERS:
+                hit = await db[coll].find_one(q, {"_id": 0, "id": 1})
+                if hit:
+                    allowed = True
+                    break
+            # staff_documents → resolve via parent staff.center_id.
+            if not allowed:
+                staff_doc = await db.staff_documents.find_one(
+                    {"file_path": path}, {"_id": 0, "staff_id": 1},
+                )
+                if staff_doc:
+                    st = await db.staff.find_one(
+                        {"id": staff_doc.get("staff_id")}, {"_id": 0, "center_id": 1},
+                    )
+                    if st and st.get("center_id") in scope_center_ids:
+                        allowed = True
+
     if not allowed:
         # Check if `path` is referenced in any document the caller owns. We
         # scan the most common attachment carriers. Each query is bounded and
@@ -1641,6 +1692,13 @@ async def my_scope(user=Depends(get_current_user)):
     dropdowns, and (c) know when to hide "All Centers" toggles.
     """
     role = user.get("role")
+    # Enrich partners lazily so `_scoped_center_ids` can see their computed
+    # centers (from batches / centers.partner_id / txn history).
+    if role == "partner" and user.get("_associated_center_ids") is None:
+        try:
+            await _enrich_user_with_associations(user)
+        except Exception:  # noqa: BLE001
+            pass
     allowed = _scoped_center_ids(user)
     is_head_level = allowed is None
     center_ids = allowed or []
