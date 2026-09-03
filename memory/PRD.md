@@ -26,6 +26,62 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 69 — Company Codes + Role-based Licenses + Multi-tenant Foundation (Done, Feb 2026)
+- **User asked (18-point spec)**: Every company must have unique `Company Code` (COMP-NNNNN). Replace single Staff Limit with role-wise licenses (HRMS Staff + Role/User Staff). Purchases must be permanently linked to `company_id` + `company_code`. License enforcement: block user creation when the role's ceiling is reached (exact copy: "HRMS Staff license limit reached. You have used X of Y available licenses. Please purchase additional licenses."). Deactivation must free the license. "Buy Additional Licenses" flow. Super Admin cross-company view. Super Admin editable pricing.
+- **User's 3 clarifications**: Super admin edits pricing themselves (I seeded defaults + editor). Full multi-tenancy scope (foundational). Super Admin cross-company view at `/companies-admin`.
+- **Backend `/app/backend/subscription_service.py`**:
+  - New `LICENSE_ROLES = ["hrms_staff", "role_user_staff"]` + `DEFAULT_LICENSE_PRICING` seeded at ₹99/staff/month (HRMS) and ₹49/staff/month (Role/User). Editable by super admin.
+  - `seed_catalog()` also seeds `db.subscription_license_pricing`.
+  - `get_pricing_catalog()` now returns `{license_pricing, plans, features, addons, gst_rate_pct}`.
+  - `compute_quote()` re-written to accept `{hrms_staff_qty, role_user_staff_qty, feature_codes, addon_codes, staff_count_for_bgv, duration_months, coupon_code}` — server-authoritative, GST 18% on post-discount taxable.
+  - `apply_bundle_entitlements()` now ALSO credits `db.company_licenses` for both roles atomically on payment capture. Idempotent via `source_order_id`.
+- **Backend `/app/backend/server.py`**:
+  - `_next_company_code()` — atomic `db.counters` sequence (COMP-10001, COMP-10002…). `_backfill_company_codes()` runs at startup and back-fills every existing company (73 backfilled in preview DB). Unique partial-filter index on `companies.company_code`.
+  - `_backfill_user_company_ids()` — best-effort resolves `user.company_id` from their first `assigned_center → center.company_id`, falls back to first company. Prevents license checks from crashing for legacy users.
+  - `POST /entities/company` — auto-assigns `company_code` on creation. Never accepts client-supplied codes.
+  - `POST /subscription/quote` + `POST /subscription/orders` — accept role qtys instead of plan_code. Order docs now persist `company_code`, `company_name`, `hrms_staff_qty`, `role_user_staff_qty`, `gst_invoice`, `gstin`, `is_topup`, full `line_items[]`. Company ID always derived from the authenticated user (security rule §16).
+  - `POST /subscription/verify` — on capture, calls `apply_bundle_entitlements` to increment `company_licenses.purchased_qty` for both roles + activate modules.
+  - `GET /subscription/licenses` — returns `{company, licenses[{role, name, price_paise, purchased_qty, used_qty, available_qty}]}`. Refreshes `used_qty` on every call by counting active users with matching `license_role`.
+  - `_check_license_available(company_id, role)` — raises HTTP 402 with **exact business message** ("HRMS Staff license limit reached. You have used X of Y available licenses. Please purchase additional licenses.") when the ceiling is hit.
+  - New `POST /auth/users` — admin creates user + enforces license via `_check_license_available`; `company_id` derived from admin's session. Legacy `POST /auth/register` (public self-register) kept intact for first-admin bootstrap.
+  - `PATCH /auth/users/{uid}` — enforces license on re-activation OR license_role change, then calls `_refresh_license_usage(company_id)` so deactivation frees the license immediately.
+  - Admin pricing endpoints (super-admin only): `GET/PATCH /subscription/admin/license-pricing`, `PATCH /subscription/admin/features`, `PATCH /subscription/admin/addons`.
+  - `POST/GET/DELETE /subscription/admin/coupons` — coupon CRUD (unchanged).
+  - `GET /companies-admin/list` — full cross-company table for super admin with `q`+`status` filters. Returns per-row: company_name/code, active modules, HRMS/Role used-vs-bought, subscription_status ("active"/"expired"), expiry_date, latest_payment_id + amount + captured_at.
+  - New Pydantic models: `UserOut`+`RegisterIn`+`UserUpdateIn` gained `company_id`, `company_code`, `license_role`, `is_active`. `AdminCreateUserIn` for `POST /auth/users`.
+- **Data model additions (Mongo)**:
+  - `counters` — atomic sequence for `company_code_seq`.
+  - `companies` — unique `company_code` (COMP-NNNNN) partial-filter index.
+  - `users` — new fields `company_id`, `license_role` ("hrms_staff" | "role_user_staff"), `is_active`.
+  - `company_licenses` — `{company_id, role, purchased_qty, used_qty, last_order_id, updated_at}` with unique compound index on `(company_id, role)`.
+  - `subscription_license_pricing` — `{role, name, description, price_paise, sort, is_active}` editable by super admin.
+- **Frontend `/app/frontend/src/pages/SubscriptionBilling.jsx`** (major rewrite while keeping the SalaryBox design):
+  - **License Usage banner** at top: company name + `Company Code: COMP-10001`, KPI tiles (Total Licenses / Used / Available), progress bars per role (green ≤ 70%, amber 70-89%, red ≥ 90%). Each role row has a "Buy More" button that pre-fills the cart for that role only and shows an amber "Additional license purchase mode" banner (features/addons cleared, isTopup=true).
+  - **Staff & User Licenses card** — replaces the old dropdown. Two stepper cards side-by-side:
+    - HRMS Staff (blue) — [-] qty [+], `₹99 / staff / month` displayed
+    - Role/User Staff (emerald) — [-] qty [+], `₹49 / staff / month`
+  - **Order Summary** now shows Company + Company Code at the top. Line-items enumerate: `LICENSE HRMS Staff × 20 × 1mo ₹1,980`, `LICENSE Role/User Staff × 5 × 1mo ₹245`, plus features/addons.
+  - Coupon + GST invoice + Continue to Pay preserved. Sticky on desktop (`lg:sticky lg:top-4`).
+  - "Edit Pricing" button (admin only) opens a `PricingEditorDialog` where super admin can edit all license/feature/addon prices in one shot (batch PATCH). Live pricing reload after save.
+  - "Payment History" tab — new columns: Order ID / Company Code / HRMS / Role/User / Features / Total / GST Invoice (with GSTIN) / Status / Date.
+- **Frontend `/app/frontend/src/pages/CompaniesAdmin.jsx`** (NEW):
+  - Route: `/companies-admin` (admin only).
+  - Header: "Super Admin" chip → "Companies" heading.
+  - 5 KPI tiles: Companies count / Active Subs / HRMS licenses used-of-bought (sys-wide) / Role/User licenses used-of-bought / Recent Revenue.
+  - Search input (name / code / payment id) + status Select (All / Active / Expired), Refresh + CSV export.
+  - Table: Company · Code (COMP-NNNNN) · Modules · HRMS Used/Bought · Role/User Used/Bought · Status · Expiry · Latest Payment (id + amount + date).
+- **Frontend `/app/frontend/src/components/Layout.jsx`** — sidebar `grp_subscription` gains a second item **Companies (Super Admin)** with a Building icon (admin-only). i18n keys added for `companies_admin` in EN + HI.
+- **Verified E2E**:
+  - `GET /subscription/licenses` (admin session) → `{company: {name: "Valeur Fabtex Pvt Ltd", company_code: "COMP-10001"}, licenses: [{role:"hrms_staff", purchased:0, used:0}, {role:"role_user_staff", purchased:0, used:0}]}`.
+  - `POST /auth/users {license_role:"hrms_staff"}` with 0 purchased licenses → **HTTP 402** with exact message `"HRMS Staff license limit reached. You have used 0 of 0 available licenses. Please purchase additional licenses."` (user-verbatim string).
+  - After granting HRMS=2 licenses: 2 users created (HTTP 200, both stamped with `company_code: COMP-10001`), 3rd → HTTP 402 `"used 2 of 2"`. Deactivate user 1 → `used_qty` auto-drops to 1 → 3rd user creation now succeeds. Regression-clean.
+  - `GET /companies-admin/list` → 73 companies rendered with sequential COMP-10001…COMP-10073 codes.
+  - Live cart quote: `20 HRMS × ₹99 × 1mo + 5 Role/User × ₹49 × 1mo + Payroll ₹699 = ₹2,924 subtotal + ₹526.32 GST = ₹3,450.32 grand total`. Company Code COMP-10001 rendered in summary.
+- **Preserved (not touched)**: Coupons, GST, Features, Addons, Duration, existing Razorpay flow, existing HRMS modules, existing navigation & auth.
+- **Deferred (Phase 70+)**: Full row-level `company_id` scoping across every existing HRMS/payroll/attendance/transaction row (already effectively scoped via center/role). Login-with-Company-Code (frontend supports plain email login today; adding a Company-Code login field is a small future add-on).
+
+
+
 ### Phase 68 — SalaryBox-style Cart, Coupons & Standalone Sidebar (Done, Feb 2026)
 - **User asked (Hinglish)**: "buyer ko payment show karte rahe as per select staff and feature and add ones aur subscription aur billing ko alag menu banaye approval & workflow se nikal kar" — SalaryBox-style dynamic cart with staff-tier plan + features + addons + coupons + GST + live-updating price. And move Subscription & Billing out of the Approvals group into its own standalone sidebar menu.
 - **Backend `/app/backend/subscription_service.py`** (major rewrite):

@@ -37,9 +37,16 @@ WEBHOOK_SECRET = os.environ.get("RAZORPAY_WEBHOOK_SECRET") or ""
 
 GST_RATE_PCT = 18  # India — flat rate applied on subtotal (post-discount).
 
-# ---- Staff-tier base plans ---------------------------------------------------
-# Every subscription starts with a base plan (HR + core Attendance + core Staff
-# management included). Features & addons stack on top. Prices are in paise.
+# ---- Role-based per-staff pricing (editable by super admin) ------------------
+# Two distinct license roles a company purchases separately. Prices are per
+# staff per month in paise. Super admins can edit these via admin endpoints.
+LICENSE_ROLES = ["hrms_staff", "role_user_staff"]
+DEFAULT_LICENSE_PRICING: list[dict] = [
+    {"role": "hrms_staff",      "name": "HRMS Staff",       "description": "Human Resource & HRMS management users",  "price_paise": 9900,  "sort": 10},
+    {"role": "role_user_staff", "name": "Role/User Staff",  "description": "General application / operational users", "price_paise": 4900,  "sort": 20},
+]
+
+# Legacy staff-tier plans kept for backwards compat / display only.
 DEFAULT_PLANS: list[dict] = [
     {"code": "plan_5",   "name": "Starter · 5 Staff",       "staff_limit": 5,        "price_paise": 49900,   "sort": 10},
     {"code": "plan_10",  "name": "Basic · 10 Staff",         "staff_limit": 10,       "price_paise": 89900,   "sort": 20},
@@ -100,7 +107,7 @@ def get_client():
 
 
 async def seed_catalog(db):
-    """Idempotent: seed legacy catalog + plans + features + addons."""
+    """Idempotent: seed legacy catalog + plans + features + addons + role pricing."""
     now = datetime.now(timezone.utc).isoformat()
     for row in DEFAULT_CATALOG:
         await db.subscription_catalog.update_one(
@@ -126,14 +133,21 @@ async def seed_catalog(db):
             {"$setOnInsert": {**row, "is_active": True, "created_at": now}},
             upsert=True,
         )
+    for row in DEFAULT_LICENSE_PRICING:
+        await db.subscription_license_pricing.update_one(
+            {"role": row["role"]},
+            {"$setOnInsert": {**row, "is_active": True, "created_at": now}},
+            upsert=True,
+        )
 
 
 async def get_pricing_catalog(db) -> dict:
-    """Everything the buyer needs to build a quote — plans / features / addons."""
-    plans   = await db.subscription_plans.find({"is_active": True}, {"_id": 0}).sort("sort", 1).to_list(50)
-    feats   = await db.subscription_features.find({"is_active": True}, {"_id": 0}).sort("price_paise", 1).to_list(50)
-    addons  = await db.subscription_addons.find({"is_active": True}, {"_id": 0}).sort("price_paise", 1).to_list(50)
-    return {"plans": plans, "features": feats, "addons": addons, "gst_rate_pct": GST_RATE_PCT}
+    """Everything the buyer needs to build a quote — role licenses / features / addons."""
+    licenses = await db.subscription_license_pricing.find({"is_active": True}, {"_id": 0}).sort("sort", 1).to_list(20)
+    plans    = await db.subscription_plans.find({"is_active": True}, {"_id": 0}).sort("sort", 1).to_list(50)
+    feats    = await db.subscription_features.find({"is_active": True}, {"_id": 0}).sort("price_paise", 1).to_list(50)
+    addons   = await db.subscription_addons.find({"is_active": True}, {"_id": 0}).sort("price_paise", 1).to_list(50)
+    return {"license_pricing": licenses, "plans": plans, "features": feats, "addons": addons, "gst_rate_pct": GST_RATE_PCT}
 
 
 async def get_catalog(db) -> list[dict]:
@@ -168,19 +182,31 @@ async def validate_coupon(db, code: str, subtotal_paise: int) -> dict:
     return {"ok": True, "discount_paise": disc, "reason": "ok", "coupon": row}
 
 
-async def compute_quote(db, *, plan_code: str, feature_codes: list[str],
-                        addon_codes: list[str], staff_count_for_bgv: int,
-                        duration_months: int, coupon_code: Optional[str]) -> dict:
+async def compute_quote(db, *, hrms_staff_qty: int, role_user_staff_qty: int,
+                        feature_codes: list[str], addon_codes: list[str],
+                        staff_count_for_bgv: int, duration_months: int,
+                        coupon_code: Optional[str]) -> dict:
     """Server-authoritative price computation. Client is NEVER trusted with amounts.
 
-    Returns a rich breakdown so the UI can render every line item + totals.
+    Line items:
+      - HRMS Staff × qty × price_per_staff × months
+      - Role/User Staff × qty × price_per_staff × months
+      - Each selected feature × months
+      - Each selected addon (monthly × months, or per_staff × BGV count)
     """
     if duration_months < 1 or duration_months > 24:
         raise HTTPException(400, "duration_months must be between 1 and 24")
+    hrms_qty = max(0, int(hrms_staff_qty or 0))
+    role_qty = max(0, int(role_user_staff_qty or 0))
+    if hrms_qty == 0 and role_qty == 0:
+        raise HTTPException(400, "Purchase at least 1 HRMS or Role/User Staff license")
 
-    plan_doc = await db.subscription_plans.find_one({"code": plan_code, "is_active": True}, {"_id": 0}) if plan_code else None
-    if not plan_doc:
-        raise HTTPException(400, "Invalid or missing plan_code")
+    pricing_rows = await db.subscription_license_pricing.find(
+        {"is_active": True}, {"_id": 0},
+    ).to_list(20)
+    pricing = {r["role"]: r for r in pricing_rows}
+    hrms_price = pricing.get("hrms_staff", {}).get("price_paise", 0)
+    role_price = pricing.get("role_user_staff", {}).get("price_paise", 0)
 
     feature_docs = []
     if feature_codes:
@@ -194,14 +220,22 @@ async def compute_quote(db, *, plan_code: str, feature_codes: list[str],
         ).to_list(50)
 
     line_items: list[dict] = []
-    # Base plan — always recurring monthly, × duration.
-    plan_total = plan_doc["price_paise"] * duration_months
-    line_items.append({
-        "kind": "plan", "code": plan_doc["code"], "name": plan_doc["name"],
-        "unit_price_paise": plan_doc["price_paise"], "qty": duration_months,
-        "total_paise": plan_total, "meta": {"staff_limit": plan_doc["staff_limit"]},
-    })
-    # Features — recurring monthly, × duration.
+    if hrms_qty > 0:
+        total = hrms_price * hrms_qty * duration_months
+        line_items.append({
+            "kind": "license", "code": "hrms_staff",
+            "name": pricing.get("hrms_staff", {}).get("name", "HRMS Staff"),
+            "unit_price_paise": hrms_price, "qty": hrms_qty, "months": duration_months,
+            "total_paise": total, "meta": {"role": "hrms_staff"},
+        })
+    if role_qty > 0:
+        total = role_price * role_qty * duration_months
+        line_items.append({
+            "kind": "license", "code": "role_user_staff",
+            "name": pricing.get("role_user_staff", {}).get("name", "Role/User Staff"),
+            "unit_price_paise": role_price, "qty": role_qty, "months": duration_months,
+            "total_paise": total, "meta": {"role": "role_user_staff"},
+        })
     for f in feature_docs:
         t = f["price_paise"] * duration_months
         line_items.append({
@@ -209,7 +243,6 @@ async def compute_quote(db, *, plan_code: str, feature_codes: list[str],
             "unit_price_paise": f["price_paise"], "qty": duration_months,
             "total_paise": t, "meta": {},
         })
-    # Addons — either recurring monthly × duration or one-off per_staff.
     for a in addon_docs:
         if a.get("unit") == "per_staff":
             qty = max(1, int(staff_count_for_bgv or 1))
@@ -236,6 +269,8 @@ async def compute_quote(db, *, plan_code: str, feature_codes: list[str],
 
     return {
         "line_items": line_items,
+        "hrms_staff_qty": hrms_qty,
+        "role_user_staff_qty": role_qty,
         "subtotal_paise": subtotal,
         "discount_paise": discount,
         "coupon_status": {"code": (coupon_code or "").upper().strip(), "ok": coupon_res["ok"], "reason": coupon_res["reason"]},
@@ -243,21 +278,19 @@ async def compute_quote(db, *, plan_code: str, feature_codes: list[str],
         "gst_paise": gst,
         "grand_total_paise": grand_total,
         "duration_months": duration_months,
-        "plan_code": plan_doc["code"],
-        "staff_limit": plan_doc["staff_limit"],
         "feature_codes": [f["code"] for f in feature_docs],
         "addon_codes": [a["code"] for a in addon_docs],
     }
 
 
-async def apply_bundle_entitlements(db, company_id: str, *, plan_code: str,
-                                    staff_limit: int, feature_codes: list[str],
-                                    duration_months: int, order_id: str, payment_id: str):
-    """After payment capture: activate all modules the buyer selected.
+async def apply_bundle_entitlements(db, company_id: str, *, hrms_staff_qty: int,
+                                    role_user_staff_qty: int, feature_codes: list[str],
+                                    duration_months: int, order_id: str, payment_id: str,
+                                    is_topup: bool = False):
+    """After payment capture: activate entitlements + credit licenses.
 
-    Base plan → grants `hr` (BASE_PLAN_MODULES). Features → each feature code
-    becomes its own entitlement. Addons are tracked on the bundle doc for
-    ops visibility but don't gate modules directly.
+    - Modules: base plan grants `hr` + every selected feature. Extended monthly.
+    - Licenses: increment `company_licenses` (purchased_qty += qty) for both roles.
     """
     modules_to_grant = list(BASE_PLAN_MODULES | set(feature_codes or []))
     ents = []
@@ -266,6 +299,20 @@ async def apply_bundle_entitlements(db, company_id: str, *, plan_code: str,
             db, company_id, m, duration_months, order_id, payment_id,
         )
         ents.append(ent)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for role, qty in (("hrms_staff", hrms_staff_qty), ("role_user_staff", role_user_staff_qty)):
+        if qty <= 0:
+            continue
+        await db.company_licenses.update_one(
+            {"company_id": company_id, "role": role},
+            {
+                "$inc": {"purchased_qty": qty},
+                "$setOnInsert": {"used_qty": 0, "created_at": now_iso},
+                "$set": {"updated_at": now_iso, "last_order_id": order_id},
+            },
+            upsert=True,
+        )
     return ents
 
 

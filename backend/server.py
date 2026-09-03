@@ -189,6 +189,11 @@ class UserOut(BaseModel):
     role: str
     assigned_center_ids: List[str] = Field(default_factory=list)
     assigned_partner_id: Optional[str] = None
+    # Phase 69 — multi-tenant / role-based licensing
+    company_id: Optional[str] = None
+    company_code: Optional[str] = None
+    license_role: Optional[str] = None    # "hrms_staff" | "role_user_staff"
+    is_active: bool = True
 
 
 class RegisterIn(BaseModel):
@@ -196,6 +201,7 @@ class RegisterIn(BaseModel):
     password: str = Field(min_length=6)
     name: str
     role: ROLE_LITERAL = "viewer"
+    license_role: Optional[str] = None    # required for admin-driven creation
 
 
 class UserUpdateIn(BaseModel):
@@ -203,6 +209,8 @@ class UserUpdateIn(BaseModel):
     assigned_center_ids: Optional[List[str]] = None
     assigned_partner_id: Optional[str] = None
     name: Optional[str] = None
+    license_role: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class LoginIn(BaseModel):
@@ -1603,6 +1611,8 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
 # ---------- Auth Routes ----------
 @api.post("/auth/register", response_model=UserOut)
 async def register(body: RegisterIn, response: Response):
+    """Legacy public self-register (used by the very first admin bootstrap).
+    For admin-driven user creation with license enforcement, use POST /auth/users."""
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -1611,15 +1621,62 @@ async def register(body: RegisterIn, response: Response):
         "email": email,
         "password_hash": hash_password(body.password),
         "name": body.name,
-        "role": body.role if body.role != "admin" else "viewer",  # self-register cannot become admin
+        "role": body.role if body.role != "admin" else "viewer",  # cannot escalate to admin
         "assigned_center_ids": [],
         "assigned_partner_id": None,
+        "company_id": None,
+        "license_role": None,
+        "is_active": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(user)
     token = create_access_token(user["id"], user["email"])
     set_auth_cookie(response, token)
     return UserOut(**user)
+
+
+class AdminCreateUserIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    name: str
+    role: ROLE_LITERAL = "viewer"
+    license_role: str  # "hrms_staff" | "role_user_staff"
+    mobile: Optional[str] = None
+    assigned_center_ids: List[str] = Field(default_factory=list)
+
+
+@api.post("/auth/users", response_model=UserOut)
+async def admin_create_user(body: AdminCreateUserIn, current=Depends(require_role("admin"))):
+    """Admin creates a new user under their own company, enforcing role license."""
+    if body.license_role not in ("hrms_staff", "role_user_staff"):
+        raise HTTPException(400, "license_role must be 'hrms_staff' or 'role_user_staff'")
+    email = body.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    # SECURITY: company_id ALWAYS comes from the authenticated admin — never from the payload.
+    company_id = current.get("company_id") or subscription_service._company_id_for(current)
+    if not company_id:
+        raise HTTPException(400, "Admin is not linked to a company yet")
+    cdoc = await db.companies.find_one({"id": company_id}, {"_id": 0, "company_code": 1}) or {}
+    await _check_license_available(company_id, body.license_role)
+    user = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "password_hash": hash_password(body.password),
+        "name": body.name,
+        "role": body.role if body.role != "admin" else "viewer",  # admin can't create another admin here
+        "assigned_center_ids": body.assigned_center_ids,
+        "assigned_partner_id": None,
+        "company_id": company_id,
+        "license_role": body.license_role,
+        "mobile": body.mobile,
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": current["id"],
+    }
+    await db.users.insert_one(user)
+    await _refresh_license_usage(company_id)
+    return UserOut(**user, company_code=cdoc.get("company_code"))
 
 
 @api.post("/auth/login", response_model=UserOut)
@@ -1767,17 +1824,35 @@ async def list_payers(_=Depends(get_current_user)):
 
 
 @api.patch("/auth/users/{uid}", response_model=UserOut)
-async def update_user(uid: str, body: UserUpdateIn, _=Depends(require_role("admin"))):
+async def update_user(uid: str, body: UserUpdateIn, current=Depends(require_role("admin"))):
     # Use exclude_unset so the admin can explicitly clear nullable fields (e.g. {"assigned_partner_id": null})
     update = body.model_dump(exclude_unset=True)
     if not update:
         raise HTTPException(400, "Nothing to update")
+    existing = await db.users.find_one({"id": uid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "User not found")
+    # SECURITY: prevent cross-company edits.
+    if existing.get("company_id") and current.get("role") != "admin":
+        raise HTTPException(403, "Forbidden")
+    # If admin is re-activating a user OR moving them to a new license_role,
+    # ensure the target company has an available license.
+    company_id = existing.get("company_id")
+    reactivating = "is_active" in update and update["is_active"] and not existing.get("is_active", True)
+    changing_role = "license_role" in update and update["license_role"] and update["license_role"] != existing.get("license_role")
+    if company_id and (reactivating or changing_role):
+        target_role = update.get("license_role") or existing.get("license_role")
+        if target_role:
+            await _check_license_available(company_id, target_role)
+    if "license_role" in update and update["license_role"] not in (None, "hrms_staff", "role_user_staff"):
+        raise HTTPException(400, "Invalid license_role")
     res = await db.users.find_one_and_update(
         {"id": uid}, {"$set": update}, return_document=True, projection={"_id": 0, "password_hash": 0}
     )
-    if not res:
-        raise HTTPException(404, "User not found")
-    return UserOut(**res)
+    if company_id:
+        await _refresh_license_usage(company_id)
+    cdoc = await db.companies.find_one({"id": company_id}, {"_id": 0, "company_code": 1}) if company_id else None
+    return UserOut(**res, company_code=(cdoc or {}).get("company_code"))
 
 
 # ---------- Password Reset (OTP via email) ----------
@@ -2072,6 +2147,7 @@ def _entity_doc(body: EntityIn, etype: str) -> dict:
     data = body.model_dump()
     # Strip system-managed keys client might've supplied
     data.pop("linked_user_id", None)
+    data.pop("company_code", None)          # server-owned for companies
     return {
         "id": str(uuid.uuid4()),
         "type": etype,
@@ -2178,6 +2254,9 @@ async def list_entities(etype: EntityType, user=Depends(get_current_user)):
 async def create_entity(etype: EntityType, body: EntityIn, _=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
     doc = _entity_doc(body, etype)
+    # Auto-assign a unique COMP-NNNNN code to every new company.
+    if etype == "company":
+        doc["company_code"] = await _next_company_code()
     plain_password = await _auto_create_user_for_entity(etype, doc)
     await db[col].insert_one(doc)
     doc.pop("_id", None)
@@ -20534,8 +20613,71 @@ async def _seed_subscription_catalog():
         )
         await db.razorpay_events.create_index("event_id", unique=True, sparse=True)
         await db.coupons.create_index("code", unique=True)
+        await db.company_licenses.create_index([("company_id", 1), ("role", 1)], unique=True)
+        # Backfill: assign company_code to any company missing it (COMP-10001…).
+        await _backfill_company_codes()
+        # Backfill: link users to a company (best-effort via assigned_center → center.company_id).
+        await _backfill_user_company_ids()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Subscription seed failed: %s", exc)
+
+
+async def _next_company_code() -> str:
+    """Return the next sequential COMP-NNNNN code using a counter document."""
+    doc = await db.counters.find_one_and_update(
+        {"_id": "company_code_seq"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=True if hasattr(db.counters, "find_one_and_update") else None,
+    )
+    seq = (doc or {}).get("seq") or 10001
+    if seq < 10001:
+        # First-time bootstrap: rewrite to 10001 so codes start clean.
+        await db.counters.update_one({"_id": "company_code_seq"}, {"$set": {"seq": 10001}}, upsert=True)
+        seq = 10001
+    return f"COMP-{seq}"
+
+
+async def _backfill_company_codes():
+    missing = await db.companies.find({"$or": [{"company_code": {"$exists": False}}, {"company_code": None}, {"company_code": ""}]}, {"_id": 0, "id": 1}).to_list(2000)
+    for row in missing:
+        code = await _next_company_code()
+        await db.companies.update_one({"id": row["id"]}, {"$set": {"company_code": code}})
+    if missing:
+        logger.info("Backfilled %d company_code(s)", len(missing))
+    try:
+        await db.companies.create_index("company_code", unique=True, partialFilterExpression={"company_code": {"$type": "string"}})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _backfill_user_company_ids():
+    """Best-effort: assign company_id to legacy users so licensing can lock them.
+
+    Rule: pick company_id from user.assigned_center_ids[0] → center.company_id.
+    Falls back to the FIRST company in the system so nothing crashes.
+    """
+    missing = await db.users.find(
+        {"$or": [{"company_id": {"$exists": False}}, {"company_id": None}]},
+        {"_id": 0, "id": 1, "assigned_center_ids": 1, "role": 1},
+    ).to_list(5000)
+    if not missing:
+        return
+    default_company = await db.companies.find_one({}, {"_id": 0, "id": 1})
+    fallback_cid = (default_company or {}).get("id")
+    fixed = 0
+    for u in missing:
+        cid = None
+        for ccid in (u.get("assigned_center_ids") or []):
+            c = await db.centers.find_one({"id": ccid}, {"_id": 0, "company_id": 1})
+            if c and c.get("company_id"):
+                cid = c["company_id"]
+                break
+        cid = cid or fallback_cid
+        if cid:
+            await db.users.update_one({"id": u["id"]}, {"$set": {"company_id": cid}})
+            fixed += 1
+    logger.info("Backfilled company_id on %d/%d user(s)", fixed, len(missing))
 
 
 @app.on_event("startup")
@@ -20595,7 +20737,8 @@ async def sub_me(user=Depends(get_current_user)):
 
 
 class QuoteIn(BaseModel):
-    plan_code: str
+    hrms_staff_qty: int = 0
+    role_user_staff_qty: int = 0
     feature_codes: List[str] = Field(default_factory=list)
     addon_codes: List[str] = Field(default_factory=list)
     staff_count_for_bgv: int = 1
@@ -20608,7 +20751,8 @@ async def sub_quote(body: QuoteIn, _=Depends(get_current_user)):
     """Server-authoritative price quote — used by the cart UI on every change."""
     return await subscription_service.compute_quote(
         db,
-        plan_code=body.plan_code,
+        hrms_staff_qty=body.hrms_staff_qty,
+        role_user_staff_qty=body.role_user_staff_qty,
         feature_codes=body.feature_codes,
         addon_codes=body.addon_codes,
         staff_count_for_bgv=body.staff_count_for_bgv,
@@ -20618,7 +20762,8 @@ async def sub_quote(body: QuoteIn, _=Depends(get_current_user)):
 
 
 class CreateBundleOrderIn(BaseModel):
-    plan_code: str
+    hrms_staff_qty: int = 0
+    role_user_staff_qty: int = 0
     feature_codes: List[str] = Field(default_factory=list)
     addon_codes: List[str] = Field(default_factory=list)
     staff_count_for_bgv: int = 1
@@ -20626,6 +20771,7 @@ class CreateBundleOrderIn(BaseModel):
     coupon_code: Optional[str] = None
     gst_invoice: bool = False
     gstin: Optional[str] = None
+    is_topup: bool = False   # True when buying additional licenses on top of existing plan
 
 
 @sub_api.post("/subscription/orders")
@@ -20633,10 +20779,11 @@ async def sub_create_order(body: CreateBundleOrderIn, user=Depends(get_current_u
     if not subscription_service.is_configured():
         raise HTTPException(503, "Razorpay not configured — contact admin")
 
-    # Re-compute the quote server-side. Client-supplied amounts are ignored.
+    # Re-compute server-side. Amounts from client are ignored.
     quote = await subscription_service.compute_quote(
         db,
-        plan_code=body.plan_code,
+        hrms_staff_qty=body.hrms_staff_qty,
+        role_user_staff_qty=body.role_user_staff_qty,
         feature_codes=body.feature_codes,
         addon_codes=body.addon_codes,
         staff_count_for_bgv=body.staff_count_for_bgv,
@@ -20649,16 +20796,20 @@ async def sub_create_order(body: CreateBundleOrderIn, user=Depends(get_current_u
     if body.gst_invoice and not (body.gstin or "").strip():
         raise HTTPException(400, "GSTIN is required when GST invoice is requested")
 
+    # SECURITY: always derive company from the authenticated user.
     company_id = subscription_service._company_id_for(user)
-    receipt = f"sub_{company_id[:8]}_{body.plan_code[:8]}_{int(datetime.now(timezone.utc).timestamp())}"[:40]
+    company_doc = await db.companies.find_one({"id": company_id}, {"_id": 0, "name": 1, "company_code": 1}) or {}
+    company_code = company_doc.get("company_code") or ""
+    receipt = f"sub_{(company_code or company_id)[:12]}_{int(datetime.now(timezone.utc).timestamp())}"[:40]
 
     client = subscription_service.get_client()
     try:
         order = client.order.create(data={
             "amount": amount, "currency": "INR", "receipt": receipt,
-            "notes": {"company_id": company_id, "plan": body.plan_code,
+            "notes": {"company_id": company_id, "company_code": company_code,
                        "duration_months": str(body.duration_months),
-                       "user_id": user["id"], "features": ",".join(body.feature_codes)[:200]},
+                       "user_id": user["id"],
+                       "hrms": str(body.hrms_staff_qty), "role_user": str(body.role_user_staff_qty)},
         })
     except Exception as exc:  # noqa: BLE001
         logger.exception("Razorpay order create failed")
@@ -20669,9 +20820,11 @@ async def sub_create_order(body: CreateBundleOrderIn, user=Depends(get_current_u
         "razorpay_order_id": order["id"],
         "razorpay_payment_id": None,
         "company_id": company_id,
+        "company_code": company_code,
+        "company_name": company_doc.get("name"),
         "user_id": user["id"],
-        "plan_code": body.plan_code,
-        "staff_limit": quote["staff_limit"],
+        "hrms_staff_qty": body.hrms_staff_qty,
+        "role_user_staff_qty": body.role_user_staff_qty,
         "feature_codes": body.feature_codes,
         "addon_codes": body.addon_codes,
         "staff_count_for_bgv": body.staff_count_for_bgv,
@@ -20685,18 +20838,20 @@ async def sub_create_order(body: CreateBundleOrderIn, user=Depends(get_current_u
         "gst_invoice": body.gst_invoice,
         "gstin": (body.gstin or "").strip().upper() or None,
         "line_items": quote["line_items"],
+        "is_topup": body.is_topup,
         "status": "created",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.orders.insert_one(doc)
     await subscription_service.audit(db, "order_created", user, target={
-        "order_id": order["id"], "plan": body.plan_code, "amount_paise": amount,
+        "order_id": order["id"], "company_code": company_code, "amount_paise": amount,
     })
     return {
         "key_id": subscription_service.KEY_ID,
         "order_id": order["id"],
         "amount": amount,
         "currency": "INR",
+        "company_code": company_code,
         "quote": quote,
     }
 
@@ -20732,24 +20887,213 @@ async def sub_verify(body: VerifyPaymentIn, user=Depends(get_current_user)):
     )
     ents = await subscription_service.apply_bundle_entitlements(
         db, order["company_id"],
-        plan_code=order["plan_code"],
-        staff_limit=order["staff_limit"],
+        hrms_staff_qty=order.get("hrms_staff_qty") or 0,
+        role_user_staff_qty=order.get("role_user_staff_qty") or 0,
         feature_codes=order.get("feature_codes") or [],
         duration_months=order["duration_months"],
         order_id=body.razorpay_order_id, payment_id=body.razorpay_payment_id,
+        is_topup=bool(order.get("is_topup")),
     )
-    # Bump coupon usage counter (best-effort).
     if order.get("coupon_code") and order.get("coupon_applied"):
         await db.coupons.update_one({"code": order["coupon_code"]}, {"$inc": {"used_count": 1}})
 
     await subscription_service.audit(db, "payment_verified", user, target={
         "order_id": body.razorpay_order_id, "payment_id": body.razorpay_payment_id,
-        "plan": order["plan_code"], "amount_paise": order["amount_paise"],
+        "company_code": order.get("company_code"), "amount_paise": order["amount_paise"],
     })
     return {"ok": True, "entitlements": ents}
 
 
-# ---- Admin: Coupon CRUD ----------------------------------------------------
+# ---- License Usage & Enforcement ----
+
+async def _refresh_license_usage(company_id: str):
+    """Recompute used_qty for a company's licenses from active users."""
+    for role in ("hrms_staff", "role_user_staff"):
+        used = await db.users.count_documents({
+            "company_id": company_id,
+            "license_role": role,
+            "$or": [{"is_active": {"$ne": False}}, {"is_active": {"$exists": False}}],
+        })
+        await db.company_licenses.update_one(
+            {"company_id": company_id, "role": role},
+            {"$set": {"used_qty": used, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+
+
+async def _check_license_available(company_id: str, license_role: str):
+    """Raise 402 if the company has already used all licenses for this role."""
+    if not license_role:
+        return
+    row = await db.company_licenses.find_one(
+        {"company_id": company_id, "role": license_role}, {"_id": 0},
+    ) or {"purchased_qty": 0, "used_qty": 0}
+    if (row.get("used_qty") or 0) >= (row.get("purchased_qty") or 0):
+        pretty = "HRMS Staff" if license_role == "hrms_staff" else "Role/User Staff"
+        raise HTTPException(402, {
+            "error": "license_limit_reached",
+            "message": f"{pretty} license limit reached. You have used {row.get('used_qty') or 0} of {row.get('purchased_qty') or 0} available licenses. Please purchase additional licenses.",
+            "role": license_role,
+            "purchased": row.get("purchased_qty") or 0,
+            "used": row.get("used_qty") or 0,
+        })
+
+
+@sub_api.get("/subscription/licenses")
+async def sub_my_licenses(user=Depends(get_current_user)):
+    """Return the caller's company license usage."""
+    company_id = subscription_service._company_id_for(user)
+    await _refresh_license_usage(company_id)
+    rows = await db.company_licenses.find({"company_id": company_id}, {"_id": 0}).to_list(20)
+    pricing = await db.subscription_license_pricing.find({"is_active": True}, {"_id": 0}).to_list(20)
+    price_by_role = {p["role"]: p for p in pricing}
+    out = []
+    for role in ("hrms_staff", "role_user_staff"):
+        row = next((r for r in rows if r["role"] == role), {"role": role, "purchased_qty": 0, "used_qty": 0})
+        p = price_by_role.get(role) or {}
+        out.append({
+            **row,
+            "name": p.get("name", role),
+            "description": p.get("description", ""),
+            "price_paise": p.get("price_paise", 0),
+            "available_qty": max(0, (row.get("purchased_qty") or 0) - (row.get("used_qty") or 0)),
+        })
+    company = await db.companies.find_one({"id": company_id}, {"_id": 0, "name": 1, "company_code": 1}) or {}
+    return {"company_id": company_id, "company": company, "licenses": out}
+
+
+# ---- Editable license pricing (super-admin only) ----
+
+class LicensePricingIn(BaseModel):
+    role: str  # hrms_staff | role_user_staff
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price_paise: Optional[int] = Field(None, ge=0)
+    is_active: Optional[bool] = None
+
+
+@sub_api.get("/subscription/admin/license-pricing")
+async def sub_admin_license_pricing(_=Depends(require_role("admin"))):
+    return await db.subscription_license_pricing.find({}, {"_id": 0}).sort("sort", 1).to_list(20)
+
+
+@sub_api.patch("/subscription/admin/license-pricing")
+async def sub_admin_update_license_pricing(body: LicensePricingIn, user=Depends(require_role("admin"))):
+    if body.role not in ("hrms_staff", "role_user_staff"):
+        raise HTTPException(400, "Invalid role")
+    update = {k: v for k, v in body.model_dump().items() if v is not None and k != "role"}
+    if not update:
+        raise HTTPException(400, "No fields to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.subscription_license_pricing.update_one({"role": body.role}, {"$set": update})
+    await subscription_service.audit(db, "license_pricing_updated", user, target={"role": body.role}, extra=update)
+    return await db.subscription_license_pricing.find_one({"role": body.role}, {"_id": 0})
+
+
+class FeaturePricingIn(BaseModel):
+    code: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price_paise: Optional[int] = Field(None, ge=0)
+    is_active: Optional[bool] = None
+
+
+@sub_api.patch("/subscription/admin/features")
+async def sub_admin_update_feature_pricing(body: FeaturePricingIn, user=Depends(require_role("admin"))):
+    update = {k: v for k, v in body.model_dump().items() if v is not None and k != "code"}
+    if not update:
+        raise HTTPException(400, "No fields to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.subscription_features.update_one({"code": body.code}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Feature not found")
+    await subscription_service.audit(db, "feature_pricing_updated", user, target={"code": body.code}, extra=update)
+    return await db.subscription_features.find_one({"code": body.code}, {"_id": 0})
+
+
+class AddonPricingIn(BaseModel):
+    code: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    price_paise: Optional[int] = Field(None, ge=0)
+    is_active: Optional[bool] = None
+
+
+@sub_api.patch("/subscription/admin/addons")
+async def sub_admin_update_addon_pricing(body: AddonPricingIn, user=Depends(require_role("admin"))):
+    update = {k: v for k, v in body.model_dump().items() if v is not None and k != "code"}
+    if not update:
+        raise HTTPException(400, "No fields to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.subscription_addons.update_one({"code": body.code}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Addon not found")
+    await subscription_service.audit(db, "addon_pricing_updated", user, target={"code": body.code}, extra=update)
+    return await db.subscription_addons.find_one({"code": body.code}, {"_id": 0})
+
+
+# ---- Super Admin cross-company view ----
+
+@sub_api.get("/companies-admin/list")
+async def companies_admin_list(
+    q: Optional[str] = None,
+    status: Optional[str] = None,
+    _=Depends(require_role("admin")),
+):
+    """List every company in the system with license + subscription status.
+    Filters: q (name/code/payment_id search), status (active/expired)."""
+    query = {}
+    if q:
+        query = {"$or": [
+            {"name": {"$regex": q, "$options": "i"}},
+            {"company_code": {"$regex": q, "$options": "i"}},
+        ]}
+    companies = await db.companies.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    out = []
+    for c in companies:
+        cid = c["id"]
+        licenses = await db.company_licenses.find({"company_id": cid}, {"_id": 0}).to_list(20)
+        lic_by_role = {r["role"]: r for r in licenses}
+        latest_order = await db.orders.find_one(
+            {"company_id": cid, "status": "captured"},
+            {"_id": 0}, sort=[("captured_at", -1)],
+        )
+        active_ents = await db.entitlements.count_documents({
+            "company_id": cid, "status": "active", "expires_at": {"$gt": now_iso},
+        })
+        # Latest expires_at across active entitlements.
+        latest_ent = await db.entitlements.find_one(
+            {"company_id": cid, "status": "active"},
+            {"_id": 0}, sort=[("expires_at", -1)],
+        )
+        expiry = (latest_ent or {}).get("expires_at")
+        sub_status = "active" if active_ents > 0 and expiry and expiry > now_iso else "expired"
+        if status and status != sub_status:
+            continue
+        out.append({
+            "company_id": cid,
+            "company_name": c.get("name"),
+            "company_code": c.get("company_code"),
+            "plan": ", ".join([e["module"] for e in await db.entitlements.find({"company_id": cid, "status": "active"}, {"_id": 0, "module": 1}).to_list(50)]) or "—",
+            "hrms_purchased": (lic_by_role.get("hrms_staff") or {}).get("purchased_qty", 0),
+            "hrms_used": (lic_by_role.get("hrms_staff") or {}).get("used_qty", 0),
+            "role_user_purchased": (lic_by_role.get("role_user_staff") or {}).get("purchased_qty", 0),
+            "role_user_used": (lic_by_role.get("role_user_staff") or {}).get("used_qty", 0),
+            "subscription_status": sub_status,
+            "expiry_date": expiry,
+            "latest_payment": (latest_order or {}).get("razorpay_payment_id"),
+            "latest_order_amount": (latest_order or {}).get("amount_paise"),
+            "latest_order_at": (latest_order or {}).get("captured_at"),
+        })
+    return out
+
+
+# Legacy catalog kept for backwards compat.
+@sub_api.get("/subscription/catalog")
+async def sub_catalog(_=Depends(get_current_user)):
+    catalog = await subscription_service.get_catalog(db)
+    return {"catalog": catalog, "key_id": subscription_service.KEY_ID}
 
 class CouponIn(BaseModel):
     code: str
@@ -20805,13 +21149,6 @@ async def sub_admin_delete_coupon(coupon_id: str, user=Depends(require_role("adm
         raise HTTPException(404, "Coupon not found")
     await subscription_service.audit(db, "coupon_deactivated", user, target={"id": coupon_id})
     return {"ok": True}
-
-
-# ---- Legacy catalog kept for backwards compat ----
-@sub_api.get("/subscription/catalog")
-async def sub_catalog(_=Depends(get_current_user)):
-    catalog = await subscription_service.get_catalog(db)
-    return {"catalog": catalog, "key_id": subscription_service.KEY_ID}
 
 
 @app.post("/api/webhooks/razorpay")

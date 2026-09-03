@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare, AlertCircle,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
-  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock,
+  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +36,7 @@ const navGroups = [
     icon: CreditCard,
     items: [
       { to: "/subscription", key: "subscription", icon: CreditCard, adminOnly: true },
+      { to: "/companies-admin", key: "companies_admin", icon: Building, adminOnly: true },
     ],
   },
   {
