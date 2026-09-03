@@ -16,12 +16,28 @@ import { Pencil, Archive } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 
-const ROLES = ["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "reporting_authority", "center_partner", "viewer"];
+const ROLES = ["admin", "company_admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "reporting_authority", "center_partner", "viewer"];
+const ROLE_LABELS = {
+  admin: "Super Admin",           // internal storage → external label
+  super_admin: "Super Admin",     // never persisted, kept for tolerance
+  company_admin: "Company Admin",
+  manager: "Manager",
+  senior_manager: "Senior Manager",
+  center_manager: "Center Manager",
+  center_staff: "Center Staff",
+  partner: "Partner",
+  accountant: "Accountant",
+  hr: "HR",
+  reporting_authority: "Reporting Authority",
+  center_partner: "Center Partner",
+  viewer: "Viewer",
+};
 
 export default function Users() {
   const { t } = useLang();
   const { user: currentUser } = useAuth();
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin = currentUser?.role === "admin" || currentUser?.role === "company_admin";
+  const isSuperAdmin = currentUser?.role === "admin";
   const [users, setUsers] = useState([]);
   const [centers, setCenters] = useState([]);
   const [partners, setPartners] = useState([]);
@@ -134,6 +150,7 @@ export default function Users() {
               )}
               <th className="text-left p-3">{t("name")}</th>
               <th className="text-left p-3">{t("email")}</th>
+              {isSuperAdmin && <th className="text-left p-3">Company</th>}
               <th className="text-left p-3">{t("role")}</th>
               <th className="text-left p-3">{t("assign_centers")}</th>
               <th className="text-left p-3">{t("assign_partner")}</th>
@@ -142,7 +159,7 @@ export default function Users() {
           </thead>
           <tbody>
             {users.length === 0 ? (
-              <tr><td colSpan={isAdmin ? 7 : 6} className="text-center py-8 overline">{t("no_data")}</td></tr>
+              <tr><td colSpan={isAdmin ? (isSuperAdmin ? 8 : 7) : (isSuperAdmin ? 7 : 6)} className="text-center py-8 overline">{t("no_data")}</td></tr>
             ) : users.map((u) => {
               const centerNames = (u.assigned_center_ids || []).map((id) => centers.find((c) => c.id === id)?.name).filter(Boolean).join(", ");
               const partnerName = partners.find((p) => p.id === u.assigned_partner_id)?.name || "—";
@@ -167,7 +184,8 @@ export default function Users() {
                     {u.is_active === false && <span className="ml-2 text-xs text-[var(--muted)]">(archived)</span>}
                   </td>
                   <td className="p-3">{u.email}</td>
-                  <td className="p-3"><span className="inline-block px-2 py-0.5 text-xs border border-[var(--brand)] text-[var(--brand)]">{u.role}</span></td>
+                  {isSuperAdmin && <td className="p-3 text-[var(--muted)] font-mono text-xs">{u.company_code || "—"}</td>}
+                  <td className="p-3"><span className="inline-block px-2 py-0.5 text-xs border border-[var(--brand)] text-[var(--brand)]">{ROLE_LABELS[u.role] || u.role}</span></td>
                   <td className="p-3 text-[var(--muted)]">{centerNames || "—"}</td>
                   <td className="p-3 text-[var(--muted)]">{partnerName}</td>
                   <td className="p-3 text-right">
@@ -201,7 +219,9 @@ export default function Users() {
               <Select value={form.role} onValueChange={(v) => setForm({ ...form, role: v })}>
                 <SelectTrigger className="rounded-none" data-testid="user-role-select"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {ROLES.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}
+                  {ROLES
+                    .filter((r) => isSuperAdmin || (r !== "admin" && r !== "company_admin"))
+                    .map((r) => <SelectItem key={r} value={r}>{ROLE_LABELS[r] || r}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>

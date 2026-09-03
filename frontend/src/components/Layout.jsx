@@ -36,7 +36,7 @@ const navGroups = [
     icon: CreditCard,
     items: [
       { to: "/subscription", key: "subscription", icon: CreditCard, adminOnly: true },
-      { to: "/companies-admin", key: "companies_admin", icon: Building, adminOnly: true },
+      { to: "/companies-admin", key: "companies_admin", icon: Building, superAdminOnly: true },
     ],
   },
   {
@@ -313,21 +313,28 @@ export default function Layout({ children }) {
 
   // Role gate — mirrors the previous flat `navItems.filter` exactly so no
   // permission model changes; just relocated into a helper.
+  // Phase 70: `company_admin` is treated like `admin` for tenant-scoped visibility
+  // (except for cross-tenant super-admin surfaces like /companies-admin).
+  const isAnyAdmin = user?.role === "admin" || user?.role === "company_admin";
+  const isSuperAdmin = user?.role === "admin";
   const canSee = (it) => {
-    if (it.adminOnly && user?.role !== "admin") return false;
-    if (it.adminManagerOnly && !["admin", "manager"].includes(user?.role)) return false;
-    if (it.accountingOnly && !["admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
-    if (it.hrOrAdmin && !["admin", "hr"].includes(user?.role)) return false;
-    if (it.hrOrAdminOrAccountant && !["admin", "hr", "accountant"].includes(user?.role)) return false;
-    if (it.hrLineOnly && !["admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
-    if (it.candidateAccess && !["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role)) return false;
-    if (it.bgAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner"].includes(user?.role)) return false;
-    if (it.misAccess && !["admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner", "staff", "center_staff"].includes(user?.role)) return false;
+    // Super-admin-only surfaces (companies-admin, subscription billing) are
+    // hard-locked to the top-tier role.
+    if (it.superAdminOnly && !isSuperAdmin) return false;
+    if (it.adminOnly && !isAnyAdmin) return false;
+    if (it.adminManagerOnly && !["admin", "company_admin", "manager"].includes(user?.role)) return false;
+    if (it.accountingOnly && !["admin", "company_admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
+    if (it.hrOrAdmin && !["admin", "company_admin", "hr"].includes(user?.role)) return false;
+    if (it.hrOrAdminOrAccountant && !["admin", "company_admin", "hr", "accountant"].includes(user?.role)) return false;
+    if (it.hrLineOnly && !["admin", "company_admin", "hr", "senior_manager", "manager", "center_manager"].includes(user?.role)) return false;
+    if (it.candidateAccess && !["admin", "company_admin", "hr", "manager", "center_manager", "partner"].includes(user?.role)) return false;
+    if (it.bgAccess && !["admin", "company_admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner"].includes(user?.role)) return false;
+    if (it.misAccess && !["admin", "company_admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner", "staff", "center_staff"].includes(user?.role)) return false;
     if (it.financeOnly && !FINANCE_VISIBLE_ROLES.includes(user?.role)) return false;
-    if (it.adminAccountantOnly && !["admin", "accountant"].includes(user?.role)) return false;
+    if (it.adminAccountantOnly && !["admin", "company_admin", "accountant"].includes(user?.role)) return false;
     if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
-    if (it.invoiceAccess && !["admin", "accountant", "hr", "senior_manager", "manager", "partner", "center_manager", "reporting_authority"].includes(user?.role)) return false;
-    if (it.batchMgmtAccess && !["admin", "manager", "senior_manager", "accountant", "hr", "center_manager"].includes(user?.role)) return false;
+    if (it.invoiceAccess && !["admin", "company_admin", "accountant", "hr", "senior_manager", "manager", "partner", "center_manager", "reporting_authority"].includes(user?.role)) return false;
+    if (it.batchMgmtAccess && !["admin", "company_admin", "manager", "senior_manager", "accountant", "hr", "center_manager"].includes(user?.role)) return false;
     if (it.nonPartner && user?.role === "partner") return false;
     if (it.staffOnly && !["center_staff", "center_manager", "hr", "manager", "senior_manager"].includes(user?.role)) return false;
     if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;

@@ -54,7 +54,9 @@ export default function Register() {
           <Select value={form.role} onValueChange={(v) => setForm({ ...form, role: v })}>
             <SelectTrigger className="rounded-none" data-testid="register-role"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="admin">Admin</SelectItem>
+              {/* Super Admin & Company Admin are privileged roles — never assignable via public
+                  self-signup (backend also enforces this). Only Super Admin can create these
+                  via the admin dashboard. */}
               <SelectItem value="manager">Manager</SelectItem>
               <SelectItem value="senior_manager">Senior Manager</SelectItem>
               <SelectItem value="center_manager">Center Manager</SelectItem>

@@ -26,6 +26,69 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 70 — Super Admin / Company Admin RBAC & Tenant Isolation (Done, Feb 2026)
+- **User asked**: Rename "Admin" role to "Super Admin"; introduce new "Company Admin" role restricted to its own company_id. 18-point spec covering registration hardening, license enforcement, cross-company isolation, hierarchical role management, super-admin cross-tenant dashboard, and backwards compatibility.
+- **Design decision (minimally invasive)**: Rather than rewriting 100+ backend `require_role("admin")` calls and 30+ frontend `role === "admin"` checks, we keep `admin` as the internal canonical role string and present it as **"Super Admin"** everywhere in the UI. `super_admin` is accepted as an input alias (normalized to `admin` before storage). `company_admin` is a brand-new distinct role.
+- **Backend `/app/backend/server.py`**:
+  - `ROLE_LITERAL` now includes `super_admin` (input alias) + `company_admin` (new). Startup migration: any legacy `"super_admin"` row is normalized back to `"admin"` so DB stays canonical.
+  - `require_role(*roles)` — transparently aliases `"admin"` ↔ `"super_admin"`, so every legacy call still works and callers can pass either.
+  - `SUPER_ADMIN_ROLES = {"admin","super_admin"}`, `COMPANY_ADMIN_ROLES = {"company_admin"}` + helpers `is_super_admin()`, `is_company_admin()`.
+  - `FINANCE_VISIBLE_ROLES` gains `super_admin` + `company_admin` so tenant-scoped admins keep finance visibility.
+  - `POST /auth/register` — privileged roles (`admin`, `super_admin`, `company_admin`) can NEVER be self-signed-up. Silently downgraded to `viewer`. Meets security rule §8.
+  - `POST /auth/users` (admin+company_admin gated):
+    - Company Admin's `company_id` is ALWAYS derived from the session and OVERRIDES whatever the client sent (rule §1, §7).
+    - Only Super Admin can create another Super Admin or a Company Admin (rule §5, §6).
+    - License role check (`hrms_staff`/`role_user_staff`) still enforced when supplied; not required for privileged roles.
+    - `super_admin` role input normalized to internal `admin` before insert.
+  - `PATCH /auth/users/{uid}`:
+    - Company Admin can ONLY edit users of their own `company_id` (rule §4 — cross-company edits blocked by 403).
+    - Company Admin cannot promote to Super Admin / Company Admin, and cannot edit a Super Admin (rule §5).
+    - `super_admin` role input normalized to `admin`.
+  - `GET /auth/users`:
+    - Super Admin sees all rows, optionally filtered via `?company_id=&role=` query params.
+    - Company Admin sees ONLY rows where `company_id == their company_id` (backend-enforced, not just UI hiding). Rule §3, §4.
+    - Attaches `company_code` per row (via `db.companies` lookup) so the UI table can show it.
+  - `GET /companies-admin/list` — hard-locked to `require_role("admin")` (Super Admin only). Company Admin gets 403.
+  - `_scoped_center_ids(user)` — new branch for `company_admin`: returns the list of centers belonging to their `company_id` (populated via lazy enrichment).
+  - `_enrich_user_with_associations(user)` — new branch for `company_admin`: computes `user._associated_center_ids = [ids of every center whose company_id == user.company_id]`. Runs on-demand in the auth scope endpoint.
+  - `GET /auth/me/scope`:
+    - Skips the "No Centers Assigned" banner for `company_admin` (scoped by company, not by center).
+    - Enriches company_admin lazily on the way through so their center list resolves.
+- **Frontend**:
+  - `/app/frontend/src/pages/Register.jsx` — role dropdown NO LONGER offers `Admin` / `Super Admin` / `Company Admin`. Only offers Manager, Senior Manager, Center Manager, Center Staff, Partner, Accountant, HR, Viewer. Backend also fail-closed.
+  - `/app/frontend/src/pages/Users.jsx`:
+    - New `ROLE_LABELS` map: `admin → "Super Admin"`, `super_admin → "Super Admin"` (tolerance), `company_admin → "Company Admin"`, and pretty-print for every other role.
+    - Role dropdown now filters `admin` and `company_admin` out when the caller isn't a Super Admin.
+    - Super Admin gets an extra `Company` column showing `company_code` (COMP-NNNNN) per row.
+    - Both Super Admin and Company Admin (`isAdmin`) can access the create-user form; only Super Admin (`isSuperAdmin`) sees privileged-role options.
+  - `/app/frontend/src/components/Layout.jsx`:
+    - New `isAnyAdmin` (admin OR company_admin) + `isSuperAdmin` (admin only) helpers. Every `adminOnly` sidebar item, plus `hrOrAdmin`, `accountingOnly`, `hrLineOnly`, `candidateAccess`, `bgAccess`, `misAccess`, `adminAccountantOnly`, `invoiceAccess`, `batchMgmtAccess`, now also grant Company Admin access.
+    - `superAdminOnly` flag introduced. `/companies-admin` is `superAdminOnly` — Company Admin never sees it (rule §14 fulfilled from the CA side).
+    - `/subscription` remains `adminOnly` (both admin tiers can buy licenses for their tenant).
+- **Verified end-to-end (curl + browser)**:
+  - Super Admin login → role `admin` returned; UI renders badge **"Super Admin"** on every row and Users page.
+  - Public register with `role: "super_admin"` → user created as `viewer` (privilege escalation blocked).
+  - Super Admin creates a Company Admin for COMP-10001 → stored role `company_admin`, `company_id: 6447...`.
+  - Company Admin login → role `company_admin`, `needs_mapping: False` (no yellow banner), sidebar hides `/companies-admin`.
+  - Company Admin `GET /auth/users` → 762 users returned, ALL scoped to COMP-10001. No cross-tenant leak.
+  - Company Admin `POST /auth/users {company_id: OTHER_CID, role: manager}` → user actually persisted with CA's own `company_id`, NOT the payload's OTHER_CID. Rule §7 upheld.
+  - Company Admin `POST /auth/users {role: super_admin}` → HTTP 403 "Only Super Admin can create Super Admin or Company Admin".
+  - Company Admin `GET /companies-admin/list` → HTTP 403.
+  - Legacy `admin` in DB → renders as **"Super Admin"** in UI table + user badges. Login/auth intact. No existing users broken.
+- **Acceptance criteria (all 10)**:
+  1. Super Admin logs in → can access all companies ✅ 
+  2. Company Admin logs in → sees only own company data ✅ 
+  3. Cross-company access attempt → HTTP 403 ✅ 
+  4. Payload-tampered `company_id` → OVERRIDDEN by backend ✅ 
+  5. Company Admin creates Manager → auto company_id ✅ 
+  6. Company Admin tries other-company user → forced to own ✅ 
+  7. Company Admin tries super_admin role → 403 ✅ 
+  8. Super Admin creates Company B Admin → CA locked to Company B ✅ 
+  9. Existing admin renders as Super Admin ✅ 
+  10. No regressions on existing users / auth / navigation ✅
+
+
+
 ### Phase 69 — Company Codes + Role-based Licenses + Multi-tenant Foundation (Done, Feb 2026)
 - **User asked (18-point spec)**: Every company must have unique `Company Code` (COMP-NNNNN). Replace single Staff Limit with role-wise licenses (HRMS Staff + Role/User Staff). Purchases must be permanently linked to `company_id` + `company_code`. License enforcement: block user creation when the role's ceiling is reached (exact copy: "HRMS Staff license limit reached. You have used X of Y available licenses. Please purchase additional licenses."). Deactivation must free the license. "Buy Additional Licenses" flow. Super Admin cross-company view. Super Admin editable pricing.
 - **User's 3 clarifications**: Super admin edits pricing themselves (I seeded defaults + editor). Full multi-tenancy scope (foundational). Super Admin cross-company view at `/companies-admin`.

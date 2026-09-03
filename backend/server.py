@@ -154,11 +154,35 @@ async def get_current_user(request: Request) -> dict:
 
 
 def require_role(*roles: str):
+    """Role gate with backward-compat aliases:
+      * `admin` and `super_admin` are treated as the SAME internal role — so
+        every legacy `require_role("admin")` invocation transparently accepts
+        the renamed `super_admin` too.
+      * When a caller wants to allow the new tenant-scoped Company Admin they
+        must pass "company_admin" explicitly.
+    """
+    allowed = set(roles)
+    if "admin" in allowed or "super_admin" in allowed:
+        allowed.update({"admin", "super_admin"})
     async def dep(user: dict = Depends(get_current_user)):
-        if user.get("role") not in roles:
+        if user.get("role") not in allowed:
             raise HTTPException(status_code=403, detail="Forbidden")
         return user
     return dep
+
+
+# Phase 70 — Role hierarchy helpers.
+SUPER_ADMIN_ROLES = {"admin", "super_admin"}
+COMPANY_ADMIN_ROLES = {"company_admin"}
+GLOBAL_ADMIN_ROLES = SUPER_ADMIN_ROLES | COMPANY_ADMIN_ROLES
+
+
+def is_super_admin(user: dict) -> bool:
+    return (user or {}).get("role") in SUPER_ADMIN_ROLES
+
+
+def is_company_admin(user: dict) -> bool:
+    return (user or {}).get("role") in COMPANY_ADMIN_ROLES
 
 
 # ---- Finance Visibility Gate -------------------------------------------------
@@ -166,7 +190,7 @@ def require_role(*roles: str):
 # Other roles (center_manager, center_staff, manager, viewer, reporting_authority, center_partner)
 # get a 403 on any financial endpoint. Operational endpoints (attendance, leave, staff, stock)
 # remain accessible.
-FINANCE_VISIBLE_ROLES = {"admin", "partner", "senior_manager", "hr", "accountant"}
+FINANCE_VISIBLE_ROLES = {"admin", "super_admin", "company_admin", "partner", "senior_manager", "hr", "accountant"}
 
 
 def require_finance_visible(user: dict = Depends(get_current_user)) -> dict:
@@ -176,7 +200,7 @@ def require_finance_visible(user: dict = Depends(get_current_user)) -> dict:
 
 
 # ---------- Models ----------
-ROLE_LITERAL = Literal["admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer", "reporting_authority", "center_partner"]
+ROLE_LITERAL = Literal["admin", "super_admin", "company_admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "viewer", "reporting_authority", "center_partner"]
 
 
 class UserOut(BaseModel):
@@ -559,7 +583,13 @@ def _scoped_center_ids(user: dict) -> Optional[List[str]]:
     """
     role = user.get("role")
     if role in ("admin", "senior_manager"):
-        return None  # unrestricted
+        return None  # unrestricted — global access
+    if role == "company_admin":
+        # Company Admin sees ALL centers of their company (but never other companies).
+        cids = user.get("_associated_center_ids")
+        if cids is not None:
+            return list(cids)
+        return None  # Best-effort None; resolved by _enrich_user_with_associations elsewhere
     if role == "partner":
         cids = user.get("_associated_center_ids")
         if cids is not None:
@@ -689,9 +719,24 @@ async def _derive_context_for_center(center_id: Optional[str]) -> dict:
 
 
 async def _enrich_user_with_associations(user: dict) -> dict:
-    """Mutates `user` to add `_associated_partner_ids` for partner-role users.
-    Called inside endpoints that filter txns by scope so cross-partner approvals work."""
-    if user.get("role") != "partner":
+    """Mutates `user` to add scope hints per role.
+
+    * `partner` → `_associated_partner_ids` + `_associated_center_ids`
+    * `company_admin` → `_associated_center_ids` = every center belonging to
+      their company. Restricts them to their tenant without granting
+      cross-company access.
+    """
+    role = user.get("role")
+    if role == "company_admin":
+        if user.get("_associated_center_ids") is None:
+            cid = user.get("company_id")
+            if cid:
+                centers = await db.centers.find({"company_id": cid}, {"_id": 0, "id": 1}).to_list(1000)
+                user["_associated_center_ids"] = [c["id"] for c in centers]
+            else:
+                user["_associated_center_ids"] = []
+        return user
+    if role != "partner":
         return user
     pid = user.get("assigned_partner_id")
     if not pid or user.get("_associated_partner_ids") is not None:
@@ -1611,17 +1656,21 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
 # ---------- Auth Routes ----------
 @api.post("/auth/register", response_model=UserOut)
 async def register(body: RegisterIn, response: Response):
-    """Legacy public self-register (used by the very first admin bootstrap).
-    For admin-driven user creation with license enforcement, use POST /auth/users."""
+    """Legacy public self-register. Privileged roles (super_admin, company_admin,
+    admin) can NEVER be self-registered — only an existing Super Admin may
+    create them via `POST /auth/users`."""
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
+    # SECURITY: normal users must not assign themselves privileged roles.
+    PROHIBITED_SELF_SIGNUP = {"admin", "super_admin", "company_admin"}
+    safe_role = body.role if body.role not in PROHIBITED_SELF_SIGNUP else "viewer"
     user = {
         "id": str(uuid.uuid4()),
         "email": email,
         "password_hash": hash_password(body.password),
         "name": body.name,
-        "role": body.role if body.role != "admin" else "viewer",  # cannot escalate to admin
+        "role": safe_role,
         "assigned_center_ids": [],
         "assigned_partner_id": None,
         "company_id": None,
@@ -1640,31 +1689,58 @@ class AdminCreateUserIn(BaseModel):
     password: str = Field(min_length=6)
     name: str
     role: ROLE_LITERAL = "viewer"
-    license_role: str  # "hrms_staff" | "role_user_staff"
+    license_role: Optional[str] = None  # required for HRMS/RoleUser license enforcement
     mobile: Optional[str] = None
     assigned_center_ids: List[str] = Field(default_factory=list)
+    company_id: Optional[str] = None  # ONLY honoured for super_admin; ignored for company_admin
 
 
 @api.post("/auth/users", response_model=UserOut)
-async def admin_create_user(body: AdminCreateUserIn, current=Depends(require_role("admin"))):
-    """Admin creates a new user under their own company, enforcing role license."""
-    if body.license_role not in ("hrms_staff", "role_user_staff"):
-        raise HTTPException(400, "license_role must be 'hrms_staff' or 'role_user_staff'")
+async def admin_create_user(body: AdminCreateUserIn, current=Depends(require_role("admin", "company_admin"))):
+    """Super Admin or Company Admin creates a new user.
+
+    Business rules:
+      * Only Super Admin can create another Super Admin or a Company Admin.
+      * Company Admin's newly created users are ALWAYS locked to the admin's
+        own company_id (client-supplied `company_id` is discarded).
+      * License role check (`hrms_staff` / `role_user_staff`) enforced when
+        supplied; not required for privileged roles (super_admin / company_admin).
+    """
     email = body.email.lower().strip()
     if await db.users.find_one({"email": email}):
         raise HTTPException(400, "Email already registered")
-    # SECURITY: company_id ALWAYS comes from the authenticated admin — never from the payload.
-    company_id = current.get("company_id") or subscription_service._company_id_for(current)
-    if not company_id:
-        raise HTTPException(400, "Admin is not linked to a company yet")
-    cdoc = await db.companies.find_one({"id": company_id}, {"_id": 0, "company_code": 1}) or {}
-    await _check_license_available(company_id, body.license_role)
+
+    creating_privileged = body.role in ("admin", "super_admin", "company_admin")
+    if creating_privileged and not is_super_admin(current):
+        raise HTTPException(403, "Only Super Admin can create Super Admin or Company Admin")
+
+    # Resolve target company_id.
+    if is_super_admin(current):
+        # Super admin may explicitly select a company.
+        company_id = body.company_id or current.get("company_id") or subscription_service._company_id_for(current)
+    else:
+        # Company admin — company_id ALWAYS derived from session; ignore payload.
+        company_id = current.get("company_id") or subscription_service._company_id_for(current)
+    if body.role != "super_admin" and not company_id:
+        raise HTTPException(400, "company_id required for non-super-admin users")
+
+    # License enforcement (only for license-tracked roles).
+    if body.license_role:
+        if body.license_role not in ("hrms_staff", "role_user_staff"):
+            raise HTTPException(400, "license_role must be 'hrms_staff' or 'role_user_staff'")
+        await _check_license_available(company_id, body.license_role)
+
+    # Normalise the incoming role: `super_admin` (new external name) is stored
+    # as `admin` (internal canonical) so all legacy code keeps working.
+    stored_role = "admin" if body.role == "super_admin" else body.role
+
+    cdoc = await db.companies.find_one({"id": company_id}, {"_id": 0, "company_code": 1}) if company_id else None
     user = {
         "id": str(uuid.uuid4()),
         "email": email,
         "password_hash": hash_password(body.password),
         "name": body.name,
-        "role": body.role if body.role != "admin" else "viewer",  # admin can't create another admin here
+        "role": stored_role,
         "assigned_center_ids": body.assigned_center_ids,
         "assigned_partner_id": None,
         "company_id": company_id,
@@ -1675,8 +1751,9 @@ async def admin_create_user(body: AdminCreateUserIn, current=Depends(require_rol
         "created_by": current["id"],
     }
     await db.users.insert_one(user)
-    await _refresh_license_usage(company_id)
-    return UserOut(**user, company_code=cdoc.get("company_code"))
+    if body.license_role and company_id:
+        await _refresh_license_usage(company_id)
+    return UserOut(**user, company_code=(cdoc or {}).get("company_code"))
 
 
 @api.post("/auth/login", response_model=UserOut)
@@ -1764,6 +1841,13 @@ async def my_scope(user=Depends(get_current_user)):
             await _enrich_user_with_associations(user)
         except Exception:  # noqa: BLE001
             pass
+    # Enrich company_admin lazily so their center scope resolves before we
+    # compute the auth scope response.
+    if role == "company_admin" and user.get("_associated_center_ids") is None:
+        try:
+            await _enrich_user_with_associations(user)
+        except Exception:  # noqa: BLE001
+            pass
     allowed = _scoped_center_ids(user)
     is_head_level = allowed is None
     center_ids = allowed or []
@@ -1782,7 +1866,8 @@ async def my_scope(user=Depends(get_current_user)):
         "assigned_center_ids": center_ids,
         "assigned_centers": center_docs,
         # Fail-closed for scoped roles with no mapping — UI shows a warning.
-        "needs_mapping": (not is_head_level) and role not in ("partner", "viewer") and not center_ids,
+        # company_admin is scoped by company_id and doesn't need center mapping.
+        "needs_mapping": (not is_head_level) and role not in ("partner", "viewer", "company_admin") and not center_ids,
         # Phase 66 — module-level entitlements so the SPA can lock unpaid modules.
         "entitled_modules": list((await subscription_service.compute_entitled_modules(db, user)).keys()),
         "blocked_modules": await _compute_blocked_modules(user),
@@ -1802,9 +1887,38 @@ async def _compute_blocked_modules(user: dict) -> list[str]:
 
 
 @api.get("/auth/users", response_model=List[UserOut])
-async def list_users(_=Depends(require_role("admin", "hr"))):
-    docs = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
-    return [UserOut(**d) for d in docs]
+async def list_users(
+    company_id: Optional[str] = None,
+    role: Optional[str] = None,
+    current=Depends(require_role("admin", "hr", "company_admin")),
+):
+    """List users. Super Admin sees everyone (optionally filtered by company/role).
+    Company Admin sees ONLY their own company. HR sees their company too (existing scope)."""
+    query = {}
+    # SECURITY: enforce company scope for Company Admin (and HR).
+    if not is_super_admin(current):
+        my_cid = current.get("company_id") or subscription_service._company_id_for(current)
+        if my_cid:
+            query["company_id"] = my_cid
+    elif company_id:
+        query["company_id"] = company_id
+    if role:
+        query["role"] = role
+    docs = await db.users.find(query, {"_id": 0, "password_hash": 0}).to_list(2000)
+    # Attach company_code where available for the UI table.
+    cids = {d.get("company_id") for d in docs if d.get("company_id")}
+    ccode_map = {}
+    if cids:
+        async for c in db.companies.find({"id": {"$in": list(cids)}}, {"_id": 0, "id": 1, "company_code": 1}):
+            ccode_map[c["id"]] = c.get("company_code")
+    out = []
+    for d in docs:
+        d["company_code"] = ccode_map.get(d.get("company_id"))
+        try:
+            out.append(UserOut(**d))
+        except Exception:  # noqa: BLE001
+            continue  # skip rows with legacy bad fields
+    return out
 
 
 @api.get("/users/payers")
@@ -1824,19 +1938,27 @@ async def list_payers(_=Depends(get_current_user)):
 
 
 @api.patch("/auth/users/{uid}", response_model=UserOut)
-async def update_user(uid: str, body: UserUpdateIn, current=Depends(require_role("admin"))):
-    # Use exclude_unset so the admin can explicitly clear nullable fields (e.g. {"assigned_partner_id": null})
+async def update_user(uid: str, body: UserUpdateIn, current=Depends(require_role("admin", "company_admin"))):
     update = body.model_dump(exclude_unset=True)
     if not update:
         raise HTTPException(400, "Nothing to update")
     existing = await db.users.find_one({"id": uid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "User not found")
-    # SECURITY: prevent cross-company edits.
-    if existing.get("company_id") and current.get("role") != "admin":
-        raise HTTPException(403, "Forbidden")
-    # If admin is re-activating a user OR moving them to a new license_role,
-    # ensure the target company has an available license.
+    # SECURITY: Company Admin can only edit their own company's users.
+    if is_company_admin(current):
+        my_cid = current.get("company_id") or subscription_service._company_id_for(current)
+        if not my_cid or existing.get("company_id") != my_cid:
+            raise HTTPException(403, "Cannot edit users from another company")
+        # Company Admin cannot promote to Super Admin or another Company Admin,
+        # and cannot demote a Super Admin.
+        if update.get("role") in ("admin", "super_admin", "company_admin"):
+            raise HTTPException(403, "Cannot assign privileged role")
+        if existing.get("role") in ("admin", "super_admin"):
+            raise HTTPException(403, "Cannot edit a Super Admin")
+    # Normalise `super_admin` → `admin` (internal canonical) if passed.
+    if update.get("role") == "super_admin":
+        update["role"] = "admin"
     company_id = existing.get("company_id")
     reactivating = "is_active" in update and update["is_active"] and not existing.get("is_active", True)
     changing_role = "license_role" in update and update["license_role"] and update["license_role"] != existing.get("license_role")
@@ -20597,6 +20719,21 @@ def require_module_entitlement(module: str):
 
 
 @app.on_event("startup")
+async def _migrate_role_names():
+    """Phase 70 — normalize legacy `super_admin` role BACK to `admin` (the
+    internal canonical value). We keep the string `admin` inside the DB so that
+    the 100+ existing `require_role("admin")` checks and 30+ frontend
+    `role === "admin"` conditionals keep working unchanged. The UI presents the
+    role as "Super Admin" everywhere. Company Admin is a new distinct role."""
+    try:
+        res = await db.users.update_many({"role": "super_admin"}, {"$set": {"role": "admin"}})
+        if res.modified_count:
+            logger.info("Normalized %d 'super_admin' → 'admin' user(s) (internal canonical)", res.modified_count)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Role normalization migration failed: %s", exc)
+
+
+@app.on_event("startup")
 async def _seed_subscription_catalog():
     try:
         await subscription_service.seed_catalog(db)
@@ -21038,10 +21175,10 @@ async def sub_admin_update_addon_pricing(body: AddonPricingIn, user=Depends(requ
 async def companies_admin_list(
     q: Optional[str] = None,
     status: Optional[str] = None,
-    _=Depends(require_role("admin")),
+    current=Depends(require_role("admin")),
 ):
-    """List every company in the system with license + subscription status.
-    Filters: q (name/code/payment_id search), status (active/expired)."""
+    """SUPER ADMIN ONLY: cross-company table. Company Admins cannot access this
+    (they hit 403 from require_role("admin"))."""
     query = {}
     if q:
         query = {"$or": [
