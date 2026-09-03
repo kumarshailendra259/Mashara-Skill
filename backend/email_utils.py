@@ -63,7 +63,7 @@ async def send_credentials_email(
       <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="background:#ffffff;border:1px solid #e2e6ec;">
         <tr>
           <td style="background:#0a3bc5;color:#ffffff;padding:24px;">
-            <div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85;">Mashara Skills and Creative Learning Pvt Ltd</div>
+            <div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85;">Mashara Enterprises</div>
             <div style="font-size:22px;font-weight:900;margin-top:4px;">Welcome to Mashara Finance</div>
           </td>
         </tr>
@@ -106,7 +106,7 @@ async def send_credentials_email(
           <p style="margin:12px 0 0;color:#5b6573;font-size:12px;">If you didn&rsquo;t expect this email, please ignore it.</p>
         </td></tr>
         <tr><td style="background:#0a3bc5;color:#ffffff;padding:14px 24px;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;text-align:center;">
-          Mashara Skills and Creative Learning Pvt Ltd
+          Mashara Enterprises
         </td></tr>
       </table>
     </td></tr>
@@ -142,7 +142,7 @@ async def send_otp_email(to_email: str, otp: str, validity_minutes: int = 15) ->
     <tr><td align="center">
       <table role="presentation" width="560" cellspacing="0" cellpadding="0" border="0" style="background:#ffffff;border:1px solid #e2e6ec;">
         <tr><td style="background:#0a3bc5;color:#ffffff;padding:22px 24px;">
-          <div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85;">Mashara Skills and Creative Learning Pvt Ltd</div>
+          <div style="font-size:11px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.85;">Mashara Enterprises</div>
           <div style="font-size:20px;font-weight:900;margin-top:4px;">Password Reset OTP</div>
         </td></tr>
         <tr><td style="padding:24px;font-size:14px;line-height:1.55;">

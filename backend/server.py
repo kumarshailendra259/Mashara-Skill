@@ -1637,7 +1637,7 @@ async def _generate_and_deliver_offer_letter(staff: dict, login_email: str,
     mail = await send_offer_letter_email(
         to_email=login_email, name=staff.get("name") or login_email.split("@")[0],
         letter_bytes=letter_bytes, filename=letter_doc["filename"],
-        company_name=(company or {}).get("name") or "Mashara Skills and Creative Learning Pvt Ltd",
+        company_name=(company or {}).get("name") or "Mashara Enterprises",
         content_type=content_type,
     )
     result["emailed"] = bool(mail.get("sent"))

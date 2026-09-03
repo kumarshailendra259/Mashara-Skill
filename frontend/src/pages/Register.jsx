@@ -31,7 +31,7 @@ export default function Register() {
       <form onSubmit={submit} className="swiss-card p-8 w-full max-w-md space-y-5" data-testid="register-form">
         <div className="border-l-2 border-[var(--brand)] pl-3" data-testid="company-welcome">
           <div className="overline text-[var(--brand)]">Welcome to</div>
-          <div className="font-heading font-bold text-base tracking-tight leading-tight mt-0.5">Mashara Skills and Creative Learning Pvt Ltd</div>
+          <div className="font-heading font-bold text-base tracking-tight leading-tight mt-0.5">Mashara Enterprises</div>
         </div>
         <div>
           <div className="overline">{t("register")}</div>
