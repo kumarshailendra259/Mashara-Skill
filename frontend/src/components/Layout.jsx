@@ -32,6 +32,13 @@ const navGroups = [
     ],
   },
   {
+    key: "grp_subscription",
+    icon: CreditCard,
+    items: [
+      { to: "/subscription", key: "subscription", icon: CreditCard, adminOnly: true },
+    ],
+  },
+  {
     key: "grp_organization",
     icon: Building2,
     items: [
@@ -72,7 +79,6 @@ const navGroups = [
       { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
       { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
       { to: "/notifications", key: "notifications", icon: MessageSquare, adminOnly: true, module: "notifications" },
-      { to: "/subscription", key: "subscription", icon: CreditCard, adminOnly: true },
     ],
   },
   {

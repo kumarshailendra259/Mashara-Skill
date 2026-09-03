@@ -26,6 +26,59 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 68 — SalaryBox-style Cart, Coupons & Standalone Sidebar (Done, Feb 2026)
+- **User asked (Hinglish)**: "buyer ko payment show karte rahe as per select staff and feature and add ones aur subscription aur billing ko alag menu banaye approval & workflow se nikal kar" — SalaryBox-style dynamic cart with staff-tier plan + features + addons + coupons + GST + live-updating price. And move Subscription & Billing out of the Approvals group into its own standalone sidebar menu.
+- **Backend `/app/backend/subscription_service.py`** (major rewrite):
+  1. **`DEFAULT_PLANS`** — 8 staff-limit tiers (5→Unlimited): Starter ₹499, Basic ₹899, Growth ₹1,499, Team ₹2,999, Business ₹4,999, Enterprise ₹8,999, Scale ₹19,999, Unlimited ₹49,999 /month. Base plan grants `hr` module.
+  2. **`DEFAULT_FEATURES`** — 8 stackable feature toggles with updated rates: Payroll ₹699, Attendance Pro ₹499, Approvals ₹299, Bank Guarantee ₹399, SMS/WA ₹249, MIS ₹599, Finance ₹799, Advanced Reports ₹399 /month.
+  3. **`DEFAULT_ADDONS`** — 6 optional extras: Background Verification ₹199/staff (one-time), GST Filing ₹999, Priority Support ₹1,499, Custom Domain ₹399, Data Vault ₹499, API Access ₹1,999 /month.
+  4. **`seed_catalog()`** — extended to bootstrap `subscription_plans`, `subscription_features`, `subscription_addons` collections idempotently.
+  5. **`get_pricing_catalog()`** — single call returns `{plans, features, addons, gst_rate_pct: 18}`.
+  6. **`validate_coupon(db, code, subtotal)`** — validates against `db.coupons` (case-insensitive), respects `expires_at`, `max_uses`, `min_subtotal_paise`; supports percentage OR flat-rupee discounts.
+  7. **`compute_quote()`** — server-authoritative computation. Accepts `{plan_code, feature_codes, addon_codes, staff_count_for_bgv, duration_months, coupon_code}`, returns full breakdown: `line_items[]`, `subtotal_paise`, `discount_paise`, `coupon_status`, `gst_paise`, `grand_total_paise`. GST 18% applied on `(subtotal − discount)`. Client-supplied amounts NEVER trusted.
+  8. **`apply_bundle_entitlements()`** — after payment capture, activates base-plan modules (`hr`) + every feature in the bundle. Addons are recorded on the order doc for ops but don't gate modules.
+- **Backend `/app/backend/server.py`** — new endpoints on `sub_api`:
+  - `GET /subscription/pricing` — returns full pricing catalog.
+  - `POST /subscription/quote` — live quote used by the cart on every state change.
+  - `POST /subscription/orders` (replaces old per-module version) — accepts `{plan_code, feature_codes, addon_codes, staff_count_for_bgv, duration_months, coupon_code, gst_invoice, gstin}`. Server re-computes the quote and creates Razorpay order for the recomputed amount (defends against client tampering). Persists the full `line_items[]` + `gst_invoice` + `gstin` on the order doc.
+  - `POST /subscription/verify` (updated) — on signature-valid capture, activates every module in the bundle via `apply_bundle_entitlements`, bumps `coupons.used_count` if applicable.
+  - `GET /subscription/me` (updated) — returns `entitled_modules`, `active_entitlements[]`, `current_bundle` (latest captured order), `is_admin`.
+  - **Admin coupon CRUD**: `POST /subscription/admin/coupons` (create), `GET /subscription/admin/coupons` (list), `DELETE /subscription/admin/coupons/{id}` (soft-disable). Supports percentage OR flat, min-subtotal, max-uses, expires_at. Duplicate codes → 409.
+  - `db.coupons` gets a unique index on `code`.
+- **Frontend `/app/frontend/src/pages/SubscriptionBilling.jsx`** (complete rewrite): SalaryBox-inspired 2-column layout.
+  - **Header**: "Choose Your Plan" (or "Upgrade Plan" if there's a current bundle) + refresh button + blue "You are on {plan}, valid till {date}" banner when a bundle exists.
+  - **Tabs**: Build Plan · Coupons · Orders & Audit.
+  - **Build Plan tab (buyer's cart)**:
+    - **Staff Limit card** — dropdown of all 8 tiers with pricing inline.
+    - **Features card** — 8 toggleable feature buttons (blue ring + check when selected), price + description per card. "N feature(s) added" counter + "Clear" button.
+    - **Add-ons card** — 6 toggleable addon buttons (emerald ring + check when selected). BGV shows an inline staff-count input (per-staff pricing).
+    - **Duration card** — +/− stepper (1-24 months).
+    - **Right sticky Order Summary** — full receipt:
+      - Line items (plan / feature / addon chips with names + qty + prices, scrollable if long)
+      - **Apply Coupon input + Apply button** → shows "LAUNCH50 applied" chip + remove-X when applied
+      - Subtotal, Coupon Discount (emerald, if applied), GST (18%), **Grand Total** (2xl bold)
+      - "+ Payment handling charges may apply" footnote
+      - **GST Invoice Yes/No** radios (Yes → GSTIN input appears)
+      - **Continue to Pay** button (opens Razorpay Checkout)
+    - Live quote debounced 200ms — every checkbox/dropdown/coupon change re-hits `POST /subscription/quote`.
+  - **Coupons tab (admin only)** — table of coupons (code, discount, uses, expires, status, deactivate action). "New Coupon" dialog with Code/Description/Discount-type (%/flat)/Min-subtotal/Max-uses/Expires-on.
+  - **Orders & Audit tab (admin only)** — recent orders (order id, plan, features CSV, total, GST invoice chip with GSTIN, status) + audit trail.
+- **Frontend `/app/frontend/src/components/Layout.jsx`** — new `grp_subscription` group with only one item ("Subscription & Billing", CreditCard icon, admin-only), placed as the **2nd group right after Dashboard**. Removed from the Approvals & Workflow group.
+- **Frontend `/app/frontend/src/lib/i18n.js`** — new EN/HI key `grp_subscription`.
+- **Verified end-to-end**:
+  - Backend curl: `GET /subscription/pricing` → 8 plans + 8 features + 6 addons + `gst_rate_pct: 18`.
+  - Backend curl: `POST /subscription/quote {plan_20 + payroll + attendance + priority}` → subtotal ₹4,196 + GST ₹755.28 = grand total **₹4,951.28**. Line items exposed for UI rendering.
+  - Backend curl: `POST /subscription/admin/coupons {code:LAUNCH50, discount_pct:50, max_uses:100}` → coupon created. Quote with `LAUNCH50` on plan_20 + payroll → subtotal ₹2,198 − ₹1,099 discount + ₹197.82 GST = ₹1,296.82.
+  - Browser (admin login): Sidebar shows **Subscription** as its own standalone group at position 2. Route `/subscription` renders the SalaryBox-style cart. Toggling Attendance Pro + Payroll + Priority Support updates the right cart to ₹4,951.28 live. Applying LAUNCH50 shows "LAUNCH50 applied" chip and grand total drops to ₹1,296.82. GST invoice Yes reveals GSTIN input. Continue to Pay button enabled for admin.
+- **Data model additions (Mongo)**:
+  - `subscription_plans` — `{code, name, staff_limit, price_paise, sort, is_active}`
+  - `subscription_features` — `{code, name, description, price_paise, is_active}`
+  - `subscription_addons` — `{code, name, description, price_paise, unit ("monthly"|"per_staff"), is_recurring, is_active}`
+  - `coupons` — `{code (unique), description, discount_pct?, discount_paise?, min_subtotal_paise?, max_uses?, used_count, expires_at?, is_active, created_by}`
+  - `orders` — now stores `plan_code, feature_codes[], addon_codes[], staff_limit, subtotal_paise, discount_paise, gst_paise, coupon_code, coupon_applied, gst_invoice, gstin, line_items[]` in addition to Razorpay ids.
+
+
+
 ### Phase 67 — Emergent Object Storage Integration (Verified + Hardened, Feb 2026)
 - **User asked**: Add File & Media Storage integration.
 - **Discovery**: Existing app already had a working Emergent Object Storage integration in `/app/backend/server.py` (helper `_put_object` / `_get_object` around lines 1213-1241), driving every file upload path — `/api/files/upload`, staff KYC docs, profile photos, offer letter templates + generated letters, reimbursement receipts + templates, salary slip templates + generated slips, attendance selfies. But it hardcoded the endpoint host and lazy-initialised.

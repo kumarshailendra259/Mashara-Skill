@@ -20533,6 +20533,7 @@ async def _seed_subscription_catalog():
             partialFilterExpression={"razorpay_payment_id": {"$type": "string"}},
         )
         await db.razorpay_events.create_index("event_id", unique=True, sparse=True)
+        await db.coupons.create_index("code", unique=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Subscription seed failed: %s", exc)
 
@@ -20564,51 +20565,100 @@ async def files_health(_=Depends(require_role("admin"))):
     }
 
 
-@sub_api.get("/subscription/catalog")
-async def sub_catalog(_=Depends(get_current_user)):
-    catalog = await subscription_service.get_catalog(db)
-    return {"catalog": catalog, "key_id": subscription_service.KEY_ID}
+@sub_api.get("/subscription/pricing")
+async def sub_pricing(_=Depends(get_current_user)):
+    """Full pricing catalog — plans (staff tiers) + features + addons + GST rate."""
+    return await subscription_service.get_pricing_catalog(db)
 
 
 @sub_api.get("/subscription/me")
 async def sub_me(user=Depends(get_current_user)):
-    """Effective entitlements + status per module for the current user."""
+    """Effective entitlements + current active subscription bundle for this user."""
     entitled = await subscription_service.compute_entitled_modules(db, user)
-    catalog = await subscription_service.get_catalog(db)
-    modules = []
-    for m in catalog:
-        ent = entitled.get(m["module"])
-        modules.append({
-            **m,
-            "status": ent["status"] if ent else "not_subscribed",
-            "expires_at": ent["expires_at"] if ent else None,
-        })
-    return {"modules": modules, "company_id": subscription_service._company_id_for(user)}
+    company_id = subscription_service._company_id_for(user)
+    # Latest captured order → the "current subscription".
+    latest = await db.orders.find_one(
+        {"company_id": company_id, "status": "captured"},
+        {"_id": 0}, sort=[("captured_at", -1)],
+    )
+    ents = await db.entitlements.find(
+        {"company_id": company_id, "status": "active"},
+        {"_id": 0},
+    ).to_list(50)
+    return {
+        "company_id": company_id,
+        "entitled_modules": list(entitled.keys()),
+        "active_entitlements": ents,
+        "current_bundle": latest,
+        "is_admin": user.get("role") == "admin",
+    }
 
 
-class CreateOrderIn(BaseModel):
-    module: str
-    duration_months: int = Field(ge=1, le=24)
+class QuoteIn(BaseModel):
+    plan_code: str
+    feature_codes: List[str] = Field(default_factory=list)
+    addon_codes: List[str] = Field(default_factory=list)
+    staff_count_for_bgv: int = 1
+    duration_months: int = Field(1, ge=1, le=24)
+    coupon_code: Optional[str] = None
+
+
+@sub_api.post("/subscription/quote")
+async def sub_quote(body: QuoteIn, _=Depends(get_current_user)):
+    """Server-authoritative price quote — used by the cart UI on every change."""
+    return await subscription_service.compute_quote(
+        db,
+        plan_code=body.plan_code,
+        feature_codes=body.feature_codes,
+        addon_codes=body.addon_codes,
+        staff_count_for_bgv=body.staff_count_for_bgv,
+        duration_months=body.duration_months,
+        coupon_code=body.coupon_code,
+    )
+
+
+class CreateBundleOrderIn(BaseModel):
+    plan_code: str
+    feature_codes: List[str] = Field(default_factory=list)
+    addon_codes: List[str] = Field(default_factory=list)
+    staff_count_for_bgv: int = 1
+    duration_months: int = Field(1, ge=1, le=24)
+    coupon_code: Optional[str] = None
+    gst_invoice: bool = False
+    gstin: Optional[str] = None
 
 
 @sub_api.post("/subscription/orders")
-async def sub_create_order(body: CreateOrderIn, user=Depends(get_current_user)):
+async def sub_create_order(body: CreateBundleOrderIn, user=Depends(get_current_user)):
     if not subscription_service.is_configured():
         raise HTTPException(503, "Razorpay not configured — contact admin")
-    catalog_row = await db.subscription_catalog.find_one({"module": body.module, "is_active": True}, {"_id": 0})
-    if not catalog_row:
-        raise HTTPException(400, f"Unknown module '{body.module}'")
 
-    amount = catalog_row["price_paise"] * body.duration_months
+    # Re-compute the quote server-side. Client-supplied amounts are ignored.
+    quote = await subscription_service.compute_quote(
+        db,
+        plan_code=body.plan_code,
+        feature_codes=body.feature_codes,
+        addon_codes=body.addon_codes,
+        staff_count_for_bgv=body.staff_count_for_bgv,
+        duration_months=body.duration_months,
+        coupon_code=body.coupon_code,
+    )
+    amount = quote["grand_total_paise"]
+    if amount <= 0:
+        raise HTTPException(400, "Zero-amount order not allowed")
+    if body.gst_invoice and not (body.gstin or "").strip():
+        raise HTTPException(400, "GSTIN is required when GST invoice is requested")
+
     company_id = subscription_service._company_id_for(user)
-    receipt = f"sub_{company_id[:8]}_{body.module[:8]}_{int(datetime.now(timezone.utc).timestamp())}"[:40]
+    receipt = f"sub_{company_id[:8]}_{body.plan_code[:8]}_{int(datetime.now(timezone.utc).timestamp())}"[:40]
 
     client = subscription_service.get_client()
     try:
         order = client.order.create(data={
             "amount": amount, "currency": "INR", "receipt": receipt,
-            "notes": {"company_id": company_id, "module": body.module,
-                       "duration_months": str(body.duration_months), "user_id": user["id"]},
+            "notes": {"company_id": company_id, "plan": body.plan_code,
+                       "duration_months": str(body.duration_months),
+                       "user_id": user["id"], "features": ",".join(body.feature_codes)[:200]},
         })
     except Exception as exc:  # noqa: BLE001
         logger.exception("Razorpay order create failed")
@@ -20620,21 +20670,34 @@ async def sub_create_order(body: CreateOrderIn, user=Depends(get_current_user)):
         "razorpay_payment_id": None,
         "company_id": company_id,
         "user_id": user["id"],
-        "module": body.module,
+        "plan_code": body.plan_code,
+        "staff_limit": quote["staff_limit"],
+        "feature_codes": body.feature_codes,
+        "addon_codes": body.addon_codes,
+        "staff_count_for_bgv": body.staff_count_for_bgv,
         "duration_months": body.duration_months,
+        "coupon_code": (body.coupon_code or "").upper().strip() or None,
+        "coupon_applied": quote["coupon_status"]["ok"],
+        "subtotal_paise": quote["subtotal_paise"],
+        "discount_paise": quote["discount_paise"],
+        "gst_paise": quote["gst_paise"],
         "amount_paise": amount,
+        "gst_invoice": body.gst_invoice,
+        "gstin": (body.gstin or "").strip().upper() or None,
+        "line_items": quote["line_items"],
         "status": "created",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.orders.insert_one(doc)
-    await subscription_service.audit(db, "order_created", user, target={"order_id": order["id"], "module": body.module})
+    await subscription_service.audit(db, "order_created", user, target={
+        "order_id": order["id"], "plan": body.plan_code, "amount_paise": amount,
+    })
     return {
         "key_id": subscription_service.KEY_ID,
         "order_id": order["id"],
         "amount": amount,
         "currency": "INR",
-        "module": body.module,
-        "duration_months": body.duration_months,
+        "quote": quote,
     }
 
 
@@ -20657,10 +20720,9 @@ async def sub_verify(body: VerifyPaymentIn, user=Depends(get_current_user)):
         await subscription_service.audit(db, "payment_signature_invalid", user, target={"order_id": body.razorpay_order_id})
         raise HTTPException(400, "Invalid payment signature")
 
-    # Idempotent: if already processed, return the existing entitlement.
     if order.get("status") == "captured":
-        ent = await db.entitlements.find_one({"source_order_id": body.razorpay_order_id}, {"_id": 0})
-        return {"ok": True, "already_processed": True, "entitlement": ent}
+        ents = await db.entitlements.find({"source_order_id": body.razorpay_order_id}, {"_id": 0}).to_list(50)
+        return {"ok": True, "already_processed": True, "entitlements": ents}
 
     now_iso = datetime.now(timezone.utc).isoformat()
     await db.orders.update_one(
@@ -20668,15 +20730,88 @@ async def sub_verify(body: VerifyPaymentIn, user=Depends(get_current_user)):
         {"$set": {"status": "captured", "razorpay_payment_id": body.razorpay_payment_id,
                    "captured_at": now_iso}},
     )
-    ent = await subscription_service._extend_or_create_entitlement(
-        db, order["company_id"], order["module"], order["duration_months"],
-        body.razorpay_order_id, body.razorpay_payment_id,
+    ents = await subscription_service.apply_bundle_entitlements(
+        db, order["company_id"],
+        plan_code=order["plan_code"],
+        staff_limit=order["staff_limit"],
+        feature_codes=order.get("feature_codes") or [],
+        duration_months=order["duration_months"],
+        order_id=body.razorpay_order_id, payment_id=body.razorpay_payment_id,
     )
+    # Bump coupon usage counter (best-effort).
+    if order.get("coupon_code") and order.get("coupon_applied"):
+        await db.coupons.update_one({"code": order["coupon_code"]}, {"$inc": {"used_count": 1}})
+
     await subscription_service.audit(db, "payment_verified", user, target={
         "order_id": body.razorpay_order_id, "payment_id": body.razorpay_payment_id,
-        "module": order["module"],
+        "plan": order["plan_code"], "amount_paise": order["amount_paise"],
     })
-    return {"ok": True, "entitlement": ent}
+    return {"ok": True, "entitlements": ents}
+
+
+# ---- Admin: Coupon CRUD ----------------------------------------------------
+
+class CouponIn(BaseModel):
+    code: str
+    description: Optional[str] = None
+    discount_pct: Optional[int] = Field(None, ge=1, le=100)
+    discount_paise: Optional[int] = Field(None, ge=1)
+    min_subtotal_paise: Optional[int] = None
+    max_uses: Optional[int] = Field(None, ge=1)
+    expires_at: Optional[str] = None  # ISO-8601
+    is_active: bool = True
+
+
+@sub_api.post("/subscription/admin/coupons")
+async def sub_admin_create_coupon(body: CouponIn, user=Depends(require_role("admin"))):
+    if not body.discount_pct and not body.discount_paise:
+        raise HTTPException(400, "Provide either discount_pct or discount_paise")
+    code = body.code.strip().upper()
+    if not code or " " in code:
+        raise HTTPException(400, "Coupon code must be non-empty and space-free")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "code": code,
+        "description": (body.description or "").strip(),
+        "discount_pct": body.discount_pct,
+        "discount_paise": body.discount_paise,
+        "min_subtotal_paise": body.min_subtotal_paise,
+        "max_uses": body.max_uses,
+        "used_count": 0,
+        "expires_at": body.expires_at,
+        "is_active": body.is_active,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": user["id"],
+    }
+    try:
+        await db.coupons.insert_one(doc)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(409, f"Coupon code already exists: {exc}")
+    doc.pop("_id", None)
+    await subscription_service.audit(db, "coupon_created", user, target={"code": code})
+    return doc
+
+
+@sub_api.get("/subscription/admin/coupons")
+async def sub_admin_list_coupons(_=Depends(require_role("admin"))):
+    rows = await db.coupons.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    return rows
+
+
+@sub_api.delete("/subscription/admin/coupons/{coupon_id}")
+async def sub_admin_delete_coupon(coupon_id: str, user=Depends(require_role("admin"))):
+    res = await db.coupons.update_one({"id": coupon_id}, {"$set": {"is_active": False}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Coupon not found")
+    await subscription_service.audit(db, "coupon_deactivated", user, target={"id": coupon_id})
+    return {"ok": True}
+
+
+# ---- Legacy catalog kept for backwards compat ----
+@sub_api.get("/subscription/catalog")
+async def sub_catalog(_=Depends(get_current_user)):
+    catalog = await subscription_service.get_catalog(db)
+    return {"catalog": catalog, "key_id": subscription_service.KEY_ID}
 
 
 @app.post("/api/webhooks/razorpay")
