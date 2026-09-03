@@ -209,10 +209,18 @@ function GrantFreeAccessDialog({ open, target, features, onClose, onGranted }) {
   const [saving, setSaving]     = useState(false);
 
   useEffect(() => {
-    if (open) { setHrms(5); setRoleUser(2); setFS(new Set()); setDuration(3); setReason(""); }
-  }, [open]);
+    if (open) {
+      setHrms(5); setRoleUser(2);
+      // Pre-select ALL features by default so a single-click "give them
+      // everything" grant just works. Admin can still un-tick individually.
+      setFS(new Set((features || []).map((f) => f.code)));
+      setDuration(3); setReason("");
+    }
+  }, [open, features]);
 
   const toggleFeature = (code) => setFS((s) => { const n = new Set(s); if (n.has(code)) n.delete(code); else n.add(code); return n; });
+  const selectAll     = () => setFS(new Set((features || []).map((f) => f.code)));
+  const selectNone    = () => setFS(new Set());
 
   const submit = async () => {
     if (!target) return;
@@ -229,7 +237,7 @@ function GrantFreeAccessDialog({ open, target, features, onClose, onGranted }) {
         duration_months: duration,
         reason: reason.trim(),
       });
-      toast.success(`Free access granted to ${target.company_name}`);
+      toast.success(`Free access granted to ${target.company_name}. Users must refresh their browser to see unlocked modules.`);
       onGranted?.();
     } catch (e) { toast.error(formatError(e)); }
     finally { setSaving(false); }
@@ -262,8 +270,14 @@ function GrantFreeAccessDialog({ open, target, features, onClose, onGranted }) {
             </div>
           </div>
           <div>
-            <Label>Feature Modules to Include</Label>
-            <div className="grid grid-cols-2 gap-2 mt-2 max-h-56 overflow-y-auto">
+            <div className="flex items-center justify-between mb-2">
+              <Label>Feature Modules to Include <span className="text-slate-400 text-xs font-normal">({featureSet.size}/{features.length} selected)</span></Label>
+              <div className="flex items-center gap-1">
+                <Button size="sm" variant="outline" onClick={selectAll} data-testid="grant-select-all">Select All</Button>
+                <Button size="sm" variant="ghost" onClick={selectNone} data-testid="grant-select-none">Clear</Button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 max-h-56 overflow-y-auto">
               {features.map((f) => {
                 const on = featureSet.has(f.code);
                 return (
@@ -293,7 +307,7 @@ function GrantFreeAccessDialog({ open, target, features, onClose, onGranted }) {
             <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Strategic partnership, beta testing, refund credit" data-testid="grant-reason"/>
           </div>
           <div className="rounded-md bg-amber-50 border border-amber-200 p-2 text-xs text-amber-800">
-            This is a <b>complimentary</b> grant — no Razorpay payment will be collected. Action is logged in the audit trail.
+            <b>Tip:</b> After granting, users of that company must <b>refresh their browser</b> (or log out/in) to see the newly unlocked modules in their sidebar.
           </div>
         </div>
         <DialogFooter>

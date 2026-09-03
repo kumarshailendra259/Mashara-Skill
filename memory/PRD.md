@@ -26,6 +26,16 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+
+### Phase 71 — Grant Free Access: Multi-Module Entitlement Bug Fix (Done, Feb 2026)
+- **User reported**: Super Admin ne "Grant Free Access" se Finance/MIS/Accounting modules enable karne ki koshish ki lekin sirf `hr` module active hua.
+- **Root cause**: `subscription_service._extend_or_create_entitlement` ka idempotency check sirf `source_order_id` pe scoped tha. Ek order kai modules grant karta hai (base `hr` + selected features); pehle module ke insert ke baad, loop mein aane wale saare aage ke modules ko same `source_order_id` match mila aur wo `return existing` se short-circuit ho gaye — DB mein sirf pehla module actually create hua.
+- **Fix**: Idempotency check ab `(source_order_id, module)` composite key pe scoped hai — file: `/app/backend/subscription_service.py`.
+- **Impact**: `apply_bundle_entitlements` ko use karne wale saare code paths (paid Razorpay subscriptions + free grants + top-ups) ab har requested module ke liye separate entitlement rows create karte hain.
+- **Verification**: curl POST `/api/companies-admin/grant-free-access` ne 9 unique modules return kiye (`approvals, attendance, bank_guarantee, finance, hr, mis, notifications, payroll, reports`), DB mein saare 9 rows confirmed. UI screenshot ne "Select All" button + 8/8 pre-checked features + purple selected-state confirm kiya.
+- **Frontend already fixed pehle**: `CompaniesAdmin.jsx` mein features default se pre-selected + "Select All" button (backup for manual reselect).
+
+
 ### Phase 70 — Super Admin / Company Admin RBAC & Tenant Isolation (Done, Feb 2026)
 - **User asked**: Rename "Admin" role to "Super Admin"; introduce new "Company Admin" role restricted to its own company_id. 18-point spec covering registration hardening, license enforcement, cross-company isolation, hierarchical role management, super-admin cross-tenant dashboard, and backwards compatibility.
 - **Design decision (minimally invasive)**: Rather than rewriting 100+ backend `require_role("admin")` calls and 30+ frontend `role === "admin"` checks, we keep `admin` as the internal canonical role string and present it as **"Super Admin"** everywhere in the UI. `super_admin` is accepted as an input alias (normalized to `admin` before storage). `company_admin` is a brand-new distinct role.

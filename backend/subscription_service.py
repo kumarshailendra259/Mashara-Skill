@@ -351,10 +351,17 @@ async def compute_entitled_modules(db, user: dict) -> dict:
 async def _extend_or_create_entitlement(db, company_id: str, module: str,
                                         duration_months: int, order_id: str,
                                         payment_id: str) -> dict:
-    """Idempotent: if the entitlement already came from this order, no-op.
-    Else extends the existing active entitlement from its current expiry, or
-    activates a new one starting now."""
-    existing = await db.entitlements.find_one({"source_order_id": order_id}, {"_id": 0})
+    """Idempotent: if this exact (order, module) already produced an entitlement,
+    no-op. Else extends the existing active entitlement from its current expiry,
+    or activates a new one starting now.
+
+    NOTE: idempotency MUST scope by (order_id, module) — a single order commonly
+    grants multiple modules (base `hr` + selected features), so a bare
+    `source_order_id` match would short-circuit every module after the first.
+    """
+    existing = await db.entitlements.find_one(
+        {"source_order_id": order_id, "module": module}, {"_id": 0},
+    )
     if existing:
         return existing
 
