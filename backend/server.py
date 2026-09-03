@@ -1192,21 +1192,29 @@ async def on_shutdown():
 
 
 # ---------- Object Storage ----------
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
 APP_STORAGE_PREFIX = os.environ.get("APP_STORAGE_PREFIX", "finance-tracker")
 _storage_key: Optional[str] = None
+_storage_last_error: Optional[str] = None
 
 
 def _init_storage() -> str:
-    global _storage_key
+    global _storage_key, _storage_last_error
     if _storage_key:
         return _storage_key
     emergent_key = os.environ.get("EMERGENT_LLM_KEY")
     if not emergent_key:
+        _storage_last_error = "EMERGENT_LLM_KEY missing"
         raise HTTPException(500, "Object storage not configured (EMERGENT_LLM_KEY missing)")
-    r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": emergent_key}, timeout=30)
-    r.raise_for_status()
-    _storage_key = r.json()["storage_key"]
+    try:
+        r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": emergent_key}, timeout=30)
+        r.raise_for_status()
+        _storage_key = r.json()["storage_key"]
+        _storage_last_error = None
+    except Exception as exc:  # noqa: BLE001
+        _storage_last_error = str(exc)
+        raise
     return _storage_key
 
 
@@ -20527,6 +20535,33 @@ async def _seed_subscription_catalog():
         await db.razorpay_events.create_index("event_id", unique=True, sparse=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Subscription seed failed: %s", exc)
+
+
+@app.on_event("startup")
+async def _init_object_storage():
+    """Fail-fast init for Emergent Object Storage.
+
+    Any exception is logged but does NOT crash the app — file uploads will
+    surface a clear 500 at request time via `_init_storage()` if the
+    integration proxy is unreachable. `GET /api/files/health` returns the
+    last state for ops visibility.
+    """
+    try:
+        _init_storage()
+        logger.info("Object storage initialised (%s, prefix=%s)", STORAGE_BASE, APP_STORAGE_PREFIX)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Object storage init failed: %s (will retry on first upload)", exc)
+
+
+@sub_api.get("/files/health")
+async def files_health(_=Depends(require_role("admin"))):
+    """Object storage health probe — admin only."""
+    return {
+        "storage_base": STORAGE_BASE,
+        "prefix": APP_STORAGE_PREFIX,
+        "initialised": bool(_storage_key),
+        "last_error": _storage_last_error,
+    }
 
 
 @sub_api.get("/subscription/catalog")

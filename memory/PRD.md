@@ -26,6 +26,30 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 67 — Emergent Object Storage Integration (Verified + Hardened, Feb 2026)
+- **User asked**: Add File & Media Storage integration.
+- **Discovery**: Existing app already had a working Emergent Object Storage integration in `/app/backend/server.py` (helper `_put_object` / `_get_object` around lines 1213-1241), driving every file upload path — `/api/files/upload`, staff KYC docs, profile photos, offer letter templates + generated letters, reimbursement receipts + templates, salary slip templates + generated slips, attendance selfies. But it hardcoded the endpoint host and lazy-initialised.
+- **Integration playbook (verified)**:
+  1. Endpoint: `${INTEGRATION_PROXY_URL}/objstore/api/v1/storage` (falls back to `https://integrations.emergentagent.com`). `INTEGRATION_PROXY_URL` is already provisioned in the pod env.
+  2. Auth: `POST /init` with `{"emergent_key": EMERGENT_LLM_KEY}` → returns `storage_key` (cache module-level, refresh on 403).
+  3. Upload: `PUT /objects/{path}` with `X-Storage-Key` + `Content-Type` + raw bytes. Path scheme: `{APP_STORAGE_PREFIX}/uploads/{user_id}/{uuid}.{ext}`.
+  4. Download: `GET /objects/{path}` with `X-Storage-Key`.
+  5. No presigned URLs, no delete API — soft-delete via `db.files.is_deleted` and the private streaming endpoint stays behind auth.
+- **Changes applied to `/app/backend/server.py`**:
+  1. `STORAGE_BASE` now reads `os.environ.get("INTEGRATION_PROXY_URL")` first (per playbook), with hardcoded fallback for safety.
+  2. `_init_storage()` records `_storage_last_error` on failure so the health endpoint surfaces the actual reason.
+  3. New `@app.on_event("startup") _init_object_storage` — calls `_init_storage()` eagerly at boot so misconfiguration is loud (`Object storage initialised (https://integrations.emergentagent.com, prefix=finance-tracker)` in `backend.err.log`); a failure logs a warning but does NOT crash the app (per playbook: retry on first upload).
+  4. New endpoint `GET /api/files/health` (admin-only) → returns `{storage_base, prefix, initialised, last_error}` for ops visibility. Mounted on the `sub_api` router because the primary `api` router was already `include_router`-ed earlier in the file.
+- **Verified end-to-end**:
+  - Startup log: `INFO server - Object storage initialised (https://integrations.emergentagent.com, prefix=finance-tracker)`.
+  - `GET /api/files/health` (admin) → `{"storage_base":"https://integrations.emergentagent.com","prefix":"finance-tracker","initialised":true,"last_error":null}`; HR → `403 Forbidden`.
+  - `curl` round-trip: uploaded `hello.txt` via `POST /api/files/upload` (with CSRF token), downloaded back via `GET /api/files/view?path=...` — content matched byte-for-byte.
+  - Browser round-trip (admin session cookie): uploaded a blob via `fetch` with the axios-interceptor style CSRF cookie header, then downloaded via `/api/files/view` — HTTP 200, exact content returned.
+- **Security preserved**: Phase 63 hardening (per-object BOLA auth, no `?auth=<jwt>` query fallback, CSRF on POST) is intact. Non-privileged roles still only see files whose parent record they can see via `_scoped_center_ids`.
+- **No new keys required from user** — the integration uses the existing `EMERGENT_LLM_KEY`. `INTEGRATION_PROXY_URL` is auto-provisioned by the platform.
+
+
+
 ### Phase 66 — Razorpay SaaS Subscription & Module Access Control (Done, Feb 2026)
 - **User asked (Hinglish)**: SaaS-style subscription banao — har module (HR, Payroll, Attendance, Finance, Approvals, Bank Guarantee, Notifications, MIS) alag-alag purchase ho, Razorpay se live payment le sake, aur bina purchase kiye locked module use na kar paye. UI mein 🔒 lock icons + full page block dono chahiye.
 - **Razorpay secrets in `/app/backend/.env`**: `RAZORPAY_KEY_ID=rzp_test_TXTWJ7xENptxlZ`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET=MASHARAENTERPRISES`.
