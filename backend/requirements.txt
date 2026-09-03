@@ -131,3 +131,4 @@ yarl==1.24.2
 zipp==4.1.0
 aiohttp-retry==2.9.1
 twilio==9.11.0
+razorpay==2.0.1

@@ -36,6 +36,10 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.post("/auth/login", { email, password });
       setUser(data);
+      try {
+        const s = await api.get("/auth/me/scope");
+        setScope(s.data);
+      } catch { setScope(null); }
       return { ok: true };
     } catch (e) {
       return { ok: false, error: formatError(e) };

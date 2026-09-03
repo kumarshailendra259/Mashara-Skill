@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare, AlertCircle,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
-  ChevronDown, ChevronRight, Star, ChevronsRight, FileText,
+  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,16 +52,16 @@ const navGroups = [
     key: "grp_finance",
     icon: Wallet,
     items: [
-      { to: "/programs", key: "programs", icon: Layers, programsAccess: true },
-      { to: "/invoices", key: "invoices", icon: FileText, invoiceAccess: true },
-      { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true },
-      { to: "/advances", key: "advances", icon: Wallet },
-      { to: "/quotations", key: "payment_request", icon: FileSignature, nonPartner: true },
-      { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true },
-      { to: "/bank-guarantees", key: "bank_guarantees", icon: Landmark, bgAccess: true },
-      { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true },
-      { to: "/mis", key: "mis_dashboard", icon: BarChart3, misAccess: true },
-      { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true },
+      { to: "/programs", key: "programs", icon: Layers, programsAccess: true, module: "finance" },
+      { to: "/invoices", key: "invoices", icon: FileText, invoiceAccess: true, module: "finance" },
+      { to: "/transactions", key: "transactions", icon: ArrowLeftRight, financeOnly: true, module: "finance" },
+      { to: "/advances", key: "advances", icon: Wallet, module: "finance" },
+      { to: "/quotations", key: "payment_request", icon: FileSignature, nonPartner: true, module: "finance" },
+      { to: "/bank-reconciliation", key: "bank_reconciliation", icon: Wallet, adminAccountantOnly: true, module: "finance" },
+      { to: "/bank-guarantees", key: "bank_guarantees", icon: Landmark, bgAccess: true, module: "bank_guarantee" },
+      { to: "/tds-register", key: "tds_register", icon: Receipt, financeOnly: true, module: "finance" },
+      { to: "/mis", key: "mis_dashboard", icon: BarChart3, misAccess: true, module: "mis" },
+      { to: "/reports", key: "reports", icon: FileBarChart2, financeOnly: true, module: "finance" },
     ],
   },
   {
@@ -71,7 +71,8 @@ const navGroups = [
       { to: "/pending-approvals", key: "pending_approvals", icon: Inbox },
       { to: "/approvals", key: "approval_log", icon: ClipboardCheck, adminOnly: true },
       { to: "/approval-workflows", key: "approval_workflows", icon: GitMerge, hrOrAdmin: true },
-      { to: "/notifications", key: "notifications", icon: MessageSquare, adminOnly: true },
+      { to: "/notifications", key: "notifications", icon: MessageSquare, adminOnly: true, module: "notifications" },
+      { to: "/subscription", key: "subscription", icon: CreditCard, adminOnly: true },
     ],
   },
   {
@@ -86,10 +87,10 @@ const navGroups = [
     key: "grp_hr",
     icon: Users,
     items: [
-      { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true },
-      { to: "/hrms", key: "HRMS", icon: Users },
-      { to: "/hrms/financial-history", key: "financial_history", icon: Wallet, hrOrAdminOrAccountant: true },
-      { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true },
+      { to: "/employee-transfers", key: "employee_transfers", icon: UserCog, hrLineOnly: true, module: "hr" },
+      { to: "/hrms", key: "HRMS", icon: Users, module: "hr" },
+      { to: "/hrms/financial-history", key: "financial_history", icon: Wallet, hrOrAdminOrAccountant: true, module: "payroll" },
+      { to: "/hr-settings", key: "hr_settings", icon: Settings2, hrOrAdmin: true, module: "hr" },
       { to: "/users", key: "user_management", icon: ShieldCheck, adminOnly: true },
       { to: "/login-history", key: "login_history", icon: History, adminOnly: true },
     ],
@@ -112,6 +113,24 @@ const navGroups = [
   },
 ];
 
+// Map a URL path → gated module (derived from `module` prop on navGroups items).
+// Used to render a full-page "Module Locked" screen when the caller lands on
+// a page whose module hasn't been purchased.
+const ROUTE_TO_MODULE = navGroups.flatMap((g) => g.items)
+  .filter((it) => it.module)
+  .map((it) => ({ to: it.to, module: it.module, label: it.key }));
+
+function moduleForPath(path) {
+  // Longest-prefix wins so /hrms/financial-history (payroll) beats /hrms (hr).
+  let best = null;
+  for (const r of ROUTE_TO_MODULE) {
+    if (path === r.to || path.startsWith(r.to + "/")) {
+      if (!best || r.to.length > best.to.length) best = r;
+    }
+  }
+  return best;
+}
+
 // Roles that may see investments / income / expense / profit-loss / milestones / TDS.
 // Must mirror FINANCE_VISIBLE_ROLES in backend/server.py.
 const FINANCE_VISIBLE_ROLES = ["admin", "partner", "senior_manager", "hr", "accountant"];
@@ -122,7 +141,7 @@ const DASHBOARD_ROLES = [...FINANCE_VISIBLE_ROLES, "center_manager"];
 // Sidebar navigation body — shared between desktop <aside> and the mobile Sheet drawer.
 // Renders grouped, collapsible menu with active-state highlighting and
 // auto-expansion when a child route is active.
-function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expanded, toggleGroup, currentPath }) {
+function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expanded, toggleGroup, currentPath, blockedModules = [] }) {
   return (
     <>
       <div className="px-5 py-5 border-b border-[var(--border)]">
@@ -171,6 +190,7 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                   {grp.items.map((it) => {
                     const Icon = it.icon;
                     const badge = badgeFor(it.key);
+                    const isLocked = it.module && blockedModules.includes(it.module);
                     return (
                       <NavLink
                         key={it.to}
@@ -182,12 +202,18 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                           `flex items-center gap-3 pl-10 pr-5 py-2 text-[13px] border-l-2 transition-colors ${
                             isActive
                               ? "border-[var(--brand)] bg-[#f3f5fb] text-[var(--brand)] font-medium"
-                              : "border-transparent text-[var(--muted)] hover:text-[var(--text)] hover:bg-gray-50"
+                              : isLocked
+                                ? "border-transparent text-slate-400 hover:text-slate-500 hover:bg-gray-50"
+                                : "border-transparent text-[var(--muted)] hover:text-[var(--text)] hover:bg-gray-50"
                           }`
                         }
+                        title={isLocked ? "Module locked — Subscribe to unlock" : undefined}
                       >
                         <Icon size={14} strokeWidth={1.6} />
                         <span className="flex-1">{t(it.key)}</span>
+                        {isLocked && (
+                          <Lock size={11} className="text-amber-500" data-testid={`nav-lock-${it.key}`} aria-label="module locked" />
+                        )}
                         {badge > 0 && (
                           <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`badge-${it.key}`}>
                             {badge}
@@ -377,6 +403,7 @@ export default function Layout({ children }) {
           expanded={expanded}
           toggleGroup={toggleGroup}
           currentPath={location.pathname}
+          blockedModules={scope?.blocked_modules || []}
         />
       </aside>
 
@@ -396,6 +423,7 @@ export default function Layout({ children }) {
             expanded={expanded}
             toggleGroup={toggleGroup}
             currentPath={location.pathname}
+            blockedModules={scope?.blocked_modules || []}
           />
         </SheetContent>
       </Sheet>
@@ -540,7 +568,50 @@ export default function Layout({ children }) {
           className="flex-1 overflow-auto p-4 md:p-6 bg-[var(--bg)] pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-6"
           data-testid="main-content"
         >
-          {children}
+          {(() => {
+            const blocked = scope?.blocked_modules || [];
+            const match = moduleForPath(location.pathname);
+            if (match && blocked.includes(match.module)) {
+              return (
+                <div className="max-w-2xl mx-auto py-16" data-testid="module-locked-page">
+                  <div className="bg-white border border-amber-200 rounded-xl p-8 text-center shadow-sm">
+                    <div className="w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center mx-auto">
+                      <Lock className="text-amber-600" size={28} />
+                    </div>
+                    <h2 className="text-2xl font-black tracking-tight text-slate-900 mt-4">
+                      Not Authorised For This Service
+                    </h2>
+                    <div className="text-slate-600 mt-3 leading-relaxed">
+                      Aapki company ne <span className="font-bold text-slate-800">{match.module}</span> module abhi tak activate nahi kiya hai.
+                      Please go through the <b>Subscription &amp; Billing</b> menu and complete the payment to access this service.
+                    </div>
+                    <div className="mt-6 flex items-center justify-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => nav("/subscription")}
+                        className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-md hover:bg-blue-700 transition-colors"
+                        data-testid="locked-goto-subscription"
+                      >
+                        <CreditCard size={14} /> Open Subscription &amp; Billing
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => nav("/")}
+                        className="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 text-sm font-medium rounded-md hover:bg-slate-50 transition-colors"
+                        data-testid="locked-goto-home"
+                      >
+                        Back to Dashboard
+                      </button>
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-6">
+                      Module code: <span className="font-mono">{match.module}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            return children;
+          })()}
         </main>
 
         {/* Bottom tab-bar — mobile only */}

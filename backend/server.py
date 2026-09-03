@@ -1718,7 +1718,22 @@ async def my_scope(user=Depends(get_current_user)):
         "assigned_centers": center_docs,
         # Fail-closed for scoped roles with no mapping — UI shows a warning.
         "needs_mapping": (not is_head_level) and role not in ("partner", "viewer") and not center_ids,
+        # Phase 66 — module-level entitlements so the SPA can lock unpaid modules.
+        "entitled_modules": list((await subscription_service.compute_entitled_modules(db, user)).keys()),
+        "blocked_modules": await _compute_blocked_modules(user),
     }
+
+
+async def _compute_blocked_modules(user: dict) -> list[str]:
+    """Modules present in the paid catalog that this user's company has NOT
+    activated yet. Admins never see blocked modules."""
+    if user.get("role") == "admin":
+        return []
+    entitled = await subscription_service.compute_entitled_modules(db, user)
+    catalog_rows = await db.subscription_catalog.find(
+        {"is_active": True}, {"_id": 0, "module": 1},
+    ).to_list(50)
+    return [c["module"] for c in catalog_rows if c["module"] not in entitled]
 
 
 @api.get("/auth/users", response_model=List[UserOut])
@@ -20456,6 +20471,273 @@ async def twilio_status_webhook(request: Request):
 
 
 app.include_router(api)
+
+
+# ============================================================================
+# ================  SUBSCRIPTION & MODULE ENTITLEMENT (Phase 66)  ============
+# ============================================================================
+# Razorpay Orders API + signature-verified activation + entitlement middleware.
+# See /app/backend/subscription_service.py for the SDK-side logic; this block
+# owns the FastAPI routes + guard dependency.
+import subscription_service  # noqa: E402
+
+# Dedicated sub-router — attached to `app` at the end of this block so its
+# routes actually get mounted (the primary `api` router was already
+# `include_router`-ed before this block was added).
+sub_api = APIRouter(prefix="/api")
+
+
+def require_module_entitlement(module: str):
+    """FastAPI dependency: returns 403 unless the current company has an
+    active entitlement for `module`. Admins always pass."""
+    async def _guard(user=Depends(get_current_user)):
+        if user.get("role") == "admin" or module in subscription_service.FREE_MODULES:
+            return user
+        ents = await subscription_service.compute_entitled_modules(db, user)
+        if module not in ents:
+            await subscription_service.audit(db, "access_denied", user, extra={"module": module})
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "module_not_subscribed",
+                    "module": module,
+                    "message": "Not Authorised For This Service. Please go through the Subscription & Billing Menu and complete the payment to access this service.",
+                    "redirect": "/subscription",
+                },
+            )
+        return user
+    return _guard
+
+
+@app.on_event("startup")
+async def _seed_subscription_catalog():
+    try:
+        await subscription_service.seed_catalog(db)
+        await db.entitlements.create_index([("company_id", 1), ("module", 1)])
+        await db.orders.create_index(
+            "razorpay_order_id",
+            unique=True,
+            partialFilterExpression={"razorpay_order_id": {"$type": "string"}},
+        )
+        await db.orders.create_index(
+            "razorpay_payment_id",
+            unique=True,
+            partialFilterExpression={"razorpay_payment_id": {"$type": "string"}},
+        )
+        await db.razorpay_events.create_index("event_id", unique=True, sparse=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Subscription seed failed: %s", exc)
+
+
+@sub_api.get("/subscription/catalog")
+async def sub_catalog(_=Depends(get_current_user)):
+    catalog = await subscription_service.get_catalog(db)
+    return {"catalog": catalog, "key_id": subscription_service.KEY_ID}
+
+
+@sub_api.get("/subscription/me")
+async def sub_me(user=Depends(get_current_user)):
+    """Effective entitlements + status per module for the current user."""
+    entitled = await subscription_service.compute_entitled_modules(db, user)
+    catalog = await subscription_service.get_catalog(db)
+    modules = []
+    for m in catalog:
+        ent = entitled.get(m["module"])
+        modules.append({
+            **m,
+            "status": ent["status"] if ent else "not_subscribed",
+            "expires_at": ent["expires_at"] if ent else None,
+        })
+    return {"modules": modules, "company_id": subscription_service._company_id_for(user)}
+
+
+class CreateOrderIn(BaseModel):
+    module: str
+    duration_months: int = Field(ge=1, le=24)
+
+
+@sub_api.post("/subscription/orders")
+async def sub_create_order(body: CreateOrderIn, user=Depends(get_current_user)):
+    if not subscription_service.is_configured():
+        raise HTTPException(503, "Razorpay not configured — contact admin")
+    catalog_row = await db.subscription_catalog.find_one({"module": body.module, "is_active": True}, {"_id": 0})
+    if not catalog_row:
+        raise HTTPException(400, f"Unknown module '{body.module}'")
+
+    amount = catalog_row["price_paise"] * body.duration_months
+    company_id = subscription_service._company_id_for(user)
+    receipt = f"sub_{company_id[:8]}_{body.module[:8]}_{int(datetime.now(timezone.utc).timestamp())}"[:40]
+
+    client = subscription_service.get_client()
+    try:
+        order = client.order.create(data={
+            "amount": amount, "currency": "INR", "receipt": receipt,
+            "notes": {"company_id": company_id, "module": body.module,
+                       "duration_months": str(body.duration_months), "user_id": user["id"]},
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Razorpay order create failed")
+        raise HTTPException(502, f"Payment gateway error: {exc}")
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "razorpay_order_id": order["id"],
+        "razorpay_payment_id": None,
+        "company_id": company_id,
+        "user_id": user["id"],
+        "module": body.module,
+        "duration_months": body.duration_months,
+        "amount_paise": amount,
+        "status": "created",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.orders.insert_one(doc)
+    await subscription_service.audit(db, "order_created", user, target={"order_id": order["id"], "module": body.module})
+    return {
+        "key_id": subscription_service.KEY_ID,
+        "order_id": order["id"],
+        "amount": amount,
+        "currency": "INR",
+        "module": body.module,
+        "duration_months": body.duration_months,
+    }
+
+
+class VerifyPaymentIn(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+@sub_api.post("/subscription/verify")
+async def sub_verify(body: VerifyPaymentIn, user=Depends(get_current_user)):
+    order = await db.orders.find_one({"razorpay_order_id": body.razorpay_order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if order["company_id"] != subscription_service._company_id_for(user):
+        raise HTTPException(403, "Order does not belong to your company")
+    if not subscription_service.verify_payment_signature(
+        body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature,
+    ):
+        await subscription_service.audit(db, "payment_signature_invalid", user, target={"order_id": body.razorpay_order_id})
+        raise HTTPException(400, "Invalid payment signature")
+
+    # Idempotent: if already processed, return the existing entitlement.
+    if order.get("status") == "captured":
+        ent = await db.entitlements.find_one({"source_order_id": body.razorpay_order_id}, {"_id": 0})
+        return {"ok": True, "already_processed": True, "entitlement": ent}
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.orders.update_one(
+        {"razorpay_order_id": body.razorpay_order_id},
+        {"$set": {"status": "captured", "razorpay_payment_id": body.razorpay_payment_id,
+                   "captured_at": now_iso}},
+    )
+    ent = await subscription_service._extend_or_create_entitlement(
+        db, order["company_id"], order["module"], order["duration_months"],
+        body.razorpay_order_id, body.razorpay_payment_id,
+    )
+    await subscription_service.audit(db, "payment_verified", user, target={
+        "order_id": body.razorpay_order_id, "payment_id": body.razorpay_payment_id,
+        "module": order["module"],
+    })
+    return {"ok": True, "entitlement": ent}
+
+
+@app.post("/api/webhooks/razorpay")
+async def razorpay_webhook(request: Request):
+    raw = await request.body()
+    sig = request.headers.get("X-Razorpay-Signature", "")
+    event_id = request.headers.get("X-Razorpay-Event-Id") or str(uuid.uuid4())
+    if not await subscription_service.verify_webhook_signature(raw, sig):
+        logger.warning("Razorpay webhook signature verification failed")
+        raise HTTPException(403, "Invalid webhook signature")
+    # Deduplicate — Razorpay retries.
+    try:
+        await db.razorpay_events.insert_one({
+            "event_id": event_id, "raw": raw.decode("utf-8", errors="replace"),
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:  # duplicate
+        return {"received": True, "duplicate": True}
+
+    import json as _json
+    event = _json.loads(raw)
+    name = event.get("event")
+    payload = event.get("payload") or {}
+    pay = (payload.get("payment") or {}).get("entity") or {}
+
+    if name == "payment.captured" and pay.get("order_id"):
+        order = await db.orders.find_one({"razorpay_order_id": pay["order_id"]}, {"_id": 0})
+        if order and order.get("status") != "captured":
+            await db.orders.update_one({"razorpay_order_id": pay["order_id"]},
+                                        {"$set": {"status": "captured",
+                                                   "razorpay_payment_id": pay.get("id"),
+                                                   "captured_at": datetime.now(timezone.utc).isoformat()}})
+            await subscription_service._extend_or_create_entitlement(
+                db, order["company_id"], order["module"], order["duration_months"],
+                pay["order_id"], pay.get("id"),
+            )
+    elif name == "payment.failed" and pay.get("order_id"):
+        await db.orders.update_one({"razorpay_order_id": pay["order_id"]},
+                                    {"$set": {"status": "failed",
+                                               "error_code": pay.get("error_code"),
+                                               "error_description": pay.get("error_description")}})
+    return {"received": True}
+
+
+@sub_api.get("/subscription/admin/subscriptions")
+async def sub_admin_list(_=Depends(require_role("admin"))):
+    ents = await db.entitlements.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    orders = await db.orders.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return {"entitlements": ents, "orders": orders}
+
+
+class AdminGrantIn(BaseModel):
+    company_id: str
+    module: str
+    duration_months: int = Field(ge=1, le=60)
+    reason: Optional[str] = None
+
+
+@sub_api.post("/subscription/admin/grant")
+async def sub_admin_grant(body: AdminGrantIn, user=Depends(require_role("admin"))):
+    """Manually grant a module entitlement (e.g. compensation / trial)."""
+    fake_order = f"manual_{uuid.uuid4()}"
+    fake_pay = f"manual_{uuid.uuid4()}"
+    ent = await subscription_service._extend_or_create_entitlement(
+        db, body.company_id, body.module, body.duration_months, fake_order, fake_pay,
+    )
+    await subscription_service.audit(db, "admin_granted", user, target={
+        "company_id": body.company_id, "module": body.module,
+        "duration_months": body.duration_months, "reason": body.reason,
+    })
+    return {"ok": True, "entitlement": ent}
+
+
+class AdminRevokeIn(BaseModel):
+    entitlement_id: str
+    reason: Optional[str] = None
+
+
+@sub_api.post("/subscription/admin/revoke")
+async def sub_admin_revoke(body: AdminRevokeIn, user=Depends(require_role("admin"))):
+    await db.entitlements.update_one({"id": body.entitlement_id},
+                                      {"$set": {"status": "cancelled",
+                                                 "cancelled_at": datetime.now(timezone.utc).isoformat(),
+                                                 "cancel_reason": body.reason}})
+    await subscription_service.audit(db, "admin_revoked", user, target={"entitlement_id": body.entitlement_id, "reason": body.reason})
+    return {"ok": True}
+
+
+@sub_api.get("/subscription/admin/audit")
+async def sub_admin_audit(limit: int = 200, _=Depends(require_role("admin"))):
+    rows = await db.subscription_audit.find({}, {"_id": 0}).sort("at", -1).to_list(min(limit, 500))
+    return rows
+
+
+# Mount the subscription sub-router now that all its routes are declared.
+app.include_router(sub_api)
 
 
 # ---------- Security middleware ----------

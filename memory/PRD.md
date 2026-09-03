@@ -26,6 +26,57 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Center Partner** — financial oversight of centers
 - **Partner** — investor with cross-partner txn approval rights
 
+### Phase 66 — Razorpay SaaS Subscription & Module Access Control (Done, Feb 2026)
+- **User asked (Hinglish)**: SaaS-style subscription banao — har module (HR, Payroll, Attendance, Finance, Approvals, Bank Guarantee, Notifications, MIS) alag-alag purchase ho, Razorpay se live payment le sake, aur bina purchase kiye locked module use na kar paye. UI mein 🔒 lock icons + full page block dono chahiye.
+- **Razorpay secrets in `/app/backend/.env`**: `RAZORPAY_KEY_ID=rzp_test_TXTWJ7xENptxlZ`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET=MASHARAENTERPRISES`.
+- **Backend `/app/backend/subscription_service.py`** (new):
+  1. `DEFAULT_CATALOG` — 8 modules with INR prices in paise (Notifications ₹149, Approvals ₹199, Attendance/BG ₹299, HR ₹399, Finance/MIS ₹499, Payroll ₹699 per month).
+  2. `seed_catalog(db)` — idempotent bootstrap into `db.subscription_catalog`.
+  3. `compute_entitled_modules(db, user)` — returns active entitlements for the user's `company_id` (falls back to `user.id`). Admins get implicit access to all modules ("admin" status).
+  4. `_extend_or_create_entitlement()` — idempotent: same `source_order_id` → no-op; existing active entitlement gets extended from current expiry, else activates fresh from now. Strips `_id` before returning (fixes ObjectId serialisation).
+  5. `verify_payment_signature(order_id, payment_id, signature)` — HMAC-SHA256 with Key Secret over `{order_id}|{payment_id}`.
+  6. `verify_webhook_signature(raw_body, signature)` — HMAC-SHA256 over raw body with Webhook Secret. Fails closed on empty or mismatched.
+  7. `audit(db, event, actor, target, extra)` — writes to `db.subscription_audit` for compliance.
+- **Backend `/app/backend/server.py`** (new sub-router `sub_api = APIRouter(prefix="/api")`, mounted AFTER route definitions because the primary `api` router was already `include_router`-ed on line 20460):
+  - `GET /subscription/catalog` — public (auth-only) list of paid modules + prices + `key_id`.
+  - `GET /subscription/me` — per-user module status (`active`/`not_subscribed`/`admin`).
+  - `POST /subscription/orders` — creates a Razorpay Order (`amount = price × months`, currency INR, receipt with company prefix); persists to `db.orders`.
+  - `POST /subscription/verify` — server-side signature check, marks order captured, extends/creates entitlement, writes audit.
+  - `POST /api/webhooks/razorpay` — CSRF-exempt public webhook; validates `X-Razorpay-Signature`, deduplicates via `db.razorpay_events`; handles `payment.captured` + `payment.failed`.
+  - `GET/POST /subscription/admin/*` — admin-only list of entitlements/orders, manual **Grant** (for trials/compensation), **Revoke**, and **Audit** endpoints.
+  - `GET /auth/me/scope` — now returns `entitled_modules` + `blocked_modules` for the SPA.
+  - `require_module_entitlement(module)` — reusable FastAPI dependency that raises `HTTP 403 {error:"module_not_subscribed", module, redirect:"/subscription", message:"Not Authorised For This Service…"}` for un-entitled companies. Admins bypass.
+  - Orders indices: **partialFilterExpression** (`$type: "string"`) on `razorpay_order_id` and `razorpay_payment_id` — prevents the duplicate-null-key bug that a plain `unique=True, sparse=True` produced.
+- **Frontend `/app/frontend/src/pages/SubscriptionBilling.jsx`** (new): Enterprise-styled Manage Your Modules dashboard.
+  - Header with company_id chip + Refresh.
+  - **3 KPI tiles** — Active Modules · Locked Modules · Monthly Commitment (₹ sum of active prices).
+  - **Modules grid** — one card per module: name, description, ₹price/month, status pill (Active / Locked / Admin Access), renewal date + days-left, primary CTA ("Unlock Module" or "Extend Access"). Non-admins see disabled buttons + "Admin only".
+  - **Duration dialog** — 1-24 month picker, live total pill; "Proceed to Payment" dynamically loads `checkout.razorpay.com/v1/checkout.js`, creates the order server-side, opens Razorpay's Checkout modal with correct order_id/key_id + prefilled user info. On success → verify → refresh auth scope so blocked_modules updates instantly. On dismiss → toast. On failure → toast.
+  - **Admin-only "Audit & Orders" tab** — recent orders table (status chips: captured/failed/created) + audit trail (event chip, actor, target, timestamp).
+  - Amber banner for non-admins when locked modules exist ("Ask an admin to complete a one-click purchase").
+- **Frontend `/app/frontend/src/components/Layout.jsx`** — module-locked sidebar + full-page block.
+  - Every relevant sidebar item now carries a `module: "hr" | "payroll" | ... ` prop. `SidebarBody` renders a small `🔒 Lock` icon (amber-500) next to any nav-link whose module is in `scope.blocked_modules`. Title tooltip: "Module locked — Subscribe to unlock".
+  - Route → module resolver (`moduleForPath`) runs on every render. If the current path matches a locked module, `<main>` renders a full "Not Authorised For This Service" block card (amber ring, Lock icon, "Open Subscription & Billing" CTA + "Back to Dashboard"), preventing children from ever mounting.
+  - New sidebar entry in **Approvals & Workflow** group: **Subscription & Billing** (CreditCard icon, admin-only).
+- **Frontend `/app/frontend/src/context/AuthContext.jsx`** — `login()` now hydrates scope right after login so `blocked_modules` is populated on the very first render (no more flash-of-unlocked content).
+- **i18n** — `subscription` key added in EN + HI (`Subscription & Billing` / `सब्सक्रिप्शन एवं बिलिंग`).
+- **Verified end-to-end (curl + browser)**:
+  - HR (`hr@finance.app`) fresh company: `entitled=[]`, `blocked=[finance,hr,payroll,attendance,approvals,bank_guarantee,notifications,mis]`. `/hrms` renders "Not Authorised" block, sidebar shows 🔒 on HRMS/Employee Transfers/HR Settings/Payment History.
+  - Admin grants HR module to HR's company → HR `entitled=["hr"]`, `blocked` drops HR. `/hrms` unlocks. Sidebar lock disappears.
+  - After granting all 8 modules → Subscription page shows "8 Active · 0 Locked · ₹3,042 Monthly Commitment", every card labelled ACTIVE with renewal date `03 Oct 2026 (30d left)`.
+  - Admin revoke: `entitled=[]` again, `blocked` full list restored.
+  - Razorpay Order creation (`POST /subscription/orders`) — live Razorpay call succeeded (order_id `order_TXUFUyoJCZiic4`, amount 119700 paise for `hr × 3` months).
+  - Razorpay signature verification helper — HMAC-SHA256 produces stable output; test webhook body `{"event":"payment.captured"}` signed with `MASHARAENTERPRISES` matches expected hex.
+- **Files added**:
+  - Backend: `/app/backend/subscription_service.py`
+  - Frontend: `/app/frontend/src/pages/SubscriptionBilling.jsx`
+- **What USER still needs to do (outside code)**:
+  1. **Register production Razorpay webhook**: Razorpay Dashboard → Settings → Webhooks → Add → `{PUBLIC_APP_URL}/api/webhooks/razorpay` (currently `https://invest-analytics-24.preview.emergentagent.com/api/webhooks/razorpay`) → set secret to `MASHARAENTERPRISES` → subscribe to `payment.captured` + `payment.failed`.
+  2. When moving to LIVE mode: regenerate Live Key + Secret in Razorpay Dashboard and paste into `/app/backend/.env` as `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET`.
+  3. Production redeploy (preview→prod) via the "Deploy" button.
+
+
+
 ### Phase 65 — Strict Role + Center-based Data Access Control (Done, Feb 2026) — PREVIEW ONLY, awaiting user approval before prod deploy
 - **User asked**: Every non-head-level user must only see data related to their mapped Center(s). Applies to Payroll, Attendance, HRMS, Staff, Finance, Expenses, Approvals, Reports, Dashboard. Backend-level enforcement mandatory (no reliance on frontend). IDOR-safe — URL/API-ID tampering must not bypass. Head-level = **admin + senior_manager**. Users without mapping → **fail-closed** + admin-forced warning banner. `center_id=null` records → head-level only.
 - **Centralised policy layer (`server.py`)**:
