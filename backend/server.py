@@ -21763,6 +21763,82 @@ async def centers_list(
     return rows
 
 
+@sub_api.get("/centers/reports")
+async def centers_reports(
+    company_id: Optional[str] = None,
+    include_pending: bool = False,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    current=Depends(require_role("admin", "company_admin")),
+):
+    """Per-center financial summary (investment / income / expense / profit) for
+    a company. Aggregates `transactions` by center. Approved-only by default to
+    match the dashboards; every center is returned (even with zero activity)."""
+    if is_company_admin(current):
+        company_id = current.get("company_id")
+    if not company_id:
+        raise HTTPException(400, "company_id is required")
+    if not _can_manage_company(current, company_id):
+        raise HTTPException(403, "Cannot view reports for another company")
+
+    centers = await db.centers.find(
+        {"company_id": company_id}, {"_id": 0, "id": 1, "center_code": 1, "name": 1, "access_status": 1, "center_status": 1},
+    ).sort("center_code", 1).to_list(5000)
+    center_ids = [c["id"] for c in centers]
+
+    match: dict = {"center_id": {"$in": center_ids}}
+    if not include_pending:
+        match["status"] = "approved"
+    else:
+        match["status"] = {"$ne": "rejected"}
+    if start or end:
+        rng: dict = {}
+        if start:
+            rng["$gte"] = start
+        if end:
+            rng["$lte"] = end
+        match["date"] = rng
+
+    agg = await db.transactions.aggregate([
+        {"$match": match},
+        {"$group": {"_id": {"center_id": "$center_id", "type": "$type"}, "total": {"$sum": "$amount"}}},
+    ]).to_list(20000)
+
+    fin: dict = {}
+    for r in agg:
+        cid = r["_id"]["center_id"]
+        ttype = r["_id"]["type"]
+        fin.setdefault(cid, {"investment": 0.0, "income": 0.0, "expense": 0.0})
+        if ttype in fin[cid]:
+            fin[cid][ttype] = round(r["total"], 2)
+
+    rows = []
+    totals = {"investment": 0.0, "income": 0.0, "expense": 0.0}
+    for c in centers:
+        f = fin.get(c["id"], {"investment": 0.0, "income": 0.0, "expense": 0.0})
+        profit = round(f["income"] - f["expense"], 2)
+        for k in totals:
+            totals[k] += f[k]
+        rows.append({
+            "center_id": c["id"],
+            "center_code": c.get("center_code"),
+            "name": c.get("name"),
+            "access_status": c.get("access_status") or "enabled",
+            "center_status": c.get("center_status") or "active",
+            "investment": f["investment"],
+            "income": f["income"],
+            "expense": f["expense"],
+            "profit": profit,
+        })
+
+    totals = {k: round(v, 2) for k, v in totals.items()}
+    totals["profit"] = round(totals["income"] - totals["expense"], 2)
+    rows.sort(key=lambda x: x["profit"], reverse=True)
+    return {"company_id": company_id, "totals": totals, "centers": rows}
+
+
+
+
 @sub_api.post("/centers")
 async def centers_create(body: CenterCreateIn, current=Depends(require_role("admin", "company_admin"))):
     if not _can_manage_company(current, body.company_id):

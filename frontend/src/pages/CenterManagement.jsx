@@ -14,8 +14,12 @@ import {
 import { toast } from "sonner";
 import {
   MapPin, Plus, Building2, CheckCircle2, XCircle, Pencil, Search,
-  ShieldCheck, ShieldOff, Save, RefreshCw,
+  ShieldCheck, ShieldOff, Save, RefreshCw, TrendingUp, TrendingDown,
+  Wallet, ArrowDownCircle, ArrowUpCircle, BarChart3,
 } from "lucide-react";
+
+const fmtINR = (n) =>
+  new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n || 0);
 
 const EMPTY_CENTER = {
   name: "", address: "", city: "", state: "", pincode: "",
@@ -56,6 +60,11 @@ export default function CenterManagement() {
   const [enabledIds, setEnabledIds] = useState(new Set());
   const [savingAccess, setSavingAccess] = useState(false);
 
+  // Financial reports (per-center P&L)
+  const [reports, setReports] = useState(null);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [includePending, setIncludePending] = useState(false);
+
   // Company list for the super-admin selector.
   const companyOptions = useMemo(() => companies || [], [companies]);
 
@@ -80,6 +89,22 @@ export default function CenterManagement() {
   }, [companyId]);
 
   useEffect(() => { if (companyId) load(); }, [companyId, load]);
+
+  const loadReports = useCallback(async () => {
+    if (!companyId) return;
+    setReportsLoading(true);
+    try {
+      const { data } = await api.get(`/centers/reports?company_id=${companyId}&include_pending=${includePending}`);
+      setReports(data);
+    } catch (e) {
+      toast.error(formatError(e));
+      setReports(null);
+    } finally {
+      setReportsLoading(false);
+    }
+  }, [companyId, includePending]);
+
+  useEffect(() => { if (companyId) loadReports(); }, [companyId, includePending, loadReports]);
 
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
@@ -307,6 +332,73 @@ export default function CenterManagement() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* Financial Summary (per-center P&L) */}
+      <div className="space-y-3" data-testid="center-reports-section">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="overline flex items-center gap-2"><BarChart3 size={12} /> Financial Summary {includePending ? "(Approved + Pending)" : "(Approved)"}</div>
+          <label className="flex items-center gap-2 text-xs cursor-pointer" data-testid="reports-include-pending">
+            <Checkbox checked={includePending} onCheckedChange={(v) => setIncludePending(!!v)} />
+            Include pending entries
+          </label>
+        </div>
+
+        {/* Company totals */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="swiss-card p-4" data-testid="rep-total-investment">
+            <div className="overline text-[10px] flex items-center gap-1"><Wallet size={11} /> Investment</div>
+            <div className="font-heading font-black text-2xl mt-1 text-indigo-600">{fmtINR(reports?.totals?.investment)}</div>
+          </div>
+          <div className="swiss-card p-4" data-testid="rep-total-income">
+            <div className="overline text-[10px] flex items-center gap-1"><ArrowUpCircle size={11} /> Income</div>
+            <div className="font-heading font-black text-2xl mt-1 text-emerald-600">{fmtINR(reports?.totals?.income)}</div>
+          </div>
+          <div className="swiss-card p-4" data-testid="rep-total-expense">
+            <div className="overline text-[10px] flex items-center gap-1"><ArrowDownCircle size={11} /> Expense</div>
+            <div className="font-heading font-black text-2xl mt-1 text-rose-600">{fmtINR(reports?.totals?.expense)}</div>
+          </div>
+          <div className="swiss-card p-4" data-testid="rep-total-profit">
+            <div className="overline text-[10px] flex items-center gap-1">
+              {(reports?.totals?.profit || 0) >= 0 ? <TrendingUp size={11} /> : <TrendingDown size={11} />} Profit / Loss
+            </div>
+            <div className={`font-heading font-black text-2xl mt-1 ${(reports?.totals?.profit || 0) >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
+              {fmtINR(reports?.totals?.profit)}
+            </div>
+          </div>
+        </div>
+
+        {/* Per-center P&L table */}
+        <div className="swiss-card overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[var(--border)] overline bg-gray-50">
+                <th className="text-left p-3">Center Code</th>
+                <th className="text-left p-3">Center Name</th>
+                <th className="text-right p-3">Investment</th>
+                <th className="text-right p-3">Income</th>
+                <th className="text-right p-3">Expense</th>
+                <th className="text-right p-3">Profit / Loss</th>
+              </tr>
+            </thead>
+            <tbody data-testid="reports-table-body">
+              {reportsLoading ? (
+                <tr><td colSpan={6} className="text-center py-8 overline">Loading…</td></tr>
+              ) : !reports || reports.centers.length === 0 ? (
+                <tr><td colSpan={6} className="text-center py-8 overline">No data</td></tr>
+              ) : reports.centers.map((r) => (
+                <tr key={r.center_id} className="border-b border-[var(--border)] hover:bg-gray-50" data-testid={`report-row-${r.center_id}`}>
+                  <td className="p-3 font-mono text-xs font-semibold text-[var(--brand)]">{r.center_code}</td>
+                  <td className="p-3 font-medium">{r.name}</td>
+                  <td className="p-3 text-right tabular-nums text-indigo-700">{fmtINR(r.investment)}</td>
+                  <td className="p-3 text-right tabular-nums text-emerald-700">{fmtINR(r.income)}</td>
+                  <td className="p-3 text-right tabular-nums text-rose-700">{fmtINR(r.expense)}</td>
+                  <td className={`p-3 text-right tabular-nums font-semibold ${r.profit >= 0 ? "text-emerald-700" : "text-rose-700"}`}>{fmtINR(r.profit)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* Add / Edit dialog */}
