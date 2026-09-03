@@ -43,12 +43,22 @@ import StaffFinancialHistory from "@/pages/StaffFinancialHistory";
 import Notifications from "@/pages/Notifications";
 import SubscriptionBilling from "@/pages/SubscriptionBilling";
 import CompaniesAdmin from "@/pages/CompaniesAdmin";
+import CenterManagement from "@/pages/CenterManagement";
+import CompanySelect from "@/pages/CompanySelect";
 import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
 function Shell({ children }) {
   return <Layout>{children}</Layout>;
+}
+
+// Auth-only wrapper WITHOUT the company-select gate (used by /select-company).
+function AuthedOnly({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="flex items-center justify-center h-screen text-sm overline">Loading…</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  return children;
 }
 
 // Renders the appropriate "/" landing page based on user role.
@@ -68,6 +78,7 @@ function App() {
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route path="/forgot-password" element={<ForgotPassword />} />
+            <Route path="/select-company" element={<AuthedOnly><CompanySelect /></AuthedOnly>} />
             <Route path="/" element={<ProtectedRoute requireFinance><Shell><RoleHome /></Shell></ProtectedRoute>} />
             <Route path="/companies" element={<ProtectedRoute><Shell><Entities etype="company" /></Shell></ProtectedRoute>} />
             <Route path="/partners" element={<ProtectedRoute><Shell><Entities etype="partner" /></Shell></ProtectedRoute>} />
@@ -87,6 +98,7 @@ function App() {
             <Route path="/notifications" element={<ProtectedRoute><Shell><Notifications /></Shell></ProtectedRoute>} />
             <Route path="/subscription" element={<ProtectedRoute><Shell><SubscriptionBilling /></Shell></ProtectedRoute>} />
             <Route path="/companies-admin" element={<ProtectedRoute><Shell><CompaniesAdmin /></Shell></ProtectedRoute>} />
+            <Route path="/center-management" element={<ProtectedRoute><Shell><CenterManagement /></Shell></ProtectedRoute>} />
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/batch-management" element={<ProtectedRoute><Shell><BatchManagement /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />

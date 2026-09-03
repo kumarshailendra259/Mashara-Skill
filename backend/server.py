@@ -1871,6 +1871,10 @@ async def my_scope(user=Depends(get_current_user)):
         # Phase 66 — module-level entitlements so the SPA can lock unpaid modules.
         "entitled_modules": list((await subscription_service.compute_entitled_modules(db, user)).keys()),
         "blocked_modules": await _compute_blocked_modules(user),
+        # Phase 72 — multi-company context.
+        "active_company_id": user.get("company_id"),
+        "active_company": (await db.companies.find_one(
+            {"id": user.get("company_id")}, {"_id": 0, "id": 1, "name": 1, "company_code": 1})) if user.get("company_id") else None,
     }
 
 
@@ -2376,9 +2380,19 @@ async def list_entities(etype: EntityType, user=Depends(get_current_user)):
 async def create_entity(etype: EntityType, body: EntityIn, _=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
     doc = _entity_doc(body, etype)
-    # Auto-assign a unique COMP-NNNNN code to every new company.
+    # Auto-assign a unique short code to every new company (e.g. UXU7SO).
     if etype == "company":
-        doc["company_code"] = await _next_company_code()
+        doc["company_code"] = await _new_company_code()
+    # Auto-assign a center_code + access defaults to every new center.
+    if etype == "center":
+        cc = None
+        if doc.get("company_id"):
+            comp = await db.companies.find_one({"id": doc["company_id"]}, {"_id": 0, "company_code": 1})
+            cc = (comp or {}).get("company_code")
+        doc["center_code"] = await _new_center_code(cc)
+        doc.setdefault("access_status", "enabled")
+        doc.setdefault("access_type", "free")
+        doc.setdefault("center_status", "active")
     plain_password = await _auto_create_user_for_entity(etype, doc)
     await db[col].insert_one(doc)
     doc.pop("_id", None)
@@ -20757,6 +20771,8 @@ async def _seed_subscription_catalog():
         await _backfill_company_codes()
         # Backfill: link users to a company (best-effort via assigned_center → center.company_id).
         await _backfill_user_company_ids()
+        # Centers + multi-company-user migration (codes, access, memberships).
+        await _migrate_multicompany()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Subscription seed failed: %s", exc)
 
@@ -20817,6 +20833,156 @@ async def _backfill_user_company_ids():
             await db.users.update_one({"id": u["id"]}, {"$set": {"company_id": cid}})
             fixed += 1
     logger.info("Backfilled company_id on %d/%d user(s)", fixed, len(missing))
+
+
+# ============================================================================
+# Multi-Company + Centers: random code generators + one-time migration
+# ============================================================================
+# Company code  → 6-char short code (e.g. "UXU7SO").
+# Center code   → "{company_code}-XXXX" (e.g. "UXU7SO-A7K2").
+# Ambiguous chars (0/O/1/I) are excluded so codes are easy to read + dictate.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _rand_code(n: int) -> str:
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(n))
+
+
+async def _new_company_code() -> str:
+    """Unique 6-char company code (retry on the rare collision)."""
+    for _ in range(50):
+        code = _rand_code(6)
+        if not await db.companies.find_one({"company_code": code}, {"_id": 1}):
+            return code
+    return _rand_code(8)
+
+
+async def _new_center_code(company_code: Optional[str]) -> str:
+    """Unique center code of the form `{company_code}-XXXX`."""
+    prefix = (company_code or "CTR").strip().upper() or "CTR"
+    for _ in range(50):
+        code = f"{prefix}-{_rand_code(4)}"
+        if not await db.centers.find_one({"center_code": code}, {"_id": 1}):
+            return code
+    return f"{prefix}-{_rand_code(6)}"
+
+
+async def _migrate_multicompany():
+    """Idempotent migration for the Centers + multi-company-user feature.
+
+    1. Reformat legacy `COMP-NNNNN` company codes → short random codes (UXU7SO).
+       Once random, they no longer match `^COMP-` so this is a one-shot no-op on
+       subsequent boots. Also mirrors the new code onto users' snapshot field.
+    2. Assign `center_code` + access defaults to every center missing them.
+    3. Backfill `user_companies` (baseline single-company membership) from
+       users.company_id — so existing users keep working; extra companies are
+       added later via the UI.
+    4. Backfill `user_centers` from users.assigned_center_ids.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # ---- Indexes -----------------------------------------------------------
+    try:
+        await db.user_companies.create_index([("user_id", 1), ("company_id", 1)], unique=True)
+        await db.user_companies.create_index([("company_id", 1)])
+        await db.user_centers.create_index([("user_id", 1), ("center_id", 1)], unique=True)
+        await db.user_centers.create_index([("user_id", 1), ("company_id", 1)])
+        await db.centers.create_index("center_code", unique=True,
+                                      partialFilterExpression={"center_code": {"$type": "string"}})
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ---- 1. Company code reformat -----------------------------------------
+    try:
+        comps = await db.companies.find(
+            {"$or": [
+                {"company_code": {"$regex": "^COMP-"}},
+                {"company_code": {"$in": [None, ""]}},
+                {"company_code": {"$exists": False}},
+            ]},
+            {"_id": 0, "id": 1},
+        ).to_list(5000)
+        for c in comps:
+            code = await _new_company_code()
+            await db.companies.update_one({"id": c["id"]}, {"$set": {"company_code": code}})
+            await db.users.update_many({"company_id": c["id"]}, {"$set": {"company_code": code}})
+        if comps:
+            logger.info("Reformatted %d company code(s) to short format", len(comps))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Company code reformat skipped: %s", exc)
+
+    # ---- 2. Center codes + access defaults --------------------------------
+    try:
+        centers = await db.centers.find(
+            {"$or": [
+                {"center_code": {"$exists": False}},
+                {"center_code": None},
+                {"center_code": ""},
+            ]},
+            {"_id": 0, "id": 1, "company_id": 1},
+        ).to_list(10000)
+        for ct in centers:
+            cc = None
+            if ct.get("company_id"):
+                comp = await db.companies.find_one({"id": ct["company_id"]}, {"_id": 0, "company_code": 1})
+                cc = (comp or {}).get("company_code")
+            code = await _new_center_code(cc)
+            await db.centers.update_one({"id": ct["id"]}, {"$set": {"center_code": code}})
+        if centers:
+            logger.info("Assigned center_code to %d center(s)", len(centers))
+        # Existing centers default to ENABLED so current users are never blocked.
+        await db.centers.update_many({"access_status": {"$exists": False}},
+                                     {"$set": {"access_status": "enabled", "access_type": "free"}})
+        await db.centers.update_many({"center_status": {"$exists": False}},
+                                     {"$set": {"center_status": "active"}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Center code/access backfill skipped: %s", exc)
+
+    # ---- 3. Baseline user_companies ---------------------------------------
+    try:
+        users = await db.users.find(
+            {"company_id": {"$nin": [None, ""]}},
+            {"_id": 0, "id": 1, "company_id": 1, "role": 1},
+        ).to_list(50000)
+        for u in users:
+            await db.user_companies.update_one(
+                {"user_id": u["id"], "company_id": u["company_id"]},
+                {"$setOnInsert": {
+                    "id": str(uuid.uuid4()),
+                    "user_id": u["id"],
+                    "company_id": u["company_id"],
+                    "role": u.get("role") or "viewer",
+                    "status": "active",
+                    "created_at": now_iso,
+                    "source": "backfill",
+                }},
+                upsert=True,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("user_companies backfill skipped: %s", exc)
+
+    # ---- 4. Baseline user_centers -----------------------------------------
+    try:
+        users = await db.users.find(
+            {"assigned_center_ids": {"$exists": True, "$ne": []}},
+            {"_id": 0, "id": 1, "company_id": 1, "assigned_center_ids": 1},
+        ).to_list(50000)
+        for u in users:
+            for cid in (u.get("assigned_center_ids") or []):
+                await db.user_centers.update_one(
+                    {"user_id": u["id"], "center_id": cid},
+                    {"$setOnInsert": {
+                        "id": str(uuid.uuid4()),
+                        "user_id": u["id"],
+                        "company_id": u.get("company_id"),
+                        "center_id": cid,
+                        "status": "active",
+                        "created_at": now_iso,
+                        "source": "backfill",
+                    }},
+                    upsert=True,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("user_centers backfill skipped: %s", exc)
 
 
 @app.on_event("startup")
@@ -21505,6 +21671,351 @@ async def sub_admin_revoke(body: AdminRevokeIn, user=Depends(require_role("admin
 async def sub_admin_audit(limit: int = 200, _=Depends(require_role("admin"))):
     rows = await db.subscription_audit.find({}, {"_id": 0}).sort("at", -1).to_list(min(limit, 500))
     return rows
+
+
+# ============================================================================
+# Centers Management + Center-wise Access + Multi-Company Users (Phase 72)
+# ============================================================================
+
+def _can_manage_company(current: dict, company_id: str) -> bool:
+    """Super Admin can manage any company; Company Admin only their own."""
+    if is_super_admin(current):
+        return True
+    if is_company_admin(current):
+        return (current.get("company_id") == company_id)
+    return False
+
+
+async def _center_out(doc: dict) -> dict:
+    return {
+        "id": doc.get("id"),
+        "center_code": doc.get("center_code"),
+        "name": doc.get("name"),
+        "company_id": doc.get("company_id"),
+        "address": doc.get("address"),
+        "city": doc.get("city"),
+        "state": doc.get("state"),
+        "pincode": doc.get("pincode"),
+        "contact_name": doc.get("contact_name") or doc.get("manager_name"),
+        "contact_mobile": doc.get("contact_mobile") or doc.get("mobile"),
+        "contact_email": doc.get("contact_email") or doc.get("email"),
+        "access_status": doc.get("access_status") or "enabled",
+        "access_type": doc.get("access_type") or "free",
+        "center_status": doc.get("center_status") or "active",
+        "created_at": doc.get("created_at"),
+        "updated_at": doc.get("updated_at"),
+    }
+
+
+class CenterCreateIn(BaseModel):
+    company_id: str
+    name: str
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_mobile: Optional[str] = None
+    contact_email: Optional[str] = None
+    center_status: str = "active"
+    access_status: str = "enabled"
+    access_type: str = "free"
+
+
+class CenterPatchIn(BaseModel):
+    name: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    contact_name: Optional[str] = None
+    contact_mobile: Optional[str] = None
+    contact_email: Optional[str] = None
+    center_status: Optional[str] = None
+    access_status: Optional[str] = None
+    access_type: Optional[str] = None
+
+
+@sub_api.get("/centers")
+async def centers_list(
+    company_id: Optional[str] = None,
+    current=Depends(require_role("admin", "company_admin")),
+):
+    """List centers for management. Super Admin: all (or filtered by company_id).
+    Company Admin: strictly their own company."""
+    query: dict = {}
+    if is_company_admin(current):
+        query["company_id"] = current.get("company_id")
+    elif company_id:
+        query["company_id"] = company_id
+    docs = await db.centers.find(query, {"_id": 0}).sort("center_code", 1).to_list(5000)
+    rows = [await _center_out(d) for d in docs]
+    # Attach company name/code map for display.
+    cids = {r["company_id"] for r in rows if r.get("company_id")}
+    cmap = {}
+    if cids:
+        async for c in db.companies.find({"id": {"$in": list(cids)}}, {"_id": 0, "id": 1, "name": 1, "company_code": 1}):
+            cmap[c["id"]] = {"name": c.get("name"), "company_code": c.get("company_code")}
+    for r in rows:
+        info = cmap.get(r.get("company_id")) or {}
+        r["company_name"] = info.get("name")
+        r["company_code"] = info.get("company_code")
+    return rows
+
+
+@sub_api.post("/centers")
+async def centers_create(body: CenterCreateIn, current=Depends(require_role("admin", "company_admin"))):
+    if not _can_manage_company(current, body.company_id):
+        raise HTTPException(403, "Cannot create a center for another company")
+    company = await db.companies.find_one({"id": body.company_id}, {"_id": 0, "company_code": 1, "name": 1})
+    if not company:
+        raise HTTPException(404, "Company not found")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "type": "center",
+        "center_code": await _new_center_code(company.get("company_code")),
+        "name": body.name,
+        "company_id": body.company_id,
+        "address": body.address,
+        "city": body.city,
+        "state": body.state,
+        "pincode": body.pincode,
+        "contact_name": body.contact_name,
+        "contact_mobile": body.contact_mobile,
+        "contact_email": body.contact_email,
+        "center_status": body.center_status or "active",
+        "access_status": body.access_status or "enabled",
+        "access_type": body.access_type or "free",
+        "created_at": now_iso,
+        "updated_at": now_iso,
+    }
+    await db.centers.insert_one(doc)
+    doc.pop("_id", None)
+    return await _center_out(doc)
+
+
+@sub_api.patch("/centers/{cid}")
+async def centers_patch(cid: str, body: CenterPatchIn, current=Depends(require_role("admin", "company_admin"))):
+    existing = await db.centers.find_one({"id": cid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Center not found")
+    if not _can_manage_company(current, existing.get("company_id")):
+        raise HTTPException(403, "Cannot edit a center of another company")
+    update = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not update:
+        raise HTTPException(400, "Nothing to update")
+    update["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = await db.centers.find_one_and_update({"id": cid}, {"$set": update}, return_document=True, projection={"_id": 0})
+    return await _center_out(res)
+
+
+class CenterAccessIn(BaseModel):
+    company_id: str
+    enabled_center_ids: List[str] = Field(default_factory=list)
+    access_type: str = "free"
+
+
+@sub_api.post("/centers/set-access")
+async def centers_set_access(body: CenterAccessIn, current=Depends(require_role("admin", "company_admin"))):
+    """Bulk enable/disable center access for a company. Centers in
+    `enabled_center_ids` → ENABLED; all other centers of the company → DISABLED."""
+    if not _can_manage_company(current, body.company_id):
+        raise HTTPException(403, "Cannot manage access for another company")
+    all_centers = await db.centers.find({"company_id": body.company_id}, {"_id": 0, "id": 1}).to_list(5000)
+    all_ids = {c["id"] for c in all_centers}
+    enabled = set(body.enabled_center_ids) & all_ids
+    disabled = all_ids - enabled
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if enabled:
+        await db.centers.update_many({"id": {"$in": list(enabled)}},
+                                     {"$set": {"access_status": "enabled", "access_type": body.access_type, "updated_at": now_iso}})
+    if disabled:
+        await db.centers.update_many({"id": {"$in": list(disabled)}},
+                                     {"$set": {"access_status": "disabled", "updated_at": now_iso}})
+    await subscription_service.audit(db, "center_access_set", current, target={
+        "company_id": body.company_id, "enabled": list(enabled), "disabled": list(disabled),
+    })
+    return {"ok": True, "enabled_count": len(enabled), "disabled_count": len(disabled)}
+
+
+# ---- User ↔ Company/Center memberships (multi-company support) --------------
+
+class MembershipItem(BaseModel):
+    company_id: str
+    role: str
+    center_ids: List[str] = Field(default_factory=list)
+
+
+class MembershipsIn(BaseModel):
+    memberships: List[MembershipItem] = Field(default_factory=list)
+
+
+@sub_api.get("/users/{uid}/memberships")
+async def user_memberships_get(uid: str, current=Depends(require_role("admin", "company_admin"))):
+    target = await db.users.find_one({"id": uid}, {"_id": 0, "id": 1, "company_id": 1})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if is_company_admin(current) and target.get("company_id") != current.get("company_id"):
+        raise HTTPException(403, "Cannot view memberships of another company's user")
+    mems = await db.user_companies.find({"user_id": uid}, {"_id": 0}).to_list(200)
+    centers = await db.user_centers.find({"user_id": uid}, {"_id": 0}).to_list(2000)
+    centers_by_company: dict = {}
+    for c in centers:
+        centers_by_company.setdefault(c.get("company_id"), []).append(c.get("center_id"))
+    cids = [m["company_id"] for m in mems]
+    cmap = {}
+    async for c in db.companies.find({"id": {"$in": cids}}, {"_id": 0, "id": 1, "name": 1, "company_code": 1}):
+        cmap[c["id"]] = c
+    out = []
+    for m in mems:
+        c = cmap.get(m["company_id"]) or {}
+        out.append({
+            "company_id": m["company_id"],
+            "company_name": c.get("name"),
+            "company_code": c.get("company_code"),
+            "role": m.get("role"),
+            "status": m.get("status", "active"),
+            "center_ids": centers_by_company.get(m["company_id"], []),
+        })
+    return {"memberships": out}
+
+
+@sub_api.put("/users/{uid}/memberships")
+async def user_memberships_set(uid: str, body: MembershipsIn, current=Depends(require_role("admin", "company_admin"))):
+    """Replace a user's company memberships + per-company center assignments.
+    Super Admin: full control. Company Admin: may only manage their own company's
+    membership row (other companies left untouched)."""
+    target = await db.users.find_one({"id": uid}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    # Company Admin guardrails.
+    if is_company_admin(current):
+        my_cid = current.get("company_id")
+        for m in body.memberships:
+            if m.company_id != my_cid:
+                raise HTTPException(403, "Company Admin can only manage its own company membership")
+            if m.role in ("admin", "super_admin"):
+                raise HTTPException(403, "Cannot assign Super Admin role")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    incoming = {m.company_id: m for m in body.memberships}
+    # Validate companies exist.
+    for cid in incoming:
+        if not await db.companies.find_one({"id": cid}, {"_id": 1}):
+            raise HTTPException(404, f"Company {cid} not found")
+
+    if is_super_admin(current):
+        # Full replace across all companies.
+        await db.user_companies.delete_many({"user_id": uid})
+        await db.user_centers.delete_many({"user_id": uid})
+        managed_companies = list(incoming.keys())
+    else:
+        # Only replace this admin's own company slice.
+        my_cid = current.get("company_id")
+        await db.user_companies.delete_many({"user_id": uid, "company_id": my_cid})
+        await db.user_centers.delete_many({"user_id": uid, "company_id": my_cid})
+        managed_companies = [my_cid] if my_cid in incoming else []
+
+    for cid in managed_companies:
+        m = incoming[cid]
+        stored_role = "admin" if m.role == "super_admin" else m.role
+        await db.user_companies.insert_one({
+            "id": str(uuid.uuid4()), "user_id": uid, "company_id": cid,
+            "role": stored_role, "status": "active", "created_at": now_iso,
+            "created_by": current["id"],
+        })
+        for center_id in m.center_ids:
+            await db.user_centers.insert_one({
+                "id": str(uuid.uuid4()), "user_id": uid, "company_id": cid,
+                "center_id": center_id, "status": "active", "created_at": now_iso,
+            })
+
+    # Keep the user's primary company_id pointing at a valid membership.
+    remaining = await db.user_companies.find_one({"user_id": uid, "status": "active"}, {"_id": 0, "company_id": 1, "role": 1})
+    if remaining:
+        await db.users.update_one({"id": uid}, {"$set": {"company_id": remaining["company_id"]}})
+    await subscription_service.audit(db, "memberships_set", current, target={"user_id": uid, "companies": list(incoming.keys())})
+    return {"ok": True}
+
+
+# ---- Session: available companies + switch active company ------------------
+
+async def _companies_for_user(user: dict) -> dict:
+    role = user.get("role")
+    if role in SUPER_ADMIN_ROLES:
+        comps = await db.companies.find({}, {"_id": 0, "id": 1, "name": 1, "company_code": 1}).sort("name", 1).to_list(3000)
+        return {
+            "is_super_admin": True,
+            "active_company_id": user.get("active_company_id"),
+            "companies": [{**c, "role": "admin"} for c in comps],
+        }
+    mems = await db.user_companies.find({"user_id": user["id"], "status": "active"}, {"_id": 0}).to_list(200)
+    cids = [m["company_id"] for m in mems]
+    cmap = {}
+    async for c in db.companies.find({"id": {"$in": cids}}, {"_id": 0, "id": 1, "name": 1, "company_code": 1}):
+        cmap[c["id"]] = c
+    out = []
+    for m in mems:
+        c = cmap.get(m["company_id"])
+        if c:
+            out.append({**c, "role": m.get("role")})
+    return {
+        "is_super_admin": False,
+        "active_company_id": user.get("company_id"),
+        "companies": out,
+    }
+
+
+@sub_api.get("/auth/my-companies")
+async def my_companies(user=Depends(get_current_user)):
+    return await _companies_for_user(user)
+
+
+class SwitchCompanyIn(BaseModel):
+    company_id: str
+
+
+@sub_api.post("/auth/switch-company")
+async def switch_company(body: SwitchCompanyIn, user=Depends(get_current_user)):
+    """Switch the active company for a multi-company user. Recalculates the
+    user's effective role + center scope for the selected company. Super Admin
+    stays global — switching only records a UI context preference."""
+    role = user.get("role")
+    if role in SUPER_ADMIN_ROLES:
+        if not await db.companies.find_one({"id": body.company_id}, {"_id": 1}):
+            raise HTTPException(404, "Company not found")
+        await db.users.update_one({"id": user["id"]}, {"$set": {"active_company_id": body.company_id}})
+        return {"ok": True, "company_id": body.company_id, "is_super_admin": True}
+
+    mem = await db.user_companies.find_one(
+        {"user_id": user["id"], "company_id": body.company_id, "status": "active"}, {"_id": 0},
+    )
+    if not mem:
+        raise HTTPException(403, "You are not a member of this company")
+
+    ucs = await db.user_centers.find(
+        {"user_id": user["id"], "company_id": body.company_id, "status": "active"}, {"_id": 0, "center_id": 1},
+    ).to_list(2000)
+    center_ids = [x["center_id"] for x in ucs]
+    if center_ids:
+        enabled = await db.centers.find(
+            {"id": {"$in": center_ids}, "access_status": "enabled", "center_status": "active"},
+            {"_id": 0, "id": 1},
+        ).to_list(2000)
+        center_ids = [e["id"] for e in enabled]
+
+    new_role = mem.get("role") or role
+    if new_role == "super_admin":
+        new_role = "company_admin"  # never elevate to global super admin via switch
+    await db.users.update_one({"id": user["id"]}, {"$set": {
+        "company_id": body.company_id,
+        "active_company_id": body.company_id,
+        "role": new_role,
+        "assigned_center_ids": center_ids,
+        "_associated_center_ids": None,  # force re-enrich for company_admin
+    }})
+    return {"ok": True, "company_id": body.company_id, "role": new_role, "assigned_center_ids": center_ids}
+
 
 
 # Mount the subscription sub-router now that all its routes are declared.

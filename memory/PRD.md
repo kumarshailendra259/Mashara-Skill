@@ -27,6 +27,27 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Partner** — investor with cross-partner txn approval rights
 
 
+### Phase 72 — Company Centers + Center-wise Access + Multi-Company Users (Done, Jun 2026)
+- **User asked (20-point spec, Hinglish)**: Multiple Centers per Company with auto-generated unique Center Codes; Company→Center relationship; per-Center access enable/disable (Super Admin selects individual centers); multi-company users (many-to-many) who log in ONCE and switch companies after login; per-company roles (e.g. company_admin in Company A, manager in Company B); backend-enforced security (no bypass via payload/URL tampering).
+- **User choices**: 1a full rollout; 2b extend existing `db.centers`; 3 company code random short `UXU7SO` + center code `UXU7SO-A7K2`; 4b always show company selector after login; 5b manual multi-company assignment via UI.
+- **Backend `/app/backend/server.py`**:
+  - Random code generators `_rand_code` / `_new_company_code` (6-char, no ambiguous chars) / `_new_center_code(company_code)` → `{CODE}-XXXX`.
+  - Startup migration `_migrate_multicompany()` (idempotent): reformatted 73 legacy `COMP-NNNNN` codes → short random (mirrored onto users.company_code); assigned `center_code` + `access_status=enabled` + `center_status=active` to 212 centers; backfilled `user_companies` (baseline single-company membership) + `user_centers` from users.assigned_center_ids. Indexes on user_companies(user_id,company_id unique), user_centers(user_id,center_id unique), centers.center_code (partial unique).
+  - New collections: `user_companies {user_id, company_id, role, status}`, `user_centers {user_id, company_id, center_id, status}`. Center access stored on the center doc (`access_status`, `access_type`, `center_status`, `center_code`).
+  - New endpoints (all on `sub_api`, prefix /api): `GET/POST /centers`, `PATCH /centers/{cid}`, `POST /centers/set-access` (bulk enable subset → rest disabled), `GET/PUT /users/{uid}/memberships`, `GET /auth/my-companies`, `POST /auth/switch-company`.
+  - `create_entity`: companies now get short random codes; centers auto-get center_code + access defaults.
+  - `POST /auth/switch-company`: validates membership (403 if not a member), sets active context on the user doc — `company_id`, `role` (from membership, never elevates to super_admin), `assigned_center_ids` (only access-ENABLED + active centers). All existing center-scoped endpoints inherit the new active company automatically. Super Admin stays global (switch only records `active_company_id` UI context).
+  - `my_scope` now returns `active_company_id` + `active_company`.
+  - Authz: `_can_manage_company` — Super Admin any; Company Admin only own company. Company Admin membership edits limited to own company slice + cannot assign super_admin.
+- **Frontend**:
+  - `AuthContext` — adds `companies`, `isSuperCompanies`, `switchCompany`, `loadCompanies` (hydrated from `/auth/my-companies`).
+  - `ProtectedRoute` — multi-company gate: non-super users are routed to `/select-company` after login until a company is chosen (sessionStorage `companyChosen`). Super Admin skips.
+  - New `pages/CompanySelect.jsx` (`/select-company`) — post-login company picker showing per-company role. `components/CompanySwitcher.jsx` — header dropdown for 2+ company users (hidden for Super Admin). `pages/CenterManagement.jsx` (`/center-management`, admin/company_admin) — company selector, KPI tiles, centers table (code/name/access/status/actions), Add Center dialog (no manual code), per-center access toggle, bulk "Manage Access" panel with Select All/Clear All/Save. `components/MembershipsDialog.jsx` — in Users page (building icon per row) to assign a user to multiple companies with per-company role + center checkboxes.
+  - Sidebar: new "Center Management" item under Organisation group (admin/company_admin). i18n keys `center_management` EN+HI.
+- **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
+- **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
+
+
 ### Phase 71 — Grant Free Access: Multi-Module Entitlement Bug Fix (Done, Feb 2026)
 - **User reported**: Super Admin ne "Grant Free Access" se Finance/MIS/Accounting modules enable karne ki koshish ki lekin sirf `hr` module active hua.
 - **Root cause**: `subscription_service._extend_or_create_entitlement` ka idempotency check sirf `source_order_id` pe scoped tha. Ek order kai modules grant karta hai (base `hr` + selected features); pehle module ke insert ke baad, loop mein aane wale saare aage ke modules ko same `source_order_id` match mila aur wo `return existing` se short-circuit ho gaye — DB mein sirf pehla module actually create hua.

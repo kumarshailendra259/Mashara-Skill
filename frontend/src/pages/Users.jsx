@@ -12,9 +12,10 @@ import {
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
-import { Pencil, Archive } from "lucide-react";
+import { Pencil, Archive, Building2 } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
+import MembershipsDialog from "@/components/MembershipsDialog";
 
 const ROLES = ["admin", "company_admin", "manager", "senior_manager", "center_manager", "center_staff", "partner", "accountant", "hr", "reporting_authority", "center_partner", "viewer"];
 const ROLE_LABELS = {
@@ -51,6 +52,7 @@ export default function Users() {
   const [selected, setSelected] = useState(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [memberFor, setMemberFor] = useState(null);
 
   const load = () => Promise.all([
     api.get("/auth/users"),
@@ -189,6 +191,7 @@ export default function Users() {
                   <td className="p-3 text-[var(--muted)]">{centerNames || "—"}</td>
                   <td className="p-3 text-[var(--muted)]">{partnerName}</td>
                   <td className="p-3 text-right">
+                    <Button size="icon" variant="ghost" onClick={() => setMemberFor(u)} className="rounded-none h-8 w-8" title="Companies & Centers" data-testid={`memberships-user-${u.id}`}><Building2 size={14} /></Button>
                     <Button size="icon" variant="ghost" onClick={() => openEdit(u)} className="rounded-none h-8 w-8" data-testid={`edit-user-${u.id}`}><Pencil size={14} /></Button>
                   </td>
                 </tr>
@@ -207,6 +210,16 @@ export default function Users() {
         busy={bulkBusy}
         onConfirm={bulkArchive}
       />
+
+      {memberFor && (
+        <MembershipsDialog
+          open={!!memberFor}
+          userId={memberFor.id}
+          userName={memberFor.name || memberFor.email}
+          isSuperAdmin={isSuperAdmin}
+          onClose={(changed) => { setMemberFor(null); if (changed) load(); }}
+        />
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="rounded-none max-w-md">

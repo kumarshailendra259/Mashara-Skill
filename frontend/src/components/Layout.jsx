@@ -18,6 +18,7 @@ import {
   Sheet, SheetContent,
 } from "@/components/ui/sheet";
 import AnnouncementBanner from "@/components/AnnouncementBanner";
+import CompanySwitcher from "@/components/CompanySwitcher";
 
 // Grouped sidebar structure (exact order per product spec).
 // Each group has: key (i18n), icon, and items (each item preserves its own
@@ -46,6 +47,7 @@ const navGroups = [
       { to: "/companies", key: "companies", icon: Building2 },
       { to: "/partners", key: "partners", icon: Users },
       { to: "/centers", key: "centers", icon: MapPin },
+      { to: "/center-management", key: "center_management", icon: MapPin, adminOnly: true },
       { to: "/projects", key: "projects", icon: Briefcase },
     ],
   },
@@ -473,6 +475,8 @@ export default function Layout({ children }) {
             </div>
           </div>
           <div className="flex items-center gap-1.5 md:gap-2">
+            {/* Multi-company switcher (only for 2+ company users) */}
+            <CompanySwitcher />
             {/* Notifications */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

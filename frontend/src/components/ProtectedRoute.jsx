@@ -23,7 +23,7 @@ const LANDING_FOR_ROLE = {
 };
 
 export default function ProtectedRoute({ children, requireFinance = false }) {
-  const { user, loading } = useAuth();
+  const { user, loading, companies, isSuperCompanies } = useAuth();
   const location = useLocation();
   if (loading) {
     return (
@@ -33,6 +33,12 @@ export default function ProtectedRoute({ children, requireFinance = false }) {
     );
   }
   if (!user) return <Navigate to="/login" replace />;
+  // Phase 72 — multi-company gate: non-super users pick a company after login.
+  let chosen = false;
+  try { chosen = sessionStorage.getItem("companyChosen") === "1"; } catch { chosen = false; }
+  if (!isSuperCompanies && !chosen && (companies?.length || 0) >= 1) {
+    return <Navigate to="/select-company" replace />;
+  }
   if (requireFinance && !FINANCE_VISIBLE_ROLES.includes(user.role)) {
     // Operational roles (center_manager) get to stay ONLY on `/` — App.js will render the ops dashboard.
     // Any other requireFinance route (e.g. /payment-dashboard, /transactions, /reports) redirects to LANDING.
