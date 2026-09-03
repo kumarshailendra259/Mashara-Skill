@@ -21201,7 +21201,6 @@ async def companies_admin_list(
         active_ents = await db.entitlements.count_documents({
             "company_id": cid, "status": "active", "expires_at": {"$gt": now_iso},
         })
-        # Latest expires_at across active entitlements.
         latest_ent = await db.entitlements.find_one(
             {"company_id": cid, "status": "active"},
             {"_id": 0}, sort=[("expires_at", -1)],
@@ -21210,6 +21209,8 @@ async def companies_admin_list(
         sub_status = "active" if active_ents > 0 and expiry and expiry > now_iso else "expired"
         if status and status != sub_status:
             continue
+        # Detect free grants (orders with amount_paise == 0 → complimentary).
+        has_free_grant = await db.orders.find_one({"company_id": cid, "is_complimentary": True}, {"_id": 0, "id": 1}) is not None
         out.append({
             "company_id": cid,
             "company_name": c.get("name"),
@@ -21221,11 +21222,135 @@ async def companies_admin_list(
             "role_user_used": (lic_by_role.get("role_user_staff") or {}).get("used_qty", 0),
             "subscription_status": sub_status,
             "expiry_date": expiry,
+            "has_free_grant": has_free_grant,
             "latest_payment": (latest_order or {}).get("razorpay_payment_id"),
             "latest_order_amount": (latest_order or {}).get("amount_paise"),
             "latest_order_at": (latest_order or {}).get("captured_at"),
         })
     return out
+
+
+# ---- Super Admin: Grant Free Access to any company ---------------------------
+
+class GrantFreeAccessIn(BaseModel):
+    company_id: str
+    hrms_staff_qty: int = 0
+    role_user_staff_qty: int = 0
+    feature_codes: List[str] = Field(default_factory=list)
+    duration_months: int = Field(1, ge=1, le=60)
+    reason: Optional[str] = None
+
+
+@sub_api.post("/companies-admin/grant-free-access")
+async def companies_admin_grant_free_access(
+    body: GrantFreeAccessIn,
+    current=Depends(require_role("admin")),
+):
+    """SUPER ADMIN ONLY: comp any company with free entitlements. Skips Razorpay
+    entirely — logs a synthetic `orders` row (is_complimentary=True, amount=0)
+    and immediately activates the requested modules + credits license quantities.
+    """
+    if not (body.hrms_staff_qty + body.role_user_staff_qty) and not body.feature_codes:
+        raise HTTPException(400, "Select at least 1 license quantity or 1 feature to grant")
+    company = await db.companies.find_one({"id": body.company_id}, {"_id": 0, "name": 1, "company_code": 1})
+    if not company:
+        raise HTTPException(404, "Company not found")
+    order_id = f"free_{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    order_doc = {
+        "id": str(uuid.uuid4()),
+        "razorpay_order_id": order_id,
+        "razorpay_payment_id": None,
+        "company_id": body.company_id,
+        "company_code": company.get("company_code"),
+        "company_name": company.get("name"),
+        "user_id": current["id"],
+        "hrms_staff_qty": body.hrms_staff_qty,
+        "role_user_staff_qty": body.role_user_staff_qty,
+        "feature_codes": body.feature_codes,
+        "addon_codes": [],
+        "duration_months": body.duration_months,
+        "coupon_code": None,
+        "coupon_applied": False,
+        "subtotal_paise": 0,
+        "discount_paise": 0,
+        "gst_paise": 0,
+        "amount_paise": 0,
+        "gst_invoice": False,
+        "gstin": None,
+        "line_items": [],
+        "is_topup": False,
+        "is_complimentary": True,
+        "granted_reason": body.reason or "Complimentary access by Super Admin",
+        "status": "captured",
+        "created_at": now_iso,
+        "captured_at": now_iso,
+    }
+    await db.orders.insert_one(order_doc)
+    ents = await subscription_service.apply_bundle_entitlements(
+        db, body.company_id,
+        hrms_staff_qty=body.hrms_staff_qty,
+        role_user_staff_qty=body.role_user_staff_qty,
+        feature_codes=body.feature_codes,
+        duration_months=body.duration_months,
+        order_id=order_id, payment_id="COMPLIMENTARY",
+    )
+    await subscription_service.audit(db, "free_access_granted", current, target={
+        "company_id": body.company_id, "company_code": company.get("company_code"),
+        "modules": body.feature_codes,
+        "hrms_qty": body.hrms_staff_qty,
+        "role_user_qty": body.role_user_staff_qty,
+        "duration_months": body.duration_months,
+        "reason": body.reason,
+    })
+    return {"ok": True, "entitlements": ents, "order_id": order_id}
+
+
+# ---- Super Admin: quick Create Company Admin from cross-tenant dashboard ----
+
+class CreateCompanyAdminIn(BaseModel):
+    company_id: str
+    email: EmailStr
+    password: str = Field(min_length=6)
+    name: str
+    mobile: Optional[str] = None
+
+
+@sub_api.post("/companies-admin/create-company-admin")
+async def companies_admin_create_company_admin(
+    body: CreateCompanyAdminIn,
+    current=Depends(require_role("admin")),
+):
+    """SUPER ADMIN ONLY: create a Company Admin for any company from the
+    cross-tenant dashboard, with the company_id explicitly selected by super
+    admin (matches spec §COMPANY ADMIN CREATION)."""
+    email = body.email.lower().strip()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    company = await db.companies.find_one({"id": body.company_id}, {"_id": 0, "id": 1, "company_code": 1, "name": 1})
+    if not company:
+        raise HTTPException(404, "Company not found")
+    user = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "password_hash": hash_password(body.password),
+        "name": body.name,
+        "role": "company_admin",
+        "assigned_center_ids": [],
+        "assigned_partner_id": None,
+        "company_id": company["id"],
+        "license_role": None,
+        "mobile": body.mobile,
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_by": current["id"],
+    }
+    await db.users.insert_one(user)
+    await subscription_service.audit(db, "company_admin_created", current, target={
+        "company_id": company["id"], "company_code": company.get("company_code"),
+        "email": email,
+    })
+    return {"ok": True, "user_id": user["id"], "company_code": company.get("company_code")}
 
 
 # Legacy catalog kept for backwards compat.

@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Building2, Search, RefreshCw, Filter, Download, Eye } from "lucide-react";
+import { Building2, Search, RefreshCw, Filter, Download, Gift, UserPlus, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from "@/components/ui/dialog";
 import {
   Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
 } from "@/components/ui/select";
@@ -18,6 +22,10 @@ export default function CompaniesAdmin() {
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("all");
+  const [grantOpen, setGrantOpen] = useState(false);
+  const [caOpen, setCaOpen] = useState(false);
+  const [target, setTarget] = useState(null);
+  const [features, setFeatures] = useState([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -32,6 +40,14 @@ export default function CompaniesAdmin() {
   }, [q, status]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    api.get("/subscription/pricing")
+      .then((r) => setFeatures(r.data?.features || []))
+      .catch(() => {});
+  }, []);
+
+  const openGrant = (row) => { setTarget(row); setGrantOpen(true); };
+  const openCA = (row) => { setTarget(row); setCaOpen(true); };
 
   const totalCompanies = rows.length;
   const activeCount    = rows.filter((r) => r.subscription_status === "active").length;
@@ -115,14 +131,18 @@ export default function CompaniesAdmin() {
                 <th className="text-left">Status</th>
                 <th className="text-left">Expiry</th>
                 <th className="text-left">Latest Payment</th>
+                <th className="text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={8} className="py-8 text-center text-slate-400">Loading…</td></tr>}
-              {!loading && rows.length === 0 && <tr><td colSpan={8} className="py-8 text-center text-slate-400">No companies</td></tr>}
+              {loading && <tr><td colSpan={9} className="py-8 text-center text-slate-400">Loading…</td></tr>}
+              {!loading && rows.length === 0 && <tr><td colSpan={9} className="py-8 text-center text-slate-400">No companies</td></tr>}
               {!loading && rows.map((r) => (
                 <tr key={r.company_id} className="border-b last:border-0 hover:bg-slate-50" data-testid={`company-row-${r.company_code}`}>
-                  <td className="py-2 font-semibold text-slate-900">{r.company_name || "—"}</td>
+                  <td className="py-2 font-semibold text-slate-900">
+                    {r.company_name || "—"}
+                    {r.has_free_grant && <Badge className="ml-2 bg-purple-100 text-purple-700 text-[10px]" data-testid={`badge-free-${r.company_code}`}><Gift size={10} className="mr-0.5"/> Free</Badge>}
+                  </td>
                   <td className="font-mono text-[11px] text-slate-500">{r.company_code || "—"}</td>
                   <td className="text-xs text-slate-500 max-w-[200px] truncate" title={r.plan}>{r.plan}</td>
                   <td className="text-right tabular-nums"><span className="font-bold">{r.hrms_used || 0}</span><span className="text-slate-400"> / {r.hrms_purchased || 0}</span></td>
@@ -134,12 +154,37 @@ export default function CompaniesAdmin() {
                       ? <div className="text-[11px] font-mono text-slate-500">{r.latest_payment}<div className="text-[10px] text-slate-400">{inr(r.latest_order_amount)} · {dt(r.latest_order_at)}</div></div>
                       : <span className="text-slate-400 text-xs">—</span>}
                   </td>
+                  <td className="text-right whitespace-nowrap">
+                    <Button size="sm" variant="outline" className="mr-1" onClick={() => openGrant(r)} data-testid={`grant-${r.company_code}`}>
+                      <Gift size={12} className="mr-1"/> Grant Free
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => openCA(r)} data-testid={`create-ca-${r.company_code}`}>
+                      <UserPlus size={12} className="mr-1"/> Add Admin
+                    </Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </Card>
+
+      {/* Grant Free Access */}
+      <GrantFreeAccessDialog
+        open={grantOpen}
+        target={target}
+        features={features}
+        onClose={() => setGrantOpen(false)}
+        onGranted={() => { setGrantOpen(false); load(); }}
+      />
+
+      {/* Create Company Admin */}
+      <CreateCompanyAdminDialog
+        open={caOpen}
+        target={target}
+        onClose={() => setCaOpen(false)}
+        onCreated={() => { setCaOpen(false); load(); }}
+      />
     </div>
   );
 }
@@ -151,5 +196,183 @@ function Kpi({ label, value, accent, testid }) {
       <div className="text-[10px] uppercase tracking-widest font-bold text-slate-500">{label}</div>
       <div className={`text-2xl font-black tabular-nums mt-1 ${map[accent] || "text-slate-900"}`}>{value}</div>
     </Card>
+  );
+}
+
+
+function GrantFreeAccessDialog({ open, target, features, onClose, onGranted }) {
+  const [hrms, setHrms]         = useState(5);
+  const [roleUser, setRoleUser] = useState(2);
+  const [featureSet, setFS]     = useState(new Set());
+  const [duration, setDuration] = useState(3);
+  const [reason, setReason]     = useState("");
+  const [saving, setSaving]     = useState(false);
+
+  useEffect(() => {
+    if (open) { setHrms(5); setRoleUser(2); setFS(new Set()); setDuration(3); setReason(""); }
+  }, [open]);
+
+  const toggleFeature = (code) => setFS((s) => { const n = new Set(s); if (n.has(code)) n.delete(code); else n.add(code); return n; });
+
+  const submit = async () => {
+    if (!target) return;
+    if (!hrms && !roleUser && featureSet.size === 0) {
+      return toast.error("Select at least 1 license or 1 feature");
+    }
+    setSaving(true);
+    try {
+      await api.post("/companies-admin/grant-free-access", {
+        company_id: target.company_id,
+        hrms_staff_qty: hrms,
+        role_user_staff_qty: roleUser,
+        feature_codes: Array.from(featureSet),
+        duration_months: duration,
+        reason: reason.trim(),
+      });
+      toast.success(`Free access granted to ${target.company_name}`);
+      onGranted?.();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl" data-testid="grant-free-dialog">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Gift size={18} className="text-purple-600"/> Grant Free Access</DialogTitle>
+          <DialogDescription>
+            Complimentary access to <span className="font-semibold text-slate-800">{target?.company_name}</span>
+            <span className="ml-1 font-mono text-xs bg-slate-100 rounded px-1.5">{target?.company_code}</span>
+            — no payment collected, entitlements activate immediately.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <Label>HRMS Staff Licenses</Label>
+              <Input type="number" min={0} value={hrms} onChange={(e) => setHrms(Math.max(0, parseInt(e.target.value || "0", 10)))} data-testid="grant-hrms"/>
+            </div>
+            <div>
+              <Label>Role/User Licenses</Label>
+              <Input type="number" min={0} value={roleUser} onChange={(e) => setRoleUser(Math.max(0, parseInt(e.target.value || "0", 10)))} data-testid="grant-role"/>
+            </div>
+            <div>
+              <Label>Duration (months)</Label>
+              <Input type="number" min={1} max={60} value={duration} onChange={(e) => setDuration(Math.max(1, Math.min(60, parseInt(e.target.value || "1", 10))))} data-testid="grant-duration"/>
+            </div>
+          </div>
+          <div>
+            <Label>Feature Modules to Include</Label>
+            <div className="grid grid-cols-2 gap-2 mt-2 max-h-56 overflow-y-auto">
+              {features.map((f) => {
+                const on = featureSet.has(f.code);
+                return (
+                  <button
+                    key={f.code}
+                    type="button"
+                    onClick={() => toggleFeature(f.code)}
+                    data-testid={`grant-feature-${f.code}`}
+                    className={`text-left border rounded p-2 text-sm transition ${on ? "border-purple-500 ring-1 ring-purple-100 bg-purple-50/40" : "border-slate-200 hover:border-slate-300"}`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className={`w-4 h-4 rounded flex items-center justify-center mt-0.5 ${on ? "bg-purple-600" : "bg-slate-100 border border-slate-300"}`}>
+                        {on && <Check size={11} className="text-white"/>}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-semibold text-slate-800">{f.name}</div>
+                        <div className="text-[10px] text-slate-500 truncate">{f.description}</div>
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div>
+            <Label>Reason (optional, audit trail)</Label>
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Strategic partnership, beta testing, refund credit" data-testid="grant-reason"/>
+          </div>
+          <div className="rounded-md bg-amber-50 border border-amber-200 p-2 text-xs text-amber-800">
+            This is a <b>complimentary</b> grant — no Razorpay payment will be collected. Action is logged in the audit trail.
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={submit} disabled={saving} className="bg-purple-600 hover:bg-purple-700" data-testid="grant-submit">
+            {saving ? "Granting…" : "Grant Free Access"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
+function CreateCompanyAdminDialog({ open, target, onClose, onCreated }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mobile, setMobile] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open) { setName(""); setEmail(""); setPassword(""); setMobile(""); }
+  }, [open]);
+
+  const submit = async () => {
+    if (!target) return;
+    if (!name.trim() || !email.trim() || password.length < 6) {
+      return toast.error("Name, email and 6+ char password required");
+    }
+    setSaving(true);
+    try {
+      const r = await api.post("/companies-admin/create-company-admin", {
+        company_id: target.company_id,
+        email: email.trim().toLowerCase(),
+        password,
+        name: name.trim(),
+        mobile: mobile.trim() || null,
+      });
+      toast.success(`Company Admin created for ${target.company_name} (${r.data.company_code})`);
+      onCreated?.();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent data-testid="create-ca-dialog">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><UserPlus size={18}/> Create Company Admin</DialogTitle>
+          <DialogDescription>
+            Assigns the new Company Admin to <span className="font-semibold text-slate-800">{target?.company_name}</span>
+            <span className="ml-1 font-mono text-xs bg-slate-100 rounded px-1.5">{target?.company_code}</span>.
+            They will only see this company's data.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div>
+            <Label>Full Name *</Label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ravi Kumar" data-testid="ca-name"/>
+          </div>
+          <div>
+            <Label>Email *</Label>
+            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@abc.com" data-testid="ca-email"/>
+          </div>
+          <div>
+            <Label>Password * (min 6 chars)</Label>
+            <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Strong password" data-testid="ca-password"/>
+          </div>
+          <div>
+            <Label>Mobile (optional)</Label>
+            <Input value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="+91…" data-testid="ca-mobile"/>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={submit} disabled={saving} data-testid="ca-submit">{saving ? "Creating…" : "Create Company Admin"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
