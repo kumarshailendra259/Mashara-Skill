@@ -21884,11 +21884,24 @@ async def user_memberships_get(uid: str, current=Depends(require_role("admin", "
 @sub_api.put("/users/{uid}/memberships")
 async def user_memberships_set(uid: str, body: MembershipsIn, current=Depends(require_role("admin", "company_admin"))):
     """Replace a user's company memberships + per-company center assignments.
+
     Super Admin: full control. Company Admin: may only manage their own company's
-    membership row (other companies left untouched)."""
+    membership row (other companies are left untouched).
+
+    Robustness (Phase 72.1 fix):
+      - duplicate company rows collapse (last one wins);
+      - center ids are validated against the company they are claimed under
+        (cross-company / unknown ids are dropped);
+      - a center can only be mapped to one company for a user (global de-dup),
+        which prevents the E11000 duplicate-key crash on user_centers;
+      - all reads/validation happen BEFORE any write, and the write runs inside
+        a MongoDB transaction when the deployment supports it (falls back to a
+        safe, pre-validated sequential write on standalone servers).
+    """
     target = await db.users.find_one({"id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
+
     # Company Admin guardrails.
     if is_company_admin(current):
         my_cid = current.get("company_id")
@@ -21897,45 +21910,85 @@ async def user_memberships_set(uid: str, body: MembershipsIn, current=Depends(re
                 raise HTTPException(403, "Company Admin can only manage its own company membership")
             if m.role in ("admin", "super_admin"):
                 raise HTTPException(403, "Cannot assign Super Admin role")
+
     now_iso = datetime.now(timezone.utc).isoformat()
+    # Duplicate memberships collapse — last entry for a company wins.
     incoming = {m.company_id: m for m in body.memberships}
-    # Validate companies exist.
+
+    # Validate every referenced company exists.
     for cid in incoming:
         if not await db.companies.find_one({"id": cid}, {"_id": 1}):
             raise HTTPException(404, f"Company {cid} not found")
 
+    # Which companies is this request allowed to (re)write?
     if is_super_admin(current):
-        # Full replace across all companies.
-        await db.user_companies.delete_many({"user_id": uid})
-        await db.user_centers.delete_many({"user_id": uid})
         managed_companies = list(incoming.keys())
+        del_uc = {"user_id": uid}
+        del_ucn = {"user_id": uid}
     else:
-        # Only replace this admin's own company slice.
         my_cid = current.get("company_id")
-        await db.user_companies.delete_many({"user_id": uid, "company_id": my_cid})
-        await db.user_centers.delete_many({"user_id": uid, "company_id": my_cid})
         managed_companies = [my_cid] if my_cid in incoming else []
+        del_uc = {"user_id": uid, "company_id": my_cid}
+        del_ucn = {"user_id": uid, "company_id": my_cid}
 
+    # ---- Build the write set fully in memory (fail-fast, no dup keys) ------
+    company_docs: list = []
+    center_docs: list = []
+    seen_centers: set = set()  # global de-dup: one center → one company per user
     for cid in managed_companies:
         m = incoming[cid]
         stored_role = "admin" if m.role == "super_admin" else m.role
-        await db.user_companies.insert_one({
+        company_docs.append({
             "id": str(uuid.uuid4()), "user_id": uid, "company_id": cid,
             "role": stored_role, "status": "active", "created_at": now_iso,
             "created_by": current["id"],
         })
-        for center_id in m.center_ids:
-            await db.user_centers.insert_one({
+        req_ids = list(dict.fromkeys(m.center_ids or []))  # de-dup within company, keep order
+        if not req_ids:
+            continue
+        # Company-center mapping: keep only centers that actually belong here.
+        valid = await db.centers.find(
+            {"company_id": cid, "id": {"$in": req_ids}}, {"_id": 0, "id": 1},
+        ).to_list(5000)
+        valid_ids = {c["id"] for c in valid}
+        for center_id in req_ids:
+            if center_id not in valid_ids or center_id in seen_centers:
+                continue  # drop unknown / cross-company / already-mapped ids
+            seen_centers.add(center_id)
+            center_docs.append({
                 "id": str(uuid.uuid4()), "user_id": uid, "company_id": cid,
                 "center_id": center_id, "status": "active", "created_at": now_iso,
             })
 
+    # ---- Atomic write: transaction when available, safe fallback otherwise -
+    async def _apply(session=None):
+        await db.user_companies.delete_many(del_uc, session=session)
+        await db.user_centers.delete_many(del_ucn, session=session)
+        if company_docs:
+            await db.user_companies.insert_many(company_docs, ordered=False, session=session)
+        if center_docs:
+            await db.user_centers.insert_many(center_docs, ordered=False, session=session)
+
+    try:
+        async with await client.start_session() as s:
+            async with s.start_transaction():
+                await _apply(session=s)
+    except Exception as exc:  # noqa: BLE001
+        # Standalone mongod (no replica set) rejects multi-doc transactions —
+        # writes are already fully validated/de-duped, so a plain apply is safe.
+        msg = str(exc)
+        if "Transaction numbers" in msg or "replica set" in msg or "transactions are not supported" in msg.lower() or "IllegalOperation" in msg:
+            await _apply(session=None)
+        else:
+            logger.exception("memberships_set write failed for user %s", uid)
+            raise HTTPException(500, "Could not save memberships")
+
     # Keep the user's primary company_id pointing at a valid membership.
-    remaining = await db.user_companies.find_one({"user_id": uid, "status": "active"}, {"_id": 0, "company_id": 1, "role": 1})
+    remaining = await db.user_companies.find_one({"user_id": uid, "status": "active"}, {"_id": 0, "company_id": 1})
     if remaining:
         await db.users.update_one({"id": uid}, {"$set": {"company_id": remaining["company_id"]}})
     await subscription_service.audit(db, "memberships_set", current, target={"user_id": uid, "companies": list(incoming.keys())})
-    return {"ok": True}
+    return {"ok": True, "companies": len(company_docs), "centers": len(center_docs)}
 
 
 # ---- Session: available companies + switch active company ------------------

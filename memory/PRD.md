@@ -47,6 +47,11 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 72.1 — Save Memberships 500 fix (Done, Jun 2026)
+- **Bug**: `PUT /api/users/{uid}/memberships` threw 500 `DuplicateKeyError E11000` on `user_centers (user_id, center_id)` — the endpoint inserted one row per center with no de-dup or company-center validation, so a repeated/cross-company center id crashed the request (root cause reproduced via curl).
+- **Fix (`server.py user_memberships_set`)**: all reads/validation happen before any write; duplicate company rows collapse (last wins); center ids are de-duped within a company AND globally per user; each center is validated against the company it is claimed under (unknown / cross-company ids are silently dropped); write runs inside a MongoDB transaction when supported, with a safe pre-validated sequential fallback for standalone mongod (deployment is standalone — no replica set).
+- **Verified via curl**: multiple companies, same-role & different-role, per-company selected centers, duplicate centers (was the crash), cross-company centers, invalid ids, empty/clear, and GET-after-PUT persistence — all HTTP 200, saved data reopens correctly, no tracebacks.
+
 
 ### Phase 71 — Grant Free Access: Multi-Module Entitlement Bug Fix (Done, Feb 2026)
 - **User reported**: Super Admin ne "Grant Free Access" se Finance/MIS/Accounting modules enable karne ki koshish ki lekin sirf `hr` module active hua.
