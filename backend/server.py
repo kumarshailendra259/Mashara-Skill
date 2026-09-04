@@ -1200,6 +1200,8 @@ async def on_startup():
     asyncio.create_task(_ensure_libreoffice_installed())
     # Daily BG expiry scheduler — fires at ~08:15 IST once a day.
     asyncio.create_task(_bg_alert_scheduler())
+    # Trial-expiry reminders — every 6h, pings companies in the last 3 trial days.
+    asyncio.create_task(_trial_reminder_scheduler())
     # Hydrate Twilio sender overrides (DB-first, env-fallback).
     try:
         import twilio_service as _twilio_svc  # local import to avoid cycles
@@ -17409,6 +17411,140 @@ async def _bg_dispatch_alerts(force: bool = False) -> dict:
     }
 
 
+async def _trial_dispatch_reminders(force: bool = False) -> dict:
+    """Send WhatsApp/SMS + email reminders to companies whose 10-day free trial
+    ends within the next 3 days (last 3 days of the trial). Idempotent per
+    (company, days_left, date) via `trial_reminder_log`."""
+    from datetime import timedelta as _td
+    import math as _math
+    from email_utils import send_trial_expiry_reminder
+
+    now = datetime.now(timezone.utc)
+    tstr = now.date().isoformat()
+    horizon = (now + _td(days=3)).isoformat()
+    trials = await db.company_trials.find(
+        {"ends_at": {"$gt": now.isoformat(), "$lte": horizon}}, {"_id": 0},
+    ).to_list(5000)
+    if not trials:
+        return {"sent": 0, "reason": "no_trials_in_window", "today": tstr}
+
+    portal_url = (os.environ.get("CHECK_IN_URL") or os.environ.get("APP_URL") or "https://finance.masharaskills.com").rstrip("/")
+    if portal_url.endswith("/check-in"):
+        portal_url = portal_url[:-len("/check-in")]
+
+    _bad = ("example.com", "example.org", "testfin.dev", "testfin.local",
+            "test.local", "@x.com", "finance.app")
+    def _clean_email(e: str) -> Optional[str]:
+        e = (e or "").strip().lower()
+        if not e or "@" not in e:
+            return None
+        if any(bad in e for bad in _bad):
+            return None
+        return e
+
+    uproj = {"_id": 0, "id": 1, "email": 1, "mobile": 1, "name": 1, "role": 1}
+    results: list = []
+    total_sent = 0
+    for tr in trials:
+        cid = tr.get("company_id")
+        if not cid:
+            continue
+        ends = datetime.fromisoformat(tr["ends_at"])
+        days_left = max(1, _math.ceil((ends - now).total_seconds() / 86400))
+        if days_left > 3:
+            continue
+        marker = f"{tstr}:{cid}:{days_left}"
+        if not force and await db.trial_reminder_log.find_one({"marker": marker}, {"_id": 0, "marker": 1}):
+            continue
+
+        # Recipients = decision-makers of the company + whoever started the trial.
+        # (Trial/subscription reminders shouldn't spam every staff member.)
+        decision_roles = {"admin", "company_admin", "owner", "accountant",
+                          "manager", "senior_manager", "partner", "reporting_authority"}
+        uids: set = set()
+        recip: list = []
+        async for u in db.users.find(
+            {"company_id": cid, "is_active": {"$ne": False}, "role": {"$in": list(decision_roles)}}, uproj,
+        ):
+            if u["id"] not in uids:
+                uids.add(u["id"]); recip.append(u)
+        # Company members (multi-company) with a decision role for THIS company.
+        member_ids = [m["user_id"] async for m in db.user_companies.find(
+            {"company_id": cid, "status": "active", "role": {"$in": list(decision_roles)}},
+            {"_id": 0, "user_id": 1})]
+        # Always include the person who started the trial.
+        if tr.get("started_by"):
+            member_ids.append(tr["started_by"])
+        extra = [i for i in set(member_ids) if i not in uids]
+        if extra:
+            async for u in db.users.find({"id": {"$in": extra}, "is_active": {"$ne": False}}, uproj):
+                if u["id"] not in uids:
+                    uids.add(u["id"]); recip.append(u)
+
+        company = await db.companies.find_one({"id": cid}, {"_id": 0, "name": 1})
+        cname = (company or {}).get("name") or "your company"
+
+        emails = list({e for e in (_clean_email(u.get("email")) for u in recip) if e})
+        email_r = {"sent": False, "reason": "no_recipients"}
+        if emails:
+            # Resend caps `to` at 50 recipients — send in chunks.
+            _ok = True
+            _last_reason = None
+            for i in range(0, len(emails), 50):
+                chunk = emails[i:i + 50]
+                r = await send_trial_expiry_reminder(chunk, cname, days_left, tr["ends_at"], portal_url)
+                if not r.get("sent"):
+                    _ok = False; _last_reason = r.get("reason")
+            email_r = {"sent": _ok, "reason": _last_reason, "recipient_count": len(emails)}
+
+        twilio_r: list = []
+        if twilio_service.is_configured():
+            body = (f"\u23f3 Mashara Finance: {cname} ka free trial {days_left} din me khatam ho raha hai "
+                    f"({tr['ends_at'][:10]}). Access banaye rakhne ke liye subscribe karein: {portal_url}/subscription")
+            seen_m: set = set()
+            for u in recip:
+                mob = u.get("mobile")
+                if not mob or mob in seen_m:
+                    continue
+                seen_m.add(mob)
+                wr = await twilio_service.send_message(
+                    db, channel="whatsapp", to=mob, body=body,
+                    event_type="trial_expiry", event_id=f"{tstr}:{u['id']}:{days_left}",
+                    sent_by_name="System (Trial scheduler)")
+                sr = await twilio_service.send_message(
+                    db, channel="sms", to=mob, body=body.replace("\u23f3 ", "")[:300],
+                    event_type="trial_expiry", event_id=f"{tstr}:{u['id']}:{days_left}:sms",
+                    sent_by_name="System (Trial scheduler)")
+                twilio_r.append({"user_id": u["id"], "mobile": mob,
+                                 "whatsapp_ok": wr.get("ok"), "whatsapp_error": wr.get("error"),
+                                 "sms_ok": sr.get("ok"), "sms_error": sr.get("error")})
+
+        sent_any = bool(email_r.get("sent")) or any(r.get("whatsapp_ok") or r.get("sms_ok") for r in twilio_r)
+        if sent_any and not force:
+            await db.trial_reminder_log.insert_one({"marker": marker, "sent_at": now.isoformat()})
+        if sent_any:
+            total_sent += 1
+        results.append({"company_id": cid, "company_name": cname, "days_left": days_left,
+                        "email_recipients": emails, "email_sent": email_r.get("sent"),
+                        "email_reason": email_r.get("reason"),
+                        "twilio_sent": sum(1 for r in twilio_r if r.get("whatsapp_ok") or r.get("sms_ok")),
+                        "twilio": twilio_r})
+    return {"sent": total_sent, "today": tstr, "trials_in_window": len(trials), "results": results}
+
+
+async def _trial_reminder_scheduler():
+    """Runs forever — every 6h dispatches trial-expiry reminders (idempotent)."""
+    await asyncio.sleep(90)  # warmup after boot
+    while True:
+        try:
+            await _trial_dispatch_reminders(force=False)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Trial reminder scheduler tick failed: %s", e)
+        await asyncio.sleep(6 * 3600)
+
+
+
+
 # ============================================================================
 # ============  JHARKHAND SKILLS  MIS  DASHBOARD  ============================
 # ============================================================================
@@ -21111,6 +21247,13 @@ async def sub_start_trial(user=Depends(get_current_user)):
         raise HTTPException(409, "A trial has already been used for this company")
     await subscription_service.audit(db, "trial_started", user, target={"company_id": company_id})
     return {"ok": True, "trial": res["trial"], "status": await _trial_status(user)}
+
+
+@sub_api.post("/subscription/trials/dispatch-reminders")
+async def sub_dispatch_trial_reminders(force: bool = False, current=Depends(require_role("admin"))):
+    """Manually trigger trial-expiry reminders (Super Admin). `force=true`
+    bypasses the once-per-day idempotency guard for testing."""
+    return await _trial_dispatch_reminders(force=force)
 
 
 class QuoteIn(BaseModel):

@@ -284,6 +284,53 @@ async def send_bg_expiry_alert(
 
 
 
+async def send_trial_expiry_reminder(
+    to_emails: list,
+    company_name: str,
+    days_left: int,
+    ends_at: str,
+    portal_url: str,
+) -> dict:
+    """Amber-styled reminder that the 10-day free trial ends soon."""
+    if not _client_ready():
+        return {"sent": False, "reason": "resend_not_configured"}
+    if not to_emails:
+        return {"sent": False, "reason": "no_recipients"}
+    sender = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev").strip() or "onboarding@resend.dev"
+    end_date = (ends_at or "")[:10]
+    day_word = "day" if days_left == 1 else "days"
+    html = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:#fffbeb;font-family:Arial,Helvetica,sans-serif;color:#111;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="background:#ffffff;border:2px solid #d97706;">
+        <tr><td style="background:#d97706;color:#ffffff;padding:16px 24px;font-weight:900;font-size:18px;letter-spacing:0.03em;">⏳ YOUR FREE TRIAL ENDS IN {days_left} {day_word.upper()}</td></tr>
+        <tr><td style="padding:20px 24px 8px;font-size:14px;line-height:1.6;color:#7c2d12;">
+          <p style="margin:0 0 10px;">Hi <b>{company_name or 'there'}</b>,</p>
+          <p style="margin:0 0 10px;">Your 10-day free trial of <b>Mashara Finance</b> ends on <b>{end_date}</b> — that's <b>{days_left} {day_word}</b> away.</p>
+          <p style="margin:0 0 10px;">All modules are unlocked right now. To keep uninterrupted access to Payroll, Attendance, Finance, MIS and more, please subscribe before the trial ends. <b>Any team member</b> can complete the payment.</p>
+        </td></tr>
+        <tr><td style="padding:8px 24px 24px;">
+          <a href="{portal_url}/subscription" style="display:inline-block;background:#d97706;color:#fff;padding:12px 22px;font-weight:800;text-decoration:none;">Subscribe Now →</a>
+        </td></tr>
+      </table>
+      <div style="margin:10px 0;color:#a16207;font-size:11px;">Mashara Finance · Automated Trial Reminder</div>
+    </td></tr></table></body></html>"""
+    params = {
+        "from": sender,
+        "to": list(dict.fromkeys(to_emails)),
+        "subject": f"⏳ Your Mashara Finance free trial ends in {days_left} {day_word}",
+        "html": html,
+    }
+    try:
+        res = await asyncio.to_thread(resend.Emails.send, params)
+        return {"sent": True, "id": res.get("id") if isinstance(res, dict) else None}
+    except Exception as e:  # noqa: BLE001
+        logger.error("Trial reminder email failed: %s", e)
+        return {"sent": False, "reason": str(e)[:250]}
+
+
 async def send_mis_weekly_digest(to_emails: list, digest: dict, portal_url: str) -> dict:
     """Send a formatted MIS weekly digest with alerts + rollups. Silently returns
     on missing Resend config so the scheduler stays healthy on dev environments."""
