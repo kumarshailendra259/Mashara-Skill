@@ -1,0 +1,23 @@
+{
+  "summary": "Verified the 10-day free trial + module-lock feature end-to-end. As companyadmin1@x.com (role=company_admin): pre-trial GET /api/auth/me/scope returned trial.eligible=true/active=false/used=false with blocked_modules=[finance,payroll,attendance,approvals,bank_guarantee,notifications,mis,reports] (8 blocked, HR already entitled). Dashboard rendered the eligible TrialBanner with data-testid=trial-banner-eligible plus start-trial-btn and trial-goto-pay. Clicked Start Free Trial -> success toast '🎉 10-day free trial started — all modules unlocked!' appeared and banner switched to data-testid=trial-banner-active with text 'Free trial active · 10 days left'. Sidebar lock icons (nav-lock-*) went from 1 -> 0. Post-trial scope: trial.active=true, days_left=10, used=true, ends_at set, blocked_modules=[] (all 9 modules entitled). Locked-page not shown on /transactions or /finance post-trial (real content renders). Subscribe Now button (data-testid=trial-active-pay) on the active banner navigates to /subscription successfully, confirming a non-super-admin can reach checkout. Second POST /api/subscription/start-trial returns 409 with {\"detail\":\"A trial has already been used for this company\"}. Super-admin regression: admin@finance.app has role=admin, blocked_modules=[], trial={eligible:false,active:false,used:false}, dashboard shows no trial banner and no sidebar locks.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Pre-trial we only observed 1 visible nav-lock-* icon in the sidebar for company_admin, even though 8 modules were blocked. This appears intentional (locks are rendered on leaf nav items and most locked paid modules are grouped under collapsed parent groups whose parent header does not carry a lock icon). If product intent is to also show a lock indicator on collapsed parent group headers whose entire subtree is locked, that would be a UX improvement. Non-blocking.",
+    "Toast success message is hardcoded English ('10-day free trial started — all modules unlocked!'); consider i18n given the mixed Hindi/English UX in the rest of the app."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "companyadmin1@x.com / Test@1234 (company_admin, LPEKKN); admin@finance.app / Admin@123 (super admin)",
+  "seed_data_creation": "Consumed the one-time free trial for company 6447f857-8d53-4c36-94b6-64ff1c6c2227 (Valeur Fabtex Pvt Ltd). Company_trials record now marks used=true, ends_at=2026-09-14T09:43:06Z. Any re-test of the 'eligible' banner for this company will need a DB reset or a different company.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Trial for companyadmin1's company is now ACTIVE (10 days). To re-verify the eligible flow, either advance/reset db.company_trials for company 6447f857-8d53-4c36-94b6-64ff1c6c2227 or use a different company. The expired-state banner (data-testid=trial-banner-expired) was NOT explicitly tested visually in this run — main-agent already curl-verified forced-expiry re-locks to 8. All other states (eligible / active) were visually and API-verified.",
+  "rca of the issue": "N/A — verification-only. Feature works: subscription_service.compute_entitled_modules merges an active trial to unlock all catalog modules; /api/auth/me/scope embeds trial via _trial_status(); TrialBanner switches variant based on scope.trial state; POST /api/subscription/start-trial is company-scoped, uses get_current_user (any role), and enforces one-time via 409 on repeat."
+}

@@ -78,6 +78,16 @@ export function AuthProvider({ children }) {
     }
   }, [hydrate]);
 
+  const startTrial = useCallback(async () => {
+    try {
+      await api.post("/subscription/start-trial");
+      await hydrate();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: formatError(e) };
+    }
+  }, [hydrate]);
+
   const register = useCallback(async (payload) => {
     try {
       const { data } = await api.post("/auth/register", payload);
@@ -100,9 +110,9 @@ export function AuthProvider({ children }) {
   const value = useMemo(
     () => ({
       user, loading, scope, companies, isSuperCompanies,
-      login, register, logout, refresh, switchCompany, loadCompanies,
+      login, register, logout, refresh, switchCompany, loadCompanies, startTrial,
     }),
-    [user, loading, scope, companies, isSuperCompanies, login, register, logout, refresh, switchCompany, loadCompanies],
+    [user, loading, scope, companies, isSuperCompanies, login, register, logout, refresh, switchCompany, loadCompanies, startTrial],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

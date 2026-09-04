@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/sheet";
 import AnnouncementBanner from "@/components/AnnouncementBanner";
 import CompanySwitcher from "@/components/CompanySwitcher";
+import TrialBanner from "@/components/TrialBanner";
 
 // Grouped sidebar structure (exact order per product spec).
 // Each group has: key (i18n), icon, and items (each item preserves its own
@@ -586,6 +587,7 @@ export default function Layout({ children }) {
           className="flex-1 overflow-auto p-4 md:p-6 bg-[var(--bg)] pb-[calc(64px+env(safe-area-inset-bottom))] md:pb-6"
           data-testid="main-content"
         >
+          <TrialBanner />
           {(() => {
             const blocked = scope?.blocked_modules || [];
             const match = moduleForPath(location.pathname);

@@ -328,7 +328,8 @@ async def compute_entitled_modules(db, user: dict) -> dict:
 
     Admins have implicit access to ALL modules (they need to be able to
     unlock things even before purchasing). Everyone else follows the
-    company's active entitlements.
+    company's active entitlements — OR an active 10-day trial, which
+    temporarily unlocks EVERY module.
 
     Returns: {module: {status, expires_at}} for allowed modules only.
     """
@@ -345,7 +346,57 @@ async def compute_entitled_modules(db, user: dict) -> dict:
         {"company_id": company_id, "status": "active", "expires_at": {"$gt": now_iso}},
         {"_id": 0},
     ).to_list(50)
-    return {r["module"]: {"status": r["status"], "expires_at": r["expires_at"]} for r in rows}
+    result = {r["module"]: {"status": r["status"], "expires_at": r["expires_at"]} for r in rows}
+
+    # Active trial → unlock every catalog module for its remaining window.
+    trial = await get_active_trial(db, company_id)
+    if trial:
+        cats = await db.subscription_catalog.find({"is_active": True}, {"_id": 0, "module": 1}).to_list(100)
+        for c in cats:
+            result.setdefault(c["module"], {"status": "trial", "expires_at": trial["ends_at"]})
+    return result
+
+
+# ---- Trial (10-day full-access, one per company) ---------------------------
+TRIAL_DAYS = 10
+
+
+async def get_active_trial(db, company_id: Optional[str]) -> Optional[dict]:
+    """Return the company's trial doc only if it is still running, else None."""
+    if not company_id:
+        return None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return await db.company_trials.find_one(
+        {"company_id": company_id, "ends_at": {"$gt": now_iso}}, {"_id": 0},
+    )
+
+
+async def get_trial(db, company_id: Optional[str]) -> Optional[dict]:
+    """Return the company's trial doc regardless of expiry (or None if never started)."""
+    if not company_id:
+        return None
+    return await db.company_trials.find_one({"company_id": company_id}, {"_id": 0})
+
+
+async def start_trial(db, company_id: str, actor: dict) -> dict:
+    """Start a one-time 10-day trial for a company. Idempotent: if a trial was
+    ever started (even expired), it is NOT restarted."""
+    existing = await db.company_trials.find_one({"company_id": company_id}, {"_id": 0})
+    if existing:
+        return {"already_used": True, "trial": existing}
+    now = datetime.now(timezone.utc)
+    doc = {
+        "id": str(uuid.uuid4()),
+        "company_id": company_id,
+        "started_at": now.isoformat(),
+        "ends_at": (now + timedelta(days=TRIAL_DAYS)).isoformat(),
+        "started_by": actor.get("id"),
+        "started_by_name": actor.get("name") or actor.get("email"),
+        "created_at": now.isoformat(),
+    }
+    await db.company_trials.insert_one(doc)
+    doc.pop("_id", None)
+    return {"already_used": False, "trial": doc}
 
 
 async def _extend_or_create_entitlement(db, company_id: str, module: str,

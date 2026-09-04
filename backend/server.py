@@ -1871,6 +1871,7 @@ async def my_scope(user=Depends(get_current_user)):
         # Phase 66 — module-level entitlements so the SPA can lock unpaid modules.
         "entitled_modules": list((await subscription_service.compute_entitled_modules(db, user)).keys()),
         "blocked_modules": await _compute_blocked_modules(user),
+        "trial": await _trial_status(user),
         # Phase 72 — multi-company context.
         "active_company_id": user.get("company_id"),
         "active_company": (await db.companies.find_one(
@@ -1888,6 +1889,27 @@ async def _compute_blocked_modules(user: dict) -> list[str]:
         {"is_active": True}, {"_id": 0, "module": 1},
     ).to_list(50)
     return [c["module"] for c in catalog_rows if c["module"] not in entitled]
+
+
+async def _trial_status(user: dict) -> dict:
+    """Trial state for the user's company: eligible (never started) / active
+    (running, with days left) / expired (used, over)."""
+    import math
+    company_id = subscription_service._company_id_for(user)
+    if user.get("role") == "admin" or not company_id:
+        return {"eligible": False, "active": False, "used": False, "ends_at": None, "days_left": 0}
+    trial = await subscription_service.get_trial(db, company_id)
+    if not trial:
+        return {"eligible": True, "active": False, "used": False, "ends_at": None, "days_left": 0}
+    now = datetime.now(timezone.utc)
+    ends = datetime.fromisoformat(trial["ends_at"])
+    active = ends > now
+    days_left = max(0, math.ceil((ends - now).total_seconds() / 86400)) if active else 0
+    return {
+        "eligible": False, "active": active, "used": True,
+        "ends_at": trial["ends_at"], "started_at": trial.get("started_at"),
+        "days_left": days_left,
+    }
 
 
 @api.get("/auth/users", response_model=List[UserOut])
@@ -21073,7 +21095,22 @@ async def sub_me(user=Depends(get_current_user)):
         "active_entitlements": ents,
         "current_bundle": latest,
         "is_admin": user.get("role") == "admin",
+        "trial": await _trial_status(user),
     }
+
+
+@sub_api.post("/subscription/start-trial")
+async def sub_start_trial(user=Depends(get_current_user)):
+    """Start a one-time 10-day free trial that unlocks ALL modules for the
+    user's company. Any authenticated member of a company can start it."""
+    company_id = subscription_service._company_id_for(user)
+    if not company_id:
+        raise HTTPException(400, "No company is associated with your account")
+    res = await subscription_service.start_trial(db, company_id, user)
+    if res["already_used"]:
+        raise HTTPException(409, "A trial has already been used for this company")
+    await subscription_service.audit(db, "trial_started", user, target={"company_id": company_id})
+    return {"ok": True, "trial": res["trial"], "status": await _trial_status(user)}
 
 
 class QuoteIn(BaseModel):
