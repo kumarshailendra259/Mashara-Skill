@@ -6911,6 +6911,7 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                 "is_final_step": is_final_step,
                 "total_steps": len(snap),
                 "requester_id": rec.get("created_by"),
+                "_staff_id": rec.get("staff_id"),
                 "requester_name": (
                     rec.get("created_by_name")
                     or rec.get("employee_name")
@@ -6990,6 +6991,7 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "current_level": t.get("current_level"),
                     "step_label": "Partner cross-approval",
                     "requester_id": t.get("created_by"),
+                    "_staff_id": t.get("staff_id"),
                     "requester_name": t.get("created_by_name") or _user_map.get(t.get("created_by")),
                     "center_id_of_request": _cid,
                     "center_name_of_request": _cname,
@@ -7003,6 +7005,39 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "created_at": t.get("created_at"),
                     "via": "partner_cross",
                 })
+    # ---- Enrich every approval with requester details (name, employee id,
+    # department, designation) resolved from the staff record (fallback to the
+    # user record). Batched to avoid N+1 lookups. Applies to ALL approval types.
+    staff_ids = {o.get("_staff_id") for o in out if o.get("_staff_id")}
+    req_uids = {o.get("requester_id") for o in out if o.get("requester_id")}
+    staff_proj = {"_id": 0, "id": 1, "user_id": 1, "name": 1, "employee_code": 1, "department": 1, "designation": 1}
+    staff_by_id: dict = {}
+    staff_by_uid: dict = {}
+    users_by_id: dict = {}
+    if staff_ids:
+        for s in await db.staff.find({"id": {"$in": list(staff_ids)}}, staff_proj).to_list(3000):
+            staff_by_id[s["id"]] = s
+    if req_uids:
+        for s in await db.staff.find({"user_id": {"$in": list(req_uids)}}, staff_proj).to_list(3000):
+            staff_by_uid[s["user_id"]] = s
+        for u in await db.users.find(
+            {"id": {"$in": list(req_uids)}},
+            {"_id": 0, "id": 1, "name": 1, "email": 1, "department": 1, "designation": 1, "employee_code": 1},
+        ).to_list(3000):
+            users_by_id[u["id"]] = u
+    for o in out:
+        sid = o.pop("_staff_id", None)
+        st = (staff_by_id.get(sid) if sid else None) or staff_by_uid.get(o.get("requester_id")) or {}
+        usr = users_by_id.get(o.get("requester_id")) or {}
+        name = st.get("name") or o.get("requester_name") or usr.get("name") or usr.get("email")
+        o["requester_name"] = name
+        o["requester"] = {
+            "name": name or None,
+            "employee_code": st.get("employee_code") or usr.get("employee_code"),
+            "department": st.get("department") or usr.get("department"),
+            "designation": st.get("designation") or usr.get("designation"),
+        }
+
     # Sort newest first
     out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return out

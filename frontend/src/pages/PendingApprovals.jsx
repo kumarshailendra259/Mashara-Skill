@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import {
-  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet, Users,
+  Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet, Users, User as UserIcon,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -371,19 +371,36 @@ export default function PendingApprovals() {
                     )}
                   </div>
 
-                  {/* Requester + Center — the "who/where" line so approver sees the source at a glance */}
-                  <div className="flex items-center gap-3 flex-wrap mt-1.5 text-[13px]">
-                    {item.requester_name && (
-                      <span className="inline-flex items-center gap-1 text-[var(--foreground)]" data-testid={`row-requester-${item.request_id}`}>
-                        👤 <b>{item.requester_name}</b>
-                      </span>
-                    )}
-                    {item.center_name_of_request && (
-                      <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 px-1.5 py-0.5 text-[11px] font-medium" data-testid={`row-center-${item.request_id}`}>
-                        🏢 {item.center_name_of_request}
-                      </span>
-                    )}
-                  </div>
+                  {/* Requester Details — who raised this request (all approval types) */}
+                  {(() => {
+                    const r = item.requester || {};
+                    const rname = r.name || item.requester_name;
+                    if (!rname && !r.employee_code && !r.department && !r.designation) return null;
+                    const na = (v) => (v == null || v === "" ? "N/A" : v);
+                    return (
+                      <div
+                        className="mt-2 bg-slate-50 border border-slate-200 px-3 py-2 text-[12px]"
+                        data-testid={`requester-details-${item.request_id}`}
+                      >
+                        <div className="overline text-[10px] text-[var(--muted)] mb-1">Requester Details</div>
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                          <span className="inline-flex items-center gap-1 text-[13px] text-[var(--foreground)]" data-testid={`row-requester-${item.request_id}`}>
+                            <UserIcon size={13} className="text-[var(--brand)]" /> <b>{na(rname)}</b>
+                          </span>
+                          <span className="text-[var(--muted)]">Employee ID: <b className="text-[var(--foreground)]">{na(r.employee_code)}</b></span>
+                          <span className="text-[var(--muted)]">Department: <b className="text-[var(--foreground)]">{na(r.department)}</b></span>
+                          <span className="text-[var(--muted)]">Designation: <b className="text-[var(--foreground)]">{na(r.designation)}</b></span>
+                        </div>
+                        {item.center_name_of_request && (
+                          <div className="mt-1">
+                            <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 px-1.5 py-0.5 text-[11px] font-medium" data-testid={`row-center-${item.request_id}`}>
+                              🏢 {item.center_name_of_request}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Purpose (short header — e.g. QRN, advance purpose) */}
                   {item.summary?.purpose && (
