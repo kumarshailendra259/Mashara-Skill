@@ -27,6 +27,19 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Partner** — investor with cross-partner txn approval rights
 
 
+### Phase 79 — Partner Settlement Interactive Dashboard + Sidebar Relocation (Done, Jun 2026)
+- **User asked (navigation)**: Remove Partner Settlement from the Dashboard; add sidebar group Partnership → Partner Settlement opening the SAME settlement system (no logic/API/calculation change).
+- **User asked (redesign)**: Turn the long Partner Settlement list into an interactive dashboard — KPI Summary → Filters → Charts → Center Overview (expandable cards) → Partner-wise → per-center Detail → Settled History. Keep 100% of existing settlement logic/actions. Partner role must see the menu (center/company-scoped data only), no admin surfaces.
+- **Frontend**:
+  - `pages/Dashboard.jsx` — removed `SettlementSection` (Dashboard now clean; widgets only).
+  - `components/Layout.jsx` — `grp_partnerships` gained item `partner_settlement` (icon Handshake) gated by new `settlementAccess` flag (admin/company_admin/partner/manager/senior_manager/accountant/hr). i18n `partner_settlement` EN+HI.
+  - `App.js` — new route `/partner-settlement` (requireFinance).
+  - `pages/PartnerSettlement.jsx` — thin page rendering the new dashboard.
+  - NEW `components/SettlementDashboard.jsx` — reuses the EXACT same endpoints (`/dashboard/settlement`, `/dashboard/settlement/history`, `/dashboard/settlement/txns`, POST `/dashboard/settlement/record`, DELETE `/dashboard/settlement/record/{id}`, `/admin/normalize-txn-dates`). Features: 8 KPI cards (Total Income / Contribution-Expense / Overall P&L / Partner Profit Share / Fair Share per Partner / To Receive / To Pay / Settled Amount — all dynamic); filters (Company [best-effort via /entities], Center, Partner, Cycle Active|Lifetime, Status All|Pending|Settled, Date Range, Clear); 5 recharts (Income vs Expense, P&L by Center, Partner Contribution, Share Distribution pie, Settlement Status pie) that respond to filters and are capped Top-10 centers / Top-8 partners for readability; Center Overview compact cards (income/expense/P&L/fair share/to receive/to pay + status badge) expandable to the original detailed partner table with Settle Dues + View Contributing Txns; Partner-wise aggregate table with per-center dues breakdown + Settle Dues; Settled History dialog; Fix Legacy Dates (admin); green=positive/receivable, red=negative/payable. Failure now shows a toast.
+- **Verified**: testing agent iteration_66 (frontend, 100%): admin (132 centers, KPIs populated, all filters/charts/expand/settle-dialog/txn-drill/history work) + partner (kumarshailendra259@gmail.com → 2 centers only, strict isolation, KPIs Total Income ₹5,000 / Fair Share ₹32,500 / To Receive ₹550 / To Pay ₹550, no admin sidebar leak) + Dashboard confirmed clean (no settlement-section). Backend untouched.
+- **Backlog note**: `SettlementDashboard.jsx` is ~950 lines — candidate to split into KPIs/Charts/CenterCard/dialogs later.
+
+
 ### Phase 78 — Partner Settlement History Visibility Fix + Assign Centers UI (Done, Jun 2026)
 - **Bug (regression from Phase 77 strict isolation)**: Partners lost access to the Settlement dashboard/history because their associations (`_associated_center_ids`) were never enriched in the settlement endpoints, so `_scoped_center_ids` fell through to `[]` (fail-closed) and hid all centers + the history section.
 - **Fix (`server.py`)**: added `await _enrich_user_with_associations(user)` to `settlement_view` (~3507), `record_settlement` (~3863), `settlement_history` (~3919), `delete_settlement_record` (~3949), `settlement_contributing_txns` (~3982). Now partners resolve to their mapped centers and see strictly-scoped settlement data + history.
