@@ -18,7 +18,6 @@ import {
 } from "recharts";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleWidgets from "@/components/RoleWidgets";
-import SettlementSection from "@/components/SettlementSection";
 import UpcomingWidget from "@/components/UpcomingWidget";
 import TodayLiveWidget from "@/components/TodayLiveWidget";
 
@@ -176,17 +175,11 @@ export default function Dashboard() {
       {/* Company vs Partner — separated charts */}
       <CompanyPartnerCharts entities={entities} baseFilters={filters} />
 
-      {/* Upcoming birthdays & holidays + Partner Settlement in a two-column grid.
-          The widget sits alongside settlement so admins get people-focused
-          reminders next to their finance summary without a whole extra row. */}
+      {/* Upcoming birthdays & holidays + live activity widgets.
+          Partner Settlement now lives under Partnership → Partner Settlement. */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className={showSettlement ? "lg:col-span-2" : "lg:col-span-3"}>
-          {showSettlement && (
-            <SettlementSection settlement={settlement} onSettled={refreshSettlement} />
-          )}
-        </div>
-        <div className={showSettlement ? "" : "lg:col-span-1"}>
-          <div className="space-y-4">
+        <div className="lg:col-span-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <TodayLiveWidget />
             <UpcomingWidget />
           </div>

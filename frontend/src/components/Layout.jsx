@@ -7,7 +7,7 @@ import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare, AlertCircle,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
-  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building,
+  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building, Handshake,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -118,6 +118,7 @@ const navGroups = [
     key: "grp_partnerships",
     icon: Star,
     items: [
+      { to: "/partner-settlement", key: "partner_settlement", icon: Handshake, settlementAccess: true },
       { to: "/partner-associations", key: "partner_ratings", icon: Star, adminManagerOnly: true },
     ],
   },
@@ -326,6 +327,7 @@ export default function Layout({ children }) {
     if (it.superAdminOnly && !isSuperAdmin) return false;
     if (it.adminOnly && !isAnyAdmin) return false;
     if (it.adminManagerOnly && !["admin", "company_admin", "manager"].includes(user?.role)) return false;
+    if (it.settlementAccess && !["admin", "company_admin", "partner", "manager", "senior_manager", "accountant", "hr"].includes(user?.role)) return false;
     if (it.accountingOnly && !["admin", "company_admin", "accountant", "senior_manager", "hr"].includes(user?.role)) return false;
     if (it.hrOrAdmin && !["admin", "company_admin", "hr"].includes(user?.role)) return false;
     if (it.hrOrAdminOrAccountant && !["admin", "company_admin", "hr", "accountant"].includes(user?.role)) return false;

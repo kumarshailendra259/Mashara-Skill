@@ -45,6 +45,7 @@ import SubscriptionBilling from "@/pages/SubscriptionBilling";
 import CompaniesAdmin from "@/pages/CompaniesAdmin";
 import CenterManagement from "@/pages/CenterManagement";
 import CompanySelect from "@/pages/CompanySelect";
+import PartnerSettlement from "@/pages/PartnerSettlement";
 import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
@@ -102,6 +103,7 @@ function App() {
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/batch-management" element={<ProtectedRoute><Shell><BatchManagement /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />
+            <Route path="/partner-settlement" element={<ProtectedRoute requireFinance><Shell><PartnerSettlement /></Shell></ProtectedRoute>} />
             <Route path="/tds-register" element={<ProtectedRoute requireFinance><Shell><TdsRegister /></Shell></ProtectedRoute>} />
             <Route path="/pending-approvals" element={<ProtectedRoute><Shell><PendingApprovals /></Shell></ProtectedRoute>} />
             <Route path="/login-history" element={<ProtectedRoute><Shell><LoginHistory /></Shell></ProtectedRoute>} />
