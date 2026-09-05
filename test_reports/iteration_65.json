@@ -1,0 +1,25 @@
+{
+  "summary": "E2E frontend verification of (1) Partner Settlement visibility fix (post Phase-77 isolation) and (2) Assign Centers '(N selected)' live counter UI. Both features work end-to-end.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "verified_flows": [
+    "Partner login (kumarshailendra259@gmail.com) → select-company (Partner role, 2 companies listed) → Dashboard renders Partner Settlement section (data-testid=settlement-section) showing exactly 2 centers: Birsa Kairo and Palojori Deoghar (settlement-center-<id> testids match backend scoping). No 403/500, no blank state.",
+    "Center isolation: partner sees only their 2 mapped centers on the settlement dashboard. No other centers leak in.",
+    "Toggle 'View Settled History' (data-testid=toggle-settled-history) → fires GET /api/dashboard/settlement/history?center_id=<id> for both centers (both return HTTP 200) → renders history-<center_id> blocks for BOTH centers with empty-state 'No settlements recorded.' (records array empty is expected per note).",
+    "Super Admin (admin@finance.app) → /users → click edit-user-<id> → dialog opens with 'Assigned Centers (0 selected)' label plus helper hint 'User will only see data of the centers checked below.' → toggling assign-center-<id> checkboxes updates the count live: 0→1→2→1 as expected."
+  ],
+  "test_report_links": ["/app/backend/tests/test_center_scope_isolation.py (pre-existing regression, not re-run this iteration; backend curl already verified per E1 note)"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "SettlementSection.jsx toggleHistory silently swallows per-center fetch errors (.catch(() => [id, []])) — for empty-DB it works, but a real 500 would appear as empty state and mask the bug. Consider surfacing a toast on non-empty failure lists.",
+    "Users.jsx: 213 centers render in a flat scrollable checkbox list — usability concern for tenants with many centers. Consider adding a search/filter input and Select-All/Clear buttons alongside the '(N selected)' counter."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (per E1 curl verification, not re-run)", "frontend": "100%"},
+  "test_credentials": "Partner: kumarshailendra259@gmail.com/Test@1234 (2 companies, 2 centers on partner company). Super Admin: admin@finance.app/Admin@123.",
+  "seed_data_creation": "None. 0 partner_settlement records in DB — empty history state confirmed working.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Partner Settlement fix (Phase 77 regression) verified working end-to-end on frontend. Both history- blocks render post-toggle. Assign Centers live counter + helper hint verified. If E1 continues Phase 77 work, key selectors: settlement-section, settlement-center-<cid>, toggle-settled-history, history-<cid>, edit-user-<uid>, assign-center-<cid>.",
+  "rca of the issue": "N/A — validation only run; fix already applied by E1 (enrichment of _associated_center_ids in settlement endpoints)."
+}

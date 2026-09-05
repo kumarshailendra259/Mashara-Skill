@@ -3507,6 +3507,7 @@ async def settlement_view(
     Each center entry also carries `settled_till` (date) and `last_settlement` (record) when applicable.
     """
     role = user.get("role")
+    await _enrich_user_with_associations(user)
     own_partner_id = user.get("assigned_partner_id") if role == "partner" else partner_id
 
     # SECURITY (center isolation): the user's authorized centers are the source
@@ -3862,6 +3863,7 @@ async def record_settlement(
         be one of the two parties (either payer or receiver).
     """
     role = user.get("role")
+    await _enrich_user_with_associations(user)
     if payload.from_partner_id == payload.to_partner_id:
         raise HTTPException(status_code=400, detail="Payer and receiver cannot be the same partner")
 
@@ -3926,6 +3928,7 @@ async def settlement_history(
       • others — can pass `center_id` to filter, or omit to get every settlement.
     """
     role = user.get("role")
+    await _enrich_user_with_associations(user)
     q: dict = {}
     if center_id:
         q["center_id"] = center_id
@@ -3946,6 +3949,7 @@ async def settlement_history(
 async def delete_settlement_record(sid: str, user=Depends(require_finance_visible)):
     """Undo a recorded settlement (admin / senior_manager / manager / accountant only)."""
     role = user.get("role")
+    await _enrich_user_with_associations(user)
     if role not in ("admin", "senior_manager", "manager", "accountant"):
         raise HTTPException(status_code=403, detail="Only admin/senior_manager/manager/accountant can delete settlement records")
     rec = await db.partner_settlements.find_one({"id": sid}, {"_id": 0, "center_id": 1})
@@ -3978,6 +3982,7 @@ async def settlement_contributing_txns(
     """
     # SECURITY (center isolation): enforce the user's authorized centers for ALL
     # scoped roles — never trust the frontend-supplied center_id.
+    await _enrich_user_with_associations(user)
     allowed_centers = _scoped_center_ids(user)
     if allowed_centers is not None and center_id not in set(allowed_centers):
         raise HTTPException(status_code=403, detail="Not authorized for this center")

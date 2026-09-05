@@ -239,14 +239,18 @@ export default function Users() {
               </Select>
             </div>
             <div>
-              <Label>{t("assign_centers")}</Label>
+              <Label>{t("assign_centers")} <span className="text-[var(--brand)] font-semibold">({form.assigned_center_ids.length} selected)</span></Label>
+              <div className="text-[11px] text-[var(--muted)] mb-1">User will only see data of the centers checked below.</div>
               <div className="border border-[var(--border)] max-h-40 overflow-y-auto p-2 space-y-1">
-                {centers.length === 0 ? <div className="overline">No centers yet</div> : centers.map((c) => (
-                  <label key={c.id} className="flex items-center gap-2 text-sm cursor-pointer">
-                    <Checkbox checked={form.assigned_center_ids.includes(c.id)} onCheckedChange={() => toggleCenter(c.id)} />
-                    {c.name}
-                  </label>
-                ))}
+                {centers.length === 0 ? <div className="overline">No centers yet</div> : centers.map((c) => {
+                  const on = form.assigned_center_ids.includes(c.id);
+                  return (
+                    <label key={c.id} className="flex items-center gap-2 text-sm cursor-pointer" data-testid={`assign-center-${c.id}`}>
+                      <Checkbox checked={on} onCheckedChange={() => toggleCenter(c.id)} />
+                      <span className={on ? "font-medium text-[var(--foreground)]" : "text-[var(--muted)]"}>{c.name}</span>
+                    </label>
+                  );
+                })}
               </div>
             </div>
             <div>

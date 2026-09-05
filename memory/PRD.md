@@ -27,6 +27,14 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Partner** — investor with cross-partner txn approval rights
 
 
+### Phase 78 — Partner Settlement History Visibility Fix + Assign Centers UI (Done, Jun 2026)
+- **Bug (regression from Phase 77 strict isolation)**: Partners lost access to the Settlement dashboard/history because their associations (`_associated_center_ids`) were never enriched in the settlement endpoints, so `_scoped_center_ids` fell through to `[]` (fail-closed) and hid all centers + the history section.
+- **Fix (`server.py`)**: added `await _enrich_user_with_associations(user)` to `settlement_view` (~3507), `record_settlement` (~3863), `settlement_history` (~3919), `delete_settlement_record` (~3949), `settlement_contributing_txns` (~3982). Now partners resolve to their mapped centers and see strictly-scoped settlement data + history.
+- **UI (`Users.jsx`)**: 'Assign Centers' label now shows a live `(N selected)` counter + helper hint 'User will only see data of the centers checked below'; each center checkbox carries `data-testid=assign-center-<id>` and highlights when selected.
+- **Verified**: backend curl (partner kumarshailendra259@gmail.com → scope 2 centers, /dashboard/settlement 200 scoped, /dashboard/settlement/history 200 empty) + testing agent iteration_65 (100% frontend: partner sees exactly 2 centers Birsa Kairo + Palojori Deoghar, View Settled History renders per-center empty-state, no leak of other centers; Assign Centers live counter 0→1→2→1 works). Note: DB currently has 0 partner_settlement records so history empty-state is expected.
+- **Non-blocking follow-ups flagged**: SettlementSection.toggleHistory swallows per-center fetch errors (mask real 500 as empty); Users.jsx flat 213-center checkbox list could use search + Select-All/Clear.
+
+
 ### Phase 72 — Company Centers + Center-wise Access + Multi-Company Users (Done, Jun 2026)
 - **User asked (20-point spec, Hinglish)**: Multiple Centers per Company with auto-generated unique Center Codes; Company→Center relationship; per-Center access enable/disable (Super Admin selects individual centers); multi-company users (many-to-many) who log in ONCE and switch companies after login; per-company roles (e.g. company_admin in Company A, manager in Company B); backend-enforced security (no bypass via payload/URL tampering).
 - **User choices**: 1a full rollout; 2b extend existing `db.centers`; 3 company code random short `UXU7SO` + center code `UXU7SO-A7K2`; 4b always show company selector after login; 5b manual multi-company assignment via UI.
