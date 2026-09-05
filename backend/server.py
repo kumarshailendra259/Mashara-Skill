@@ -620,6 +620,21 @@ def _center_scope_query(user: dict, field: str = "center_id",
     return {field: {"$in": cids}}
 
 
+def _scope_staff_query(user: dict, staff_q: dict, center_id: Optional[str] = None) -> dict:
+    """Enforce the user's authorized centers on a db.staff query (mutates + returns
+    staff_q). Raises 403 if a requested center_id is outside the user's scope.
+    Head-level users (admin/senior_manager) are unrestricted."""
+    allowed = _scoped_center_ids(user)
+    if center_id:
+        if allowed is not None and center_id not in set(allowed):
+            raise HTTPException(status_code=403, detail="Not authorized for this center")
+        staff_q["center_id"] = center_id
+    elif allowed is not None:
+        staff_q["center_id"] = {"$in": list(allowed) if allowed else ["__none__"]}
+    return staff_q
+
+
+
 async def _centers_for_partner(partner_id: str) -> list:
     """Compute the set of center_ids where the given partner is mapped.
 
@@ -3149,6 +3164,12 @@ async def dashboard_summary(
     # Only approved entries count toward financial summary by default
     if not include_pending:
         match["status"] = "approved"
+    # SECURITY (center isolation): a frontend-supplied center_id may only NARROW
+    # within the user's authorized centers — never override the scope filter.
+    if center_id:
+        allowed_centers = _scoped_center_ids(user)
+        if allowed_centers is not None and center_id not in set(allowed_centers):
+            raise HTTPException(status_code=403, detail="Not authorized for this center")
     for k, v in [("company_id", company_id), ("partner_id", partner_id),
                  ("center_id", center_id), ("project_id", project_id)]:
         if v:
@@ -3488,7 +3509,12 @@ async def settlement_view(
     role = user.get("role")
     own_partner_id = user.get("assigned_partner_id") if role == "partner" else partner_id
 
-    # Find which centers to include
+    # SECURITY (center isolation): the user's authorized centers are the source
+    # of truth. `None` = head-level (admin/senior_manager/company-admin org-wide),
+    # `[]` = no center mapped (fail-closed), else the explicit allowed list.
+    allowed_centers = _scoped_center_ids(user)
+
+    # Find which centers to include (candidate set BEFORE authorization filter).
     center_ids: list[str] = []
     if center_id:
         center_ids = [center_id]
@@ -3497,11 +3523,18 @@ async def settlement_view(
     elif own_partner_id:
         center_ids = await _centers_for_partner(own_partner_id)
     else:
-        # admin without filter: all centers that have any partner transaction
+        # No explicit filter: all centers that have any partner transaction.
         center_ids = await db.transactions.distinct(
             "center_id",
             {"status": "approved", "partner_id": {"$ne": None}, "center_id": {"$ne": None}},
         )
+
+    # Enforce center authorization — never trust a frontend-supplied center_id.
+    if allowed_centers is not None:
+        allowed_set = set(allowed_centers)
+        if center_id and center_id not in allowed_set:
+            raise HTTPException(status_code=403, detail="Not authorized for this center")
+        center_ids = [c for c in center_ids if c in allowed_set]
 
     # Fetch entity name lookups
     center_docs = await db.centers.find({"id": {"$in": center_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(1000)
@@ -3679,14 +3712,23 @@ async def payment_dashboard_summary(
 
     # Base filter (scope + type=expense) — used for expense aggregations
     base: dict = {"date": {"$gte": s, "$lte": e}, "type": "expense", "status": {"$ne": "rejected"}}
+    await _enrich_user_with_associations(user)
     if role == "partner":
         base["partner_id"] = user.get("assigned_partner_id")
-    elif role in ("center_manager", "center_staff"):
-        centers = user.get("assigned_center_ids") or []
-        if centers:
-            base["center_id"] = {"$in": centers}
-    if center_id:
-        base["center_id"] = center_id  # override
+    # SECURITY (center isolation): the user's authorized centers are the source of
+    # truth for EVERY non-head-level role. A frontend center_id may only narrow
+    # within scope — it can never override it.
+    allowed_centers = _scoped_center_ids(user)
+    if allowed_centers is not None:
+        allowed_set = set(allowed_centers)
+        if center_id:
+            if center_id not in allowed_set:
+                raise HTTPException(status_code=403, detail="Not authorized for this center")
+            base["center_id"] = center_id
+        else:
+            base["center_id"] = {"$in": list(allowed_set) if allowed_set else ["__none__"]}
+    elif center_id:
+        base["center_id"] = center_id
     if partner_id and role != "partner":
         base["partner_id"] = partner_id
     if project_id:
@@ -3713,11 +3755,14 @@ async def payment_dashboard_summary(
     upcoming_filter: dict = {"status": {"$in": ["pending", "in_progress", "sent_back"]}}
     if role == "partner":
         upcoming_filter["partner_id"] = user.get("assigned_partner_id")
-    elif role in ("center_manager", "center_staff"):
-        centers = user.get("assigned_center_ids") or []
-        if centers:
-            upcoming_filter["center_id"] = {"$in": centers}
-    if center_id:
+    # SECURITY (center isolation): same authorized-center rule on the payments collection.
+    if allowed_centers is not None:
+        allowed_set2 = set(allowed_centers)
+        if center_id:
+            upcoming_filter["center_id"] = center_id  # already validated in-scope above
+        else:
+            upcoming_filter["center_id"] = {"$in": list(allowed_set2) if allowed_set2 else ["__none__"]}
+    elif center_id:
         upcoming_filter["center_id"] = center_id
     upcoming_rows = await db.payments.aggregate([
         {"$match": upcoming_filter},
@@ -3825,7 +3870,13 @@ async def record_settlement(
     if not center:
         raise HTTPException(status_code=404, detail="Center not found")
 
-    # Partner-role enforcement
+    # SECURITY (center isolation): non-head-level users can only record for their
+    # authorized centers — regardless of role permission.
+    allowed_centers = _scoped_center_ids(user)
+    if allowed_centers is not None and payload.center_id not in set(allowed_centers):
+        raise HTTPException(status_code=403, detail="Not authorized for this center")
+
+    # Partner-role enforcement (must be one of the two parties).
     if role == "partner":
         own_pid = user.get("assigned_partner_id")
         if not own_pid or own_pid not in (payload.from_partner_id, payload.to_partner_id):
@@ -3878,14 +3929,15 @@ async def settlement_history(
     q: dict = {}
     if center_id:
         q["center_id"] = center_id
-    if role == "partner":
-        own_pid = user.get("assigned_partner_id")
-        own_centers = await _centers_for_partner(own_pid) if own_pid else []
-        if not own_centers:
+    # SECURITY (center isolation) — enforce authorized centers for all scoped roles.
+    allowed_centers = _scoped_center_ids(user)
+    if allowed_centers is not None:
+        if not allowed_centers:
             return {"records": []}
-        if center_id and center_id not in own_centers:
-            raise HTTPException(status_code=403, detail="Center not mapped to your partner profile")
-        q["center_id"] = {"$in": own_centers} if not center_id else center_id
+        if center_id and center_id not in set(allowed_centers):
+            raise HTTPException(status_code=403, detail="Not authorized for this center")
+        if not center_id:
+            q["center_id"] = {"$in": allowed_centers}
     docs = await db.partner_settlements.find(q, {"_id": 0}).sort("date", -1).to_list(500)
     return {"records": docs}
 
@@ -3896,6 +3948,13 @@ async def delete_settlement_record(sid: str, user=Depends(require_finance_visibl
     role = user.get("role")
     if role not in ("admin", "senior_manager", "manager", "accountant"):
         raise HTTPException(status_code=403, detail="Only admin/senior_manager/manager/accountant can delete settlement records")
+    rec = await db.partner_settlements.find_one({"id": sid}, {"_id": 0, "center_id": 1})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Settlement record not found")
+    # SECURITY (center isolation) — cannot delete a record of an unauthorized center.
+    allowed_centers = _scoped_center_ids(user)
+    if allowed_centers is not None and rec.get("center_id") not in set(allowed_centers):
+        raise HTTPException(status_code=403, detail="Not authorized for this center")
     res = await db.partner_settlements.delete_one({"id": sid})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Settlement record not found")
@@ -3917,13 +3976,11 @@ async def settlement_contributing_txns(
       id, date, type, amount, source, category, description, partner_id, partner_name,
       created_at, created_by_name.
     """
-    # Partner-scoping — only own centers.
-    role = user.get("role")
-    if role == "partner":
-        own_pid = user.get("assigned_partner_id")
-        own_centers = await _centers_for_partner(own_pid) if own_pid else []
-        if center_id not in own_centers:
-            raise HTTPException(status_code=403, detail="Center not mapped to your partner profile")
+    # SECURITY (center isolation): enforce the user's authorized centers for ALL
+    # scoped roles — never trust the frontend-supplied center_id.
+    allowed_centers = _scoped_center_ids(user)
+    if allowed_centers is not None and center_id not in set(allowed_centers):
+        raise HTTPException(status_code=403, detail="Not authorized for this center")
 
     q: dict = {"status": "approved", "center_id": center_id, "partner_id": {"$ne": None}}
     cutoff = None
@@ -8396,7 +8453,7 @@ async def report_attendance(
     year: int = Query(..., ge=2020, le=2100),
     staff_id: Optional[str] = None,
     center_id: Optional[str] = None,
-    _=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager")),
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager")),
 ):
     """Per-day attendance CSV for a month. Filters by staff or center."""
     import calendar
@@ -8407,8 +8464,8 @@ async def report_attendance(
     staff_q: dict = {"active": {"$ne": False}}
     if staff_id:
         staff_q["id"] = staff_id
-    if center_id:
-        staff_q["center_id"] = center_id
+    # SECURITY (center isolation): restrict staff to the user's authorized centers.
+    _scope_staff_query(user, staff_q, center_id)
     staff_list = await db.staff.find(staff_q, {"_id": 0, "id": 1, "name": 1, "employee_code": 1, "center_id": 1, "designation": 1}).to_list(2000)
     ids = [s["id"] for s in staff_list]
 
@@ -8468,12 +8525,25 @@ async def report_payroll(
     month: int = Query(..., ge=1, le=12),
     year: int = Query(..., ge=2020, le=2100),
     staff_id: Optional[str] = None,
-    _=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
 ):
     """Comprehensive payroll CSV (earnings + deductions + bank details) for the month."""
     q: dict = {"month": month, "year": year}
     if staff_id:
         q["staff_id"] = staff_id
+    # SECURITY (center isolation): restrict payroll to staff in authorized centers.
+    allowed_centers = _scoped_center_ids(user)
+    if allowed_centers is not None:
+        scoped_staff = await db.staff.find(
+            {"center_id": {"$in": list(allowed_centers) if allowed_centers else ["__none__"]}},
+            {"_id": 0, "id": 1},
+        ).to_list(20000)
+        allowed_staff_ids = {s["id"] for s in scoped_staff}
+        if staff_id:
+            if staff_id not in allowed_staff_ids:
+                raise HTTPException(status_code=403, detail="Not authorized for this staff member")
+        else:
+            q["staff_id"] = {"$in": list(allowed_staff_ids)}
     docs = await db.payroll.find(q, {"_id": 0}).to_list(5000)
     sids = list({d["staff_id"] for d in docs})
     staffs = {s["id"]: s for s in await db.staff.find(
@@ -8542,7 +8612,7 @@ async def report_consolidated(
     year: int = Query(..., ge=2020, le=2100),
     staff_id: Optional[str] = None,
     center_id: Optional[str] = None,
-    _=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
+    user=Depends(require_role("admin", "hr", "accountant", "senior_manager")),
 ):
     """One CSV row per staff for the month: attendance summary + payroll + bank."""
     import calendar
@@ -8553,8 +8623,8 @@ async def report_consolidated(
     sq: dict = {"active": {"$ne": False}}
     if staff_id:
         sq["id"] = staff_id
-    if center_id:
-        sq["center_id"] = center_id
+    # SECURITY (center isolation): restrict staff to the user's authorized centers.
+    _scope_staff_query(user, sq, center_id)
     staff_list = await db.staff.find(sq, {"_id": 0}).to_list(5000)
     sids = [s["id"] for s in staff_list]
 

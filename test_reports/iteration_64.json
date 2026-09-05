@@ -1,0 +1,28 @@
+{
+  "summary": "Independently re-verified the CRITICAL center-wise data isolation fix. Wrote /app/backend/tests/test_center_scope_isolation.py with 18 tests covering scoped user (test_center_manager_c6912430@x.com / accountant, mapped to center 9cf18e69-...) and admin regression across settlement, settlement/txns, settlement/history, dashboard/summary, dashboard/payment-summary, reports/attendance, reports/consolidated, reports/payroll. Result: 17 passed, 1 skipped (payroll CSV had no rows for month=6/2026 so scope leak could not be checked from response; skip is data-not-fix-related). Every negative check confirmed: passing UNMAPPED center_id (0161ac10-0e67-4c92-966b-5cd01628d028) returns HTTP 403 from settlement, settlement/txns, settlement/history, dashboard/summary, dashboard/payment-summary, reports/attendance, reports/consolidated. Positive checks: with mapped center_id all return 200. GET /api/dashboard/settlement returns exactly 1 center (the mapped one) for the scoped user. /api/dashboard/settlement/history without any center_id returned only records for the mapped center (no leak). /api/auth/me confirms role=accountant, assigned_center_ids contains only the mapped center. Admin regression (admin@finance.app): GET /api/dashboard/settlement returned 132 centers, and admin can pass either the mapped OR the unmapped center_id to settlement, summary, and payment-summary without any 403 — head-level access preserved. Frontend spot-check: logged into the SPA as the scoped user, selected the (only) company 'Valeur Fabtex Pvt Ltd'. The dashboard rendered role badge 'center_manager' and a fail-closed 'No Centers Assigned' banner (with Hindi/Hinglish copy) plus empty KPI cards (all zeros) — no other centers' data leaked into the UI. No unmapped-center id appeared anywhere in the DOM. Partner Settlement section did not render any unmapped-center card. Backend-level enforcement is verified as the authoritative security boundary.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_center_scope_isolation.py",
+    "/app/test_reports/pytest/center_scope_isolation.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Observation (not a security defect): the SPA header shows the scoped user's role as 'center_manager' while /api/auth/me returns role='accountant'. Both currently satisfy the isolation rule (same _scoped_center_ids branch: assigned_center_ids), but the UI/DB label mismatch may confuse admins configuring RBAC. Consider unifying the role label source.",
+    "Payroll scope test skipped due to zero payroll docs for 6/2026. To make the regression fully deterministic, seed at least one payroll row for a mapped-center staff (and one for an unmapped-center staff) so the CSV Center-column assertion can actively prove non-leakage."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_center_scope_isolation.py (new)"
+  ],
+  "success_rate": {"backend": "100% (17/17 executed, 1 skipped - no data)", "frontend": "100%"},
+  "test_credentials": "test_center_manager_c6912430@x.com / Test@1234 (accountant, mapped to 9cf18e69-312d-488d-a484-2d68d62d48a7); admin@finance.app / Admin@123 (unrestricted). Unmapped center used for negative tests: 0161ac10-0e67-4c92-966b-5cd01628d028.",
+  "seed_data_creation": "None. No POST/PUT/DELETE issued during scope testing (read-only).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Center-scope isolation on finance/settlement/reports endpoints is fully enforced at the API layer. The regression suite is /app/backend/tests/test_center_scope_isolation.py — run before any future edits to _scoped_center_ids, _scope_staff_query, settlement_view, dashboard_summary, payment_dashboard_summary, or /reports/*. MIS (/api/mis/*) intentionally not tested per review-request scope. If additional finance endpoints are added that accept center_id, mirror the same 403-on-unmapped assertion.",
+  "rca of the issue": "N/A — verification-only. The fix (server.py:575 _scoped_center_ids canonical helper + _scope_staff_query for reports + explicit 403 checks in settlement_view/dashboard_summary/payment_dashboard_summary/settlement_history/settlement_contributing_txns/report_attendance/report_consolidated/report_payroll) correctly enforces center isolation for scoped roles and preserves head-level (admin/senior_manager) unrestricted access."
+}
