@@ -11263,6 +11263,8 @@ class BatchIn(BaseModel):
     base_rate: float = 0
     final_rate: float = 0
     work_order_value: float = 0
+    # Phase 81 · Link to the Work Order master (source of truth for WO Value/PBG).
+    work_order_id: Optional[str] = None
 
 
 class BatchOut(BatchIn):
@@ -11277,6 +11279,8 @@ class BatchOut(BatchIn):
     lifecycle_history: List[dict] = Field(default_factory=list)
     # Timestamp set by the daily auto-close scheduler when it closes an expired batch.
     auto_closed_at: Optional[str] = None
+    # Phase 81 · enriched Work Order number for display (from linked work_order_id)
+    work_order_no: Optional[str] = None
 
 
 # Category hourly rates (fixed business config — change here if statutory rates revise).
@@ -11468,6 +11472,15 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
         else:
             q["center_id"] = {"$in": scoped_ids}
     docs = await db.batches.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    # Phase 81 — attach linked Work Order number for display (batch-load, no N+1).
+    wo_ids = list({d.get("work_order_id") for d in docs if d.get("work_order_id")})
+    wo_map = {}
+    if wo_ids:
+        async for w in db.work_orders.find({"id": {"$in": wo_ids}}, {"_id": 0, "id": 1, "wo_number": 1}):
+            wo_map[w["id"]] = w.get("wo_number")
+    for d in docs:
+        if d.get("work_order_id"):
+            d["work_order_no"] = wo_map.get(d["work_order_id"])
     return [BatchOut(**d) for d in docs]
 
 
@@ -11490,6 +11503,9 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
         cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
         if cnt != len(set(body.partner_ids)):
             raise HTTPException(400, "one or more partner_ids do not exist")
+    # Phase 81: validate optional Work Order linkage (must exist).
+    if body.work_order_id and not await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "work_order_id does not exist")
     # Phase 37: target-gated creation. If target_id is provided, we atomically
     # consume `total_beneficiaries` (batch capacity) from the target's remaining
     # counter. Insufficient target → 400. Legacy call without target_id still
@@ -11545,6 +11561,8 @@ async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin
         cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
         if cnt != len(set(body.partner_ids)):
             raise HTTPException(400, "one or more partner_ids do not exist")
+    if body.work_order_id and not await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "work_order_id does not exist")
     # Lifecycle-based lock enforcement (admin bypasses locks).
     existing = await db.batches.find_one({"id": bid}, {"_id": 0})
     if not existing:

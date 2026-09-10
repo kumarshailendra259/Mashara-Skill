@@ -34,6 +34,13 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified**: testing agent iteration_68 — backend 16/16 pytest (`test_phase81_work_orders.py`): auto-compute (₹6,87,150 / PBG ₹20,614.50), override precedence, expired/cancelled excluded from totals, status filter surfaces inactive, financials grand-total consistency, target enrichment, RBAC (partner 403, admin-only delete). Frontend 100%: cards render dynamic ₹, summary + grand total, filters, form modal, view modal (detail/print/edit/delete), target WO Value column + view action, existing KPI strip + Batch/Target flows intact. Dummy test WOs cleaned from DB (0 remaining → client starts fresh).
 - **Note**: center_manager centre-scoping code path present (verified by review) but not exercised E2E. GST intentionally excluded per user.
 
+### Phase 81b — Batch ↔ Work Order Link (Done, Jun 2026)
+- **User asked**: Batch create form me existing Work Order ka dropdown (WO No — Centre — FY) daalo taaki har batch apni WO se linked rahe.
+- **Backend**: `BatchIn.work_order_id` (optional) + validation (400 if WO doesn't exist) on create & update; `BatchOut.work_order_no` enriched in `list_batches` via batch-load map (no N+1).
+- **Frontend (`BatchManagement.jsx`)**: "Linked Work Order" Select (`bm-batch-inp-wo`) in the batch form's Work Order Allocation section — options are active/all WOs filtered by the batch's project+centre, labelled `WO No — Centre — FY (status)`; new "Work Order" column in the Batch Creation table showing the linked WO number. `woList` loaded once + refreshed on WO save.
+- **Verified**: curl — batch created with `work_order_id` persists, GET /batches returns `work_order_no`, bad id → 400, cleanup done. Frontend screenshot — dropdown + column render, no crash.
+
+
 
 ### Phase 80 — Global Premium SaaS/HRMS UI Redesign (Done, Jun 2026)
 - **User asked**: App-wide modern premium Finance+HRMS SaaS redesign (SalaryBox-clean + Mashara analytics). UI/UX ONLY — no logic/API/DB/RBAC/calculation changes. Inter font; professional blue primary; green income/profit, red expense, indigo investment, amber pending; thin borders; 4-8px radius; subtle shadows; spacious; soft-blue active sidebar; enterprise header; modern KPI cards/tables/forms/buttons; responsive.

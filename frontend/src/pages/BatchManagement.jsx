@@ -15,7 +15,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Target, Layers, Users, ClipboardList, GraduationCap, BadgeCheck,
   Plus, Trash2, Edit3, Search, Info, LockKeyhole, Upload, Download,
-  CheckCircle2, AlertTriangle, Eye,
+  CheckCircle2, AlertTriangle, Eye, FileText,
 } from "lucide-react";
 import { inr } from "@/lib/i18n";
 import WorkOrderFinancials from "@/components/batch/WorkOrderFinancials";
@@ -72,6 +72,7 @@ const EMPTY_BATCH = {
   // Phase 38 · Work Order Allocation
   fy_year: "", category: "", job_role_master_id: "",
   job_role_hours: 0, num_candidates: 0,
+  work_order_id: "",
 };
 
 // FY dropdown options — accepts any year. UI shows common ones + a "Custom" free-text.
@@ -167,7 +168,15 @@ export default function BatchManagement() {
 
   const openAddWO = (prefill = null) => { setWoFormInitial(null); setWoFormPrefill(prefill); setWoFormOpen(true); };
   const openEditWO = (wo) => { setWoView({ open: false, list: [], loading: false }); setWoFormInitial(wo); setWoFormPrefill(null); setWoFormOpen(true); };
-  const onWOSaved = () => { loadFinancials(); loadTargets(); };
+  const onWOSaved = () => { loadFinancials(); loadTargets(); loadWOList(); };
+
+  // Full WO list (for the batch → work order dropdown + display map)
+  const [woList, setWoList] = useState([]);
+  const loadWOList = useCallback(async () => {
+    try { const r = await api.get("/work-orders", { params: { include_inactive: true } }); setWoList(r.data || []); }
+    catch { /* non-blocking */ }
+  }, []);
+  useEffect(() => { loadWOList(); }, [loadWOList]);
 
   const fetchWOList = async (params) => {
     setWoView({ open: true, list: [], loading: true });
@@ -674,13 +683,13 @@ export default function BatchManagement() {
                 <tr className="[&>th]:p-2 [&>th]:text-left [&>th]:overline [&>th]:text-[10px] [&>th]:whitespace-nowrap">
                   <th>Batch</th><th>Project</th><th>Center</th>
                   <th className="text-right">Capacity</th><th className="text-right">Enrolled</th>
-                  <th>Start</th><th>End</th><th>Status</th><th>Target</th>
+                  <th>Start</th><th>End</th><th>Status</th><th>Work Order</th><th>Target</th>
                 </tr>
               </thead>
               <tbody>
-                {bLoading && <tr><td colSpan={9} className="p-4 text-center text-[var(--muted)]">Loading…</td></tr>}
+                {bLoading && <tr><td colSpan={10} className="p-4 text-center text-[var(--muted)]">Loading…</td></tr>}
                 {!bLoading && filteredBatches.length === 0 && (
-                  <tr><td colSpan={9} className="p-8 text-center text-[var(--muted)]">No batches match your filters.</td></tr>
+                  <tr><td colSpan={10} className="p-8 text-center text-[var(--muted)]">No batches match your filters.</td></tr>
                 )}
                 {filteredBatches.map((b) => {
                   const proj = entProjects.find((p) => p.id === b.project_id);
@@ -697,6 +706,11 @@ export default function BatchManagement() {
                       <td>{b.end_date || "—"}</td>
                       <td>
                         <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-bold uppercase border ${LC_TONE[lc] || "bg-gray-100"}`}>{lc}</span>
+                      </td>
+                      <td>
+                        {b.work_order_no
+                          ? <span className="inline-flex items-center gap-1 text-[10px] font-mono text-[var(--brand)] font-semibold" title="Linked Work Order"><FileText size={10} /> {b.work_order_no}</span>
+                          : <span className="text-[var(--muted)] text-[10px]">—</span>}
                       </td>
                       <td>
                         {b.target_id ? (
@@ -950,6 +964,23 @@ export default function BatchManagement() {
                 <div className="overline text-[10px] flex items-center justify-between border-b border-indigo-200 pb-1">
                   <span>Work Order Allocation · Rate Engine</span>
                   {rateBusy && <span className="text-[9px] italic text-[var(--muted)] normal-case">Calculating…</span>}
+                </div>
+                <div>
+                  <Label className="overline text-[10px]">Linked Work Order</Label>
+                  <Select value={bEdit.work_order_id || "none"} onValueChange={(v) => setBEdit({ ...bEdit, work_order_id: v === "none" ? "" : v })}>
+                    <SelectTrigger className="rounded-none" data-testid="bm-batch-inp-wo"><SelectValue placeholder="Select the sanctioned Work Order" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">— No Work Order —</SelectItem>
+                      {woList
+                        .filter((w) => (!bEdit.project_id || w.project_id === bEdit.project_id) && (!bEdit.center_id || w.center_id === bEdit.center_id))
+                        .map((w) => (
+                          <SelectItem key={w.id} value={w.id}>
+                            {w.wo_number} — {w.center_name || "—"} — {w.fy}{w.effective_status !== "active" ? ` (${w.effective_status})` : ""}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <div className="text-[9px] text-[var(--muted)] mt-1">Ties this batch to its sanctioned Work Order (WO No — Centre — FY). Filtered by the batch's project & centre.</div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div>
