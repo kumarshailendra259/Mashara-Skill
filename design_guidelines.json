@@ -1,124 +1,240 @@
 {
-  "theme_and_archetype": {
-    "domain": "Finance, Business Tracking Dashboard",
-    "theme": "Light Theme",
-    "archetype": "Archetype 4: Swiss & High-Contrast",
-    "vibe": "Authority, clarity, function-first, rigid, objective, data-dense."
-  },
+  "design_system_name": "Mashara Finance Modern SaaS/HRMS Design System",
+  "theme": "Light Neutral Enterprise SaaS",
   "typography": {
-    "strategy": "Swiss Brutalist (Tech/Enterprise). Clean, minimal typography prioritizing data readability.",
-    "font_families": {
-      "headings": "Chivo",
-      "body": "IBM Plex Sans",
-      "monospace": "JetBrains Mono"
-    },
-    "font_weights": {
-      "headings": "700, 900",
-      "body": "400, 500"
-    },
-    "sizing": {
-      "h1": "text-3xl sm:text-4xl",
-      "h2": "text-2xl sm:text-3xl",
-      "h3": "text-xl sm:text-2xl",
-      "body": "text-sm",
-      "small": "text-xs"
-    },
-    "rules": [
-      "Headings must use tight letter spacing: tracking-tight.",
-      "Overlines/Labels must be Uppercase, text-xs, and wide spacing: tracking-[0.2em].",
-      "Avoid Inter for headings."
-    ],
-    "installation": "yarn add @fontsource/chivo @fontsource/ibm-plex-sans @fontsource/jetbrains-mono"
-  },
-  "color_palette": {
-    "base": {
-      "background": "#F8F9FA",
-      "surface": "#FFFFFF",
-      "border": "#E5E7EB",
-      "text_primary": "#0A0A0A",
-      "text_secondary": "#4B5563"
-    },
-    "brand_accents": {
-      "primary": "#002FA7",
-      "primary_hover": "#002585",
-      "accent": "#0A0A0A"
-    },
-    "status": {
-      "success": "#00A859",
-      "danger": "#FF2A2A",
-      "warning": "#FFD700",
-      "info": "#007AFF"
-    },
-    "rules": [
-      "95% of the UI should be monochrome. Color exists only to guide action.",
-      "No full-screen gradients. Pure function over decoration.",
-      "Use International Klein Blue (#002FA7) strictly for primary actions.",
-      "Use Green/Red strictly for Profit/Loss indicators."
-    ]
-  },
-  "spacing_and_layout": {
-    "strategy": "The 'Control Room' Grid (Mode B).",
-    "grid_system": {
-      "base": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4",
-      "gap": "gap-4 md:gap-6"
-    },
-    "widget_ratios": [
-      "Summary/KPI Card: col-span-1",
-      "Primary Data/Chart: col-span-2 row-span-2 or col-span-3",
-      "Feed/List/Table: col-span-full or col-span-4"
-    ],
-    "rules": [
-      "Every pixel must be utilized. Use h-full on children.",
-      "Generous internal padding in containers (p-6).",
-      "Strict alignment: numbers in tables should be right-aligned."
-    ]
-  },
-  "component_strategy": {
-    "surfaces": "Grid Borders ('Technical' Look). Use border-collapse style layouts where possible.",
-    "cards": "Flat solid background, sharp corners (rounded-none or max rounded-sm / 2-4px), 1px solid border (border-gray-200), NO shadows.",
-    "buttons": "Rectangular, sharp edges. Primary uses background #002FA7, text #FFFFFF. Hover state must explicitly set text color.",
-    "inputs": "Shadcn UI customized: sharp borders, distinct focus state (ring-2 ring-primary).",
-    "charts": "Recharts. Use monochrome for general data, strict Green/Red for Income/Expense.",
-    "tables": "Dense, high-contrast borders. Alternating subtle row colors if data is extremely dense."
-  },
-  "motion_and_interaction": {
-    "hover_states": "Crisp and fast. Slight border color darkening or background tint.",
-    "transitions": "transition-colors duration-150 ease-in-out.",
-    "focus": "Focus states must have HIGHER contrast, eg: focus:ring-2 focus:ring-[#002FA7] focus:ring-offset-2."
-  },
-  "icons_and_assets": {
-    "icon_library": "@phosphor-icons/react",
-    "icon_style": "Duotone or Regular depending on emphasis. Dense layouts prefer crisp line icons.",
-    "installation": "yarn add @phosphor-icons/react",
-    "images": [
-      {
-        "category": "logo",
-        "url": "https://images.pexels.com/photos/5477692/pexels-photo-5477692.jpeg",
-        "description": "Minimalist ampersand logo for brand placeholder."
+    "font_family": "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    "font_rules": "Use Inter throughout all components. Headings 600-700, Body 400-500, Menu 500-600, KPI numbers 600-700 with tabular figures.",
+    "hierarchy": {
+      "h1": {
+        "size": "text-2xl sm:text-3xl",
+        "weight": "font-bold (700)",
+        "line_height": "leading-tight",
+        "tracking": "tracking-tight"
       },
-      {
-        "category": "user_avatar",
-        "url": "https://images.pexels.com/photos/36733305/pexels-photo-36733305.jpeg",
-        "description": "Professional business person avatar."
+      "h2": {
+        "size": "text-xl sm:text-2xl",
+        "weight": "font-semibold (600)",
+        "line_height": "leading-snug"
+      },
+      "h3": {
+        "size": "text-lg sm:text-xl",
+        "weight": "font-semibold (600)",
+        "line_height": "leading-snug"
+      },
+      "body": {
+        "size": "text-sm sm:text-base",
+        "weight": "font-normal (400) or font-medium (500)",
+        "line_height": "leading-relaxed"
+      },
+      "menu": {
+        "size": "text-sm",
+        "weight": "font-medium (500) to font-semibold (600)",
+        "tracking": "tracking-normal"
+      },
+      "kpi_value": {
+        "size": "text-2xl sm:text-3xl lg:text-4xl",
+        "weight": "font-bold (700)",
+        "feature": "tabular-nums font-mono"
+      },
+      "overline": {
+        "size": "text-xs",
+        "weight": "font-semibold (600)",
+        "transform": "uppercase",
+        "tracking": "tracking-wider"
       }
-    ],
-    "rules": [
-      "NEVER use placeholder URLs. Use provided image URLs."
+    }
+  },
+  "colors": {
+    "background": {
+      "hex": "#f8f9fa",
+      "hsl": "210 20% 98%",
+      "description": "Clean light neutral global background"
+    },
+    "surface": {
+      "hex": "#ffffff",
+      "hsl": "0 0% 100%",
+      "description": "Card, panel, and table white background"
+    },
+    "border": {
+      "hex": "#e5e7eb",
+      "hsl": "220 13% 91%",
+      "description": "Thin subtle 1px border for all cards, containers, and table cells"
+    },
+    "primary_brand": {
+      "hex": "#002fa7",
+      "hsl": "223 100% 33%",
+      "description": "Professional blue for primary CTAs, active nav item indicators, and key highlights"
+    },
+    "primary_soft": {
+      "hex": "#ebf2ff",
+      "hsl": "218 100% 96%",
+      "description": "Soft blue tint for active sidebar items, selected tab backgrounds, and hover accents"
+    },
+    "primary_hover": {
+      "hex": "#00227d",
+      "hsl": "223 100% 25%"
+    },
+    "income_profit": {
+      "hex": "#00a859",
+      "hsl": "152 100% 33%",
+      "description": "Green for Income, Profit, Success states, positive trends, and active badges"
+    },
+    "income_profit_soft": {
+      "hex": "#e6f7ef",
+      "hsl": "148 60% 94%"
+    },
+    "expense": {
+      "hex": "#ff2a2a",
+      "hsl": "0 100% 58%",
+      "description": "Red for Expense, Danger buttons, Negative trends, overdue states, and error alerts"
+    },
+    "expense_soft": {
+      "hex": "#ffebeb",
+      "hsl": "0 100% 96%"
+    },
+    "investment": {
+      "hex": "#4f46e5",
+      "hsl": "243 75% 59%",
+      "description": "Blue/Indigo for Investment KPIs, partner capital visualizations, and secondary metrics"
+    },
+    "investment_soft": {
+      "hex": "#eef2ff",
+      "hsl": "226 100% 97%"
+    },
+    "warning_pending": {
+      "hex": "#f59e0b",
+      "hsl": "38 92% 50%",
+      "description": "Amber for Pending approvals, Warning alerts, draft statuses, and action items"
+    },
+    "warning_pending_soft": {
+      "hex": "#fffbe3",
+      "hsl": "48 100% 95%"
+    },
+    "text": {
+      "primary": {
+        "hex": "#0a0a0a",
+        "hsl": "221 39% 11%",
+        "description": "Neutral dark gray text for maximum legibility"
+      },
+      "secondary": {
+        "hex": "#4b5563",
+        "hsl": "215 16% 47%",
+        "description": "Muted gray text for labels, descriptions, and metadata"
+      },
+      "tertiary": {
+        "hex": "#9ca3af",
+        "hsl": "218 11% 65%"
+      }
+    }
+  },
+  "border_radius_and_shadows": {
+    "border_radius": {
+      "sm": "rounded-sm (4px)",
+      "md": "rounded-md (6px) - Default for cards, inputs, buttons",
+      "lg": "rounded-lg (8px) - Maximum radius allowed"
+    },
+    "shadows": {
+      "card": "shadow-[0_1px_3px_0_rgba(0,0,0,0.05)] or shadow-sm",
+      "dropdown_modal": "shadow-md shadow-slate-200/50",
+      "rule": "Very subtle shadows only where necessary. Strictly avoid heavy gradients, excessive glow, or high-blur shadows."
+    }
+  },
+  "sidebar_spec": {
+    "width_expanded": "w-64 (256px)",
+    "width_collapsed": "w-16 (64px)",
+    "background": "bg-white border-r border-slate-200",
+    "active_item_style": "bg-[#ebf2ff] text-[#002fa7] font-semibold border-r-2 border-[#002fa7]",
+    "inactive_item_style": "text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium",
+    "group_header": "text-[11px] font-semibold uppercase tracking-wider text-slate-400 px-3 py-2 mt-4",
+    "submenu_indentation": "pl-9 pr-3 py-1.5 text-xs text-slate-600 hover:text-[#002fa7] font-medium",
+    "collapse_behavior": "Smooth accordion expansion for nested modules, keeping clear parent vs child visual hierarchy while preserving all RBAC visibility checks."
+  },
+  "header_spec": {
+    "height": "h-14 sm:h-16 (56px-64px)",
+    "background": "bg-white border-b border-slate-200 sticky top-0 z-40 px-4 sm:px-6 flex items-center justify-between",
+    "components": [
+      "Sidebar collapse toggle button",
+      "Company Switcher dropdown + Company Code Chip (bg-slate-100 text-slate-700 text-xs font-mono font-semibold px-2 py-0.5 rounded border border-slate-200)",
+      "Pending Requests pill badge (bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1.5)",
+      "Global search or Quick Actions",
+      "Notifications icon with unread indicator badge",
+      "Help / Settings triggers",
+      "User Profile Avatar + Dropdown with role badge"
     ]
   },
-  "testing": {
-    "rules": [
-      "All interactive and key informational elements MUST include data-testid attribute.",
-      "Use kebab-case, role-based format. Example: data-testid='login-submit-button', data-testid='kpi-total-profit'."
-    ]
+  "dashboard_and_kpi_spec": {
+    "kpi_cards": {
+      "container": "bg-white rounded-md border border-slate-200 p-4 sm:p-5 shadow-sm hover:border-slate-300 transition-all",
+      "layout": "Flex container with small uppercase label on top, bold mono numeric value in center, icon badge on right, trend/percentage subtext at bottom",
+      "color_code_mapping": {
+        "total_investment": "Icon in blue/indigo soft container, metric text primary",
+        "total_income": "Icon in green soft container, trend text in green (#00a859)",
+        "total_expense": "Icon in red soft container, trend text in red (#ff2a2a)",
+        "net_profit": "Icon in green soft container if positive, red soft container if negative"
+      }
+    },
+    "filter_bar": {
+      "container": "bg-white rounded-md border border-slate-200 p-3 sm:p-4 mb-6 flex flex-wrap items-center gap-3",
+      "elements": ["Company Dropdown", "Partner Dropdown", "Centre Dropdown", "Project Dropdown", "Date Range Picker (From / To)", "Reset Filters Button"]
+    },
+    "charts": {
+      "styling": "Clean Recharts or Shadcn chart wrappers with subtle gridlines (#f1f5f9), custom crisp tooltips, rounded bar edges (radius: [4, 4, 0, 0]), and responsive containers",
+      "charts_required": [
+        "Monthly Trend (Line Chart with Income/Expense dual stroke)",
+        "Distribution (Pie/Donut Chart with semantic color segments)",
+        "Company Income (Bar Chart with clean numeric axis)",
+        "Partner Investment / Income / Expense (Multi-bar or Composed Chart)"
+      ]
+    }
+  },
+  "table_form_button_spec": {
+    "tables": {
+      "container": "bg-white rounded-md border border-slate-200 overflow-hidden shadow-sm",
+      "header": "bg-slate-50 border-b border-slate-200 text-xs font-semibold uppercase tracking-wider text-slate-600 py-3 px-4 text-left sticky top-0",
+      "row": "border-b border-slate-100 hover:bg-slate-50/80 transition-colors text-sm text-slate-800 py-3 px-4",
+      "status_badges": {
+        "approved_active_paid": "bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-semibold px-2.5 py-0.5 rounded-full",
+        "pending_draft_review": "bg-amber-50 text-amber-800 border border-amber-200 text-xs font-semibold px-2.5 py-0.5 rounded-full",
+        "rejected_cancelled_overdue": "bg-rose-50 text-rose-700 border border-rose-200 text-xs font-semibold px-2.5 py-0.5 rounded-full",
+        "neutral_info": "bg-blue-50 text-blue-700 border border-blue-200 text-xs font-semibold px-2.5 py-0.5 rounded-full"
+      }
+    },
+    "forms": {
+      "label": "text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1.5 block",
+      "input": "h-9 sm:h-10 bg-white border border-slate-300 rounded-md px-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#002fa7]/20 focus:border-[#002fa7] transition-all",
+      "required_star": "text-rose-500 font-bold ml-0.5"
+    },
+    "buttons": {
+      "primary": "bg-[#002fa7] hover:bg-[#00227d] text-white font-medium text-sm rounded-md px-4 py-2 shadow-sm transition-all flex items-center justify-center gap-2 active:scale-[0.99]",
+      "secondary": "bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-medium text-sm rounded-md px-4 py-2 shadow-sm transition-all flex items-center justify-center gap-2",
+      "danger": "bg-[#ff2a2a] hover:bg-red-700 text-white font-medium text-sm rounded-md px-4 py-2 shadow-sm transition-all flex items-center justify-center gap-2",
+      "success": "bg-[#00a859] hover:bg-emerald-700 text-white font-medium text-sm rounded-md px-4 py-2 shadow-sm transition-all flex items-center justify-center gap-2"
+    }
+  },
+  "spacing_scale": {
+    "philosophy": "Generous SaaS whitespace with 4px grid alignment. Use p-4 to p-8 on card containers to prevent text collisions.",
+    "container_padding": "p-4 sm:p-6 lg:p-8",
+    "gap_scale": "gap-3, gap-4, gap-6, gap-8"
+  },
+  "data_testid_rules": {
+    "mandatory": true,
+    "pattern": "All interactive elements, buttons, form inputs, status badges, KPI cards, sidebar items, and action items must retain or include data-testid attributes in kebab-case format."
   },
   "instructions_to_main_agent": [
-    "Implement bilingual toggle (English/Hindi) in the header using i18n or state context.",
-    "Dashboard needs KPIs for Investment, Profit, Loss, Expenses, Income.",
-    "Use Recharts for line, bar, pie charts. Ensure tooltips are functional and styled with high contrast.",
-    "Role-based access (Admin, Manager, Viewer) should reflect in UI (disable/hide actions for Viewers).",
-    "Implement CSV/Excel export/import capabilities as requested.",
-    "Use .js files. Do not use TypeScript.",
-    "Ensure data tables are dense, scalable, and responsive (horizontal scroll on mobile)."
+    "Apply Inter font globally by ensuring index.css sets font-family: 'Inter', sans-serif on body and all headings.",
+    "Ensure CSS root variables reflect the exact Hex & HSL values for --brand (#002fa7), --success (#00a859), --danger (#ff2a2a), --warning (#f59e0b), --info (#4f46e5).",
+    "Keep all existing RBAC logic, permissions, state management, backend API paths, and calculations untouched.",
+    "Enhance the Sidebar component with clear module grouping, smooth collapsible submenus, soft blue active item highlights, and proper icon alignments.",
+    "Enhance Header component with company switcher dropdown, company code pill, pending approvals count, notification triggers, and user profile.",
+    "Redesign Dashboard KPI cards and filters into clean, modern SaaS components with crisp typography and subtle borders.",
+    "Ensure tables have sticky headers, compact comfortable row padding, responsive overflow wrappers, and status badges.",
+    "Use Sonner for all toast feedback messages."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Avoid generic AI slop: maintain clear, crisp contrast with high legibility.",
+    "Never center-align the main app layout or dense tables.",
+    "Do NOT use AI emojis (🤖, 💡, 🔮) as visual icons — use Lucide React icons exclusively.",
+    "Every button and input must have clear hover, focus, and active micro-states.",
+    "Maintain all existing test IDs for reliable automated test suites."
   ]
 }

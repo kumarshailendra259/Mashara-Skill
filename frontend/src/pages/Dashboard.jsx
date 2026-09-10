@@ -20,6 +20,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleWidgets from "@/components/RoleWidgets";
 import UpcomingWidget from "@/components/UpcomingWidget";
 import TodayLiveWidget from "@/components/TodayLiveWidget";
+import { Wallet, TrendingUp, TrendingDown, LineChart as LineChartIcon } from "lucide-react";
 
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
 const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
@@ -109,7 +110,7 @@ export default function Dashboard() {
           <div key={etype} className="space-y-1">
             <Label className="overline">{t(etype)}</Label>
             <Select value={filters[`${etype}_id`] || "__all"} onValueChange={(v) => setF(`${etype}_id`, v === "__all" ? "" : v)}>
-              <SelectTrigger className="rounded-none" data-testid={`filter-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
+              <SelectTrigger className="rounded-md" data-testid={`filter-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all">{t("all")}</SelectItem>
                 {entities[etype].map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
@@ -119,20 +120,20 @@ export default function Dashboard() {
         ))}
         <div className="space-y-1">
           <Label className="overline">From</Label>
-          <Input type="date" value={filters.start} onChange={(e) => setF("start", e.target.value)} className="rounded-none" data-testid="filter-start" />
+          <Input type="date" value={filters.start} onChange={(e) => setF("start", e.target.value)} className="rounded-md" data-testid="filter-start" />
         </div>
         <div className="space-y-1">
           <Label className="overline">To</Label>
-          <Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-none" data-testid="filter-end" />
+          <Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-md" data-testid="filter-end" />
         </div>
       </div>
 
       {/* KPIs */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard label={t("total_investment")} value={totals.investment} testId="kpi-investment" />
-        <KpiCard label={t("total_income")} value={totals.income} accent="positive" testId="kpi-income" />
-        <KpiCard label={t("total_expense")} value={totals.expense} accent="negative" testId="kpi-expense" />
-        <KpiCard label={t("net_profit")} value={totals.profit} accent={totals.profit >= 0 ? "positive" : "negative"} testId="kpi-profit" />
+        <KpiCard label={t("total_investment")} value={totals.investment} tone="investment" icon={Wallet} testId="kpi-investment" />
+        <KpiCard label={t("total_income")} value={totals.income} accent="positive" icon={TrendingUp} testId="kpi-income" />
+        <KpiCard label={t("total_expense")} value={totals.expense} accent="negative" icon={TrendingDown} testId="kpi-expense" />
+        <KpiCard label={t("net_profit")} value={totals.profit} accent={totals.profit >= 0 ? "positive" : "negative"} icon={LineChartIcon} testId="kpi-profit" />
       </div>
 
       {/* Charts row */}
@@ -147,7 +148,7 @@ export default function Dashboard() {
                 <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
                 <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                 <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
-                <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", boxShadow: "0 4px 12px rgba(15,23,42,0.08)" }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
                 <Line type="monotone" dataKey="investment" stroke="#002FA7" strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="income" stroke="#00A859" strokeWidth={2} dot={false} />
@@ -164,7 +165,7 @@ export default function Dashboard() {
                 <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={90} stroke="#fff">
                   {pieData.map((entry) => <Cell key={entry.name} fill={entry.color} />)}
                 </Pie>
-                <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", boxShadow: "0 4px 12px rgba(15,23,42,0.08)" }} />
                 <Legend wrapperStyle={{ fontSize: 12 }} />
               </PieChart>
             </ResponsiveContainer>
@@ -333,7 +334,7 @@ export default function Dashboard() {
                     <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
                     <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                     <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
-                    <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                    <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", boxShadow: "0 4px 12px rgba(15,23,42,0.08)" }} />
                     <Bar dataKey="amount" fill="#0a3bc5" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -468,7 +469,7 @@ function CompanyPartnerCharts({ entities, baseFilters }) {
                   <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
                   <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                   <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                  <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", boxShadow: "0 4px 12px rgba(15,23,42,0.08)" }} />
                   <Bar dataKey="income" fill="#00A859" />
                 </BarChart>
               </ResponsiveContainer>
@@ -505,7 +506,7 @@ function CompanyPartnerCharts({ entities, baseFilters }) {
                   <CartesianGrid stroke="#e5e7eb" strokeDasharray="2 4" />
                   <XAxis dataKey="month" tick={{ fontSize: 11 }} />
                   <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `₹${(v/1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 0, border: "1px solid #0a0a0a" }} />
+                  <Tooltip formatter={(v) => inr(v)} contentStyle={{ borderRadius: 8, border: "1px solid #e5e7eb", boxShadow: "0 4px 12px rgba(15,23,42,0.08)" }} />
                   <Legend wrapperStyle={{ fontSize: 12 }} />
                   <Line type="monotone" dataKey="investment" stroke="#002FA7" strokeWidth={2} dot={false} />
                   <Line type="monotone" dataKey="income" stroke="#00A859" strokeWidth={2} dot={false} />

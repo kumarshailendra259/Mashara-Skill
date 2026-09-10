@@ -27,6 +27,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Partner** — investor with cross-partner txn approval rights
 
 
+### Phase 80 — Global Premium SaaS/HRMS UI Redesign (Done, Jun 2026)
+- **User asked**: App-wide modern premium Finance+HRMS SaaS redesign (SalaryBox-clean + Mashara analytics). UI/UX ONLY — no logic/API/DB/RBAC/calculation changes. Inter font; professional blue primary; green income/profit, red expense, indigo investment, amber pending; thin borders; 4-8px radius; subtle shadows; spacious; soft-blue active sidebar; enterprise header; modern KPI cards/tables/forms/buttons; responsive.
+- **Approach (low-risk, high-cascade)**: The whole app is styled via global CSS tokens + shared classes (`swiss-card`, `overline`, `num`, `value-*`) + shadcn tokens + shared `Layout`/`KpiCard`. Updating those cascades the new look across every module without touching page logic. Design blueprint captured in `/app/design_guidelines.json` (design_agent).
+- **Changes**:
+  - `public/index.html` — load Inter 400/500/600/700 + JetBrains Mono.
+  - `src/index.css` — Inter global (dropped Chivo/IBM Plex); tokens: `--warning` #f59e0b (amber), added `--investment` #4f46e5 + `--brand-soft` #ebf2ff + soft tints; `--radius` 0.375rem; shadcn `--primary`/`--accent`/`--ring` refreshed; `.swiss-card` 8px radius + subtle shadow + hover; `.overline` 600; `.badge-*` status helpers; custom thin scrollbar. Print styles preserved.
+  - `components/KpiCard.jsx` — backward-compatible optional `icon` (lucide) in a soft-colored badge + `tone` + `sub`.
+  - `pages/Dashboard.jsx` — KPI cards now carry icons (Wallet/TrendingUp/TrendingDown/LineChart), filter Selects/Inputs softened to rounded-md, chart tooltips restyled (8px radius, subtle shadow).
+  - `components/Layout.jsx` — sidebar group + submenu ACTIVE state → soft-blue (`bg brand-soft` + blue text, rounded, no left-border), brand-blue app logo; NEW header **Pending Requests amber pill** (`data-testid=pending-requests-pill` → /pending-approvals); header buttons softened to rounded-md. All RBAC/collapse/mobile logic untouched.
+- **Verified**: testing agent iteration_67 (frontend regression, 100%): admin dashboard (4 KPI cards + icons, filters, charts), sidebar nav across /transactions /hrms /reports /subscription /partner-settlement /users /center-management (all non-blank), header controls (pending pill/notif/lang/user/logout), transactions table + New Transaction dialog, partner RBAC intact (no admin routes, /companies-admin 403), mobile 390px bottom-nav + drawer + stacked KPIs. Only pre-existing minor console warnings (Reports key prop, mobile drawer a11y) — not redesign regressions.
+
+
 ### Phase 79 — Partner Settlement Interactive Dashboard + Sidebar Relocation (Done, Jun 2026)
 - **User asked (navigation)**: Remove Partner Settlement from the Dashboard; add sidebar group Partnership → Partner Settlement opening the SAME settlement system (no logic/API/calculation change).
 - **User asked (redesign)**: Turn the long Partner Settlement list into an interactive dashboard — KPI Summary → Filters → Charts → Center Overview (expandable cards) → Partner-wise → per-center Detail → Settled History. Keep 100% of existing settlement logic/actions. Partner role must see the menu (center/company-scoped data only), no admin surfaces.

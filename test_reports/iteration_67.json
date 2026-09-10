@@ -1,0 +1,29 @@
+{
+  "summary": "Frontend-only regression testing after global UI/UX redesign (Inter font, color tokens, softened radii, header pending pill, sidebar soft-blue active). Admin and Partner flows both verified. Dashboard KPI cards, filters, charts, sidebar navigation, header controls, transaction table + New Transaction dialog, partner settlement dashboard, RBAC scoping, and mobile responsive layout all work. No blank pages, no crashes, no RBAC leaks.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Reports", "issues": ["React console warning: 'Each child in a list should have a unique key prop' in Reports render — cosmetic, not a redesign regression"]},
+      {"screen": "Mobile drawer", "issues": ["Radix DialogContent missing DialogTitle a11y warning — pre-existing, unrelated to this redesign"]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(Optional) Add unique `key` prop to list mapping in Reports page to silence React console warning.",
+    "(Optional) Add VisuallyHidden DialogTitle to the mobile drawer/hamburger DialogContent for a11y."
+  ],
+  "critical_code_review_comments": [
+    "Redesign is backward compatible: KpiCard optional icon/tone/sub works without breaking existing callers.",
+    "pending-requests-pill data-testid present and correctly links to /pending-approvals.",
+    "Sidebar/router RBAC unchanged — partner user does not see admin routes and /companies-admin returns 403."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100% of tested flows passing"},
+  "test_credentials": "Super Admin admin@finance.app / Admin@123; Partner kumarshailendra259@gmail.com / Test@1234",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Redesign is stable end-to-end. Admin lands on / with 4 KPIs (kpi-investment/income/expense/profit) all rendering ₹ values and lucide icon badges. dashboard-filters and all filter-* selects/inputs present and functional. Routes tested OK: /transactions (table + New Transaction dialog opens), /hrms, /reports, /subscription, /partner-settlement, /users, /center-management (all render, non-blank). Header controls: pending-requests-pill (99+), notif-bell, lang-toggle, user-menu all present. Partner (kumarshailendra259) after /select-company can pick company (2 companies shown — 3YJIII4A Partner, 4GV4LG Manager); partner-settlement page renders settlement-dashboard testid with KPIs + charts + center cards; sidebar hides admin items; /companies-admin returns 403. Mobile 390px shows bottom nav (Dashboard/Check-in/Pending/HRMS/Menu) + hamburger drawer; KPI cards stack vertically. Minor console noise: React key warning in Reports (pre-existing), Radix DialogTitle a11y warning in mobile drawer, and a recharts width(-1)/height(-1) warning briefly during initial dashboard mount (self-resolves)."
+}

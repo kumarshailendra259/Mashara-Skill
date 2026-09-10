@@ -157,7 +157,7 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
     <>
       <div className="px-5 py-5 border-b border-[var(--border)]">
         <div className="text-xs overline">Console</div>
-        <div className="font-heading text-xl font-black tracking-tight mt-1">{t("app_name")}</div>
+        <div className="font-heading text-xl font-bold tracking-tight mt-1 text-[var(--brand)]">{t("app_name")}</div>
         <div className="mt-2 pt-2 border-t border-[var(--border)] text-[10px] leading-tight text-[var(--muted)]" data-testid="company-banner">
           Welcome to<br />
           <span className="font-bold text-[var(--ink)]" data-testid="company-banner-name">
@@ -179,14 +179,14 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                 type="button"
                 onClick={() => toggleGroup(grp.key)}
                 data-testid={`navgrp-toggle-${grp.key}`}
-                className={`w-full flex items-center gap-3 px-5 py-2.5 text-sm text-left transition-colors border-l-2 ${
+                className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm text-left transition-colors rounded-md mx-2 ${
                   hasActiveChild
-                    ? "border-[var(--brand)] bg-[#f8f9fd] text-[var(--ink)] font-semibold"
-                    : "border-transparent text-[var(--ink)] hover:bg-gray-50 font-semibold"
+                    ? "bg-[var(--brand-soft)] text-[var(--brand)] font-semibold"
+                    : "text-[var(--ink)] hover:bg-slate-50 font-semibold"
                 }`}
               >
-                <GIcon size={16} strokeWidth={1.8} className={hasActiveChild ? "text-[var(--brand)]" : "text-[var(--muted)]"} />
-                <span className="flex-1 tracking-tight uppercase text-[11px]">{t(grp.key)}</span>
+                <GIcon size={17} strokeWidth={1.9} className={hasActiveChild ? "text-[var(--brand)]" : "text-[var(--muted)]"} />
+                <span className="flex-1 tracking-wide uppercase text-[11px]">{t(grp.key)}</span>
                 {groupBadge > 0 && !isOpen && (
                   <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`navgrp-badge-${grp.key}`}>
                     {groupBadge}
@@ -210,17 +210,17 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                         onClick={onNavigate}
                         data-testid={`nav-${it.key}`}
                         className={({ isActive }) =>
-                          `flex items-center gap-3 pl-10 pr-5 py-2 text-[13px] border-l-2 transition-colors ${
+                          `flex items-center gap-3 pl-9 pr-4 py-2 text-[13px] rounded-md mx-2 transition-colors ${
                             isActive
-                              ? "border-[var(--brand)] bg-[#f3f5fb] text-[var(--brand)] font-medium"
+                              ? "bg-[var(--brand-soft)] text-[var(--brand)] font-semibold"
                               : isLocked
-                                ? "border-transparent text-slate-400 hover:text-slate-500 hover:bg-gray-50"
-                                : "border-transparent text-[var(--muted)] hover:text-[var(--text)] hover:bg-gray-50"
+                                ? "text-slate-400 hover:text-slate-500 hover:bg-slate-50 font-medium"
+                                : "text-[var(--muted)] hover:text-[var(--text)] hover:bg-slate-50 font-medium"
                           }`
                         }
                         title={isLocked ? "Module locked — Subscribe to unlock" : undefined}
                       >
-                        <Icon size={14} strokeWidth={1.6} />
+                        <Icon size={15} strokeWidth={1.7} />
                         <span className="flex-1">{t(it.key)}</span>
                         {isLocked && (
                           <Lock size={11} className="text-amber-500" data-testid={`nav-lock-${it.key}`} aria-label="module locked" />
@@ -480,10 +480,23 @@ export default function Layout({ children }) {
           <div className="flex items-center gap-1.5 md:gap-2">
             {/* Multi-company switcher (only for 2+ company users) */}
             <CompanySwitcher />
+            {/* Pending Requests pill — quick access to approvals queue */}
+            {totalApprovalBadge > 0 && (
+              <button
+                type="button"
+                onClick={() => nav("/pending-approvals")}
+                data-testid="pending-requests-pill"
+                title="Pending requests"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors"
+              >
+                <Inbox size={13} />
+                <span>{totalApprovalBadge > 99 ? "99+" : totalApprovalBadge} Pending</span>
+              </button>
+            )}
             {/* Notifications */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="rounded-none relative h-9 px-2" data-testid="notif-bell">
+                <Button variant="outline" size="sm" className="rounded-md relative h-9 px-2" data-testid="notif-bell">
                   <Bell size={16} />
                   {notifs.unread > 0 && (
                     <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[16px] h-[16px] text-[10px] font-bold bg-[var(--danger)] text-white px-1" data-testid="notif-badge">
@@ -529,7 +542,7 @@ export default function Layout({ children }) {
             {/* Language — hidden on very small screens to save room */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" data-testid="lang-toggle" className="rounded-none gap-1 md:gap-2 hidden xs:inline-flex sm:inline-flex">
+                <Button variant="outline" size="sm" data-testid="lang-toggle" className="rounded-md gap-1 md:gap-2 hidden xs:inline-flex sm:inline-flex">
                   <Languages size={14} /> {lang.toUpperCase()}
                 </Button>
               </DropdownMenuTrigger>
@@ -542,7 +555,7 @@ export default function Layout({ children }) {
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="rounded-none max-w-[120px] md:max-w-none truncate" data-testid="user-menu">
+                <Button variant="outline" size="sm" className="rounded-md max-w-[120px] md:max-w-none truncate" data-testid="user-menu">
                   <span className="truncate">{user?.name || user?.email}</span>
                 </Button>
               </DropdownMenuTrigger>
