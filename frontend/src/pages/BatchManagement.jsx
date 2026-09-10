@@ -178,6 +178,7 @@ export default function BatchManagement() {
   }, []);
   useEffect(() => { loadWOList(); }, [loadWOList]);
 
+
   const fetchWOList = async (params) => {
     setWoView({ open: true, list: [], loading: true });
     try {
@@ -263,6 +264,24 @@ export default function BatchManagement() {
   const [bEdit, setBEdit] = useState(null);
   const [bSaving, setBSaving] = useState(false);
   const [selectedTargetForBatch, setSelectedTargetForBatch] = useState(null);
+
+  // Auto-select the Work Order when exactly ONE active WO matches the batch's
+  // project + centre (+ FY if set) and the user hasn't already picked one.
+  useEffect(() => {
+    if (!bOpen || !bEdit || bEdit.work_order_id || !bEdit.project_id || !bEdit.center_id) return;
+    const matches = woList.filter((w) =>
+      w.effective_status === "active" &&
+      w.project_id === bEdit.project_id &&
+      w.center_id === bEdit.center_id &&
+      (!bEdit.fy_year || w.fy === bEdit.fy_year));
+    if (matches.length === 1) {
+      const only = matches[0];
+      setBEdit((prev) => (prev && !prev.work_order_id ? { ...prev, work_order_id: only.id } : prev));
+      toast.success(`Work Order ${only.wo_number} auto-linked`);
+    }
+    // eslint-disable-next-line
+  }, [bOpen, bEdit?.project_id, bEdit?.center_id, bEdit?.fy_year, bEdit?.work_order_id, woList]);
+
   // Phase 38 · Job Role master + live WO calculation
   const [jobRoles, setJobRoles] = useState([]);
   const [rateInfo, setRateInfo] = useState(null); // {base_rate, final_rate, is_lwe, ...}
