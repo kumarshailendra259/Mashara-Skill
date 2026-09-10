@@ -1,0 +1,37 @@
+{
+  "summary": "Phase 81 Work Order end-to-end backend + frontend testing completed successfully. Backend pytest suite (16 tests) covers CRUD, auto-compute correctness (₹6,87,150 / ₹20,614.50 PBG@3%), value override, expired/cancelled effective status, status filter surfacing inactive WOs, financials dashboard aggregation + grand total consistency, batch-targets Phase 81 enrichment (work_order_value + center_wo_value), and RBAC (partner is 403 on both /api/work-orders and /api/batch-management/financials, admin-only delete). Frontend smoke on /batch-management confirmed dashboard cards wo-card-total-value/pbg/allocated/avg render dynamic ₹ values (₹6,87,150 / ₹20,615 / ₹2,479 / ₹6,87,150), Work Order Financial Summary table + wo-summary-grand row present, filters (wo-filter-search/project/center/fy/status/clear) render, + Work Order (wo-add-btn) opens wo-form-modal, view (wo-summary-view-0) opens wo-detail with wo-print-btn / wo-edit-btn / wo-delete-btn, Target Allocation Stage 1 now has Work Order Value column (bm-tgt-wo-value-*) and eye view action (bm-tgt-view-wo-*) — showing '—' when project/centre/FY doesn't match any WO (correct). Existing Batch Management KPI strip (Targets/Total Target/Allocated/Remaining/Utilization/Total Batches/Active Batches = 1/300/0/300/0%/353/206) all still render.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Work Order form modal", "issues": ["Radix DialogContent 'Missing Description or aria-describedby' console warning — pre-existing across the app; a11y-only, does not affect functionality"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase81_work_orders.py",
+    "/app/test_reports/pytest/phase81_wo.xml"
+  ],
+  "action_items": [
+    "(Optional) Add a DialogDescription (or VisuallyHidden) to WorkOrderFormModal and WorkOrderViewModal DialogContent to silence the Radix a11y console warning."
+  ],
+  "critical_code_review_comments": [
+    "_compute_work_order is backend-authoritative — client-sent derived totals are ignored. Good design (single source of truth).",
+    "Override logic: value_override coerces '', 0, '0', None to None (falls back to computed). Numeric override > 0 overrides; PBG recomputes on override. Verified via test_value_override_takes_precedence.",
+    "_wo_effective_status correctly derives expired from expiry_date < today.isoformat() and cancelled from status field. Verified.",
+    "GET /api/batch-management/financials only counts effective_status=='active' in cards/summary (no double-count of expired/cancelled). Grand total equals sum(row.total_wo_value) — consistency verified.",
+    "GET /api/work-orders and /api/work-orders/{id} enforce center_manager scoping via _wo_center_filter and per-doc assigned_center_ids check (403 on foreign centre) — code path present.",
+    "DELETE gated to admin-only via require_role('admin'). Correct.",
+    "list_batch_targets enriches every row with work_order_value + center_wo_value from db.work_orders (Σ active WOs matching project+centre+fy and per-centre). Verified in test.",
+    "Minor: server.py at 22,891 lines exceeds 700-line guideline — long-standing, out of scope for this phase."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase81_work_orders.py (new)"
+  ],
+  "success_rate": {"backend": "100% (16/16 pytest)", "frontend": "100% of tested selectors + flows"},
+  "test_credentials": "Super Admin admin@finance.app / Admin@123; Partner kumarshailendra259@gmail.com / Test@1234 (used to verify 403 on WO endpoints)",
+  "seed_data_creation": "Test creates then cleans up its own WOs (WO-TEST-<uuid>, WO-EXPIRED-<uuid>, WO-CANC-<uuid>). Pre-existing seeded 'WO-TEST-001' (ProjectX_8f686b / TEST_Center_Phase72 / 2026-27 / ₹6,87,150) is left intact and is what the UI screenshots reflect.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend regression file: /app/backend/tests/test_phase81_work_orders.py (16 tests, all pass in ~3s). Existing seed WO 'WO-TEST-001' on ProjectX_8f686b/TEST_Center_Phase72/2026-27 = ₹6,87,150 with PBG ₹20,614.50. Batch-target JSDMS/Birsa Bharno/2026-27 exists but does NOT overlap the WO, so its bm-tgt-wo-value cell correctly renders '—'. To exercise the Target Allocation WO linkage in UI, create a target for ProjectX_8f686b + TEST_Center_Phase72 + 2026-27 — the wo-value cell will then show ₹6,87,150 and the bm-tgt-view-wo action will open the WO detail modal. To test multi-WO 'wo-view-list' UI, create a second active WO for the same TEST_Center_Phase72. Partner endpoint checks confirm read RBAC. center_manager scoping code path is present but was not exercised end-to-end (no dedicated center_manager test account was easily identifiable in memory/test_credentials.md that also has assigned_center_ids overlapping TEST_Center_Phase72)."
+}

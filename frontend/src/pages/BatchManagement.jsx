@@ -15,8 +15,12 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Target, Layers, Users, ClipboardList, GraduationCap, BadgeCheck,
   Plus, Trash2, Edit3, Search, Info, LockKeyhole, Upload, Download,
-  CheckCircle2, AlertTriangle,
+  CheckCircle2, AlertTriangle, Eye,
 } from "lucide-react";
+import { inr } from "@/lib/i18n";
+import WorkOrderFinancials from "@/components/batch/WorkOrderFinancials";
+import WorkOrderFormModal from "@/components/batch/WorkOrderFormModal";
+import WorkOrderViewModal from "@/components/batch/WorkOrderViewModal";
 import EnrollmentStage from "@/pages/bm/EnrollmentStage";
 import AttendanceStage from "@/pages/bm/AttendanceStage";
 import AssessmentStage from "@/pages/bm/AssessmentStage";
@@ -130,6 +134,59 @@ export default function BatchManagement() {
     finally { setTLoading(false); }
   }, [tProjF, tYearF]);
   useEffect(() => { loadTargets(); }, [loadTargets]);
+
+  // ---- Phase 81 · Work Orders (source of truth for Work Order Value / PBG) ----
+  const canManageWO = ["admin", "manager", "senior_manager"].includes(user?.role);
+  const [woFin, setWoFin] = useState({ cards: {}, summary_rows: [], grand_total: {} });
+  const [woFinLoading, setWoFinLoading] = useState(false);
+  const [woFilters, setWoFilters] = useState({ q: "", project_id: "all", center_id: "all", fy: "all", status: "all" });
+  const setWoFilter = (k, v) => setWoFilters((s) => ({ ...s, [k]: v }));
+  const clearWoFilters = () => setWoFilters({ q: "", project_id: "all", center_id: "all", fy: "all", status: "all" });
+
+  const loadFinancials = useCallback(async () => {
+    setWoFinLoading(true);
+    try {
+      const params = {};
+      if (woFilters.q.trim()) params.q = woFilters.q.trim();
+      if (woFilters.project_id !== "all") params.project_id = woFilters.project_id;
+      if (woFilters.center_id !== "all") params.center_id = woFilters.center_id;
+      if (woFilters.fy !== "all") params.fy = woFilters.fy;
+      if (woFilters.status !== "all") params.status = woFilters.status;
+      const r = await api.get("/batch-management/financials", { params });
+      setWoFin(r.data || { cards: {}, summary_rows: [], grand_total: {} });
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setWoFinLoading(false); }
+  }, [woFilters]);
+  useEffect(() => { loadFinancials(); }, [loadFinancials]);
+
+  // WO modals
+  const [woFormOpen, setWoFormOpen] = useState(false);
+  const [woFormInitial, setWoFormInitial] = useState(null);
+  const [woFormPrefill, setWoFormPrefill] = useState(null);
+  const [woView, setWoView] = useState({ open: false, list: [], loading: false });
+
+  const openAddWO = (prefill = null) => { setWoFormInitial(null); setWoFormPrefill(prefill); setWoFormOpen(true); };
+  const openEditWO = (wo) => { setWoView({ open: false, list: [], loading: false }); setWoFormInitial(wo); setWoFormPrefill(null); setWoFormOpen(true); };
+  const onWOSaved = () => { loadFinancials(); loadTargets(); };
+
+  const fetchWOList = async (params) => {
+    setWoView({ open: true, list: [], loading: true });
+    try {
+      const r = await api.get("/work-orders", { params });
+      setWoView({ open: true, list: r.data || [], loading: false });
+    } catch (e) { toast.error(formatError(e)); setWoView({ open: true, list: [], loading: false }); }
+  };
+  const openViewForTarget = (t) => fetchWOList({ project_id: t.project_id, center_id: t.center_id, fy: (t.fy || t.target_year || "").trim() });
+  const openViewForRow = (r) => fetchWOList({ project_id: r.project_id, center_id: r.center_id, fy: r.fy });
+  const deleteWO = async (wo) => {
+    if (!window.confirm(`Delete Work Order ${wo.wo_number}? This cannot be undone.`)) return;
+    try {
+      await api.delete(`/work-orders/${wo.id}`);
+      toast.success("Work Order deleted");
+      setWoView({ open: false, list: [], loading: false });
+      loadFinancials(); loadTargets();
+    } catch (e) { toast.error(formatError(e)); }
+  };
 
   const filteredTargets = useMemo(() => {
     const s = tSearch.trim().toLowerCase();
@@ -423,6 +480,22 @@ export default function BatchManagement() {
         ))}
       </div>
 
+      {/* ===== Phase 81 · Work Order Financials (dashboard cards + summary) ===== */}
+      <WorkOrderFinancials
+        cards={woFin.cards}
+        summaryRows={woFin.summary_rows}
+        grandTotal={woFin.grand_total}
+        filters={woFilters}
+        setFilter={setWoFilter}
+        clearFilters={clearWoFilters}
+        projects={entProjects}
+        centers={entCenters}
+        loading={woFinLoading}
+        onAddWO={openAddWO}
+        onViewRow={openViewForRow}
+        canManage={canManageWO}
+      />
+
       {/* Tabs */}
       <Tabs value={tab} onValueChange={setTab} className="w-full">
         <TabsList className="rounded-none grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-1 h-auto p-1 bg-gray-100">
@@ -466,6 +539,11 @@ export default function BatchManagement() {
               </Select>
             </div>
             <div className="flex gap-2 ml-auto">
+              {canManageWO && (
+                <Button variant="outline" onClick={() => openAddWO(tProjF !== "all" ? { project_id: tProjF } : null)} className="rounded-md gap-1" data-testid="bm-tgt-add-wo-btn">
+                  <Plus size={13} /> Work Order
+                </Button>
+              )}
               {canManageTargets && (
                 <Button onClick={openNewTarget} className="brand-btn rounded-none gap-1" data-testid="bm-tgt-add-btn">
                   <Plus size={13} /> Allocate Target
@@ -482,13 +560,14 @@ export default function BatchManagement() {
                   <th>Training</th>
                   <th className="text-right">Total</th><th className="text-right">Allocated</th>
                   <th className="text-right">Remaining</th><th className="w-40">Utilization</th>
+                  <th className="text-right">Work Order Value</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {tLoading && <tr><td colSpan={10} className="p-4 text-center text-[var(--muted)]">Loading…</td></tr>}
+                {tLoading && <tr><td colSpan={11} className="p-4 text-center text-[var(--muted)]">Loading…</td></tr>}
                 {!tLoading && filteredTargets.length === 0 && (
-                  <tr><td colSpan={10} className="p-8 text-center text-[var(--muted)]">
+                  <tr><td colSpan={11} className="p-8 text-center text-[var(--muted)]">
                     No targets allocated yet. Click <b>Allocate Target</b> to start Stage 1.
                   </td></tr>
                 )}
@@ -510,7 +589,14 @@ export default function BatchManagement() {
                           <span className="text-[10px] font-bold w-8 text-right">{util}%</span>
                         </div>
                       </td>
+                      <td className="text-right num font-semibold text-[var(--brand)]" data-testid={`bm-tgt-wo-value-${t.id}`}>
+                        {t.work_order_value ? inr(t.work_order_value) : <span className="text-[var(--muted)]">—</span>}
+                        {t.center_wo_value > (t.work_order_value || 0) && (
+                          <div className="text-[9px] text-[var(--muted)] font-normal">Centre: {inr(t.center_wo_value)}</div>
+                        )}
+                      </td>
                       <td className="whitespace-nowrap">
+                        <Button size="icon" variant="ghost" onClick={() => openViewForTarget(t)} className="h-7 w-7" title="View Work Order" data-testid={`bm-tgt-view-wo-${t.id}`}><Eye size={13} /></Button>
                         {(t.remaining || 0) > 0 && canManageBatches && (
                           <Button size="sm" onClick={() => openNewBatch(t)} className="brand-btn rounded-none h-7 text-[10px] gap-1" data-testid={`bm-tgt-create-batch-${t.id}`}>
                             <Plus size={11} /> Batch
@@ -1065,6 +1151,28 @@ export default function BatchManagement() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ===== Phase 81 · Work Order modals ===== */}
+      <WorkOrderFormModal
+        open={woFormOpen}
+        initial={woFormInitial}
+        prefill={woFormPrefill}
+        onClose={() => setWoFormOpen(false)}
+        onSaved={onWOSaved}
+        projects={entProjects}
+        centers={entCenters}
+        companies={entCompanies}
+      />
+      <WorkOrderViewModal
+        open={woView.open}
+        list={woView.list}
+        loading={woView.loading}
+        onClose={() => setWoView({ open: false, list: [], loading: false })}
+        onEdit={openEditWO}
+        onDelete={deleteWO}
+        canManage={canManageWO}
+        canDelete={user?.role === "admin"}
+      />
     </div>
   );
 }

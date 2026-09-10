@@ -12452,6 +12452,9 @@ class BatchTargetOut(BatchTargetIn):
     project_name: Optional[str] = None
     center_name: Optional[str] = None
     company_name: Optional[str] = None
+    # Phase 81 — Work Order value read from the linked Work Order master (source of truth)
+    work_order_value: float = 0     # Σ active WOs matching project+centre+FY
+    center_wo_value: float = 0      # Σ active WOs for this centre (all projects/FY)
 
 
 TARGET_ADMIN_ROLES = ("admin", "manager", "senior_manager")
@@ -12522,7 +12525,28 @@ async def list_batch_targets(
         else:
             q["center_id"] = {"$in": assigned}
     docs = await db.batch_targets.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    return [BatchTargetOut(**await _enrich_target(d)) for d in docs]
+    # Phase 81 — attach Work Order values (source of truth = db.work_orders).
+    # Load active WOs once for the visible centres, then map by (proj,ctr,fy) & centre.
+    center_ids = list({d.get("center_id") for d in docs if d.get("center_id")})
+    wo_pcf: dict = {}   # (project_id, center_id, fy) -> Σ value
+    wo_center: dict = {}  # center_id -> Σ value
+    if center_ids:
+        async for w in db.work_orders.find({"center_id": {"$in": center_ids}}, {"_id": 0}):
+            if _wo_effective_status(w) != "active":
+                continue
+            val = float(w.get("work_order_value") or 0)
+            cid = w.get("center_id")
+            wfy = (w.get("fy") or "").strip()
+            wo_pcf[(w.get("project_id"), cid, wfy)] = round(wo_pcf.get((w.get("project_id"), cid, wfy), 0) + val, 2)
+            wo_center[cid] = round(wo_center.get(cid, 0) + val, 2)
+    results = []
+    for d in docs:
+        enriched = await _enrich_target(d)
+        tfy = (d.get("fy") or d.get("target_year") or "").strip()
+        enriched["work_order_value"] = wo_pcf.get((d.get("project_id"), d.get("center_id"), tfy), 0)
+        enriched["center_wo_value"] = wo_center.get(d.get("center_id"), 0)
+        results.append(BatchTargetOut(**enriched))
+    return results
 
 
 @api.get("/batch-targets/{tid}", response_model=BatchTargetOut)
@@ -12566,6 +12590,371 @@ async def delete_batch_target(tid: str, _=Depends(require_role("admin"))):
 async def batches_under_target(tid: str, _=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
     docs = await db.batches.find({"target_id": tid}, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return [BatchOut(**d) for d in docs]
+
+
+# ============================================================================
+# ==========  BATCH MANAGEMENT · Work Order Master (Phase 81) ================
+# ============================================================================
+# The Work Order is the SINGLE SOURCE OF TRUTH for Work Order Value / PBG.
+# Linked to Project + Centre + Financial Year. Course line items drive the
+# auto-computed value (override allowed). Target Allocation & the BM dashboard
+# READ from here — no financial value is duplicated into targets/batches.
+
+WO_READ_ROLES = (*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager")
+
+
+class WorkOrderCourseIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    sector: Optional[str] = ""
+    sub_sector: Optional[str] = ""
+    course: Optional[str] = ""
+    qp_code: Optional[str] = ""
+    category: Optional[str] = ""
+    nsqf_level: Optional[str] = ""
+    course_hours: float = Field(default=0, ge=0)
+    cost_per_hour: float = Field(default=0, ge=0)
+    boarding_per_day: float = Field(default=0, ge=0)
+    boarding_days: float = Field(default=0, ge=0)
+    beneficiaries: int = Field(default=0, ge=0)
+
+
+class WorkOrderIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    company_id: Optional[str] = None
+    project_id: str
+    center_id: str
+    fy: str = Field(min_length=4)                       # e.g. "2026-27"
+    wo_number: str = Field(min_length=1)
+    loi_number: Optional[str] = ""
+    issue_date: Optional[str] = ""                      # YYYY-MM-DD
+    expiry_date: Optional[str] = ""
+    status: Optional[str] = "active"                    # active | completed | cancelled
+    scheme: Optional[str] = ""
+    training_service_provider: Optional[str] = ""
+    nature_of_training: Optional[str] = ""              # STT | RPL | ...
+    centre_level: Optional[str] = ""
+    centre_type: Optional[str] = ""
+    district_block: Optional[str] = ""
+    lwe_district: Optional[str] = ""
+    pbg_mode: Optional[str] = "3"                       # "3" | "5" | "10" | "manual"
+    pbg_percent: float = Field(default=3, ge=0)
+    work_order_value_override: Optional[float] = None
+    courses: List[WorkOrderCourseIn] = Field(default_factory=list)
+    remarks: Optional[str] = ""
+
+
+class WorkOrderOut(WorkOrderIn):
+    id: str
+    created_at: str
+    created_by: Optional[str] = None
+    updated_at: Optional[str] = None
+    # Derived (backend-authoritative)
+    total_training_fee: float = 0
+    total_boarding_cost: float = 0
+    computed_value: float = 0
+    work_order_value: float = 0
+    grand_total: float = 0
+    pbg_amount: float = 0
+    total_beneficiaries: int = 0
+    effective_status: str = "active"
+    # Enriched names
+    project_name: Optional[str] = None
+    center_name: Optional[str] = None
+    company_name: Optional[str] = None
+
+
+def _wo_effective_status(doc: dict) -> str:
+    st = (doc.get("status") or "active").lower()
+    if st == "cancelled":
+        return "cancelled"
+    exp = (doc.get("expiry_date") or "").strip()
+    today = datetime.now(timezone.utc).date().isoformat()
+    if exp and exp < today:
+        return "expired"
+    return st or "active"
+
+
+def _compute_work_order(courses: list, pbg_percent: float, value_override) -> dict:
+    """Backend-authoritative WO financials. Value = Σ(Total Fee) unless a manual
+    override (>0) is supplied. Never trusts client-sent derived totals."""
+    rows = []
+    total_classroom = 0.0
+    total_boarding = 0.0
+    total_benef = 0
+    for c in (courses or []):
+        c = dict(c)
+        hours = float(c.get("course_hours") or 0)
+        cph = float(c.get("cost_per_hour") or 0)
+        bpd = float(c.get("boarding_per_day") or 0)
+        days = float(c.get("boarding_days") or 0)
+        benef = int(c.get("beneficiaries") or 0)
+        classroom = round(hours * cph * benef, 2)
+        boarding = round(bpd * days * benef, 2)
+        total_fee = round(classroom + boarding, 2)
+        rows.append({
+            "sector": c.get("sector", "") or "", "sub_sector": c.get("sub_sector", "") or "",
+            "course": c.get("course", "") or "", "qp_code": c.get("qp_code", "") or "",
+            "category": c.get("category", "") or "", "nsqf_level": c.get("nsqf_level", "") or "",
+            "course_hours": hours, "cost_per_hour": cph, "boarding_per_day": bpd,
+            "boarding_days": days, "beneficiaries": benef,
+            "total_classroom_fee": classroom, "total_boarding_cost": boarding, "total_fee": total_fee,
+        })
+        total_classroom += classroom
+        total_boarding += boarding
+        total_benef += benef
+    computed_value = round(total_classroom + total_boarding, 2)
+    ov = None
+    try:
+        ov = float(value_override) if value_override not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        ov = None
+    work_order_value = round(ov, 2) if (ov and ov > 0) else computed_value
+    pbg_amount = round(work_order_value * (float(pbg_percent or 0)) / 100.0, 2)
+    return {
+        "courses": rows,
+        "total_training_fee": round(total_classroom, 2),
+        "total_boarding_cost": round(total_boarding, 2),
+        "computed_value": computed_value,
+        "work_order_value": work_order_value,
+        "grand_total": computed_value,
+        "pbg_amount": pbg_amount,
+        "total_beneficiaries": int(total_benef),
+    }
+
+
+async def _enrich_work_order(doc: dict) -> dict:
+    out = dict(doc)
+    out.pop("_id", None)
+    if doc.get("project_id"):
+        p = await db.projects.find_one({"id": doc["project_id"]}, {"_id": 0, "name": 1})
+        out["project_name"] = p["name"] if p else None
+    if doc.get("center_id"):
+        c = await db.centers.find_one({"id": doc["center_id"]}, {"_id": 0, "name": 1})
+        out["center_name"] = c["name"] if c else None
+    if doc.get("company_id"):
+        co = await db.companies.find_one({"id": doc["company_id"]}, {"_id": 0, "name": 1})
+        out["company_name"] = co["name"] if co else None
+    out["effective_status"] = _wo_effective_status(doc)
+    return out
+
+
+def _wo_center_filter(user: dict, q: dict) -> dict:
+    """Restrict a WO query to the caller's assigned centres when center_manager."""
+    if user.get("role") == "center_manager":
+        assigned = user.get("assigned_center_ids") or ["__none__"]
+        q["center_id"] = {"$in": assigned}
+    return q
+
+
+@api.post("/work-orders", response_model=WorkOrderOut, status_code=201)
+async def create_work_order(body: WorkOrderIn, user=Depends(require_role(*TARGET_ADMIN_ROLES))):
+    if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "project_id does not exist")
+    if not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "center_id does not exist")
+    if body.company_id and not await db.companies.find_one({"id": body.company_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "company_id does not exist")
+    now = datetime.now(timezone.utc).isoformat()
+    payload = body.model_dump()
+    derived = _compute_work_order(payload.get("courses"), payload.get("pbg_percent"), payload.get("work_order_value_override"))
+    doc = {"id": str(uuid.uuid4()), **payload, **derived,
+           "created_by": user["id"], "created_at": now, "updated_at": now}
+    await db.work_orders.insert_one(doc)
+    return WorkOrderOut(**await _enrich_work_order(doc))
+
+
+@api.get("/work-orders", response_model=List[WorkOrderOut])
+async def list_work_orders(
+    project_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    fy: Optional[str] = None,
+    status: Optional[str] = None,           # active | expired | cancelled | completed
+    district: Optional[str] = None,
+    q: Optional[str] = None,                # search: wo_number / loi / project / center / company name
+    include_inactive: bool = Query(True, description="Include expired/cancelled (client filters/badges)"),
+    user=Depends(require_role(*WO_READ_ROLES)),
+):
+    query: dict = {}
+    if project_id: query["project_id"] = project_id
+    if center_id:  query["center_id"] = center_id
+    if fy:         query["fy"] = fy
+    if district:   query["district_block"] = {"$regex": district, "$options": "i"}
+    if q:
+        s = q.strip()
+        query["$or"] = [
+            {"wo_number": {"$regex": s, "$options": "i"}},
+            {"loi_number": {"$regex": s, "$options": "i"}},
+            {"scheme": {"$regex": s, "$options": "i"}},
+        ]
+    _wo_center_filter(user, query)
+    docs = await db.work_orders.find(query, {"_id": 0}).sort("created_at", -1).to_list(3000)
+    out = [await _enrich_work_order(d) for d in docs]
+    # status filter operates on the effective (derived) status
+    if status:
+        out = [d for d in out if d["effective_status"] == status]
+    elif not include_inactive:
+        out = [d for d in out if d["effective_status"] == "active"]
+    # name-based search (needs enriched names) applied post-enrich
+    if q:
+        s = q.strip().lower()
+        out = [d for d in out if
+               s in (d.get("wo_number") or "").lower()
+               or s in (d.get("loi_number") or "").lower()
+               or s in (d.get("project_name") or "").lower()
+               or s in (d.get("center_name") or "").lower()
+               or s in (d.get("company_name") or "").lower()
+               or s in (d.get("scheme") or "").lower()]
+    return [WorkOrderOut(**d) for d in out]
+
+
+@api.get("/work-orders/{wid}", response_model=WorkOrderOut)
+async def get_work_order(wid: str, user=Depends(require_role(*WO_READ_ROLES))):
+    doc = await db.work_orders.find_one({"id": wid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Work Order not found")
+    if user.get("role") == "center_manager":
+        assigned = user.get("assigned_center_ids") or []
+        if doc.get("center_id") not in assigned:
+            raise HTTPException(403, "Not authorized for this centre's work order")
+    return WorkOrderOut(**await _enrich_work_order(doc))
+
+
+@api.patch("/work-orders/{wid}", response_model=WorkOrderOut)
+async def update_work_order(wid: str, body: WorkOrderIn, _=Depends(require_role(*TARGET_ADMIN_ROLES))):
+    existing = await db.work_orders.find_one({"id": wid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Work Order not found")
+    if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "project_id does not exist")
+    if not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "center_id does not exist")
+    payload = body.model_dump()
+    derived = _compute_work_order(payload.get("courses"), payload.get("pbg_percent"), payload.get("work_order_value_override"))
+    upd = {**payload, **derived, "updated_at": datetime.now(timezone.utc).isoformat()}
+    res = await db.work_orders.find_one_and_update({"id": wid}, {"$set": upd}, return_document=True)
+    return WorkOrderOut(**await _enrich_work_order(res))
+
+
+@api.delete("/work-orders/{wid}", status_code=204)
+async def delete_work_order(wid: str, _=Depends(require_role("admin"))):
+    existing = await db.work_orders.find_one({"id": wid}, {"_id": 0, "id": 1})
+    if not existing:
+        raise HTTPException(404, "Work Order not found")
+    await db.work_orders.delete_one({"id": wid})
+    return Response(status_code=204)
+
+
+@api.get("/batch-management/financials")
+async def batch_management_financials(
+    project_id: Optional[str] = None,
+    center_id: Optional[str] = None,
+    fy: Optional[str] = None,
+    district: Optional[str] = None,
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    user=Depends(require_role(*WO_READ_ROLES)),
+):
+    """Aggregated Work Order financials for the BM dashboard cards + the
+    Work Order Financial Summary table. Only ACTIVE work orders count towards
+    the default totals (expired/cancelled excluded) — no double counting."""
+    # --- gather work orders in scope ---
+    woq: dict = {}
+    if project_id: woq["project_id"] = project_id
+    if center_id:  woq["center_id"] = center_id
+    if fy:         woq["fy"] = fy
+    if district:   woq["district_block"] = {"$regex": district, "$options": "i"}
+    _wo_center_filter(user, woq)
+    wo_docs = await db.work_orders.find(woq, {"_id": 0}).to_list(5000)
+    wo_enriched = [await _enrich_work_order(d) for d in wo_docs]
+    if status:
+        wo_enriched = [d for d in wo_enriched if d["effective_status"] == status]
+    if q:
+        s = q.strip().lower()
+        wo_enriched = [d for d in wo_enriched if
+                       s in (d.get("wo_number") or "").lower()
+                       or s in (d.get("project_name") or "").lower()
+                       or s in (d.get("center_name") or "").lower()
+                       or s in (d.get("company_name") or "").lower()]
+    active = [d for d in wo_enriched if d["effective_status"] == "active"]
+
+    total_wo_value = round(sum(float(d.get("work_order_value") or 0) for d in active), 2)
+    total_pbg = round(sum(float(d.get("pbg_amount") or 0) for d in active), 2)
+    wo_count = len(active)
+    avg_wo_value = round(total_wo_value / wo_count, 2) if wo_count else 0.0
+
+    # --- allocated value: rate-engine value of batches within scope ---
+    bq: dict = {}
+    if project_id: bq["project_id"] = project_id
+    if center_id:  bq["center_id"] = center_id
+    if user.get("role") == "center_manager":
+        assigned = user.get("assigned_center_ids") or ["__none__"]
+        bq["center_id"] = {"$in": assigned} if not center_id else center_id
+    allocated_value = 0.0
+    async for b in db.batches.find(bq, {"_id": 0, "work_order_value": 1, "fy_year": 1}):
+        if fy and (b.get("fy_year") or "") != fy:
+            continue
+        allocated_value += float(b.get("work_order_value") or 0)
+    allocated_value = round(allocated_value, 2)
+
+    # --- target rollups keyed by (project, center, fy) ---
+    tq: dict = {}
+    if project_id: tq["project_id"] = project_id
+    if center_id:  tq["center_id"] = center_id
+    if user.get("role") == "center_manager":
+        assigned = user.get("assigned_center_ids") or ["__none__"]
+        tq["center_id"] = {"$in": assigned} if not center_id else center_id
+    targets = await db.batch_targets.find(tq, {"_id": 0}).to_list(5000)
+
+    def tgt_fy(t):
+        return (t.get("fy") or t.get("target_year") or "").strip()
+
+    # group summary rows by (project_id, center_id, fy)
+    groups: dict = {}
+    for d in active:
+        key = (d.get("project_id"), d.get("center_id"), (d.get("fy") or "").strip())
+        g = groups.setdefault(key, {
+            "project_id": d.get("project_id"), "project_name": d.get("project_name"),
+            "center_id": d.get("center_id"), "center_name": d.get("center_name"),
+            "company_name": d.get("company_name"), "fy": (d.get("fy") or "").strip(),
+            "wo_count": 0, "total_wo_value": 0.0, "pbg_amount": 0.0,
+            "total_target": 0, "allocated": 0, "remaining": 0,
+        })
+        g["wo_count"] += 1
+        g["total_wo_value"] = round(g["total_wo_value"] + float(d.get("work_order_value") or 0), 2)
+        g["pbg_amount"] = round(g["pbg_amount"] + float(d.get("pbg_amount") or 0), 2)
+
+    # fold matching targets into each group
+    for key, g in groups.items():
+        pid, cid, gfy = key
+        for t in targets:
+            if t.get("project_id") == pid and t.get("center_id") == cid and tgt_fy(t) == gfy:
+                g["total_target"] += int(t.get("total_target") or 0)
+                g["allocated"] += int(t.get("allocated") or 0)
+                g["remaining"] += int(t.get("remaining") or 0)
+    for g in groups.values():
+        g["utilization_pct"] = round((g["allocated"] / g["total_target"]) * 100) if g["total_target"] else 0
+
+    summary_rows = sorted(groups.values(), key=lambda x: (-x["total_wo_value"]))
+    grand = {
+        "wo_count": wo_count,
+        "total_target": sum(g["total_target"] for g in summary_rows),
+        "allocated": sum(g["allocated"] for g in summary_rows),
+        "remaining": sum(g["remaining"] for g in summary_rows),
+        "total_wo_value": total_wo_value,
+        "pbg_amount": total_pbg,
+    }
+    return {
+        "cards": {
+            "total_work_order_value": total_wo_value,
+            "total_pbg_amount": total_pbg,
+            "allocated_value": allocated_value,
+            "average_work_order_value": avg_wo_value,
+            "active_work_orders": wo_count,
+        },
+        "summary_rows": summary_rows,
+        "grand_total": grand,
+    }
+
 
 
 async def _consume_target(tid: str, amount: int) -> dict:
