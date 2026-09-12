@@ -1,0 +1,44 @@
+{
+  "summary": "Phase 82 · RBAC Menu Access Control end-to-end backend + frontend testing PASSED. Backend pytest 19/19 (1 skipped due to unrelated stale seed) covers /api/rbac/menus (59), /api/rbac/roles (>=8 system), /api/auth/me/permissions (admin=all-true), admin permissions cannot be restricted (PUT admin → 400), custom role creation defaults ALL-OFF, custom role delete, save with change count + audit old→new entry, reset restores full access, non-admin (hr) → 403 on /api/rbac/*, hr can still read own /api/auth/me/permissions. Frontend E2E on /menu-access-control verified: role selector renders all 8 system roles, selecting Accountant shows menu tree with 7 action checkboxes per row (data-testid mac-chk-<menuId>-<action>), Save disabled until dirty, save→confirm dialog (mac-confirm-dialog)→mac-confirm-save persists, Audit Log tab shows the change, Admin role shows mac-admin-note + all checkboxes disabled, custom role creation (mac-new-role-input + mac-create-role) appears in selector with all checkboxes unchecked, mac-delete-role removes it. Enforcement flow verified end-to-end: created accountant test user, restricted subscription.view=OFF, logged in as that user → (a) Subscription group HIDDEN from sidebar (Dashboard/OrgMgmt/Batch/Finance/Approvals/Candidate/HR/Procurement/Partnerships still visible), (b) GET /api/subscription/status returns 403 (middleware Phase-1 VIEW enforcement working), (c) /api/auth/me/permissions returns is_admin=false subscription.view=false, (d) direct nav to /menu-access-control redirects to / (ProtectedRoute requireAdmin gate working). Reset restored access.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "DELETE /api/auth/users/{id}", "issue": "Returns 405 Method Not Allowed — user cleanup after admin-driven creation is not supported via this route. Pre-existing (not Phase 82). Test users created for RBAC verification cannot be cleanly removed by the same admin flow that created them."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase82_rbac_menu_access.py",
+    "/app/test_reports/pytest/phase82_rbac.xml"
+  ],
+  "action_items": [
+    "(Optional) Add DELETE /api/auth/users/{id} (or equivalent admin user-delete) so admin-created accounts can be cleaned up. Not blocking Phase 82.",
+    "(Optional) Re-seed test_center_manager_c6912430@x.com with role=accountant + assigned_center_ids per /app/memory/test_credentials.md — currently role is 'center_manager' and assigned_center_ids is []. This caused the center-isolation regression test to skip (not fail)."
+  ],
+  "critical_code_review_comments": [
+    "Middleware rbac_view_enforcement correctly exempts /api/auth and /api/rbac so admins can never lock themselves out of the RBAC console — good.",
+    "_role_perm_map treats admin/super_admin as all-true unconditionally (short-circuit before DB read) — cannot be restricted even if DB rows exist. Correct.",
+    "System roles with no stored rows default to full access (_default_perm(is_system=True)) — matches 'no-lockout' requirement.",
+    "Custom (non-system) roles default all-off (_default_perm(is_system=False)) — matches requirement.",
+    "PUT /api/rbac/permissions/admin correctly returns 400 (admin cannot be restricted). Verified.",
+    "Audit log captures actor_id, actor_name, role_key, and per-action old→new booleans — sufficient for compliance trail.",
+    "_menu_for_path uses longest-prefix match (best is None or len(pfx) > best[1]) — correct for overlapping prefixes.",
+    "Phase-1 VIEW enforcement only wires 6 prefix groups (subscription/centers/users/rbac/batch bundle/dashboard.settlement) — Phase-2 granular create/edit/delete enforcement is TODO but UI already saves those checkboxes for future use (documented in review request).",
+    "Center-data isolation and menu-permission are two independent controls in code — menu.view=ON does NOT widen the center filter (dashboards still apply _wo_center_filter/assigned_center_ids). Verified.",
+    "PermissionContext reloads via /api/auth/me/permissions after any Save/Reset, so sidebar updates without full reload.",
+    "server.py file size (23,229 lines) still exceeds 700-line guideline — long-standing, out of scope."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase82_rbac_menu_access.py (new · 20 tests)"
+  ],
+  "success_rate": {"backend": "100% (19/19 pytest, 1 skip on stale seed)", "frontend": "100% of Phase 82 selectors + enforcement flows"},
+  "test_credentials": "Super Admin admin@finance.app / Admin@123 (verified). HR hr@finance.app / Hr@12345 used to verify non-admin 403 on /api/rbac/*. Test accountant users are created ephemerally per run (email test_rbac82_*@example.com / Test@1234) — DELETE endpoint absent, so they persist in DB (no impact on future runs, unique per uuid).",
+  "seed_data_creation": "Backend test creates a throwaway accountant user + a throwaway custom role per run, both prefixed TEST_. Custom role is deleted. Permission changes on 'accountant' role are always followed by reset so app is left in clean no-restriction state.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Phase 82 backend regression file: /app/backend/tests/test_phase82_rbac_menu_access.py (20 tests, ~5s). Enforcement mapped prefixes (subscription/centers/users/batch*/dashboard.settlement) are the only Phase-1 VIEW-enforced surfaces — testing other endpoints for 403 on menu.view=OFF is not expected. Admin-created user cleanup via DELETE /api/auth/users/{id} returns 405 — persist a note if you generate lots of test users. To exercise center-isolation regression cleanly, seed test_center_manager_c6912430@x.com back to role=accountant with one assigned_center_id."
+}

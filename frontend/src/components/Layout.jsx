@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
+import { usePerm } from "@/context/PermissionContext";
 import { api } from "@/lib/api";
 import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
@@ -50,6 +51,7 @@ const navGroups = [
       { to: "/centers", key: "centers", icon: MapPin },
       { to: "/center-management", key: "center_management", icon: MapPin, adminOnly: true },
       { to: "/projects", key: "projects", icon: Briefcase },
+      { to: "/menu-access-control", key: "roles_permissions", icon: ShieldCheck, adminOnly: true },
     ],
   },
   {
@@ -349,11 +351,19 @@ export default function Layout({ children }) {
   // Group-level visibility: hide any group whose every item is filtered out.
   // If the user only has access to one submenu inside a group, the group and
   // that single submenu still render (per product requirement).
+  const { can } = usePerm();
+  const GROUP_MENU = {
+    grp_dashboard: "dashboard", grp_subscription: "subscription", grp_organization: "org",
+    grp_batch: "batch", grp_finance: "finance", grp_approvals: "approvals",
+    grp_candidates: "candidates", grp_hr: "hr", grp_procurement: "procurement", grp_partnerships: "partnerships",
+  };
   const visibleGroups = useMemo(() => {
     return navGroups
+      .filter((g) => (GROUP_MENU[g.key] ? can(GROUP_MENU[g.key], "view") : true))
       .map((g) => ({ ...g, items: g.items.filter(canSee) }))
       .filter((g) => g.items.length > 0);
-  }, [user?.role]);
+    // eslint-disable-next-line
+  }, [user?.role, can]);
 
   // Track which groups are expanded. A group opens automatically when one of
   // its children matches the current route. User can still manually toggle.

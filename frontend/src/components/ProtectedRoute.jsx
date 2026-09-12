@@ -22,7 +22,7 @@ const LANDING_FOR_ROLE = {
   center_manager:      "/",
 };
 
-export default function ProtectedRoute({ children, requireFinance = false }) {
+export default function ProtectedRoute({ children, requireFinance = false, requireAdmin = false }) {
   const { user, loading, companies, isSuperCompanies } = useAuth();
   const location = useLocation();
   if (loading) {
@@ -38,6 +38,9 @@ export default function ProtectedRoute({ children, requireFinance = false }) {
   try { chosen = sessionStorage.getItem("companyChosen") === "1"; } catch { chosen = false; }
   if (!isSuperCompanies && !chosen && (companies?.length || 0) >= 1) {
     return <Navigate to="/select-company" replace />;
+  }
+  if (requireAdmin && !["admin", "super_admin"].includes(user.role)) {
+    return <Navigate to="/" replace />;
   }
   if (requireFinance && !FINANCE_VISIBLE_ROLES.includes(user.role)) {
     // Operational roles (center_manager) get to stay ONLY on `/` — App.js will render the ops dashboard.

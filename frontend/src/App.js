@@ -2,6 +2,8 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { LangProvider } from "@/context/LangContext";
 import { AuthProvider } from "@/context/AuthContext";
+import { PermissionProvider } from "@/context/PermissionContext";
+import MenuAccessControl from "@/pages/MenuAccessControl";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
@@ -74,6 +76,7 @@ function App() {
   return (
     <LangProvider>
       <AuthProvider>
+        <PermissionProvider>
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
@@ -119,11 +122,13 @@ function App() {
             <Route path="/candidates" element={<ProtectedRoute><Shell><Candidates /></Shell></ProtectedRoute>} />
             <Route path="/bank-guarantees" element={<ProtectedRoute><Shell><BankGuarantees /></Shell></ProtectedRoute>} />
             <Route path="/mis" element={<ProtectedRoute><Shell><MISDashboard /></Shell></ProtectedRoute>} />
+            <Route path="/menu-access-control" element={<ProtectedRoute requireAdmin><Shell><MenuAccessControl /></Shell></ProtectedRoute>} />
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
         <Toaster position="top-right" />
+        </PermissionProvider>
       </AuthProvider>
     </LangProvider>
   );

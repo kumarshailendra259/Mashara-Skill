@@ -193,6 +193,326 @@ def is_company_admin(user: dict) -> bool:
 FINANCE_VISIBLE_ROLES = {"admin", "super_admin", "company_admin", "partner", "senior_manager", "hr", "accountant"}
 
 
+# ============================================================================
+# ==============  RBAC · Menu Access Control (Phase 82) ======================
+# ============================================================================
+# Admin-configurable per-role menu/action permissions layered ON TOP of the
+# existing require_role gates and the strict center-data isolation (which are
+# NOT replaced). System roles default to FULL access (nothing breaks); custom
+# roles default to ALL-OFF; admin/super_admin always have full access.
+
+ADMIN_ROLE_KEYS = {"admin", "super_admin"}
+PERMISSION_ACTIONS = ["view", "create", "edit", "delete", "approve", "export", "print"]
+
+SYSTEM_ROLES = [
+    {"key": "admin", "label": "Admin", "is_system": True, "protected": True},
+    {"key": "senior_manager", "label": "Senior Manager", "is_system": True},
+    {"key": "manager", "label": "Manager", "is_system": True},
+    {"key": "center_manager", "label": "Center Manager", "is_system": True},
+    {"key": "center_staff", "label": "Center Staff", "is_system": True},
+    {"key": "accountant", "label": "Accountant", "is_system": True},
+    {"key": "hr", "label": "HR", "is_system": True},
+    {"key": "partner", "label": "Partner", "is_system": True},
+]
+
+# Stable menu registry (the "menus" table). New entries here auto-appear in the
+# Admin Menu Access Control screen. `prefixes` drive backend VIEW enforcement.
+MENU_REGISTRY = [
+    {"id": "dashboard", "label": "Dashboard", "parent": None, "prefixes": []},
+    {"id": "subscription", "label": "Subscription", "parent": None, "prefixes": ["/api/subscription"]},
+    {"id": "org", "label": "Organization Management", "parent": None, "prefixes": []},
+    {"id": "org.companies", "label": "Companies", "parent": "org", "prefixes": []},
+    {"id": "org.partners", "label": "Partners", "parent": "org", "prefixes": []},
+    {"id": "org.centers", "label": "Centers", "parent": "org", "prefixes": ["/api/centers"]},
+    {"id": "org.projects", "label": "Projects", "parent": "org", "prefixes": []},
+    {"id": "org.users", "label": "Users", "parent": "org", "prefixes": ["/api/users"]},
+    {"id": "org.roles", "label": "Roles & Permissions", "parent": "org", "prefixes": ["/api/rbac"]},
+    {"id": "batch", "label": "Batch Management", "parent": None, "prefixes": ["/api/batches", "/api/batch-targets", "/api/batch-management", "/api/work-orders"]},
+    {"id": "batch.targets", "label": "Target Allocation", "parent": "batch", "prefixes": []},
+    {"id": "batch.creation", "label": "Batch Creation", "parent": "batch", "prefixes": []},
+    {"id": "batch.enrollment", "label": "Candidate Enrollment", "parent": "batch", "prefixes": []},
+    {"id": "batch.attendance", "label": "Attendance", "parent": "batch", "prefixes": []},
+    {"id": "batch.assessment", "label": "Assessment", "parent": "batch", "prefixes": []},
+    {"id": "batch.placement", "label": "Placement", "parent": "batch", "prefixes": []},
+    {"id": "batch.closure", "label": "Batch Closure", "parent": "batch", "prefixes": []},
+    {"id": "finance", "label": "Finance & Accounting", "parent": None, "prefixes": []},
+    {"id": "finance.dashboard", "label": "Finance Dashboard", "parent": "finance", "prefixes": []},
+    {"id": "finance.income", "label": "Income", "parent": "finance", "prefixes": []},
+    {"id": "finance.expense", "label": "Expense", "parent": "finance", "prefixes": []},
+    {"id": "finance.investment", "label": "Investment", "parent": "finance", "prefixes": []},
+    {"id": "finance.accounts", "label": "Accounts", "parent": "finance", "prefixes": []},
+    {"id": "finance.payment_tracker", "label": "Payment Tracker", "parent": "finance", "prefixes": []},
+    {"id": "finance.reimbursement", "label": "Reimbursement", "parent": "finance", "prefixes": []},
+    {"id": "finance.advances", "label": "Advances", "parent": "finance", "prefixes": []},
+    {"id": "finance.salary", "label": "Salary", "parent": "finance", "prefixes": []},
+    {"id": "finance.payroll", "label": "Payroll", "parent": "finance", "prefixes": []},
+    {"id": "approvals", "label": "Approvals & Workflow", "parent": None, "prefixes": []},
+    {"id": "approvals.pending", "label": "Pending Approvals", "parent": "approvals", "prefixes": []},
+    {"id": "approvals.history", "label": "Approval History", "parent": "approvals", "prefixes": []},
+    {"id": "approvals.workflow", "label": "Approval Workflow", "parent": "approvals", "prefixes": []},
+    {"id": "candidates", "label": "Candidate / Student Management", "parent": None, "prefixes": []},
+    {"id": "candidates.list", "label": "Candidates", "parent": "candidates", "prefixes": []},
+    {"id": "candidates.documents", "label": "Candidate Documents", "parent": "candidates", "prefixes": []},
+    {"id": "candidates.placement", "label": "Placement", "parent": "candidates", "prefixes": []},
+    {"id": "candidates.reports", "label": "Candidate Reports", "parent": "candidates", "prefixes": []},
+    {"id": "hr", "label": "Employee / HR Management", "parent": None, "prefixes": []},
+    {"id": "hr.employees", "label": "Employees", "parent": "hr", "prefixes": []},
+    {"id": "hr.attendance", "label": "Attendance", "parent": "hr", "prefixes": []},
+    {"id": "hr.leave", "label": "Leave", "parent": "hr", "prefixes": []},
+    {"id": "hr.salary", "label": "Salary", "parent": "hr", "prefixes": []},
+    {"id": "hr.payroll", "label": "Payroll", "parent": "hr", "prefixes": []},
+    {"id": "hr.settings", "label": "HR Settings", "parent": "hr", "prefixes": []},
+    {"id": "hr.documents", "label": "Staff Documents", "parent": "hr", "prefixes": []},
+    {"id": "hr.holidays", "label": "Holidays", "parent": "hr", "prefixes": []},
+    {"id": "hr.shifts", "label": "Shifts", "parent": "hr", "prefixes": []},
+    {"id": "hr.geofences", "label": "Geofences", "parent": "hr", "prefixes": []},
+    {"id": "procurement", "label": "Procurement & Vendors", "parent": None, "prefixes": []},
+    {"id": "procurement.vendors", "label": "Vendors", "parent": "procurement", "prefixes": []},
+    {"id": "procurement.purchase_requests", "label": "Purchase Requests", "parent": "procurement", "prefixes": []},
+    {"id": "procurement.purchase_orders", "label": "Purchase Orders", "parent": "procurement", "prefixes": []},
+    {"id": "procurement.procurement", "label": "Procurement", "parent": "procurement", "prefixes": []},
+    {"id": "partnerships", "label": "Partnerships", "parent": None, "prefixes": []},
+    {"id": "partnerships.partners", "label": "Partners", "parent": "partnerships", "prefixes": []},
+    {"id": "partnerships.mapping", "label": "Partner Mapping", "parent": "partnerships", "prefixes": []},
+    {"id": "partnerships.settlement", "label": "Settlement", "parent": "partnerships", "prefixes": ["/api/dashboard/settlement"]},
+    {"id": "partnerships.settlement_history", "label": "Settlement History", "parent": "partnerships", "prefixes": []},
+    {"id": "partnerships.reports", "label": "Partner Reports", "parent": "partnerships", "prefixes": []},
+]
+MENU_IDS = [m["id"] for m in MENU_REGISTRY]
+MENU_BY_ID = {m["id"]: m for m in MENU_REGISTRY}
+# Never enforce/lock these (self-service + auth + the RBAC config itself is admin-gated separately).
+_ENFORCE_EXEMPT_PREFIXES = ["/api/auth", "/api/rbac"]
+
+
+async def _ensure_system_roles():
+    for r in SYSTEM_ROLES:
+        await db.roles.update_one({"key": r["key"]}, {"$setOnInsert": {
+            "id": str(uuid.uuid4()), **r, "created_at": datetime.now(timezone.utc).isoformat(),
+        }}, upsert=True)
+
+
+def _default_perm(is_system: bool) -> dict:
+    v = bool(is_system)
+    return {a: v for a in PERMISSION_ACTIONS}
+
+
+async def _role_perm_map(role_key: str) -> dict:
+    """menu_id -> {action: bool} for a role, merging stored rows over defaults."""
+    if role_key in ADMIN_ROLE_KEYS:
+        return {mid: {a: True for a in PERMISSION_ACTIONS} for mid in MENU_IDS}
+    role = await db.roles.find_one({"key": role_key}, {"_id": 0})
+    is_system = bool(role and role.get("is_system"))
+    stored = {}
+    async for row in db.role_menu_permissions.find({"role_key": role_key}, {"_id": 0}):
+        stored[row["menu_id"]] = {a: bool(row.get("can_" + a, False)) for a in PERMISSION_ACTIONS}
+    out = {}
+    for mid in MENU_IDS:
+        out[mid] = stored.get(mid, _default_perm(is_system))
+    return out
+
+
+async def check_menu_permission(user: dict, menu_id: str, action: str = "view") -> bool:
+    if (user or {}).get("role") in ADMIN_ROLE_KEYS:
+        return True
+    pm = await _role_perm_map(user.get("role") or "")
+    return bool(pm.get(menu_id, {}).get(action, False))
+
+
+def require_menu(menu_id: str, action: str = "view"):
+    async def dep(user: dict = Depends(get_current_user)):
+        if not await check_menu_permission(user, menu_id, action):
+            raise HTTPException(status_code=403, detail=f"Access denied: missing '{action}' permission for this section")
+        return user
+    return dep
+
+
+# ---- VIEW enforcement middleware (Phase 1: menu-level view on mapped prefixes) ----
+def _menu_for_path(path: str):
+    best = None
+    for m in MENU_REGISTRY:
+        for pfx in m.get("prefixes", []):
+            if path == pfx or path.startswith(pfx + "/") or path.startswith(pfx + "?") or path.startswith(pfx):
+                if best is None or len(pfx) > best[1]:
+                    best = (m["id"], len(pfx))
+    return best[0] if best else None
+
+
+@app.middleware("http")
+async def rbac_view_enforcement(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api") or any(path.startswith(p) for p in _ENFORCE_EXEMPT_PREFIXES):
+        return await call_next(request)
+    menu_id = _menu_for_path(path)
+    if not menu_id:
+        return await call_next(request)
+    token = request.cookies.get("access_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
+        return await call_next(request)  # let endpoint's own auth return 401
+    try:
+        payload = jwt.decode(token, jwt_secret(), algorithms=[JWT_ALG])
+        u = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "role": 1})
+    except Exception:
+        return await call_next(request)
+    if not u:
+        return await call_next(request)
+    if not await check_menu_permission(u, menu_id, "view"):
+        from starlette.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"detail": "Access denied: you do not have permission to view this section"})
+    return await call_next(request)
+
+
+class MenuPermIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    menu_id: str
+    can_view: bool = False
+    can_create: bool = False
+    can_edit: bool = False
+    can_delete: bool = False
+    can_approve: bool = False
+    can_export: bool = False
+    can_print: bool = False
+
+
+class PermissionsSaveIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    permissions: List[MenuPermIn]
+
+
+class RoleIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    label: str = Field(min_length=1)
+
+
+@api.get("/rbac/menus")
+async def rbac_menus(_=Depends(require_role("admin"))):
+    return MENU_REGISTRY
+
+
+@api.get("/rbac/roles")
+async def rbac_roles(_=Depends(require_role("admin"))):
+    await _ensure_system_roles()
+    roles = await db.roles.find({}, {"_id": 0}).sort("is_system", -1).to_list(200)
+    return roles
+
+
+@api.post("/rbac/roles", status_code=201)
+async def rbac_create_role(body: RoleIn, user=Depends(require_role("admin"))):
+    key = re.sub(r"[^a-z0-9_]+", "_", body.label.strip().lower()).strip("_")
+    if not key:
+        raise HTTPException(400, "Invalid role name")
+    if await db.roles.find_one({"key": key}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "A role with this name already exists")
+    doc = {"id": str(uuid.uuid4()), "key": key, "label": body.label.strip(),
+           "is_system": False, "created_at": datetime.now(timezone.utc).isoformat(), "created_by": user["id"]}
+    await db.roles.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.patch("/rbac/roles/{role_key}")
+async def rbac_rename_role(role_key: str, body: RoleIn, _=Depends(require_role("admin"))):
+    role = await db.roles.find_one({"key": role_key}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    if role.get("protected"):
+        raise HTTPException(400, "Admin role cannot be modified")
+    await db.roles.update_one({"key": role_key}, {"$set": {"label": body.label.strip()}})
+    return {"ok": True}
+
+
+@api.delete("/rbac/roles/{role_key}", status_code=204)
+async def rbac_delete_role(role_key: str, _=Depends(require_role("admin"))):
+    role = await db.roles.find_one({"key": role_key}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    if role.get("is_system"):
+        raise HTTPException(400, "System roles cannot be deleted")
+    if await db.users.count_documents({"role": role_key}) > 0:
+        raise HTTPException(400, "Cannot delete a role that is assigned to users")
+    await db.roles.delete_one({"key": role_key})
+    await db.role_menu_permissions.delete_many({"role_key": role_key})
+    return Response(status_code=204)
+
+
+@api.get("/rbac/permissions/{role_key}")
+async def rbac_get_permissions(role_key: str, _=Depends(require_role("admin"))):
+    await _ensure_system_roles()
+    role = await db.roles.find_one({"key": role_key}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    pm = await _role_perm_map(role_key)
+    rows = [{"menu_id": mid, **{("can_" + a): pm[mid][a] for a in PERMISSION_ACTIONS}} for mid in MENU_IDS]
+    return {"role": role, "is_admin": role_key in ADMIN_ROLE_KEYS, "permissions": rows}
+
+
+@api.put("/rbac/permissions/{role_key}")
+async def rbac_save_permissions(role_key: str, body: PermissionsSaveIn, user=Depends(require_role("admin"))):
+    role = await db.roles.find_one({"key": role_key}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    if role_key in ADMIN_ROLE_KEYS:
+        raise HTTPException(400, "Admin always has full access and cannot be restricted")
+    before = await _role_perm_map(role_key)
+    audit_changes = []
+    now = datetime.now(timezone.utc).isoformat()
+    for p in body.permissions:
+        if p.menu_id not in MENU_BY_ID:
+            continue
+        newvals = {a: bool(getattr(p, "can_" + a)) for a in PERMISSION_ACTIONS}
+        oldvals = before.get(p.menu_id, {})
+        for a in PERMISSION_ACTIONS:
+            if bool(oldvals.get(a)) != newvals[a]:
+                audit_changes.append({"menu_id": p.menu_id, "action": a, "old": bool(oldvals.get(a)), "new": newvals[a]})
+        await db.role_menu_permissions.update_one(
+            {"role_key": role_key, "menu_id": p.menu_id},
+            {"$set": {"role_key": role_key, "menu_id": p.menu_id,
+                      **{("can_" + a): newvals[a] for a in PERMISSION_ACTIONS}, "updated_at": now}},
+            upsert=True)
+    if audit_changes:
+        await db.permission_audit.insert_one({
+            "id": str(uuid.uuid4()), "actor_id": user["id"],
+            "actor_name": user.get("name") or user.get("email"),
+            "role_key": role_key, "changes": audit_changes, "at": now,
+        })
+    return {"ok": True, "changed": len(audit_changes)}
+
+
+@api.post("/rbac/permissions/{role_key}/reset")
+async def rbac_reset_permissions(role_key: str, user=Depends(require_role("admin"))):
+    role = await db.roles.find_one({"key": role_key}, {"_id": 0})
+    if not role:
+        raise HTTPException(404, "Role not found")
+    if role_key in ADMIN_ROLE_KEYS:
+        raise HTTPException(400, "Admin role is always full access")
+    await db.role_menu_permissions.delete_many({"role_key": role_key})
+    await db.permission_audit.insert_one({
+        "id": str(uuid.uuid4()), "actor_id": user["id"],
+        "actor_name": user.get("name") or user.get("email"),
+        "role_key": role_key, "changes": [{"menu_id": "*", "action": "reset", "old": None, "new": "default"}],
+        "at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"ok": True}
+
+
+@api.get("/rbac/audit")
+async def rbac_audit(role_key: Optional[str] = None, _=Depends(require_role("admin"))):
+    q = {"role_key": role_key} if role_key else {}
+    logs = await db.permission_audit.find(q, {"_id": 0}).sort("at", -1).to_list(300)
+    return logs
+
+
+@api.get("/auth/me/permissions")
+async def my_permissions(user=Depends(get_current_user)):
+    """Effective permissions for the logged-in user's role (drives sidebar + button gating)."""
+    pm = await _role_perm_map(user.get("role") or "")
+    return {"role": user.get("role"), "is_admin": user.get("role") in ADMIN_ROLE_KEYS, "permissions": pm}
+
+
+
 def require_finance_visible(user: dict = Depends(get_current_user)) -> dict:
     if user.get("role") not in FINANCE_VISIBLE_ROLES:
         raise HTTPException(status_code=403, detail="Financial data is restricted for your role")
