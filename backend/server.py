@@ -5796,6 +5796,63 @@ async def edit_attendance(aid: str, body: AttendanceEditIn, user=Depends(require
     return await db.attendance.find_one({"id": aid}, {"_id": 0})
 
 
+async def _shift_end_iso_for(staff: dict, date_str: str) -> str:
+    """UTC ISO for the shift-end (or HR day-end fallback) on `date_str` in IST.
+    Used as the auto-checkout timestamp for stale (forgot-to-punch-out) rows."""
+    end_hhmm = None
+    if staff and staff.get("shift_id"):
+        sh = await db.shifts.find_one({"id": staff["shift_id"]}, {"_id": 0, "end_time": 1})
+        if sh and sh.get("end_time"):
+            end_hhmm = sh["end_time"]
+    if not end_hhmm:
+        pol = await db.hr_policy.find_one({"id": "singleton"}, {"_id": 0, "day_end_time": 1})
+        end_hhmm = (pol or {}).get("day_end_time") or "18:00"
+    try:
+        h, m = (int(x) for x in str(end_hhmm).split(":")[:2])
+        y, mo, d = (int(x) for x in date_str.split("-")[:3])
+        ist_dt = datetime(y, mo, d, h, m, tzinfo=BUSINESS_TZ)
+        return ist_dt.astimezone(timezone.utc).isoformat()
+    except (ValueError, AttributeError):
+        return datetime.now(timezone.utc).isoformat()
+
+
+async def _auto_close_stale_attendance(staff: dict) -> int:
+    """Finalize any open attendance rows from PREVIOUS IST dates as AUTO_CLOSED so
+    a forgotten checkout never carries into the next day. Idempotent; safe to call
+    on every attendance read (dashboard/status/check-in/checkout/history).
+    Never touches regularised / admin / leave / half rows (authoritative)."""
+    if not staff or not staff.get("id"):
+        return 0
+    today = _today_ist()
+    stale = await db.attendance.find(
+        {
+            "staff_id": staff["id"],
+            "date": {"$lt": today},
+            "check_in_at": {"$exists": True, "$ne": None},
+            "check_out_at": {"$in": [None, ""]},
+            "regularised": {"$ne": True},
+            "status": {"$nin": ["leave", "half", "auto_closed"]},
+            "marked_via": {"$nin": ["regularised", "admin"]},
+        },
+        {"_id": 0, "id": 1, "date": 1},
+    ).to_list(400)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for r in stale:
+        co = await _shift_end_iso_for(staff, r["date"])
+        await db.attendance.update_one(
+            {"id": r["id"]},
+            {"$set": {
+                "status": "auto_closed",
+                "check_out_at": co,
+                "check_out_via": "auto",
+                "auto_closed_at": now_iso,
+                "auto_close_note": "Automatically closed because checkout was not completed.",
+            }},
+        )
+    return len(stale)
+
+
+
 @api.post("/attendance/self")
 async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
     """Mobile self-check-in: looks up the staff record linked to the current user,
@@ -5849,24 +5906,8 @@ async def self_check_in(body: SelfCheckInIn, user=Depends(get_current_user)):
             nearest_dist_m = round(nearest_dist or 0, 1)
     today = (body.date or _today_ist())[:10]
     now_iso = datetime.now(timezone.utc).isoformat()
-    # If a previous day's row is still open (staff forgot to punch out),
-    # close it as "incomplete" so today starts fresh. Prevents the display
-    # bug where yesterday's dangling check-in was paired with today's
-    # check-in-as-check-out on the UI.
-    # SAFETY: never overwrite rows that were regularised (approved retro attendance),
-    # admin-edited, marked as leave, or half-day — those statuses are authoritative.
-    await db.attendance.update_many(
-        {
-            "staff_id": staff["id"],
-            "date": {"$lt": today},
-            "check_in_at": {"$exists": True, "$ne": None},
-            "check_out_at": {"$in": [None, ""]},
-            "regularised": {"$ne": True},
-            "status": {"$nin": ["leave", "half"]},
-            "marked_via": {"$nin": ["regularised", "admin"]},
-        },
-        {"$set": {"status": "incomplete", "auto_closed_at": now_iso}},
-    )
+    # Close any previous-day open rows as AUTO_CLOSED so today starts fresh.
+    await _auto_close_stale_attendance(staff)
     doc = {
         "staff_id": staff["id"],
         "date": today,
@@ -5911,6 +5952,7 @@ async def self_check_out(body: CheckOutIn, user=Depends(get_current_user)):
     staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
     if not staff:
         raise HTTPException(400, "Your user is not linked to any staff record.")
+    await _auto_close_stale_attendance(staff)
     today = _today_ist()
     row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     if not row:
@@ -5940,9 +5982,10 @@ async def my_attendance(
     user=Depends(get_current_user),
 ):
     """Current logged-in staff's own attendance history."""
-    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1})
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "shift_id": 1})
     if not staff:
         return []
+    await _auto_close_stale_attendance(staff)
     q: dict = {"staff_id": staff["id"]}
     if start or end:
         q["date"] = {}
@@ -5957,9 +6000,10 @@ async def my_attendance(
 @api.get("/attendance/today")
 async def my_today_attendance(user=Depends(get_current_user)):
     """Return today's attendance row for the current logged-in user (if any)."""
-    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    staff = await db.staff.find_one({"user_id": user["id"]}, {"_id": 0, "id": 1, "name": 1, "shift_id": 1})
     if not staff:
         return {"staff": None, "attendance": None}
+    await _auto_close_stale_attendance(staff)
     today = _today_ist()
     row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     return {"staff": staff, "attendance": row}
@@ -6053,8 +6097,8 @@ async def my_attendance_monthly(
         details = {}
         if row:
             st = row.get("status")
-            if st == "present" and row.get("check_in_at") and not row.get("check_out_at"):
-                status = "present"  # incomplete but shown as present for calendar
+            if st in ("present", "auto_closed", "incomplete") and row.get("check_in_at"):
+                status = "present"  # attended (even if checkout was auto-closed) → show present on calendar
             else:
                 status = st or ("present" if row.get("check_in_at") else "absent")
             is_late = bool(row.get("is_late"))
@@ -6150,8 +6194,8 @@ async def list_attendance(
     # only punched in but never punched out — instead of misleading "Present".
     for d in docs:
         s = d.get("status")
-        if s == "incomplete":
-            d["effective_status"] = "incomplete"
+        if s in ("incomplete", "auto_closed"):
+            d["effective_status"] = s
         elif s == "present" and d.get("check_in_at") and not d.get("check_out_at"):
             d["effective_status"] = "incomplete"
         elif s == "present" and d.get("check_in_at") and d.get("check_out_at"):
@@ -8710,7 +8754,7 @@ async def staff_salary_summary(
             raw = row.get("status")
             if row.get("regularised") or row.get("marked_via") == "regularised":
                 effective = row.get("status") if row.get("status") in ("present", "half") else "present"
-            elif raw == "incomplete":
+            elif raw in ("incomplete", "auto_closed"):
                 effective = "incomplete"
             elif raw in ("present", "half", "absent", "leave"):
                 effective = raw
@@ -10465,7 +10509,9 @@ async def my_summary(user=Depends(get_current_user)):
             "upcoming_holidays": [], "all_holidays": [], "leave_balances": [],
             "weekly_off_days": ["sunday"],
         }
-    today = datetime.now(timezone.utc).date().isoformat()
+    # Auto-close any stale previous-day open sessions before computing "today".
+    await _auto_close_stale_attendance(staff)
+    today = _today_ist()  # IST calendar date (never UTC — fixes next-day carry-over)
     today_row = await db.attendance.find_one({"staff_id": staff["id"], "date": today}, {"_id": 0})
     # This month stats — "complete present" = has both check_in_at + check_out_at
     yyyy_mm = today[:7]
@@ -10475,6 +10521,8 @@ async def my_summary(user=Depends(get_current_user)):
         s = r.get("status")
         if s in ("absent", "leave", "half"):
             return s
+        if s == "auto_closed":
+            return "incomplete"
         if s == "present" and r.get("check_in_at") and r.get("check_out_at"):
             return "present"
         if s == "present" and r.get("check_in_at") and not r.get("check_out_at"):
