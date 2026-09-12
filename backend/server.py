@@ -337,12 +337,102 @@ def _menu_for_path(path: str):
     return best[0] if best else None
 
 
+# ---- Phase 2: comprehensive prefix→menu map for ACTION enforcement ----
+# (create/edit/delete/approve/export/print). View is NOT added here so shared
+# GET reads across modules stay unaffected. Longest-prefix wins.
+_ACTION_PREFIX_MENU = sorted([
+    ("/api/subscription", "subscription"),
+    ("/api/entities", "org"),
+    ("/api/users", "org.users"),
+    ("/api/companies", "org.companies"),
+    ("/api/projects", "org.projects"),
+    ("/api/centers", "org.centers"),
+    ("/api/batch-management", "batch"),
+    ("/api/batch-targets", "batch.targets"),
+    ("/api/batch-payments", "batch"),
+    ("/api/batch-extension-requests", "batch"),
+    ("/api/batches", "batch.creation"),
+    ("/api/work-orders", "batch"),
+    ("/api/work-order", "batch"),
+    ("/api/transactions", "finance"),
+    ("/api/invoices", "finance"),
+    ("/api/payment-vouchers", "finance"),
+    ("/api/payments", "finance.payment_tracker"),
+    ("/api/bank-accounts", "finance.accounts"),
+    ("/api/bank-transactions", "finance.accounts"),
+    ("/api/bank-guarantees", "finance"),
+    ("/api/finance-settings", "finance"),
+    ("/api/reimbursement-templates", "finance.reimbursement"),
+    ("/api/reimbursements", "finance.reimbursement"),
+    ("/api/advance-requests", "finance.advances"),
+    ("/api/payroll-batches", "finance.payroll"),
+    ("/api/payroll", "finance.payroll"),
+    ("/api/salary-slip-templates", "finance.salary"),
+    ("/api/staff-payments", "finance.salary"),
+    ("/api/fooding-entries", "finance"),
+    ("/api/quotations", "procurement"),
+    ("/api/vendors", "procurement.vendors"),
+    ("/api/asset-purchase-requests", "procurement.purchase_requests"),
+    ("/api/candidates", "candidates.list"),
+    ("/api/staff-documents", "hr.documents"),
+    ("/api/staff", "hr.employees"),
+    ("/api/attendance", "hr.attendance"),
+    ("/api/regularisations", "hr.attendance"),
+    ("/api/leave-balances", "hr.leave"),
+    ("/api/leave-types", "hr.leave"),
+    ("/api/leaves", "hr.leave"),
+    ("/api/holidays", "hr.holidays"),
+    ("/api/shifts", "hr.shifts"),
+    ("/api/geofences", "hr.geofences"),
+    ("/api/employee-transfers", "hr.employees"),
+    ("/api/offer-letter-templates", "hr.settings"),
+    ("/api/offer-letters", "hr.employees"),
+    ("/api/hr-policy", "hr.settings"),
+    ("/api/announcements", "hr.settings"),
+    ("/api/asset-transfers", "hr.settings"),
+    ("/api/assets", "hr.settings"),
+    ("/api/approval-chains", "approvals.workflow"),
+    ("/api/approval-log", "approvals.history"),
+    ("/api/approvals", "approvals.pending"),
+    ("/api/partner-associations", "partnerships.mapping"),
+    ("/api/partners", "partnerships.partners"),
+    ("/api/dashboard/settlement", "partnerships.settlement"),
+], key=lambda x: -len(x[0]))
+
+_METHOD_ACTION = {"GET": "view", "POST": "create", "PUT": "edit", "PATCH": "edit", "DELETE": "delete"}
+
+
+def _action_for_request(method: str, path: str) -> str:
+    p = path.lower()
+    if "/approve" in p or "/reject" in p:
+        return "approve"
+    if "/export" in p or "/download" in p or p.endswith(".csv") or "/csv" in p or "/xlsx" in p:
+        return "export"
+    if "/pdf" in p or "/print" in p:
+        return "print"
+    return _METHOD_ACTION.get(method.upper(), "view")
+
+
+def _action_menu_for_path(path: str):
+    for pfx, mid in _ACTION_PREFIX_MENU:
+        if path == pfx or path.startswith(pfx + "/"):
+            return mid
+    return None
+
+
 @app.middleware("http")
 async def rbac_view_enforcement(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api") or any(path.startswith(p) for p in _ENFORCE_EXEMPT_PREFIXES):
         return await call_next(request)
-    menu_id = _menu_for_path(path)
+    action = _action_for_request(request.method, path)
+    # VIEW stays enforced only on the Phase-1 view prefixes (shared GET reads on
+    # other modules must not be blocked). Non-view actions (create/edit/delete/
+    # approve/export/print) are enforced across all mapped module prefixes.
+    if action == "view":
+        menu_id = _menu_for_path(path)
+    else:
+        menu_id = _action_menu_for_path(path)
     if not menu_id:
         return await call_next(request)
     token = request.cookies.get("access_token")
@@ -359,9 +449,10 @@ async def rbac_view_enforcement(request: Request, call_next):
         return await call_next(request)
     if not u:
         return await call_next(request)
-    if not await check_menu_permission(u, menu_id, "view"):
+    if not await check_menu_permission(u, menu_id, action):
         from starlette.responses import JSONResponse
-        return JSONResponse(status_code=403, content={"detail": "Access denied: you do not have permission to view this section"})
+        return JSONResponse(status_code=403, content={
+            "detail": f"Access denied: you do not have '{action}' permission for this section"})
     return await call_next(request)
 
 
