@@ -10,7 +10,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Upload, Plus, Trash2, Users, AlertTriangle, Download, CheckCircle2 } from "lucide-react";
+import { Upload, Plus, Trash2, Users, AlertTriangle, Download, CheckCircle2, Pencil } from "lucide-react";
 
 /**
  * Stage 3 — Candidate Enrollment
@@ -31,8 +31,9 @@ export default function EnrollmentStage({ batches, canWrite }) {
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null); // {valid, errors, counts, capacity_state}
   const [busy, setBusy] = useState(false);
-  // Manual add dialog
+  // Manual add / edit dialog
   const [manualOpen, setManualOpen] = useState(false);
+  const [editId, setEditId] = useState(null); // null = add mode; id = edit mode
   const [manual, setManual] = useState({ name: "", mobile: "", email: "", gender: "", dob: "", aadhaar: "", father_name: "", address: "", job_role: "" });
 
   const activeBatch = useMemo(() => batches.find((b) => b.id === batchId), [batches, batchId]);
@@ -82,12 +83,31 @@ export default function EnrollmentStage({ batches, canWrite }) {
   const doManual = async () => {
     if (!manual.name.trim()) return toast.error("Name is required");
     try {
-      await api.post(`/batches/${batchId}/candidates`, manual);
-      toast.success("Candidate enrolled");
-      setManualOpen(false);
+      if (editId) {
+        await api.patch(`/batches/${batchId}/candidates/${editId}`, manual);
+        toast.success("Candidate updated");
+      } else {
+        await api.post(`/batches/${batchId}/candidates`, manual);
+        toast.success("Candidate enrolled");
+      }
+      setManualOpen(false); setEditId(null);
       setManual({ name: "", mobile: "", email: "", gender: "", dob: "", aadhaar: "", father_name: "", address: "", job_role: "" });
       load();
     } catch (e) { toast.error(formatError(e)); }
+  };
+  const openAdd = () => {
+    setEditId(null);
+    setManual({ name: "", mobile: "", email: "", gender: "", dob: "", aadhaar: "", father_name: "", address: "", job_role: "" });
+    setManualOpen(true);
+  };
+  const openEdit = (c) => {
+    setEditId(c.id);
+    setManual({
+      name: c.name || "", mobile: c.mobile || "", email: c.email || "", gender: c.gender || "",
+      dob: c.dob || "", aadhaar: c.aadhaar || "", father_name: c.father_name || "",
+      address: c.address || "", job_role: c.job_role || "",
+    });
+    setManualOpen(true);
   };
   const removeCandidate = async (cid) => {
     if (!window.confirm("Remove this candidate from the batch?")) return;
@@ -137,7 +157,7 @@ export default function EnrollmentStage({ batches, canWrite }) {
             <input type="file" accept=".csv,.xlsx" onChange={(e) => setFile(e.target.files?.[0] || null)} className="text-xs" data-testid="bm-enroll-file" />
             {canWrite && <Button onClick={doUpload} disabled={!file || busy} className="brand-btn rounded-none gap-1 text-xs" data-testid="bm-enroll-upload"><Upload size={13} /> {busy ? "Parsing…" : "Preview"}</Button>}
             <div className="ml-auto">
-              {canWrite && state?.available > 0 && <Button onClick={() => setManualOpen(true)} className="brand-btn rounded-none gap-1 text-xs" data-testid="bm-enroll-manual-btn"><Plus size={13} /> Add Manually</Button>}
+              {canWrite && state?.available > 0 && <Button onClick={openAdd} className="brand-btn rounded-none gap-1 text-xs" data-testid="bm-enroll-manual-btn"><Plus size={13} /> Add Manually</Button>}
               {canWrite && state?.available === 0 && <span className="text-[11px] text-red-700 italic">Batch full</span>}
             </div>
           </div>
@@ -207,7 +227,12 @@ export default function EnrollmentStage({ batches, canWrite }) {
                     <td className="font-mono">{c.aadhaar || "—"}</td>
                     <td>{c.job_role || "—"}</td>
                     <td><span className="inline-flex items-center px-1.5 py-0.5 bg-emerald-100 border border-emerald-300 text-emerald-800 text-[9px] font-bold uppercase">{c.status || "enrolled"}</span></td>
-                    <td>{canWrite && <Button size="icon" variant="ghost" onClick={() => removeCandidate(c.id)} className="h-7 w-7 rounded-none hover:text-red-700"><Trash2 size={12} /></Button>}</td>
+                    <td>{canWrite && (
+                      <div className="flex items-center gap-1 justify-end">
+                        <Button size="icon" variant="ghost" onClick={() => openEdit(c)} className="h-7 w-7 rounded-none hover:text-[var(--brand)]" data-testid={`bm-enroll-edit-${c.id}`}><Pencil size={12} /></Button>
+                        <Button size="icon" variant="ghost" onClick={() => removeCandidate(c.id)} className="h-7 w-7 rounded-none hover:text-red-700" data-testid={`bm-enroll-del-${c.id}`}><Trash2 size={12} /></Button>
+                      </div>
+                    )}</td>
                   </tr>
                 ))}
               </tbody>
@@ -216,12 +241,12 @@ export default function EnrollmentStage({ batches, canWrite }) {
         </>
       )}
 
-      {/* Manual add dialog */}
-      <Dialog open={manualOpen} onOpenChange={setManualOpen}>
+      {/* Manual add / edit dialog */}
+      <Dialog open={manualOpen} onOpenChange={(o) => { setManualOpen(o); if (!o) setEditId(null); }}>
         <DialogContent className="rounded-none max-w-2xl" data-testid="bm-enroll-manual-dialog">
           <DialogHeader>
-            <DialogTitle className="font-heading">Add Candidate — {activeBatch?.name}</DialogTitle>
-            <DialogDescription className="text-xs">Single candidate manual enrollment. Aadhaar dedupe is enforced per batch.</DialogDescription>
+            <DialogTitle className="font-heading">{editId ? "Edit Candidate" : "Add Candidate"} — {activeBatch?.name}</DialogTitle>
+            <DialogDescription className="text-xs">{editId ? "Update candidate details. Aadhaar must stay unique within the batch." : "Single candidate manual enrollment. Aadhaar dedupe is enforced per batch."}</DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-2 gap-3">
             {[
@@ -237,8 +262,8 @@ export default function EnrollmentStage({ batches, canWrite }) {
             ))}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setManualOpen(false)} className="rounded-none">Cancel</Button>
-            <Button onClick={doManual} className="brand-btn rounded-none" data-testid="bm-enroll-manual-save">Enroll</Button>
+            <Button variant="outline" onClick={() => { setManualOpen(false); setEditId(null); }} className="rounded-none">Cancel</Button>
+            <Button onClick={doManual} className="brand-btn rounded-none" data-testid="bm-enroll-manual-save">{editId ? "Save Changes" : "Enroll"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -720,7 +720,7 @@ export default function BatchManagement() {
                       <td>{proj?.name || b.project_id?.slice(0, 8)}</td>
                       <td>{cen?.name || "—"}</td>
                       <td className="text-right">{num(b.total_beneficiaries)}</td>
-                      <td className="text-right">{num(b.passed_candidates || 0)}</td>
+                      <td className="text-right">{num(b.enrolled || 0)}</td>
                       <td>{b.start_date || "—"}</td>
                       <td>{b.end_date || "—"}</td>
                       <td>

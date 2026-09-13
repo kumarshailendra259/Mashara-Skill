@@ -2226,3 +2226,23 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - Reports tab screenshots confirm all 4 charts render with real data + tooltips work (hover on Aug-18 shows Distance=15, Mobilisation=38)
 - Digest `POST /api/mis/digest/run?force=true` returned `sent:2` to real admin/HR users, filtered out `@x.io` / `@example.com` demo addresses
 - Scheduler task boots on app startup, safely idempotent per ISO week via `mis_digest_log`
+
+---
+
+## Phase 84 (Jun 2026) — Batch Management Data Synchronization Fix
+
+**Problem:** Target Allocation "Allocated" showed 0 for most targets; bulk-created & legacy batches never counted; batch "Enrolled" column always showed 0 (read wrong field `passed_candidates`).
+
+**Root cause:** `batch_targets.allocated/remaining` were drift-prone denormalized counters updated only by create/delete (with target_id). Bulk create never consumed; edits never re-synced; legacy (target_id=None) batches never counted. Frontend Enrolled read `b.passed_candidates`.
+
+**Fix (backend-authoritative, derived from actual DB records):**
+- New helpers: `_target_allocated_single`, `_target_alloc_map`, `_recompute_target_counters`, `_recompute_targets_for_batch`, `_norm_fy/_batch_fy/_target_fy` (server.py ~line 13475).
+- Allocation rule (user-confirmed): a batch counts toward a target if `target_id` matches, OR (no target_id AND Project+Centre+FY match).
+- `list_batch_targets`, `get_batch_target`, `batch_management_financials` now DERIVE allocated/remaining live (always correct after refresh/login). `update_batch_target` shrink-guard & `delete_batch_target` guard use live values.
+- `create_batch` / `update_batch` / `delete_batch` enforce target limit against live remaining + call `_recompute_targets_for_batch`.
+- `batches_bulk_commit` now resolves each row to a matching target (Project+Centre+FY), enforces limit across rows (fit rows created, overflow → `failed[]`), sets `target_id`, persists counters.
+- `/batches` list now returns live `enrolled` count (aggregation on `db.candidates`); `BatchOut.enrolled` added. Frontend Enrolled column fixed to `b.enrolled`.
+- New `POST /api/batch-management/reconcile-allocations` (admin/manager) — non-destructive recompute of all target counters.
+- New `PATCH /api/batches/{bid}/candidates/{cid}` — admin/manager/HR/center_manager can edit enrolled candidate details (Aadhaar uniqueness re-enforced). Frontend EnrollmentStage got per-row Edit (pencil) button + reused dialog.
+
+**Tested (curl, real preview data + smoke screenshot):** A create→alloc↑ ✓ | B bulk (2 fit @100, 3rd overflow→failed, alloc=100/rem=200) ✓ | C enroll→enrolled=1 in list ✓ | D refresh persists (live) ✓ | E duplicate aadhaar→409 ✓ | F exceed capacity→400 ✓ | candidate edit ✓. Frontend BM page renders, KPI cards live.

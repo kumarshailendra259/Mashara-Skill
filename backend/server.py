@@ -11740,6 +11740,9 @@ class BatchOut(BatchIn):
     auto_closed_at: Optional[str] = None
     # Phase 81 · enriched Work Order number for display (from linked work_order_id)
     work_order_no: Optional[str] = None
+    # Live enrolled count (Σ active candidate records for this batch). Computed
+    # on read from db.candidates — never a stored/manual value.
+    enrolled: Optional[int] = 0
 
 
 # Category hourly rates (fixed business config — change here if statutory rates revise).
@@ -11937,9 +11940,20 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
     if wo_ids:
         async for w in db.work_orders.find({"id": {"$in": wo_ids}}, {"_id": 0, "id": 1, "wo_number": 1}):
             wo_map[w["id"]] = w.get("wo_number")
+    # Live enrolled count per batch (from actual active candidate records — never
+    # a stored/display-only value). Single aggregation, no N+1.
+    batch_ids = [d["id"] for d in docs]
+    enrolled_map: dict = {}
+    if batch_ids:
+        async for g in db.candidates.aggregate([
+            {"$match": {"batch_id": {"$in": batch_ids}, "is_deleted": {"$ne": True}}},
+            {"$group": {"_id": "$batch_id", "n": {"$sum": 1}}},
+        ]):
+            enrolled_map[g["_id"]] = g["n"]
     for d in docs:
         if d.get("work_order_id"):
             d["work_order_no"] = wo_map.get(d["work_order_id"])
+        d["enrolled"] = enrolled_map.get(d["id"], 0)
     return [BatchOut(**d) for d in docs]
 
 
@@ -11965,11 +11979,9 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
     # Phase 81: validate optional Work Order linkage (must exist).
     if body.work_order_id and not await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "work_order_id does not exist")
-    # Phase 37: target-gated creation. If target_id is provided, we atomically
-    # consume `total_beneficiaries` (batch capacity) from the target's remaining
-    # counter. Insufficient target → 400. Legacy call without target_id still
-    # works (grandfathered).
-    consumed_target = None
+    # Phase 37/84: target-gated creation. If target_id is provided we validate
+    # coherence and enforce the target limit against the LIVE allocated capacity
+    # (derived from actual batches — never a drift-prone counter).
     if body.target_id:
         tgt = await db.batch_targets.find_one({"id": body.target_id}, {"_id": 0})
         if not tgt:
@@ -11979,8 +11991,13 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
             raise HTTPException(400, "Batch project_id must match the target's project_id")
         if tgt.get("center_id") and body.center_id and tgt["center_id"] != body.center_id:
             raise HTTPException(400, "Batch center_id must match the target's center_id")
-        # Atomic consume
-        consumed_target = await _consume_target(body.target_id, int(body.total_beneficiaries or 0))
+        cap = int(body.total_beneficiaries or 0)
+        if cap <= 0:
+            raise HTTPException(400, "Batch capacity must be > 0 to consume from target")
+        live_alloc = await _target_allocated_single(tgt)
+        remaining = int(tgt.get("total_target") or 0) - live_alloc
+        if cap > remaining:
+            raise HTTPException(400, f"Insufficient target remaining ({remaining}) for batch capacity {cap}")
     doc = body.model_dump()
     # Phase 38: authoritative rate calculation. Frontend-supplied rates ignored.
     # Rate calc runs only when the caller provided both FY + Category.
@@ -11999,13 +12016,9 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
         )
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
-    try:
-        await db.batches.insert_one(doc)
-    except Exception:
-        # Roll back the target consumption if the batch insert fails.
-        if consumed_target and body.target_id:
-            await _release_target(body.target_id, int(body.total_beneficiaries or 0))
-        raise
+    await db.batches.insert_one(doc)
+    # Re-sync every target this batch contributes to (explicit + key-matched).
+    await _recompute_targets_for_batch(doc)
     return BatchOut(**doc)
 
 
@@ -12075,10 +12088,31 @@ async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin
         )
     # Keep locks in sync with lifecycle_status if it changed via PUT.
     upd.update(_lifecycle_locks(upd.get("lifecycle_status") or "Draft"))
+    # Phase 84: enforce target limit against LIVE allocation when a target is
+    # linked (or being changed). Exclude THIS batch's own current contribution so
+    # editing capacity doesn't double-count against itself.
+    new_tid = body.target_id
+    if new_tid:
+        tgt = await db.batch_targets.find_one({"id": new_tid}, {"_id": 0})
+        if not tgt:
+            raise HTTPException(400, "target_id does not exist")
+        if tgt.get("project_id") and tgt["project_id"] != body.project_id:
+            raise HTTPException(400, "Batch project_id must match the target's project_id")
+        if tgt.get("center_id") and body.center_id and tgt["center_id"] != body.center_id:
+            raise HTTPException(400, "Batch center_id must match the target's center_id")
+        cap = int(body.total_beneficiaries or 0)
+        live_alloc = await _target_allocated_single(tgt, exclude_batch_id=bid)
+        remaining = int(tgt.get("total_target") or 0) - live_alloc
+        if cap > remaining:
+            raise HTTPException(400, f"Insufficient target remaining ({remaining}) for batch capacity {cap}")
     res = await db.batches.find_one_and_update({"id": bid}, {"$set": upd}, return_document=True)
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
+    # Re-sync counters for both the OLD and NEW target linkage (capacity, target
+    # or FY/centre may have changed).
+    await _recompute_targets_for_batch(existing)
+    await _recompute_targets_for_batch(res)
     return BatchOut(**res)
 
 
@@ -12087,15 +12121,15 @@ async def delete_batch(bid: str, _=Depends(require_role("admin"))):
     # Cascade delete: auto-generated transactions (milestone income + recovery + assessment
     # fee + TDS) AND batch_payments — otherwise Milestone Income dashboard keeps
     # showing orphaned totals from deleted batches.
-    existing = await db.batches.find_one({"id": bid}, {"_id": 0, "target_id": 1, "total_beneficiaries": 1})
+    existing = await db.batches.find_one({"id": bid}, {"_id": 0})
     txn_del = await db.transactions.delete_many({"batch_id": bid})
     await db.batch_payments.delete_many({"batch_id": bid})
     r = await db.batches.delete_one({"id": bid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
-    # Phase 37: release the seat count back to the target pool.
-    if existing and existing.get("target_id"):
-        await _release_target(existing["target_id"], int(existing.get("total_beneficiaries") or 0))
+    # Phase 84: release seats by recomputing every affected target from live records.
+    if existing:
+        await _recompute_targets_for_batch(existing)
     return {"ok": True, "transactions_deleted": txn_del.deleted_count}
 
 
@@ -13017,8 +13051,15 @@ async def list_batch_targets(
             wo_pcf[(w.get("project_id"), cid, wfy)] = round(wo_pcf.get((w.get("project_id"), cid, wfy), 0) + val, 2)
             wo_center[cid] = round(wo_center.get(cid, 0) + val, 2)
     results = []
+    alloc_map = await _target_alloc_map(docs)
     for d in docs:
         enriched = await _enrich_target(d)
+        # Phase 84 — allocated/remaining are DERIVED live from actual batches, so
+        # they are always correct after refresh/login regardless of counter drift.
+        allocated = int(alloc_map.get(d.get("id"), 0))
+        total = int(d.get("total_target") or 0)
+        enriched["allocated"] = allocated
+        enriched["remaining"] = total - allocated
         tfy = (d.get("fy") or d.get("target_year") or "").strip()
         enriched["work_order_value"] = wo_pcf.get((d.get("project_id"), d.get("center_id"), tfy), 0)
         enriched["center_wo_value"] = wo_center.get(d.get("center_id"), 0)
@@ -13030,15 +13071,20 @@ async def list_batch_targets(
 async def get_batch_target(tid: str, _=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
     doc = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
     if not doc: raise HTTPException(404, "Target not found")
-    return BatchTargetOut(**await _enrich_target(doc))
+    enriched = await _enrich_target(doc)
+    allocated = await _target_allocated_single(doc)
+    total = int(doc.get("total_target") or 0)
+    enriched["allocated"] = allocated
+    enriched["remaining"] = total - allocated
+    return BatchTargetOut(**enriched)
 
 
 @api.patch("/batch-targets/{tid}", response_model=BatchTargetOut)
 async def update_batch_target(tid: str, body: BatchTargetIn, _=Depends(require_role(*TARGET_ADMIN_ROLES))):
     existing = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
     if not existing: raise HTTPException(404, "Target not found")
-    # Can't shrink total_target below already-allocated portion.
-    allocated = int(existing.get("allocated") or 0)
+    # Can't shrink total_target below already-allocated portion (live-derived).
+    allocated = await _target_allocated_single(existing)
     if body.total_target < allocated:
         raise HTTPException(400, f"total_target cannot be less than already allocated ({allocated})")
     calc = sum(int(j.get("count") or 0) for j in (body.job_role_targets or []))
@@ -13050,14 +13096,17 @@ async def update_batch_target(tid: str, body: BatchTargetIn, _=Depends(require_r
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     res = await db.batch_targets.find_one_and_update({"id": tid}, {"$set": upd}, return_document=True)
     res.pop("_id", None)
-    return BatchTargetOut(**await _enrich_target(res))
+    enriched = await _enrich_target(res)
+    enriched["allocated"] = allocated
+    enriched["remaining"] = body.total_target - allocated
+    return BatchTargetOut(**enriched)
 
 
 @api.delete("/batch-targets/{tid}", status_code=204)
 async def delete_batch_target(tid: str, _=Depends(require_role("admin"))):
     existing = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
     if not existing: raise HTTPException(404, "Target not found")
-    if int(existing.get("allocated") or 0) > 0:
+    if await _target_allocated_single(existing) > 0:
         raise HTTPException(400, "Cannot delete a target that has batches attached. Delete/detach batches first.")
     await db.batch_targets.delete_one({"id": tid})
     return Response(status_code=204)
@@ -13400,14 +13449,18 @@ async def batch_management_financials(
         g["total_wo_value"] = round(g["total_wo_value"] + float(d.get("work_order_value") or 0), 2)
         g["pbg_amount"] = round(g["pbg_amount"] + float(d.get("pbg_amount") or 0), 2)
 
-    # fold matching targets into each group
+    # fold matching targets into each group — allocated/remaining are DERIVED
+    # live from actual batch capacities (Phase 84), never stored counters.
+    alloc_map = await _target_alloc_map(targets)
     for key, g in groups.items():
         pid, cid, gfy = key
         for t in targets:
             if t.get("project_id") == pid and t.get("center_id") == cid and tgt_fy(t) == gfy:
-                g["total_target"] += int(t.get("total_target") or 0)
-                g["allocated"] += int(t.get("allocated") or 0)
-                g["remaining"] += int(t.get("remaining") or 0)
+                ttotal = int(t.get("total_target") or 0)
+                talloc = int(alloc_map.get(t.get("id"), 0))
+                g["total_target"] += ttotal
+                g["allocated"] += talloc
+                g["remaining"] += (ttotal - talloc)
     for g in groups.values():
         g["utilization_pct"] = round((g["allocated"] / g["total_target"]) * 100) if g["total_target"] else 0
 
@@ -13464,6 +13517,115 @@ async def _release_target(tid: str, amount: int) -> None:
         {"$inc": {"allocated": -amount, "remaining": amount},
          "$set": {"updated_at": datetime.now(timezone.utc).isoformat()}},
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 84 (Jun 2026) — AUTHORITATIVE allocation from actual batch records.
+# The stored `batch_targets.allocated`/`remaining` counters used to drift because
+# bulk-create never consumed and edits never re-synced. We now always DERIVE
+# allocated from live batch capacities. A batch counts toward a target when:
+#   • it has target_id == target.id  (explicit link), OR
+#   • it has NO target_id but its Project + Centre + FY match the target
+#     (grandfathered / bulk-created batches — user-confirmed rule).
+# Deleted batches are physically removed, so they self-release automatically.
+# ---------------------------------------------------------------------------
+
+def _norm_fy(v) -> str:
+    return (str(v or "")).strip()
+
+
+def _batch_fy(b: dict) -> str:
+    return _norm_fy(b.get("fy_year") or b.get("target_year"))
+
+
+def _target_fy(t: dict) -> str:
+    return _norm_fy(t.get("fy") or t.get("target_year"))
+
+
+async def _target_allocated_single(t: dict, exclude_batch_id: Optional[str] = None) -> int:
+    """Live allocated capacity for ONE target, summed from actual batches."""
+    tid = t.get("id")
+    proj = t.get("project_id")
+    ctr = t.get("center_id")
+    fy = _target_fy(t)
+    total = 0
+    cur = db.batches.find(
+        {"$or": [
+            {"target_id": tid},
+            {"target_id": {"$in": [None, ""]}, "project_id": proj, "center_id": ctr},
+        ]},
+        {"_id": 0, "id": 1, "target_id": 1, "fy_year": 1, "target_year": 1, "total_beneficiaries": 1},
+    )
+    async for b in cur:
+        if exclude_batch_id and b.get("id") == exclude_batch_id:
+            continue
+        if not b.get("target_id") and _batch_fy(b) != fy:
+            continue
+        total += int(b.get("total_beneficiaries") or 0)
+    return int(total)
+
+
+async def _target_alloc_map(targets: List[dict]) -> dict:
+    """Bulk version — returns {target_id: allocated} for a list of targets in one
+    batch scan. Each legacy (no target_id) batch is attributed to the FIRST target
+    whose Project+Centre+FY key matches (deterministic, no double-count)."""
+    if not targets:
+        return {}
+    proj_ids = list({t.get("project_id") for t in targets if t.get("project_id")})
+    q: dict = {"project_id": {"$in": proj_ids}} if proj_ids else {}
+    batches = await db.batches.find(
+        q, {"_id": 0, "id": 1, "target_id": 1, "project_id": 1, "center_id": 1,
+            "fy_year": 1, "target_year": 1, "total_beneficiaries": 1},
+    ).to_list(200000)
+    alloc = {t["id"]: 0 for t in targets}
+    id_set = set(alloc.keys())
+    key_index: dict = {}
+    for t in targets:
+        key = (t.get("project_id"), t.get("center_id"), _target_fy(t))
+        key_index.setdefault(key, t["id"])
+    for b in batches:
+        cap = int(b.get("total_beneficiaries") or 0)
+        tid = b.get("target_id")
+        if tid and tid in id_set:
+            alloc[tid] += cap
+        elif not tid:
+            mt = key_index.get((b.get("project_id"), b.get("center_id"), _batch_fy(b)))
+            if mt:
+                alloc[mt] += cap
+    return alloc
+
+
+async def _recompute_target_counters(tid: str) -> None:
+    """Persist allocated/remaining on ONE target from live batch records."""
+    if not tid:
+        return
+    t = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        return
+    allocated = await _target_allocated_single(t)
+    total = int(t.get("total_target") or 0)
+    await db.batch_targets.update_one(
+        {"id": tid},
+        {"$set": {"allocated": allocated, "remaining": total - allocated,
+                  "updated_at": datetime.now(timezone.utc).isoformat()}},
+    )
+
+
+async def _recompute_targets_for_batch(b: dict) -> None:
+    """Recompute counters for every target affected by this batch — its explicit
+    target_id plus any target sharing the same Project+Centre+FY key."""
+    tids: set = set()
+    if b.get("target_id"):
+        tids.add(b["target_id"])
+    fy = _batch_fy(b)
+    async for t in db.batch_targets.find(
+        {"project_id": b.get("project_id"), "center_id": b.get("center_id")},
+        {"_id": 0, "id": 1, "fy": 1, "target_year": 1},
+    ):
+        if _target_fy(t) == fy:
+            tids.add(t["id"])
+    for tid in tids:
+        await _recompute_target_counters(tid)
 
 
 # ============================================================================
@@ -13670,6 +13832,76 @@ async def remove_batch_candidate(bid: str, cid: str, user=Depends(require_role(*
     await db.candidates.update_one({"id": cid}, {"$set": {"is_deleted": True,
         "deleted_at": datetime.now(timezone.utc).isoformat()}})
     return Response(status_code=204)
+
+
+class CandidateDetailIn(BaseModel):
+    """Editable candidate detail fields. All optional — only sent fields update."""
+    model_config = ConfigDict(extra="ignore")
+    name: Optional[str] = None
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    gender: Optional[str] = None
+    dob: Optional[str] = None
+    aadhaar: Optional[str] = None
+    father_name: Optional[str] = None
+    address: Optional[str] = None
+    job_role: Optional[str] = None
+
+
+@api.patch("/batches/{bid}/candidates/{cid}")
+async def update_batch_candidate(bid: str, cid: str, body: CandidateDetailIn,
+                                 user=Depends(require_role(*ENROLL_ROLES))):
+    """Edit an enrolled candidate's detail fields. Admin/manager/HR always allowed;
+    center_manager restricted to own centers. Aadhaar uniqueness within the batch
+    is re-enforced when it changes."""
+    c = await db.candidates.find_one({"id": cid, "batch_id": bid, "is_deleted": {"$ne": True}}, {"_id": 0})
+    if not c: raise HTTPException(404, "Candidate not found in this batch")
+    if user.get("role") == "center_manager":
+        b = await db.batches.find_one({"id": bid}, {"_id": 0, "center_id": 1})
+        if (b or {}).get("center_id") not in set(user.get("assigned_center_ids") or []):
+            raise HTTPException(403, "Center manager can only edit own-batch candidates")
+    upd = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
+    if not upd:
+        return c
+    if "name" in upd and not str(upd["name"]).strip():
+        raise HTTPException(400, "Name cannot be empty")
+    new_aadhaar = (upd.get("aadhaar") or "").strip()
+    if new_aadhaar and new_aadhaar != (c.get("aadhaar") or ""):
+        dup = await db.candidates.find_one(
+            {"batch_id": bid, "aadhaar": new_aadhaar, "is_deleted": {"$ne": True}, "id": {"$ne": cid}},
+            {"_id": 0, "id": 1})
+        if dup:
+            raise HTTPException(409, f"Candidate with Aadhaar {new_aadhaar} already exists in this batch")
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+    upd["updated_by"] = user["id"]
+    await db.candidates.update_one({"id": cid}, {"$set": upd})
+    return await db.candidates.find_one({"id": cid}, {"_id": 0})
+
+
+@api.post("/batch-management/reconcile-allocations")
+async def reconcile_batch_allocations(_=Depends(require_role("admin", "manager", "senior_manager"))):
+    """One-time / on-demand reconciliation. Recomputes every target's
+    allocated/remaining from ACTUAL batch capacities (non-destructive — no rows
+    are ever deleted). Enrolled counts are always live, so nothing to persist
+    there. Returns a summary of what changed."""
+    targets = await db.batch_targets.find({}, {"_id": 0}).to_list(5000)
+    alloc_map = await _target_alloc_map(targets)
+    changed = 0
+    for t in targets:
+        allocated = int(alloc_map.get(t["id"], 0))
+        total = int(t.get("total_target") or 0)
+        remaining = total - allocated
+        if int(t.get("allocated") or 0) != allocated or int(t.get("remaining") or 0) != remaining:
+            changed += 1
+        await db.batch_targets.update_one(
+            {"id": t["id"]},
+            {"$set": {"allocated": allocated, "remaining": remaining,
+                      "updated_at": datetime.now(timezone.utc).isoformat()}},
+        )
+    total_enrolled = await db.candidates.count_documents({"is_deleted": {"$ne": True}, "batch_id": {"$ne": None}})
+    return {"targets_reconciled": len(targets), "targets_changed": changed,
+            "active_enrollments": total_enrolled}
+
 
 
 # ============================================================================
@@ -14306,6 +14538,20 @@ async def batches_bulk_commit(payload: dict = Body(...),
     now = datetime.now(timezone.utc).isoformat()
     inserted = 0
     failed: List[dict] = []
+    # Phase 84 — bulk create MUST use the SAME target-allocation logic as normal
+    # create. Resolve each row to a matching target (Project+Centre+FY) and
+    # enforce the target limit against LIVE remaining, tracking consumption across
+    # rows in this file so the total can't overshoot. Rows that don't fit → failed.
+    all_targets = await db.batch_targets.find({}, {"_id": 0}).to_list(5000)
+    alloc_map = await _target_alloc_map(all_targets)
+    remaining_by_tid: dict = {
+        t["id"]: int(t.get("total_target") or 0) - int(alloc_map.get(t["id"], 0))
+        for t in all_targets
+    }
+    key_targets: dict = {}
+    for t in all_targets:
+        key_targets.setdefault((t.get("project_id"), t.get("center_id"), _target_fy(t)), t["id"])
+    affected: set = set()
     # Re-validate against existing names atomically to handle races between preview and commit.
     for r in rows:
         try:
@@ -14313,6 +14559,18 @@ async def batches_bulk_commit(payload: dict = Body(...),
             if await db.batches.find_one({"name": r.get("name")}, {"_id": 0, "id": 1}):
                 failed.append({"row": r.get("row"), "reason": f"batch_name '{r.get('name')}' already exists"})
                 continue
+            cap = int(r.get("total_beneficiaries") or 0)
+            # Resolve target + enforce limit (only when a matching target exists).
+            row_fy = _norm_fy(r.get("fy_year"))
+            tid = key_targets.get((r.get("project_id"), r.get("center_id"), row_fy))
+            if tid:
+                rem = remaining_by_tid.get(tid, 0)
+                if cap > rem:
+                    failed.append({"row": r.get("row"),
+                                   "reason": f"Would exceed target remaining ({rem}) for capacity {cap}"})
+                    continue
+                remaining_by_tid[tid] = rem - cap
+                affected.add(tid)
             # Server re-computes the rate — never trust preview values.
             rc = None
             if r.get("fy_year") and r.get("category"):
@@ -14323,15 +14581,16 @@ async def batches_bulk_commit(payload: dict = Body(...),
                 "project_id": r.get("project_id"),
                 "center_id": r.get("center_id"),
                 "company_id": r.get("company_id"),
+                "target_id": tid,
                 "partner_ids": [], "job_roles": [],
                 "start_date": r.get("start_date") or "", "end_date": r.get("end_date") or "",
-                "total_beneficiaries": int(r.get("total_beneficiaries") or 0),
+                "total_beneficiaries": cap,
                 "description": "", "closed": False,
                 "lifecycle_status": "Draft",
                 "state": "", "territory": "",
                 "target_year": r.get("fy_year") or "",
                 "training_type": r.get("training_type") or "",
-                "total_target": int(r.get("total_beneficiaries") or 0),
+                "total_target": cap,
                 # WO Allocation
                 "fy_year": r.get("fy_year") or "",
                 "category": r.get("category") or "",
@@ -14352,6 +14611,9 @@ async def batches_bulk_commit(payload: dict = Body(...),
             inserted += 1
         except Exception as e:
             failed.append({"row": r.get("row"), "reason": str(e)})
+    # Persist the fresh allocated/remaining on every target this batch touched.
+    for tid in affected:
+        await _recompute_target_counters(tid)
     return {"inserted": inserted, "failed": failed, "total": len(rows)}
 
 
