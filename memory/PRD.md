@@ -2246,3 +2246,16 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - New `PATCH /api/batches/{bid}/candidates/{cid}` — admin/manager/HR/center_manager can edit enrolled candidate details (Aadhaar uniqueness re-enforced). Frontend EnrollmentStage got per-row Edit (pencil) button + reused dialog.
 
 **Tested (curl, real preview data + smoke screenshot):** A create→alloc↑ ✓ | B bulk (2 fit @100, 3rd overflow→failed, alloc=100/rem=200) ✓ | C enroll→enrolled=1 in list ✓ | D refresh persists (live) ✓ | E duplicate aadhaar→409 ✓ | F exceed capacity→400 ✓ | candidate edit ✓. Frontend BM page renders, KPI cards live.
+
+## Phase 84.1 (Jun 2026) — Legacy Batch WO Linking + Per-row Edit/Delete
+
+**User ask (Hinglish):** Legacy batches ko update karne ka button; "Incomplete WO" jabki WO create ho chuka; side me edit option.
+
+**Backend:** New `POST /api/batches/reconcile-work-orders` (admin/manager/senior_manager/center_manager). Auto-links every batch with NO work_order_id to the uniquely-matching ACTIVE Work Order (Project+Centre, +FY if batch has one). Back-fills batch fy_year from WO, and category when WO has a single distinct course category, then recomputes rate/WO value. Non-destructive (only fills missing fields). Center managers scoped to own centers. Returns {linked, ambiguous, no_match, total_unlinked}. Verified: created matching WO → reconcile linked 3 batches, category='I' & final_rate computed.
+
+**Frontend (BatchManagement.jsx):**
+- `saveBatch` now branches create (POST) vs edit (PUT `/batches/{id}`); edit mode relaxes the Target-required rule (legacy batches keep no target).
+- New per-row **Edit (pencil)** + **Delete (trash)** buttons in a new Actions column (testids `bm-batch-edit-{id}`, `bm-batch-del-{id}`).
+- New **"Fix Legacy WO"** header button (`bm-batch-reconcile-wo-btn`) → calls reconcile endpoint, toasts summary, reloads.
+- "Incomplete WO" badge now keys off `!b.work_order_id` (matches user mental model) instead of `!fy_year||!category`.
+- Dialog title/save label become "Edit Batch"/"Save Changes" in edit mode.

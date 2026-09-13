@@ -15,7 +15,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Target, Layers, Users, ClipboardList, GraduationCap, BadgeCheck,
   Plus, Trash2, Edit3, Search, Info, LockKeyhole, Upload, Download,
-  CheckCircle2, AlertTriangle, Eye, FileText,
+  CheckCircle2, AlertTriangle, Eye, FileText, Link2, Wrench,
 } from "lucide-react";
 import { inr } from "@/lib/i18n";
 import WorkOrderFinancials from "@/components/batch/WorkOrderFinancials";
@@ -351,18 +351,51 @@ export default function BatchManagement() {
     });
     setSelectedTargetForBatch(t);
   };
+  const openEditBatch = (b) => {
+    // Prefill the dialog with the existing batch for editing (id present ⇒ edit mode).
+    setBEdit({ ...EMPTY_BATCH, ...b });
+    const t = b.target_id ? targets.find((x) => x.id === b.target_id) : null;
+    setSelectedTargetForBatch(t || null);
+    setBOpen(true);
+  };
+  const removeBatch = async (b) => {
+    if (!window.confirm(`Delete batch "${b.name}"? This releases its target allocation and cannot be undone.`)) return;
+    try {
+      await api.delete(`/batches/${b.id}`);
+      toast.success("Batch deleted");
+      loadBatches(); loadTargets();
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  const [woReconciling, setWoReconciling] = useState(false);
+  const reconcileLegacyWO = async () => {
+    if (!window.confirm("Auto-link all batches that have no Work Order to a matching active Work Order (same Project + Centre + FY)? Only missing fields are filled — nothing is overwritten.")) return;
+    setWoReconciling(true);
+    try {
+      const r = await api.post("/batches/reconcile-work-orders");
+      const d = r.data || {};
+      toast.success(`Linked ${d.linked} batch(es). ${d.ambiguous} ambiguous, ${d.no_match} without a matching WO.`);
+      loadBatches(); loadTargets();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setWoReconciling(false); }
+  };
   const saveBatch = async () => {
-    if (!bEdit.target_id) return toast.error("Select a Target first (Stage 1) — batches must be created against an allocated target");
+    const isEdit = !!bEdit.id;
+    if (!isEdit && !bEdit.target_id) return toast.error("Select a Target first (Stage 1) — batches must be created against an allocated target");
     if (!bEdit.project_id) return toast.error("Project is required");
     if (!bEdit.name?.trim()) return toast.error("Batch ID / Name is required");
     if (!bEdit.total_beneficiaries || Number(bEdit.total_beneficiaries) <= 0) return toast.error("Batch capacity must be > 0");
-    if (selectedTargetForBatch && Number(bEdit.total_beneficiaries) > (selectedTargetForBatch.remaining || 0)) {
+    if (!isEdit && selectedTargetForBatch && Number(bEdit.total_beneficiaries) > (selectedTargetForBatch.remaining || 0)) {
       return toast.error(`Batch capacity exceeds target remaining (${selectedTargetForBatch.remaining})`);
     }
     setBSaving(true);
     try {
-      await api.post("/batches", bEdit);
-      toast.success("Batch created & target consumed");
+      if (isEdit) {
+        await api.put(`/batches/${bEdit.id}`, bEdit);
+        toast.success("Batch updated");
+      } else {
+        await api.post("/batches", bEdit);
+        toast.success("Batch created & target consumed");
+      }
       setBOpen(false); setBEdit(null); setSelectedTargetForBatch(null);
       loadBatches(); loadTargets();
     } catch (e) { toast.error(formatError(e)); }
@@ -683,6 +716,18 @@ export default function BatchManagement() {
                   <Upload size={13} /> Bulk Create
                 </Button>
               )}
+              {canManageBatches && (
+                <Button
+                  onClick={reconcileLegacyWO}
+                  disabled={woReconciling}
+                  variant="outline"
+                  className="rounded-none gap-1"
+                  title="Auto-link legacy batches to matching active Work Orders"
+                  data-testid="bm-batch-reconcile-wo-btn"
+                >
+                  <Wrench size={13} /> {woReconciling ? "Linking…" : "Fix Legacy WO"}
+                </Button>
+              )}
               {!canManageBatches && (
                 <span className="text-[11px] text-[var(--muted)] italic" title="Your role can view batches but not create them.">Read-only role</span>
               )}
@@ -703,12 +748,13 @@ export default function BatchManagement() {
                   <th>Batch</th><th>Project</th><th>Center</th>
                   <th className="text-right">Capacity</th><th className="text-right">Enrolled</th>
                   <th>Start</th><th>End</th><th>Status</th><th>Work Order</th><th>Target</th>
+                  <th className="text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {bLoading && <tr><td colSpan={10} className="p-4 text-center text-[var(--muted)]">Loading…</td></tr>}
+                {bLoading && <tr><td colSpan={11} className="p-4 text-center text-[var(--muted)]">Loading…</td></tr>}
                 {!bLoading && filteredBatches.length === 0 && (
-                  <tr><td colSpan={10} className="p-8 text-center text-[var(--muted)]">No batches match your filters.</td></tr>
+                  <tr><td colSpan={11} className="p-8 text-center text-[var(--muted)]">No batches match your filters.</td></tr>
                 )}
                 {filteredBatches.map((b) => {
                   const proj = entProjects.find((p) => p.id === b.project_id);
@@ -739,10 +785,18 @@ export default function BatchManagement() {
                             <LockKeyhole size={9} /> Legacy
                           </span>
                         )}
-                        {(!b.fy_year || !b.category) && (
-                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 mt-1 bg-amber-100 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase" title="FY / Category / Rate not set — edit batch to complete Work Order Allocation.">
+                        {!b.work_order_id && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 mt-1 bg-amber-100 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase" title="No Work Order linked — click 'Fix Legacy WO' or Edit to link one.">
                             Incomplete WO
                           </span>
+                        )}
+                      </td>
+                      <td className="text-right">
+                        {canManageBatches && (
+                          <div className="inline-flex items-center gap-1 justify-end">
+                            <Button size="icon" variant="ghost" onClick={() => openEditBatch(b)} className="h-7 w-7 rounded-none hover:text-[var(--brand)]" title="Edit batch" data-testid={`bm-batch-edit-${b.id}`}><Edit3 size={13} /></Button>
+                            <Button size="icon" variant="ghost" onClick={() => removeBatch(b)} className="h-7 w-7 rounded-none hover:text-red-700" title="Delete batch" data-testid={`bm-batch-del-${b.id}`}><Trash2 size={13} /></Button>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -889,8 +943,8 @@ export default function BatchManagement() {
       <Dialog open={bOpen} onOpenChange={(o) => !o && (setBOpen(false), setBEdit(null), setSelectedTargetForBatch(null))}>
         <DialogContent className="rounded-none max-w-4xl max-h-[92vh] overflow-y-auto" data-testid="bm-batch-dialog">
           <DialogHeader>
-            <DialogTitle className="font-heading">Create New Batch</DialogTitle>
-            <DialogDescription className="text-xs">Batches consume seats from an allocated target. Capacity cannot exceed the target&apos;s remaining seats.</DialogDescription>
+            <DialogTitle className="font-heading">{bEdit?.id ? "Edit Batch" : "Create New Batch"}</DialogTitle>
+            <DialogDescription className="text-xs">{bEdit?.id ? "Update batch details, link a Work Order, and complete the FY / Category to fix the rate." : "Batches consume seats from an allocated target. Capacity cannot exceed the target's remaining seats."}</DialogDescription>
           </DialogHeader>
           {bEdit && (
             <div className="space-y-4">
@@ -1068,7 +1122,7 @@ export default function BatchManagement() {
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => { setBOpen(false); setBEdit(null); setSelectedTargetForBatch(null); }} className="rounded-none">Cancel</Button>
-            <Button onClick={saveBatch} disabled={bSaving} className="brand-btn rounded-none" data-testid="bm-batch-save">{bSaving ? "Creating…" : "Create Batch"}</Button>
+            <Button onClick={saveBatch} disabled={bSaving} className="brand-btn rounded-none" data-testid="bm-batch-save">{bSaving ? "Saving…" : (bEdit?.id ? "Save Changes" : "Create Batch")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -13903,6 +13903,82 @@ async def reconcile_batch_allocations(_=Depends(require_role("admin", "manager",
             "active_enrollments": total_enrolled}
 
 
+@api.post("/batches/reconcile-work-orders")
+async def reconcile_batch_work_orders(
+    user=Depends(require_role("admin", "manager", "senior_manager", "center_manager")),
+):
+    """Legacy batch fixer — auto-links every batch that has NO Work Order to the
+    uniquely-matching ACTIVE Work Order (same Project + Centre, and FY if the batch
+    already has one). When linked it also back-fills the batch FY from the WO and,
+    if the WO carries a single course category, the batch category — so the rate can
+    recompute and the "Incomplete WO" flag clears. Non-destructive: only fills
+    missing fields, never overwrites an existing WO link. Returns a summary."""
+    # Center managers only reconcile their own centers.
+    scope = None
+    if user.get("role") == "center_manager":
+        scope = set(user.get("assigned_center_ids") or [])
+    wos = await db.work_orders.find({}, {"_id": 0}).to_list(5000)
+    active_wos = [w for w in wos if _wo_effective_status(w) == "active"]
+    q = {"$or": [{"work_order_id": {"$in": [None, ""]}}, {"work_order_id": {"$exists": False}}]}
+    batches = await db.batches.find(q, {"_id": 0}).to_list(100000)
+    linked = 0
+    ambiguous = 0
+    no_match = 0
+    touched_targets: set = set()
+    for b in batches:
+        if scope is not None and b.get("center_id") not in scope:
+            continue
+        b_fy = _batch_fy(b)
+        cands = [
+            w for w in active_wos
+            if w.get("project_id") == b.get("project_id")
+            and w.get("center_id") == b.get("center_id")
+            and (not b_fy or (w.get("fy") or "") == b_fy)
+        ]
+        if len(cands) == 0:
+            no_match += 1
+            continue
+        if len(cands) > 1:
+            ambiguous += 1
+            continue
+        wo = cands[0]
+        upd = {"work_order_id": wo["id"], "updated_at": datetime.now(timezone.utc).isoformat()}
+        if not b.get("fy_year"):
+            upd["fy_year"] = wo.get("fy") or ""
+        # Back-fill category only when the WO has exactly one distinct category.
+        if not b.get("category"):
+            cats = list({(c.get("category") or "").strip() for c in (wo.get("courses") or []) if (c.get("category") or "").strip()})
+            if len(cats) == 1:
+                upd["category"] = cats[0]
+        # Recompute rate + WO value if FY + Category are now both known.
+        fy_final = upd.get("fy_year") or b.get("fy_year")
+        cat_final = upd.get("category") or b.get("category")
+        if fy_final and cat_final:
+            is_lwe = b.get("is_lwe")
+            if is_lwe is None and b.get("center_id"):
+                c = await db.centers.find_one({"id": b["center_id"]}, {"_id": 0, "is_lwe": 1})
+                is_lwe = bool(c.get("is_lwe")) if c else False
+            try:
+                rc = await _compute_wo_rate(fy_final, cat_final, bool(is_lwe))
+                upd["is_lwe"] = rc["is_lwe"]
+                upd["base_rate"] = rc["base_rate"]
+                upd["final_rate"] = rc["final_rate"]
+                upd["work_order_value"] = round(
+                    int(b.get("num_candidates") or 0) * rc["final_rate"] * float(b.get("job_role_hours") or 0), 2)
+            except Exception:
+                pass
+        await db.batches.update_one({"id": b["id"]}, {"$set": upd})
+        linked += 1
+        if b.get("target_id"):
+            touched_targets.add(b["target_id"])
+    for tid in touched_targets:
+        await _recompute_target_counters(tid)
+    return {"linked": linked, "ambiguous": ambiguous, "no_match": no_match,
+            "total_unlinked": len(batches)}
+
+
+
+
 
 # ============================================================================
 # ==========  BATCH MANAGEMENT · Stage 4 · Attendance Grid  ==================
