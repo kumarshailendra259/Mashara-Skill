@@ -2259,3 +2259,23 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - New **"Fix Legacy WO"** header button (`bm-batch-reconcile-wo-btn`) → calls reconcile endpoint, toasts summary, reloads.
 - "Incomplete WO" badge now keys off `!b.work_order_id` (matches user mental model) instead of `!fy_year||!category`.
 - Dialog title/save label become "Edit Batch"/"Save Changes" in edit mode.
+
+## Phase 85 (Jun 2026) — Batch Management Dashboard Redesign (Premium SaaS)
+
+**Scope:** UI/UX only — no DB/API/business-logic changes (per user). Reference mockup provided.
+
+**New component:** `/app/frontend/src/components/batch/BatchDashboard.jsx` (self-contained, all data via props). Renders:
+- Header: title + subtitle "Complete Batch Lifecycle" + lifecycle breadcrumb + "Quick Actions" dropdown (Work Order / Allocate Target / Create Batch / Add Candidate / Record Placement).
+- 6 KPI cards (Total Target, Allocated, Remaining, Utilization, Active Centres, Active Batches) — derived from `targets` scoped by the global filter bar (project/center/fy/q), so they respond to filters and always reflect real targets (not WO-dependent). Clickable → jump to stage.
+- 4 financial KPI cards from `/batch-management/financials` cards (INR).
+- Global filter bar (search + Project/Centre/FY/WO Status + Clear All + Export CSV) wired to `woFilters` (drives financials fetch).
+- 4-col analytics (recharts): Target Utilization donut, Centre-wise WO Value horizontal bar (click bar → filter centre), Batch Lifecycle 8-tile widget, Pending Actions (clickable → stage).
+- Attention Required alerts (unallocated targets → Allocate).
+- Work Order Financial Summary table: sticky header, sortable columns, pagination (8/pg), utilization pill coloring (red/amber/green), status badges (Not Started/At Risk/In Progress/On Track/Completed), View → right-side slide-over drawer (Sheet) 'Work Order Details' + quick actions, More menu.
+- Target Allocation (By Centre) table with progress bars + status (Critical/Attention/In Progress/On Track).
+
+**BatchManagement.jsx changes:** replaced old header+KPI strip+`<WorkOrderFinancials>` with `<BatchDashboard/>`; converted the 7 Tabs into a bottom lifecycle stepper (STEPPER const + stepDone/stepSub) that swaps the detail content below (existing TabsContent stage components kept intact). Backend: added `wo_number` to financials summary groups.
+
+**Design:** followed `/app/design_guidelines.json` (navy #1E3A8A primary, rounded-xl cards, soft shadows, slate palette, 6 KPI accent tints, status/utilization color maps).
+
+**Tested:** testing_agent iteration_70 — all sections render, filters reactive, Quick Actions, stepper switches detail, empty states clean (preview DB has 0 active WOs), regression on Stage-2 batch table (353 edit/delete rows) intact. No console/page errors (only non-blocking recharts responsive warnings). Verified at 1440x900 + 1366x768.

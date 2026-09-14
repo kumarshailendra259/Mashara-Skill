@@ -13442,7 +13442,7 @@ async def batch_management_financials(
             "project_id": d.get("project_id"), "project_name": d.get("project_name"),
             "center_id": d.get("center_id"), "center_name": d.get("center_name"),
             "company_name": d.get("company_name"), "fy": (d.get("fy") or "").strip(),
-            "wo_count": 0, "total_wo_value": 0.0, "pbg_amount": 0.0,
+            "wo_count": 0, "wo_number": d.get("wo_number"), "total_wo_value": 0.0, "pbg_amount": 0.0,
             "total_target": 0, "allocated": 0, "remaining": 0,
         })
         g["wo_count"] += 1

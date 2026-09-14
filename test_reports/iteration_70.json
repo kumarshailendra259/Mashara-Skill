@@ -1,0 +1,26 @@
+{
+  "summary": "Frontend-only test of redesigned /batch-management (BatchDashboard + BatchManagement stepper). Logged in as admin@finance.app and verified: header/title/subtitle/lifecycle breadcrumb render; all 6 KPI cards render live numbers (Total Target=300, Allocated=0, Remaining=300, Utilization=0%, Active Centres=1, Active Batches=206); 4 financial KPI cards render (Total WO Value ₹0, Total PBG ₹0, Allocated Value ₹2,479, Avg WO Value ₹0); filter bar (dash-search, All Projects/Centres/FY/WO Status, Clear All, Export) all wired — search filters + Clear All work; Export triggers CSV download (work_order_financial_summary.csv); Quick Actions dropdown opens and all 4 items (qa-allocate-target, qa-create-batch, qa-add-candidate, qa-record-placement) present — Create Batch opens dialog, Add Candidate/Record Placement switch bottom detail; analytics area shows Target Utilization donut (0% center + Allocated/Remaining legend with live values), Centre-wise WO Value chart shows clean 'No work order data' empty state (expected: 0 WOs in preview DB), Batch Lifecycle widget shows all stat tiles, Pending Actions pending-0..4 render and are clickable; Attention Required shows 'Birsa Bharno has 300 unallocated targets' with working Allocate action opening Create Batch dialog; Work Order Financial Summary renders clean empty state '0 record(s)' + 'No work orders match your filters' (expected); Target Allocation (By Centre) table shows 1 row (ta-row-*) with ta-batch-* (opens Create Batch dialog) and ta-edit-* buttons; bottom 7-step stepper all 7 testids present and clicking each switches the detail area cleanly; regression: Stage-2 Batch Creation still works — 353 bm-batch-edit-* + 353 bm-batch-del-* rows detected. No page errors / no red console errors, only recharts responsive-container warnings on initial layout (non-blocking, charts render correctly).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "BatchDashboard analytics row", "issues": ["Recharts logs 'width(-1) height(-1)' warnings on mount for the donut + bar + batch-lifecycle charts. Non-blocking (charts render fine once container measures), but noisy in console. Consider giving ResponsiveContainer an explicit min-height / min-width or delaying mount until parent is laid out."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(Optional / low priority) Silence recharts ResponsiveContainer width(-1)/height(-1) warnings on BatchDashboard by giving the chart containers a fixed/min height at mount."
+  ],
+  "critical_code_review_comments": [
+    "BatchManagement.jsx is 1316 lines and BatchDashboard.jsx is 661 lines — consider splitting stage detail sections + dialogs out of BatchManagement.jsx into per-stage components to stay under the 700-line guideline.",
+    "Recharts ResponsiveContainer warnings suggest charts mount before parent has a size — wrap in a min-h-[220px] container or gate on measured size."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100%"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None — read-only testing; opened dialogs and cancelled via Escape.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Preview DB currently has 1 target (Birsa Bharno, 300 target, 0 allocated), 353 batches, 0 active work orders. WO Financial Summary + Centre-wise bar chart are therefore legitimately empty and render clean empty states. All redesigned Batch Management dashboard testids (kpi-*, dash-*, quick-actions-btn, qa-*, pending-*, attention-*, ta-row-*/ta-batch-*/ta-edit-*, stepper-*, bm-batch-edit-*/del-*) are wired correctly. Only console noise is recharts width/height warnings — safe to ignore."
+}

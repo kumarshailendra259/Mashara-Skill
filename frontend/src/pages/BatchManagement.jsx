@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { inr } from "@/lib/i18n";
 import WorkOrderFinancials from "@/components/batch/WorkOrderFinancials";
+import BatchDashboard from "@/components/batch/BatchDashboard";
 import WorkOrderFormModal from "@/components/batch/WorkOrderFormModal";
 import WorkOrderViewModal from "@/components/batch/WorkOrderViewModal";
 import EnrollmentStage from "@/pages/bm/EnrollmentStage";
@@ -77,6 +78,17 @@ const EMPTY_BATCH = {
 
 // FY dropdown options — accepts any year. UI shows common ones + a "Custom" free-text.
 const FY_OPTIONS = ["2024-25", "2025-26", "2026-27", "2027-28", "2028-29"];
+
+// Bottom lifecycle stepper stages (maps to the Tabs `tab` state values).
+const STEPPER = [
+  { v: "targets", label: "Target Allocation" },
+  { v: "batches", label: "Batch Creation" },
+  { v: "enroll", label: "Enrollment" },
+  { v: "attendance", label: "Attendance" },
+  { v: "assessment", label: "Assessment" },
+  { v: "placement", label: "Placement" },
+  { v: "closure", label: "Closure" },
+];
 
 const num = (n) => n == null || n === "" ? "—" : Number(n).toLocaleString("en-IN");
 
@@ -188,6 +200,11 @@ export default function BatchManagement() {
   };
   const openViewForTarget = (t) => fetchWOList({ project_id: t.project_id, center_id: t.center_id, fy: (t.fy || t.target_year || "").trim() });
   const openViewForRow = (r) => fetchWOList({ project_id: r.project_id, center_id: r.center_id, fy: r.fy });
+  // Dashboard drawer — returns the WO list for a summary row (no modal side-effects).
+  const fetchWOsFor = async (row) => {
+    const r = await api.get("/work-orders", { params: { project_id: row.project_id, center_id: row.center_id, fy: row.fy, include_inactive: true } });
+    return r.data || [];
+  };
   const deleteWO = async (wo) => {
     if (!window.confirm(`Delete Work Order ${wo.wo_number}? This cannot be undone.`)) return;
     try {
@@ -504,70 +521,87 @@ export default function BatchManagement() {
     };
   }, [targets, batches]);
 
+  // Stepper completion + sub-count per stage (derived from live data).
+  const enrolledTotal = useMemo(() => batches.reduce((s, b) => s + (Number(b.enrolled) || 0), 0), [batches]);
+  const stepDone = {
+    targets: kpi.total_target > 0,
+    batches: batches.length > 0,
+    enroll: enrolledTotal > 0,
+    attendance: false,
+    assessment: batches.some((b) => (b.passed_candidates || 0) > 0),
+    placement: batches.some((b) => (b.placed_candidates || 0) > 0),
+    closure: batches.some((b) => (b.lifecycle_status === "Closed" || b.closed)),
+  };
+  const stepSub = (v) => {
+    if (v === "targets") return `${kpi.allocated.toLocaleString("en-IN")} / ${kpi.total_target.toLocaleString("en-IN")}`;
+    if (v === "batches") return `${batches.length} batches`;
+    if (v === "enroll") return enrolledTotal ? `${enrolledTotal.toLocaleString("en-IN")} enrolled` : "—";
+    return "—";
+  };
+
   return (
     <div className="space-y-5" data-testid="batch-management-page">
-      {/* Header */}
-      <div>
-        <div className="overline">Batch Management · Centralised</div>
-        <h1 className="font-heading font-black tracking-tight text-3xl mt-1 flex items-center gap-3">
-          <Layers size={28} className="text-[var(--brand)]" /> Batch Management
-        </h1>
-        <div className="text-sm text-[var(--muted)] mt-1 max-w-3xl">
-          Single source of truth for the entire batch lifecycle — Target Allocation → Batch Creation →
-          Candidate Enrollment → Attendance → Assessment → Placement → Closure. All other modules read
-          from here; create every new batch from this page.
-        </div>
-      </div>
-
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
-        {[
-          { l: "Targets", v: kpi.targets_count, icon: Target, tone: "brand" },
-          { l: "Total Target", v: kpi.total_target, icon: Target, tone: "brand" },
-          { l: "Allocated", v: kpi.allocated, icon: BadgeCheck, tone: "green" },
-          { l: "Remaining", v: kpi.remaining, icon: ClipboardList, tone: "amber" },
-          { l: "Utilization %", v: `${kpi.utilization_pct}%`, tone: "green" },
-          { l: "Total Batches", v: kpi.total_batches, icon: Layers, tone: "brand" },
-          { l: "Active Batches", v: kpi.active_batches, icon: Users, tone: "green" },
-        ].map((k, i) => (
-          <div key={i} className="swiss-card p-3 border-l-4 border-[var(--brand)]/40">
-            <div className="overline text-[10px] flex items-center gap-1">
-              {k.icon && <k.icon size={11} />} {k.l}
-            </div>
-            <div className={`font-heading font-black text-2xl mt-1 ${k.tone === "green" ? "text-emerald-700" : k.tone === "amber" ? "text-amber-700" : "text-[var(--brand)]"}`}>
-              {typeof k.v === "number" ? k.v.toLocaleString("en-IN") : k.v}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* ===== Phase 81 · Work Order Financials (dashboard cards + summary) ===== */}
-      <WorkOrderFinancials
+      {/* ===== Premium dashboard header (KPIs, financials, filters, analytics, WO summary, target allocation, drawer) ===== */}
+      <BatchDashboard
+        kpi={kpi}
         cards={woFin.cards}
-        summaryRows={woFin.summary_rows}
         grandTotal={woFin.grand_total}
+        summaryRows={woFin.summary_rows}
+        targets={targets}
+        batches={batches}
+        woList={woList}
         filters={woFilters}
         setFilter={setWoFilter}
         clearFilters={clearWoFilters}
         projects={entProjects}
         centers={entCenters}
+        fyOptions={FY_OPTIONS}
         loading={woFinLoading}
+        canManageWO={canManageWO}
+        canManageTargets={canManageTargets}
+        canManageBatches={canManageBatches}
         onAddWO={openAddWO}
-        onViewRow={openViewForRow}
-        canManage={canManageWO}
+        onAllocateTarget={openNewTarget}
+        onCreateBatch={() => openNewBatch()}
+        onEditWO={openEditWO}
+        onEditTarget={openEditTarget}
+        onCreateBatchForTarget={(t) => openNewBatch(t)}
+        goToStage={setTab}
+        fetchWOs={fetchWOsFor}
       />
 
-      {/* Tabs */}
+      {/* ===== Bottom lifecycle stepper — click a stage to load its detail below ===== */}
+      <div className="bg-white rounded-xl border border-slate-200/80 shadow-sm p-4">
+        <div className="flex items-stretch gap-1 overflow-x-auto">
+          {STEPPER.map((s, i) => {
+            const isActive = tab === s.v;
+            const done = stepDone[s.v];
+            const sub = stepSub(s.v);
+            return (
+              <React.Fragment key={s.v}>
+                <button
+                  onClick={() => setTab(s.v)}
+                  data-testid={`stepper-${s.v}`}
+                  className={`flex-1 min-w-[120px] flex flex-col items-center text-center px-2 py-2 rounded-lg transition-colors ${isActive ? "bg-blue-50 border border-blue-200" : "hover:bg-slate-50 border border-transparent"}`}
+                >
+                  <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold mb-1 ${
+                    isActive ? "bg-blue-600 text-white ring-4 ring-blue-100"
+                      : done ? "bg-emerald-100 text-emerald-700 border border-emerald-300"
+                      : "bg-slate-100 text-slate-400 border border-slate-200"}`}>
+                    {done && !isActive ? <CheckCircle2 size={15} /> : i + 1}
+                  </span>
+                  <span className={`text-[11px] font-semibold leading-tight ${isActive ? "text-blue-700" : "text-slate-600"}`}>{s.label}</span>
+                  <span className="text-[10px] text-slate-400 mt-0.5">{sub}</span>
+                </button>
+                {i < STEPPER.length - 1 && <div className="self-center w-4 h-0.5 bg-slate-200 shrink-0" />}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Stage detail */}
       <Tabs value={tab} onValueChange={setTab} className="w-full">
-        <TabsList className="rounded-none grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-1 h-auto p-1 bg-gray-100">
-          <TabsTrigger value="targets" className="rounded-none" data-testid="bm-tab-targets">1 · Target Allocation</TabsTrigger>
-          <TabsTrigger value="batches" className="rounded-none" data-testid="bm-tab-batches">2 · Batch Creation</TabsTrigger>
-          <TabsTrigger value="enroll" className="rounded-none" data-testid="bm-tab-enroll">3 · Enrollment</TabsTrigger>
-          <TabsTrigger value="attendance" className="rounded-none" data-testid="bm-tab-attendance">4 · Attendance</TabsTrigger>
-          <TabsTrigger value="assessment" className="rounded-none" data-testid="bm-tab-assessment">5 · Assessment</TabsTrigger>
-          <TabsTrigger value="placement" className="rounded-none" data-testid="bm-tab-placement">6 · Placement</TabsTrigger>
-          <TabsTrigger value="closure" className="rounded-none" data-testid="bm-tab-closure">7 · Closure</TabsTrigger>
-        </TabsList>
 
         {/* ================== STAGE 1: TARGETS ================== */}
         <TabsContent value="targets" className="pt-4 space-y-4">
