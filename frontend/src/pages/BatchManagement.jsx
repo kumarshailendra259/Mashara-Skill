@@ -312,6 +312,33 @@ export default function BatchManagement() {
   }, []);
   useEffect(() => { loadJobRoles(); }, [loadJobRoles]);
 
+  // Phase 87 — Job Role dropdown driven by the LINKED Work Order's courses.
+  const selectedWO = useMemo(
+    () => woList.find((w) => w.id === bEdit?.work_order_id) || null,
+    [woList, bEdit?.work_order_id],
+  );
+  const woCourses = selectedWO?.courses || [];
+  // When a WO is linked, inherit its FY and (if it has a single course) auto-fill
+  // that course's role/category/hours/candidates so the user needn't type them.
+  useEffect(() => {
+    if (!bOpen || !bEdit?.work_order_id || !selectedWO) return;
+    setBEdit((prev) => {
+      if (!prev) return prev;
+      const patch = {};
+      if (selectedWO.fy && prev.fy_year !== selectedWO.fy) patch.fy_year = selectedWO.fy;
+      const courses = selectedWO.courses || [];
+      if (courses.length === 1 && prev.wo_course_index == null) {
+        const c = courses[0];
+        patch.wo_course_index = 0;
+        patch.job_role = c.course || c.qp_code || "";
+        if (!prev.category) patch.category = c.category || "";
+        if (!prev.job_role_hours) patch.job_role_hours = Number(c.course_hours) || 0;
+        if (!prev.num_candidates) patch.num_candidates = Number(c.beneficiaries) || 0;
+      }
+      return Object.keys(patch).length ? { ...prev, ...patch } : prev;
+    });
+  }, [bOpen, bEdit?.work_order_id, selectedWO]);
+
   const loadBatches = useCallback(async () => {
     setBLoading(true);
     try {
@@ -461,7 +488,20 @@ export default function BatchManagement() {
   };
   const pickJobRole = (rid) => {
     const r = jobRoles.find((x) => x.id === rid);
-    setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: rid, job_role_hours: r?.default_hours || prev.job_role_hours }) : prev);
+    setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: rid, job_role: r?.name || prev.job_role, job_role_hours: r?.default_hours || prev.job_role_hours }) : prev);
+  };
+  // Pick a job role from the linked Work Order's courses → auto-fill everything.
+  const pickWOCourse = (idx) => {
+    const c = woCourses[Number(idx)];
+    if (!c) return;
+    setBEdit((prev) => prev ? ({
+      ...prev,
+      wo_course_index: Number(idx),
+      job_role: c.course || c.qp_code || "",
+      category: c.category || prev.category,
+      job_role_hours: Number(c.course_hours) || prev.job_role_hours,
+      num_candidates: Number(c.beneficiaries) || prev.num_candidates,
+    }) : prev);
   };
 
   // Phase 38 Session 2 · Bulk Batch Creation
@@ -1074,7 +1114,7 @@ export default function BatchManagement() {
                 </div>
                 <div>
                   <Label className="overline text-[10px]">Linked Work Order</Label>
-                  <Select value={bEdit.work_order_id || "none"} onValueChange={(v) => setBEdit({ ...bEdit, work_order_id: v === "none" ? "" : v })}>
+                  <Select value={bEdit.work_order_id || "none"} onValueChange={(v) => setBEdit({ ...bEdit, work_order_id: v === "none" ? "" : v, wo_course_index: null })}>
                     <SelectTrigger className="rounded-none" data-testid="bm-batch-inp-wo"><SelectValue placeholder="Select the sanctioned Work Order" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="none">— No Work Order —</SelectItem>
@@ -1111,17 +1151,35 @@ export default function BatchManagement() {
                     </Select>
                   </div>
                   <div>
-                    <Label className="overline text-[10px]">Job Role</Label>
+                    <Label className="overline text-[10px]">Job Role{selectedWO && woCourses.length > 0 ? " · from Work Order" : ""}</Label>
                     <div className="flex gap-1">
-                      <Select value={bEdit.job_role_master_id || undefined} onValueChange={pickJobRole}>
-                        <SelectTrigger className="rounded-none flex-1" data-testid="bm-batch-inp-jobrole"><SelectValue placeholder="Select" /></SelectTrigger>
-                        <SelectContent>
-                          {jobRoles.length === 0 && <SelectItem value="__none__" disabled>No job roles — add one</SelectItem>}
-                          {jobRoles.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}{r.default_hours ? ` · ${r.default_hours}h` : ""}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                      <Button type="button" size="icon" variant="outline" onClick={() => setJrOpen(true)} className="h-9 w-9 rounded-none" title="Add Job Role" data-testid="bm-batch-jr-add"><Plus size={13} /></Button>
+                      {selectedWO && woCourses.length > 0 ? (
+                        <Select value={bEdit.wo_course_index != null ? String(bEdit.wo_course_index) : undefined} onValueChange={pickWOCourse}>
+                          <SelectTrigger className="rounded-none flex-1" data-testid="bm-batch-inp-jobrole"><SelectValue placeholder="Select from Work Order" /></SelectTrigger>
+                          <SelectContent>
+                            {woCourses.map((c, i) => (
+                              <SelectItem key={i} value={String(i)}>
+                                {(c.course || c.qp_code || `Role ${i + 1}`)}{c.category ? ` · Cat ${c.category}` : ""}{c.course_hours ? ` · ${c.course_hours}h` : ""}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <>
+                          <Select value={bEdit.job_role_master_id || undefined} onValueChange={pickJobRole}>
+                            <SelectTrigger className="rounded-none flex-1" data-testid="bm-batch-inp-jobrole"><SelectValue placeholder="Select" /></SelectTrigger>
+                            <SelectContent>
+                              {jobRoles.length === 0 && <SelectItem value="__none__" disabled>No job roles — add one</SelectItem>}
+                              {jobRoles.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}{r.default_hours ? ` · ${r.default_hours}h` : ""}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                          <Button type="button" size="icon" variant="outline" onClick={() => setJrOpen(true)} className="h-9 w-9 rounded-none" title="Add Job Role" data-testid="bm-batch-jr-add"><Plus size={13} /></Button>
+                        </>
+                      )}
                     </div>
+                    {selectedWO && woCourses.length > 0 && (
+                      <div className="text-[9px] text-[var(--muted)] mt-0.5">Roles auto-loaded from {selectedWO.wo_number}. Selecting one fills Category, Hours & Candidates.</div>
+                    )}
                   </div>
                   <div>
                     <Label className="overline text-[10px]">Job Role Hours</Label>

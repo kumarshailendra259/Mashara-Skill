@@ -11715,6 +11715,7 @@ class BatchIn(BaseModel):
     fy_year: Optional[str] = ""
     category: Optional[str] = ""             # I | II | III
     job_role_master_id: Optional[str] = None  # FK to db.job_role_master (Phase 38)
+    job_role: Optional[str] = ""              # Phase 87 · role name (from linked WO course)
     job_role_hours: float = Field(default=0, ge=0)
     num_candidates: int = Field(default=0, ge=0)
     # Derived (backend-authoritative — frontend value ignored on save).

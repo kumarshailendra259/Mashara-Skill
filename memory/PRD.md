@@ -2301,3 +2301,15 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 **Business rules (user-confirmed):** WO link mandatory; BG<PBG → shortfall warning + authorized override only (BG>PBG allowed freely); auto-expiry authoritative, manual Active/Expired only for authorized roles.
 
 **Tested:** backend curl (shortfall 400, exact-PBG draft, claim<valid_till 400, full workflow, illegal transition 400, summary) + testing_agent iteration_71 (all frontend flows pass after a 1-line fix: projects endpoint `/mis/projects` + Promise.allSettled). No console errors. A demo WO 'WO-BG-SEED-01' (value 10L, PBG 30k) seeded in preview.
+
+## Phase 87 (Jun 2026) — Batch Create: Job Role dropdown driven by linked Work Order
+
+**User ask:** Batch banate waqt Work Order select karne par Job Role dropdown us WO ke courses se aaye (manual na karna pade), aur job role choose karte hi related info auto-fill ho.
+
+**Backend:** Added scalar `job_role` field to BatchIn (persists selected role name from WO course).
+
+**Frontend (BatchManagement.jsx):**
+- New `selectedWO`/`woCourses` (from linked WO's `courses[]`), `pickWOCourse(idx)` handler, and an effect that on WO-link inherits WO FY and (single course) auto-fills role/category/hours/candidates.
+- Job Role field now WO-course-driven when a WO is linked (options = WO courses, label "Job Role · from Work Order"); selecting one fills Category, Job Role Hours, No. of Candidates → Per Hour Rate + Total WO Value auto-compute. Falls back to the job-role-master dropdown (+ add) when no WO is linked. WO change resets `wo_course_index`.
+
+**Verified (screenshot):** Linking WO-BG-SEED-01 → dropdown shows "Seed · Cat I · 200h"; select → Category I, Hours 200, Candidates 30, FY 2026-27, Rate ₹56.35, Total ₹3,38,100. No console errors.
