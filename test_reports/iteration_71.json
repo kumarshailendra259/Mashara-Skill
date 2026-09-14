@@ -1,0 +1,34 @@
+{
+  "summary": "Full end-to-end frontend test of BG module WO-first flow on /bank-guarantees. Found and fixed one blocker (WO picker showed 'No work orders found.' due to a wrong endpoint call). After the 1-line fix, every scenario in the review request passed: WO picker + Auto-Linked panel + amount auto-fill(30000), PBG shortfall warning with override note (admin) and disappearance for above-PBG amount, claim<valid_till blocking, Save Draft creating a row, View drawer (WO Summary/Batch linkage/Audit trail), full status workflow draft->submitted->under_verification->active with badge update, Renew creating a new BG referencing the same WO, quick chips + search + clear filters.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "/api/projects", "issue": "Endpoint does not exist (404). Frontend BankGuarantees was calling it. Not a backend bug per se (canonical route is /api/mis/projects) but flagged since BankGuarantees.jsx now uses /mis/projects."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "BankGuarantees list KPI", "issue": "After creating a Renew BG the ACTIVE KPI card stayed at 0 while the row badge showed Active, and OUTSTANDING/PENDING rendered as -\u20b95,000 because renewed BG amount is added to total_issued but PBG_required for the underlying WO is not counted twice. Summary math needs review for renewed BGs.", "selector": "[data-testid=bg-kpi-active], financial summary Outstanding/Pending", "priority": "MEDIUM"},
+      {"component": "Quick filter chips", "issue": "Task mentions 'bg-quick-draft' but no data-testid=\"bg-quick-draft\" chip is rendered (only all/active/expiring_soon/expired/submitted/pending_verification). Non-blocking.", "selector": "[data-testid=bg-quick-draft]", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "Initial reference load in BankGuarantees", "issue": "loadRefs used Promise.all with api.get('/projects') which 404s -> whole Promise.all rejects -> catch swallows -> woList stayed empty -> WO picker permanently showed 'No work orders found.' blocking the entire WO-first flow. FIXED by switching to Promise.allSettled and using /mis/projects.", "affected_selectors": ["[data-testid=bg-wo-picker]", "[data-testid^=bg-wo-opt-]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Review financial summary math when a BG is renewed: currently total_issued double counts (original+renewal) but PBG required does not, producing negative Outstanding/Pending. Decide whether renewed BGs should be excluded from active_bg_value/total_issued or the WO's PBG_required should be treated as satisfied only once.",
+    "Consider whether the KPI 'Active' count should reflect effective_status (>30 days from Valid Till when stored status=active) rather than only counting stored status; currently effective badge shows Active in table but Active KPI = 0.",
+    "Optionally add a bg-quick-draft chip if drafts should be filterable via quick chips (currently only via search/status filter)."
+  ],
+  "critical_code_review_comments": [
+    "BankGuarantees.jsx loadRefs used Promise.all + wrong /projects endpoint with a silent catch. Any single reference-data 404 would kill the picker with no user feedback. General pattern to avoid across the codebase: prefer Promise.allSettled when independent reference calls are combined and always surface load errors.",
+    "server.py file is ~20k+ lines; consider modularization (already flagged in prior iterations)."
+  ],
+  "updated_files": ["/app/frontend/src/pages/BankGuarantees.jsx"],
+  "success_rate": {"backend": "100% (curl smoke via wo-context/list/create-status verified indirectly through UI + already-tested by main agent)", "frontend": "100% of requested scenarios after 1-line fix"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Created 2 BGs against WO-BG-SEED-01: BG-TEST-<ts> (draft->submitted->under_verification->active), BG-RENEW-<ts> (draft, renewal).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "The WO picker depends on GET /api/work-orders + /api/mis/projects + /api/centers. If any of these regresses, the picker will silently show 'No work orders found.' unless the Promise.allSettled fallback (added this iteration) remains. Seeded WO id 6631bff3-9ec2-4662-8766-5c23aac63f0f is still used; two BGs already exist against it after this run.",
+  "rca of the issue": "Root cause of blocker: BankGuarantees.jsx line 91-95 called api.get('/projects') which returns 404 (canonical route is /api/mis/projects). Because it was wrapped in Promise.all inside a try/catch that swallowed the error, woList was never populated. Fix: switch to Promise.allSettled and use /mis/projects so partial failures don't zero out the WO list. Reproduction pre-fix: login as admin -> /bank-guarantees -> Add BG -> click WO picker -> type anything -> 'No work orders found.'. Post-fix: seed WO WO-BG-SEED-01 appears immediately."
+}

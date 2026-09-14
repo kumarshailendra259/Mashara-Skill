@@ -2279,3 +2279,25 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 **Design:** followed `/app/design_guidelines.json` (navy #1E3A8A primary, rounded-xl cards, soft shadows, slate palette, 6 KPI accent tints, status/utilization color maps).
 
 **Tested:** testing_agent iteration_70 — all sections render, filters reactive, Quick Actions, stepper switches detail, empty states clean (preview DB has 0 active WOs), regression on Stage-2 batch table (353 edit/delete rows) intact. No console/page errors (only non-blocking recharts responsive warnings). Verified at 1440x900 + 1366x768.
+
+## Phase 86 (Jun 2026) — Bank Guarantee ↔ Work Order / Batch Management Integration
+
+**Goal:** Eliminate duplicate data entry — BG inherits everything from the Work Order (source of truth). WO-first flow, auto status, audit trail, coverage.
+
+**Backend (server.py):**
+- `GET /api/bank-guarantees/wo-context/{work_order_id}` — WO snapshot (FY/Project/Centre/LOI/WO No./WO Value/PBG) + existing BG coverage (received/balance/coverage%) + live Batch linkage (target/allocated/remaining/total+active batches/candidates). Single source of truth `_bg_wo_context`.
+- `POST /api/bank-guarantees` refactored to JSON body: requires work_order_id, snapshots WO fields, validates claim_expiry>=valid_till and PBG shortfall (BG<PBG needs authorized override; BG>=PBG free), status=draft + status_history seed.
+- `GET /api/bank-guarantees` enriches effective_status + days_remaining; filters project_id/center_id/fy/status(effective)/bank/search.
+- `GET /api/bank-guarantees/summary` — 8 status counts + financial (total_pbg_required/total_bg_amount/active/expired/pending/outstanding).
+- `PATCH /api/bank-guarantees/{id}` — extended editable fields + claim/shortfall re-validation.
+- `POST /api/bank-guarantees/{id}/status` — workflow transitions (draft→submitted→under_verification→active→released/cancelled) with legal-transition guard, privileged-role guard for active/released/cancelled, auto submission/verification/activation stamping, and status_history audit append.
+- Helpers `_bg_effective_status` (auto Active/Expiring Soon/Expired from valid_till, 30-day window — authoritative), `_bg_days_remaining`, `_bg_enrich`. Roles: BG_WRITE_ROLES (admin/hr/manager/senior_manager/accountant); BG_OVERRIDE_ROLES (admin/accountant/manager/senior_manager) for shortfall override + manual active/expired.
+
+**Frontend (BankGuarantees.jsx full rewrite; BGExpiryAlert preserved):**
+- Dashboard: 7 KPI cards + 5 financial cards (live /summary), quick-filter chips + filter bar (search/project/centre/fy/bank), status-badge table with days-remaining coloring, actions dropdown (View/Edit/Change Status/Renew/Delete-in-More).
+- Sectioned Add/Edit/Renew dialog: Work Order Link (searchable combobox) → Auto-Linked Information (read-only, from wo-context, amount auto-fills to PBG + shortfall warning with override note) → BG Details → Additional (location/remarks/attachments via /files/upload). Save Draft / Submit.
+- Status dialog (transition + stage fields + remarks). View Sheet drawer: BG fields + Work Order Summary + Batch linkage + Attachments + Audit Trail. Renew creates a new BG referencing old.
+
+**Business rules (user-confirmed):** WO link mandatory; BG<PBG → shortfall warning + authorized override only (BG>PBG allowed freely); auto-expiry authoritative, manual Active/Expired only for authorized roles.
+
+**Tested:** backend curl (shortfall 400, exact-PBG draft, claim<valid_till 400, full workflow, illegal transition 400, summary) + testing_agent iteration_71 (all frontend flows pass after a 1-line fix: projects endpoint `/mis/projects` + Promise.allSettled). No console errors. A demo WO 'WO-BG-SEED-01' (value 10L, PBG 30k) seeded in preview.

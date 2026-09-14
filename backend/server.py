@@ -17968,97 +17968,212 @@ async def restore_candidate(cid: str, _=Depends(require_role("admin", "hr"))):
 # =====================================================================
 BG_ROLES = ("admin", "hr", "manager", "senior_manager", "accountant", "center_manager", "partner")
 BG_WRITE_ROLES = ("admin", "hr", "manager", "senior_manager", "accountant")
+# Roles allowed to: override a PBG shortfall, and manually set Active/Expired/Released/Cancelled.
+BG_OVERRIDE_ROLES = ("admin", "accountant", "manager", "senior_manager")
+# Workflow states the user can drive. `expiring_soon` / `expired` are COMPUTED
+# from valid_till and never stored as the workflow status.
+BG_WORKFLOW_STATES = ["draft", "submitted", "under_verification", "active", "released", "cancelled"]
+
+
+def _bg_effective_status(doc: dict) -> str:
+    """Auto expiry is authoritative: when the workflow status is `active` we derive
+    active / expiring_soon / expired purely from valid_till. Non-active workflow
+    states (draft/submitted/under_verification/released/cancelled) pass through."""
+    from datetime import date as _d, timedelta as _td
+    st = (doc.get("status") or "draft").lower()
+    if st != "active":
+        return st
+    vt = (doc.get("valid_till") or "").strip()
+    if not vt:
+        return "active"
+    today = _d.today().isoformat()
+    horizon = (_d.today() + _td(days=30)).isoformat()
+    if vt < today:
+        return "expired"
+    if vt <= horizon:
+        return "expiring_soon"
+    return "active"
+
+
+def _bg_days_remaining(doc: dict):
+    from datetime import date as _d
+    vt = (doc.get("valid_till") or "").strip()
+    if not vt:
+        return None
+    try:
+        return (_d.fromisoformat(vt) - _d.today()).days
+    except ValueError:
+        return None
+
+
+def _bg_enrich(doc: dict) -> dict:
+    d = dict(doc)
+    d.pop("_id", None)
+    d["effective_status"] = _bg_effective_status(d)
+    d["days_remaining"] = _bg_days_remaining(d)
+    return d
+
+
+async def _bg_wo_context(work_order_id: str) -> dict:
+    """Single source of truth for everything a BG inherits from its Work Order:
+    WO snapshot + PBG required + existing BG coverage + live Batch-Management linkage.
+    Reuses existing WO / target / batch data — no duplication."""
+    wo = await db.work_orders.find_one({"id": work_order_id}, {"_id": 0})
+    if not wo:
+        raise HTTPException(404, "Work Order not found")
+    wo = await _enrich_work_order(wo)
+    proj, ctr, fy = wo.get("project_id"), wo.get("center_id"), (wo.get("fy") or "").strip()
+    pbg_required = float(wo.get("pbg_amount") or 0)
+
+    # Existing BG coverage for this WO (non-deleted, non-cancelled, non-renewed originals).
+    bg_docs = await db.bank_guarantees.find(
+        {"work_order_id": work_order_id, "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}},
+        {"_id": 0, "amount": 1, "status": 1, "bg_number": 1},
+    ).to_list(500)
+    bg_received = sum(float(b.get("amount") or 0) for b in bg_docs if (b.get("status") or "") != "cancelled")
+    balance = round(pbg_required - bg_received, 2)
+    coverage_pct = round((bg_received / pbg_required * 100), 1) if pbg_required else 0
+
+    # Live batch-management linkage (project+centre+FY).
+    targets = await db.batch_targets.find(
+        {"project_id": proj, "center_id": ctr}, {"_id": 0}).to_list(500)
+    targets = [t for t in targets if (t.get("fy") or t.get("target_year") or "").strip() == fy]
+    alloc_map = await _target_alloc_map(targets)
+    total_target = sum(int(t.get("total_target") or 0) for t in targets)
+    allocated = sum(int(alloc_map.get(t["id"], 0)) for t in targets)
+    remaining = total_target - allocated
+    b_q = {"$or": [
+        {"work_order_id": work_order_id},
+        {"target_id": {"$in": [None, ""]}, "project_id": proj, "center_id": ctr},
+    ]}
+    linked_batches = await db.batches.find(b_q, {"_id": 0, "id": 1, "closed": 1, "lifecycle_status": 1, "fy_year": 1, "target_year": 1}).to_list(5000)
+    def _fy_ok(b):
+        return b.get("work_order_id") == work_order_id or (b.get("fy_year") or b.get("target_year") or "").strip() == fy
+    linked_batches = [b for b in linked_batches if _fy_ok(b)]
+    batch_ids = [b["id"] for b in linked_batches]
+    candidates = 0
+    if batch_ids:
+        async for g in db.candidates.aggregate([
+            {"$match": {"batch_id": {"$in": batch_ids}, "is_deleted": {"$ne": True}}},
+            {"$group": {"_id": None, "n": {"$sum": 1}}},
+        ]):
+            candidates = g["n"]
+
+    return {
+        "work_order": {
+            "id": wo["id"], "wo_number": wo.get("wo_number"), "loi_number": wo.get("loi_number"),
+            "project_id": proj, "project_name": wo.get("project_name"),
+            "center_id": ctr, "center_name": wo.get("center_name"),
+            "company_id": wo.get("company_id"), "company_name": wo.get("company_name"),
+            "fy": fy, "work_order_value": float(wo.get("work_order_value") or 0),
+            "pbg_amount": pbg_required, "effective_status": wo.get("effective_status"),
+        },
+        "pbg": {"required": pbg_required, "bg_received": round(bg_received, 2),
+                "balance": balance, "coverage_pct": coverage_pct,
+                "existing_bgs": bg_docs},
+        "batch": {"total_target": total_target, "allocated": allocated, "remaining": remaining,
+                  "total_batches": len(linked_batches),
+                  "active_batches": len([b for b in linked_batches if not b.get("closed") and b.get("lifecycle_status") != "Closed"]),
+                  "candidates": candidates},
+    }
+
+
+@api.get("/bank-guarantees/wo-context/{work_order_id}")
+async def bg_wo_context(work_order_id: str, _=Depends(require_role(*BG_ROLES))):
+    return await _bg_wo_context(work_order_id)
 
 
 @api.post("/bank-guarantees", status_code=201)
-async def create_bank_guarantee(
-    letter_of_intent_no: Optional[str] = Query(None),
-    work_order_no: Optional[str] = Query(None),
-    in_favour_of: Optional[str] = Query(None),
-    applicant: Optional[str] = Query(None),
-    issued_by: str = Query(...),
-    bg_number: str = Query(...),
-    amount: float = Query(...),
-    date_of_issuance: str = Query(...),
-    valid_till: str = Query(...),
-    bg_claim_expiry_date: str = Query(...),
-    center_id: Optional[str] = Query(None),
-    location: Optional[str] = Query(None),
-    remarks: Optional[str] = Query(None),
-    fy: Optional[str] = Query(None),
-    renews_bg_id: Optional[str] = Query(None),
-    file: Optional[UploadFile] = File(None),
-    user=Depends(require_role(*BG_WRITE_ROLES)),
-):
-    bg_id = str(uuid.uuid4())
-    attachment = None
-    if file and file.filename:
-        data = await file.read()
-        if len(data) > 2 * 1024 * 1024:
-            raise HTTPException(413, "Attachment must be less than 2MB")
-        ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
-        path = f"{APP_STORAGE_PREFIX}/bank-guarantees/{bg_id}.{ext}"
-        ct = file.content_type or "application/octet-stream"
-        try:
-            _put_object(path, data, ct)
-        except requests.HTTPError as e:
-            raise HTTPException(502, f"Storage upload failed: {e}")
-        await db.files.insert_one({
-            "id": bg_id, "path": path, "filename": file.filename,
-            "content_type": ct, "size": len(data),
-            "uploaded_by": user["id"], "uploaded_at": datetime.now(timezone.utc).isoformat(),
-            "is_deleted": False,
-        })
-        attachment = {"path": path, "filename": file.filename, "content_type": ct, "size": len(data)}
-    now = datetime.now(timezone.utc).isoformat()
-    # Renewal chain — validate that the referenced BG exists and belongs to this system.
+async def create_bank_guarantee(payload: dict = Body(...), user=Depends(require_role(*BG_WRITE_ROLES))):
+    """WO-first creation. The BG inherits FY/Project/Centre/LOI/WO No./WO Value/PBG
+    from the selected Work Order (source of truth) — the client only sends BG-specific
+    fields. Mandatory Work Order link. Auto-expiry status is authoritative."""
+    work_order_id = (payload.get("work_order_id") or "").strip()
+    if not work_order_id:
+        raise HTTPException(400, "work_order_id is required — every BG must be linked to a Work Order")
+    ctx = await _bg_wo_context(work_order_id)
+    wo = ctx["work_order"]
+    pbg_required = float(wo.get("pbg_amount") or 0)
+
+    bg_number = (payload.get("bg_number") or "").strip()
+    issued_by = (payload.get("issued_by") or "").strip()
+    date_of_issuance = (payload.get("date_of_issuance") or "").strip()
+    valid_till = (payload.get("valid_till") or "").strip()
+    bg_claim_expiry_date = (payload.get("bg_claim_expiry_date") or "").strip()
+    for lbl, v in [("Bank Guarantee Number", bg_number), ("Issued By", issued_by),
+                   ("Date of Issuance", date_of_issuance), ("Valid Till", valid_till),
+                   ("BG Claim Expiry Date", bg_claim_expiry_date)]:
+        if not v:
+            raise HTTPException(400, f"{lbl} is required")
+    try:
+        amount = float(payload.get("amount"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Amount is required and must be a number")
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be greater than 0")
+    # Claim expiry should not be earlier than valid-till.
+    if bg_claim_expiry_date < valid_till:
+        raise HTTPException(400, "BG Claim Expiry Date cannot be earlier than Valid Till")
+    # PBG shortfall guard: BG below required PBG needs an authorized override.
+    amount_override = bool(payload.get("amount_override"))
+    if amount < pbg_required:
+        if not (amount_override and user.get("role") in BG_OVERRIDE_ROLES):
+            raise HTTPException(400, f"PBG shortfall: BG amount ({amount}) is less than required PBG ({pbg_required}). Authorized override required.")
+
+    renews_bg_id = (payload.get("renews_bg_id") or "").strip() or None
     renews_bg_number = None
     if renews_bg_id:
         old = await db.bank_guarantees.find_one({"id": renews_bg_id, "is_deleted": {"$ne": True}}, {"_id": 0, "bg_number": 1})
         if not old:
             raise HTTPException(404, "Referenced BG (renews_bg_id) not found")
         renews_bg_number = old.get("bg_number")
+
+    bg_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    uname = user.get("name") or user.get("email")
     doc = {
         "id": bg_id,
-        "fy": (fy or "").strip() or None,
-        "letter_of_intent_no": (letter_of_intent_no or "").strip() or None,
-        "work_order_no": (work_order_no or "").strip() or None,
-        "in_favour_of": (in_favour_of or "").strip() or None,
-        "applicant": (applicant or "").strip() or None,
-        "issued_by": issued_by.strip(),
-        "bg_number": bg_number.strip(),
-        "amount": float(amount),
+        # --- Work Order linkage + snapshot (source of truth = WO) ---
+        "work_order_id": work_order_id,
+        "work_order_no": wo.get("wo_number"),
+        "letter_of_intent_no": wo.get("loi_number") or None,
+        "fy": wo.get("fy") or None,
+        "project_id": wo.get("project_id"), "project_name": wo.get("project_name"),
+        "center_id": wo.get("center_id"), "center_name": wo.get("center_name"),
+        "company_id": wo.get("company_id"),
+        "work_order_value": float(wo.get("work_order_value") or 0),
+        "pbg_required": pbg_required,
+        "applicant": (payload.get("applicant") or wo.get("company_name") or "").strip() or None,
+        "in_favour_of": (payload.get("in_favour_of") or "").strip() or None,
+        # --- BG-specific ---
+        "bg_number": bg_number,
+        "amount": amount,
+        "amount_override": amount_override,
+        "issued_by": issued_by,
         "date_of_issuance": date_of_issuance,
         "valid_till": valid_till,
         "bg_claim_expiry_date": bg_claim_expiry_date,
-        "center_id": (center_id or "").strip() or None,
-        "location": (location or "").strip() or None,
-        "remarks": (remarks or "").strip() or None,
-        "attachment": attachment,
-        "is_renewed": False,
-        "is_deleted": False,
-        "renews_bg_id": renews_bg_id or None,
-        "renews_bg_number": renews_bg_number,
-        "created_by": user["id"],
-        "created_at": now,
-        "updated_at": now,
+        "location": (payload.get("location") or "").strip() or None,
+        "remarks": (payload.get("remarks") or "").strip() or None,
+        # --- Status workflow ---
+        "status": "draft",
+        "status_history": [{"at": now, "user": user["id"], "user_name": uname,
+                            "from": None, "to": "draft", "remarks": "Created"}],
+        # --- Attachments (list of /files refs {id,path,filename,content_type,size,doc_type}) ---
+        "attachments": payload.get("attachments") or [],
+        # --- Renewal chain ---
+        "is_renewed": False, "is_deleted": False,
+        "renews_bg_id": renews_bg_id, "renews_bg_number": renews_bg_number,
+        "created_by": user["id"], "created_at": now, "updated_at": now,
     }
     await db.bank_guarantees.insert_one(doc)
-    # If this new BG renews an old one, flip the old to renewed and stitch the
-    # audit chain (`renewed_by_bg_id` on the old row) so history is preserved.
     if renews_bg_id:
         await db.bank_guarantees.update_one(
             {"id": renews_bg_id},
-            {"$set": {
-                "is_renewed": True,
-                "renewed_at": now,
-                "renewed_by_bg_id": bg_id,
-                "renewed_by_bg_number": bg_number.strip(),
-                "renewed_by_user": user["id"],
-            }},
+            {"$set": {"is_renewed": True, "renewed_at": now, "renewed_by_bg_id": bg_id,
+                      "renewed_by_bg_number": bg_number, "renewed_by_user": user["id"]}},
         )
-    doc.pop("_id", None)
-    return doc
+    return _bg_enrich(doc)
 
 
 # ---------------- Bank Guarantee Bulk Upload ----------------
@@ -18337,6 +18452,10 @@ async def bg_bulk_upload(
 async def list_bank_guarantees(
     search: Optional[str] = Query(None),
     center_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    fy: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),      # filter by EFFECTIVE status
+    bank: Optional[str] = Query(None),        # issued_by contains
     include_deleted: bool = Query(False),
     include_renewed: bool = Query(True),
     _=Depends(require_role(*BG_ROLES)),
@@ -18348,6 +18467,12 @@ async def list_bank_guarantees(
         q["is_renewed"] = {"$ne": True}
     if center_id:
         q["center_id"] = center_id
+    if project_id:
+        q["project_id"] = project_id
+    if fy:
+        q["fy"] = fy
+    if bank:
+        q["issued_by"] = {"$regex": bank.strip(), "$options": "i"}
     if search:
         s = search.strip()
         q["$or"] = [
@@ -18357,11 +18482,54 @@ async def list_bank_guarantees(
             {"in_favour_of": {"$regex": s, "$options": "i"}},
             {"applicant": {"$regex": s, "$options": "i"}},
             {"issued_by": {"$regex": s, "$options": "i"}},
+            {"project_name": {"$regex": s, "$options": "i"}},
+            {"center_name": {"$regex": s, "$options": "i"}},
             {"location": {"$regex": s, "$options": "i"}},
             {"fy": {"$regex": s, "$options": "i"}},
         ]
-    docs = await db.bank_guarantees.find(q, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(1000)
-    return docs
+    docs = await db.bank_guarantees.find(q, {"_id": 0}).sort("bg_claim_expiry_date", 1).to_list(2000)
+    out = [_bg_enrich(d) for d in docs]
+    if status and status != "all":
+        out = [d for d in out if d["effective_status"] == status]
+    return out
+
+
+@api.get("/bank-guarantees/summary")
+async def bg_summary(_=Depends(require_role(*BG_ROLES))):
+    """Live KPI + financial summary for the BG management dashboard."""
+    docs = await db.bank_guarantees.find(
+        {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}}, {"_id": 0}).to_list(3000)
+    counts = {"total": len(docs), "draft": 0, "submitted": 0, "under_verification": 0,
+              "active": 0, "expiring_soon": 0, "expired": 0, "released": 0, "cancelled": 0}
+    total_bg_amount = active_value = expired_value = pending_value = 0.0
+    wo_pbg = {}
+    for d in docs:
+        es = _bg_effective_status(d)
+        counts[es] = counts.get(es, 0) + 1
+        amt = float(d.get("amount") or 0)
+        if es != "cancelled":
+            total_bg_amount += amt
+        if es in ("active", "expiring_soon"):
+            active_value += amt
+        elif es == "expired":
+            expired_value += amt
+        elif es in ("draft", "submitted", "under_verification"):
+            pending_value += amt
+        if d.get("work_order_id"):
+            wo_pbg[d["work_order_id"]] = float(d.get("pbg_required") or 0)
+    total_pbg_required = round(sum(wo_pbg.values()), 2)
+    return {
+        "counts": counts,
+        "financial": {
+            "total_pbg_required": total_pbg_required,
+            "total_bg_amount": round(total_bg_amount, 2),
+            "active_bg_value": round(active_value, 2),
+            "expired_bg_value": round(expired_value, 2),
+            "pending_bg_value": round(pending_value, 2),
+            "outstanding": round(total_pbg_required - total_bg_amount, 2),
+        },
+    }
+
 
 
 @api.get("/bank-guarantees/expiring-soon")
@@ -18404,23 +18572,106 @@ async def bg_expiring_soon(
 
 
 @api.patch("/bank-guarantees/{bid}")
-async def update_bank_guarantee(
-    bid: str, payload: dict = Body(...),
-    _=Depends(require_role(*BG_WRITE_ROLES)),
-):
+async def update_bank_guarantee(bid: str, payload: dict = Body(...), user=Depends(require_role(*BG_WRITE_ROLES))):
     existing = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Bank guarantee not found")
-    allowed = {"letter_of_intent_no", "work_order_no", "in_favour_of", "applicant", "issued_by",
-               "bg_number", "amount", "date_of_issuance", "valid_till", "bg_claim_expiry_date",
-               "center_id", "location", "remarks", "is_renewed", "fy"}
+    allowed = {
+        "bg_number", "amount", "amount_override", "issued_by", "date_of_issuance",
+        "valid_till", "bg_claim_expiry_date", "location", "remarks", "in_favour_of",
+        "applicant", "attachments",
+        # submission / verification detail fields
+        "submission_date", "submitted_by_name", "department", "submission_ref_no",
+        "submission_remarks", "verification_date", "verified_by_name", "verification_remarks",
+    }
     upd = {k: v for k, v in payload.items() if k in allowed}
     if not upd:
         raise HTTPException(400, "No updatable fields provided")
+    vt = upd.get("valid_till", existing.get("valid_till"))
+    ce = upd.get("bg_claim_expiry_date", existing.get("bg_claim_expiry_date"))
+    if vt and ce and ce < vt:
+        raise HTTPException(400, "BG Claim Expiry Date cannot be earlier than Valid Till")
+    # PBG shortfall guard on amount edit.
+    if "amount" in upd:
+        try:
+            amt = float(upd["amount"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Amount must be a number")
+        pbg_req = float(existing.get("pbg_required") or 0)
+        if amt < pbg_req and not (bool(upd.get("amount_override") or existing.get("amount_override")) and user.get("role") in BG_OVERRIDE_ROLES):
+            raise HTTPException(400, f"PBG shortfall: BG amount ({amt}) is less than required PBG ({pbg_req}). Authorized override required.")
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.bank_guarantees.update_one({"id": bid}, {"$set": upd})
     doc = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
-    return doc
+    return _bg_enrich(doc)
+
+
+# Allowed workflow transitions. `active`/`released`/`cancelled` require an
+# authorized role; the forward path is otherwise open to write-roles.
+_BG_TRANSITIONS = {
+    "draft": ["submitted", "cancelled"],
+    "submitted": ["under_verification", "draft", "cancelled"],
+    "under_verification": ["active", "submitted", "cancelled"],
+    "active": ["released", "cancelled"],
+    "released": [],
+    "cancelled": [],
+}
+_BG_PRIVILEGED_TARGETS = {"active", "released", "cancelled"}
+
+
+@api.post("/bank-guarantees/{bid}/status")
+async def change_bg_status(bid: str, payload: dict = Body(...), user=Depends(require_role(*BG_WRITE_ROLES))):
+    """Drive the BG workflow with a full audit trail. Auto-expiry (expiring_soon /
+    expired) is computed on read and can never be set here."""
+    doc = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Bank guarantee not found")
+    to = (payload.get("status") or "").strip().lower()
+    remarks = (payload.get("remarks") or "").strip()
+    if to not in BG_WORKFLOW_STATES:
+        raise HTTPException(400, f"Invalid status. Allowed: {', '.join(BG_WORKFLOW_STATES)}")
+    frm = (doc.get("status") or "draft").lower()
+    if to == frm:
+        raise HTTPException(400, f"BG is already {to}")
+    if to not in _BG_TRANSITIONS.get(frm, []):
+        raise HTTPException(400, f"Illegal transition {frm} → {to}")
+    if to in _BG_PRIVILEGED_TARGETS and user.get("role") not in BG_OVERRIDE_ROLES:
+        raise HTTPException(403, f"Only authorized roles can set status to {to}")
+    now = datetime.now(timezone.utc).isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
+    uname = user.get("name") or user.get("email")
+    upd = {"status": to, "updated_at": now}
+    # Stamp stage-specific fields automatically.
+    if to == "submitted":
+        upd.setdefault("submission_date", doc.get("submission_date") or today)
+        if not doc.get("submitted_by_name"):
+            upd["submitted_by_name"] = uname
+        upd["submitted_by"] = user["id"]
+        for f in ("department", "submission_ref_no", "submission_remarks"):
+            if payload.get(f) is not None:
+                upd[f] = payload.get(f)
+    elif to == "under_verification":
+        upd["verification_date"] = payload.get("verification_date") or today
+        upd["verified_by"] = user["id"]
+        if not doc.get("verified_by_name"):
+            upd["verified_by_name"] = uname
+        if payload.get("verification_remarks") is not None:
+            upd["verification_remarks"] = payload.get("verification_remarks")
+    elif to == "active":
+        upd["activation_date"] = payload.get("activation_date") or today
+        upd["activated_by"] = user["id"]
+        upd["activated_by_name"] = uname
+    elif to == "released":
+        upd["released_at"] = now
+        upd["released_by"] = user["id"]
+    elif to == "cancelled":
+        upd["cancelled_at"] = now
+        upd["cancelled_by"] = user["id"]
+    hist = {"at": now, "user": user["id"], "user_name": uname, "from": frm, "to": to, "remarks": remarks or None}
+    await db.bank_guarantees.update_one({"id": bid}, {"$set": upd, "$push": {"status_history": hist}})
+    out = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
+    return _bg_enrich(out)
+
 
 
 @api.patch("/bank-guarantees/{bid}/renew")

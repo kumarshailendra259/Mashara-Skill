@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
@@ -7,607 +7,655 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
+} from "@/components/ui/sheet";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Plus, Search, Trash2, Edit3, Eye, Landmark, Paperclip, ShieldCheck, AlertTriangle, Download, Upload, FileSpreadsheet, X, CheckCircle2, XCircle,
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
+import {
+  Plus, Search, Eye, ShieldCheck, AlertTriangle, RotateCcw, FileText, Landmark,
+  Layers3, Wallet, TrendingUp, Clock, CheckCircle2, XCircle, MoreVertical, Pencil,
+  RefreshCw, ClipboardCheck, History, Paperclip, X, ChevronRight, Download,
 } from "lucide-react";
 
-const FIELDS = [
-  { key: "fy", label: "FY" },
-  { key: "letter_of_intent_no", label: "Letter of Intent (LoI) No" },
-  { key: "work_order_no", label: "Work Order No" },
-  { key: "in_favour_of", label: "In Favour Of" },
-  { key: "applicant", label: "Applicant" },
-  { key: "issued_by", label: "Issued By", required: true },
-  { key: "bg_number", label: "Bank Guarantee Number", required: true },
-  { key: "amount", label: "Amount", required: true, type: "number" },
-  { key: "date_of_issuance", label: "Date of Issuance", required: true, type: "date" },
-  { key: "valid_till", label: "Valid Till", required: true, type: "date" },
-  { key: "bg_claim_expiry_date", label: "BG Claim Expiry Date", required: true, type: "date" },
-];
+const WRITE_ROLES = ["admin", "hr", "manager", "senior_manager", "accountant"];
+const OVERRIDE_ROLES = ["admin", "accountant", "manager", "senior_manager"];
 
-const EMPTY = FIELDS.reduce((a, f) => ({ ...a, [f.key]: "" }), { center_id: "", location: "", remarks: "" });
 const inr = (n) => Number(n || 0).toLocaleString("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 });
+const fmtDate = (s) => {
+  if (!s) return "—";
+  const p = String(s).slice(0, 10).split("-");
+  return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : s;
+};
+
+// effective status → badge style + label + dot
+const ST = {
+  draft: { label: "Draft", cls: "bg-slate-100 text-slate-600 border-slate-200", dot: "bg-slate-400" },
+  submitted: { label: "Submitted", cls: "bg-blue-50 text-blue-700 border-blue-200", dot: "bg-blue-500" },
+  under_verification: { label: "Verification", cls: "bg-violet-50 text-violet-700 border-violet-200", dot: "bg-violet-500" },
+  active: { label: "Active", cls: "bg-emerald-50 text-emerald-700 border-emerald-200", dot: "bg-emerald-500" },
+  expiring_soon: { label: "Expiring Soon", cls: "bg-amber-50 text-amber-700 border-amber-200", dot: "bg-amber-500" },
+  expired: { label: "Expired", cls: "bg-red-50 text-red-700 border-red-200", dot: "bg-red-500" },
+  released: { label: "Released", cls: "bg-teal-50 text-teal-700 border-teal-200", dot: "bg-teal-500" },
+  cancelled: { label: "Cancelled", cls: "bg-slate-200 text-slate-700 border-slate-300", dot: "bg-slate-600" },
+};
+const StatusBadge = ({ s }) => {
+  const m = ST[s] || ST.draft;
+  return <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${m.cls}`}><span className={`w-1.5 h-1.5 rounded-full ${m.dot}`} />{m.label}</span>;
+};
+const DaysBadge = ({ d }) => {
+  if (d == null) return <span className="text-slate-400">—</span>;
+  if (d < 0) return <span className="text-red-600 font-semibold text-xs">Expired</span>;
+  const cls = d > 30 ? "text-emerald-600" : d >= 8 ? "text-amber-600" : "text-orange-600";
+  return <span className={`font-semibold text-xs ${cls}`}>{d} Days</span>;
+};
+
+const QUICK = [
+  { k: "all", label: "All" },
+  { k: "active", label: "Active" },
+  { k: "expiring_soon", label: "Expiring Soon" },
+  { k: "expired", label: "Expired" },
+  { k: "submitted", label: "Submitted" },
+  { k: "under_verification", label: "Pending Verification" },
+];
+const DOC_TYPES = ["BG Copy", "Amendment", "Renewal Document", "Department Submission Proof", "Other"];
+const EMPTY_FORM = {
+  work_order_id: "", bg_number: "", amount: "", amount_override: false, issued_by: "",
+  date_of_issuance: "", valid_till: "", bg_claim_expiry_date: "", in_favour_of: "",
+  applicant: "", location: "", remarks: "", attachments: [], renews_bg_id: "",
+};
 
 export default function BankGuarantees() {
   const { user } = useAuth();
-  const canWrite = ["admin", "hr", "manager", "senior_manager", "accountant"].includes(user?.role);
+  const canWrite = WRITE_ROLES.includes(user?.role);
+  const canOverride = OVERRIDE_ROLES.includes(user?.role);
   const canDelete = ["admin", "hr"].includes(user?.role);
 
   const [rows, setRows] = useState([]);
+  const [summary, setSummary] = useState(null);
+  const [projects, setProjects] = useState([]);
   const [centers, setCenters] = useState([]);
+  const [woList, setWoList] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [search, setSearch] = useState("");
-  const [centerFilter, setCenterFilter] = useState("all");
-  const [showRenewed, setShowRenewed] = useState(false);
+  const [filters, setFilters] = useState({ search: "", project_id: "all", center_id: "all", fy: "all", bank: "" });
+  const [quick, setQuick] = useState("all");
 
-  const [openForm, setOpenForm] = useState(false);
-  const [editing, setEditing] = useState(null);
-  const [file, setFile] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const fileRef = useRef(null);
-  const [viewing, setViewing] = useState(null);
-  const [renewsBgId, setRenewsBgId] = useState("");
-  const [runningAlerts, setRunningAlerts] = useState(false);
-  const [chain, setChain] = useState(null);
-  // ---- Bulk Upload state ----
-  const [bulkOpen, setBulkOpen] = useState(false);
-  const [bulkFile, setBulkFile] = useState(null);
-  const [bulkPreview, setBulkPreview] = useState(null); // {valid, failed, total_rows, valid_rows, errors}
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const bulkFileRef = useRef(null);
-  useEffect(() => {
-    if (!viewing) { setChain(null); return; }
-    // Only fetch the chain when the BG is either part of a renewal or has been renewed.
-    if (viewing.renews_bg_id || viewing.renewed_by_bg_id) {
-      api.get(`/bank-guarantees/${viewing.id}/chain`).then((r) => setChain(r.data)).catch(() => setChain(null));
-    } else {
-      setChain(null);
-    }
-  }, [viewing]);
-
-  // Active BGs are candidates that can be renewed by a new BG. Pre-filter so
-  // the dropdown only shows non-renewed / non-deleted BGs.
-  const renewableBgs = useMemo(() => rows.filter((r) => !r.is_renewed && !r.is_deleted), [rows]);
+  const loadRefs = useCallback(async () => {
+    try {
+      const [p, c, w] = await Promise.allSettled([
+        api.get("/mis/projects"), api.get("/centers"), api.get("/work-orders"),
+      ]);
+      setProjects(p.status === "fulfilled" ? (p.value.data || []) : []);
+      setCenters(c.status === "fulfilled" ? (c.value.data || []) : []);
+      setWoList(w.status === "fulfilled" ? (w.value.data || []) : []);
+    } catch { /* noop */ }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      if (search) params.set("search", search);
-      if (centerFilter !== "all") params.set("center_id", centerFilter);
-      params.set("include_renewed", String(showRenewed));
-      const { data } = await api.get(`/bank-guarantees?${params.toString()}`);
-      setRows(data || []);
+      if (filters.search) params.set("search", filters.search);
+      if (filters.project_id !== "all") params.set("project_id", filters.project_id);
+      if (filters.center_id !== "all") params.set("center_id", filters.center_id);
+      if (filters.fy !== "all") params.set("fy", filters.fy);
+      if (filters.bank) params.set("bank", filters.bank);
+      if (quick !== "all") params.set("status", quick);
+      const [r, s] = await Promise.all([
+        api.get(`/bank-guarantees?${params.toString()}`),
+        api.get("/bank-guarantees/summary"),
+      ]);
+      setRows(r.data || []); setSummary(s.data || null);
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
-  }, [search, centerFilter, showRenewed]);
+  }, [filters, quick]);
 
+  useEffect(() => { loadRefs(); }, [loadRefs]);
   useEffect(() => { load(); }, [load]);
-  useEffect(() => {
-    api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => setCenters([]));
-  }, []);
-  const centerNameById = useMemo(() => {
-    const m = new Map(); (centers || []).forEach((c) => m.set(c.id, c.name || c.id)); return m;
-  }, [centers]);
 
-  const openAdd = () => { setEditing({ ...EMPTY }); setFile(null); setRenewsBgId(""); setOpenForm(true); };
-  const openEdit = (row) => { setEditing({ ...EMPTY, ...row }); setFile(null); setRenewsBgId(""); setOpenForm(true); };
+  const fyOptions = useMemo(() => Array.from(new Set(woList.map((w) => w.fy).filter(Boolean))).sort(), [woList]);
 
-  const save = async () => {
-    const missing = FIELDS.filter((f) => f.required && !String(editing?.[f.key] || "").trim());
-    if (missing.length) { toast.error(`Please fill: ${missing.map((f) => f.label).join(", ")}`); return; }
-    if (!editing?.id && !file) { toast.error("Attachment is required"); return; }
-    if (file && file.size > 2 * 1024 * 1024) { toast.error("Attachment must be less than 2MB"); return; }
+  // ---- form dialog ----
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [woCtx, setWoCtx] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [woQuery, setWoQuery] = useState("");
+  const [woPickerOpen, setWoPickerOpen] = useState(false);
+
+  const setF = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const openAdd = () => { setEditing(null); setForm(EMPTY_FORM); setWoCtx(null); setWoQuery(""); setFormOpen(true); };
+  const openEdit = (bg) => {
+    setEditing(bg);
+    setForm({
+      work_order_id: bg.work_order_id || "", bg_number: bg.bg_number || "", amount: bg.amount ?? "",
+      amount_override: !!bg.amount_override, issued_by: bg.issued_by || "",
+      date_of_issuance: (bg.date_of_issuance || "").slice(0, 10), valid_till: (bg.valid_till || "").slice(0, 10),
+      bg_claim_expiry_date: (bg.bg_claim_expiry_date || "").slice(0, 10), in_favour_of: bg.in_favour_of || "",
+      applicant: bg.applicant || "", location: bg.location || "", remarks: bg.remarks || "",
+      attachments: bg.attachments || [], renews_bg_id: "",
+    });
+    loadWoCtx(bg.work_order_id, false);
+    setFormOpen(true);
+  };
+  const openRenew = (bg) => {
+    setEditing(null);
+    setForm({ ...EMPTY_FORM, work_order_id: bg.work_order_id || "", renews_bg_id: bg.id, in_favour_of: bg.in_favour_of || "", applicant: bg.applicant || "", location: bg.location || "" });
+    loadWoCtx(bg.work_order_id, true);
+    setFormOpen(true);
+    toast.info(`Renewing ${bg.bg_number} — enter the NEW BG details. History is preserved.`);
+  };
+
+  const loadWoCtx = async (woId, autofillAmount) => {
+    if (!woId) { setWoCtx(null); return; }
+    try {
+      const { data } = await api.get(`/bank-guarantees/wo-context/${woId}`);
+      setWoCtx(data);
+      if (autofillAmount) {
+        setForm((f) => ({ ...f, amount: data.pbg?.required || "", applicant: f.applicant || data.work_order?.company_name || "" }));
+      }
+    } catch (e) { toast.error(formatError(e)); setWoCtx(null); }
+  };
+  const onPickWO = (w) => {
+    setF("work_order_id", w.id);
+    setWoPickerOpen(false); setWoQuery("");
+    loadWoCtx(w.id, true);
+  };
+
+  const filteredWO = useMemo(() => {
+    const q = woQuery.trim().toLowerCase();
+    return woList.filter((w) => !q || [w.wo_number, w.loi_number, w.project_name, w.center_name].some((v) => (v || "").toLowerCase().includes(q))).slice(0, 40);
+  }, [woList, woQuery]);
+
+  const pbgRequired = woCtx?.pbg?.required || 0;
+  const amtNum = Number(form.amount) || 0;
+  const shortfall = pbgRequired > 0 && amtNum > 0 && amtNum < pbgRequired;
+
+  const uploadAttachment = async (file, docType) => {
+    const fd = new FormData(); fd.append("file", file);
+    try {
+      const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setForm((f) => ({ ...f, attachments: [...(f.attachments || []), { ...data, doc_type: docType }] }));
+      toast.success("Attachment uploaded");
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const doSave = async (submitAfter) => {
+    if (!form.work_order_id) return toast.error("Select a Work Order first");
+    for (const [k, l] of [["bg_number", "BG Number"], ["issued_by", "Issued By"], ["amount", "Amount"], ["date_of_issuance", "Date of Issuance"], ["valid_till", "Valid Till"], ["bg_claim_expiry_date", "BG Claim Expiry Date"]]) {
+      if (!String(form[k] || "").trim()) return toast.error(`${l} is required`);
+    }
+    if (form.bg_claim_expiry_date < form.valid_till) return toast.error("Claim Expiry Date cannot be earlier than Valid Till");
+    if (shortfall && !canOverride) return toast.error(`PBG shortfall — BG (${inr(amtNum)}) is below required PBG (${inr(pbgRequired)}). Only authorized roles can override.`);
+    const payload = { ...form, amount: amtNum, amount_override: shortfall ? true : form.amount_override };
     setSaving(true);
     try {
-      const params = new URLSearchParams();
-      FIELDS.forEach((f) => {
-        const v = editing?.[f.key];
-        if (v !== undefined && v !== null && v !== "") params.set(f.key, String(v));
-      });
-      if (editing?.center_id) params.set("center_id", editing.center_id);
-      if (editing?.location) params.set("location", editing.location);
-      if (editing?.remarks) params.set("remarks", editing.remarks);
-      if (editing?.id) {
-        // Edit — no file re-upload for now (keeping the module simple; users can delete + re-add if they need a new file).
-        const body = { ...editing };
-        delete body.id;
-        await api.patch(`/bank-guarantees/${editing.id}`, body);
-        toast.success("Bank guarantee updated");
+      if (editing) {
+        await api.patch(`/bank-guarantees/${editing.id}`, payload);
+        toast.success("Bank Guarantee updated");
       } else {
-        if (renewsBgId) params.set("renews_bg_id", renewsBgId);
-        const fd = new FormData(); if (file) fd.append("file", file);
-        await api.post(`/bank-guarantees?${params.toString()}`, fd, {
-          headers: { "Content-Type": "multipart/form-data" },
-        });
-        toast.success(renewsBgId ? "New BG added — previous one marked Renewed." : "Bank guarantee added");
+        const { data } = await api.post("/bank-guarantees", payload);
+        if (submitAfter) {
+          await api.post(`/bank-guarantees/${data.id}/status`, { status: "submitted", remarks: "Submitted on creation" });
+          toast.success("Bank Guarantee created & submitted");
+        } else { toast.success("Bank Guarantee saved as draft"); }
       }
-      setOpenForm(false); setEditing(null); setFile(null); setRenewsBgId("");
-      if (fileRef.current) fileRef.current.value = "";
-      load();
+      setFormOpen(false); load();
     } catch (e) { toast.error(formatError(e)); }
     finally { setSaving(false); }
   };
 
-  const markRenewed = async (row) => {
-    if (!window.confirm(`Mark BG "${row.bg_number}" as renewed? The expiry alert will stop showing.`)) return;
-    try {
-      await api.patch(`/bank-guarantees/${row.id}/renew`);
-      toast.success("Marked as renewed");
-      load();
-    } catch (e) { toast.error(formatError(e)); }
+  // ---- view drawer ----
+  const [viewing, setViewing] = useState(null);
+  const [viewCtx, setViewCtx] = useState(null);
+  const openView = async (bg) => {
+    setViewing(bg); setViewCtx(null);
+    if (bg.work_order_id) {
+      try { const { data } = await api.get(`/bank-guarantees/wo-context/${bg.work_order_id}`); setViewCtx(data); } catch { /* noop */ }
+    }
   };
 
-  const remove = async (row) => {
-    if (!window.confirm(`Delete BG "${row.bg_number}"?`)) return;
+  // ---- status dialog ----
+  const [stDialog, setStDialog] = useState(null); // { bg, to, remarks, department, submission_ref_no, verification_remarks }
+  const TRANSITIONS = { draft: ["submitted", "cancelled"], submitted: ["under_verification", "draft", "cancelled"], under_verification: ["active", "submitted", "cancelled"], active: ["released", "cancelled"], released: [], cancelled: [] };
+  const nextStates = (bg) => TRANSITIONS[(bg.status || "draft")] || [];
+  const submitStatus = async () => {
+    const d = stDialog;
     try {
-      await api.delete(`/bank-guarantees/${row.id}`);
-      toast.success("Deleted");
-      load();
-    } catch (e) { toast.error(formatError(e)); }
-  };
-
-  const daysToExpiry = (iso) => {
-    if (!iso) return null;
-    const d = new Date(iso);
-    return Math.ceil((d - new Date()) / (1000 * 60 * 60 * 24));
-  };
-
-  // ---- Bulk Upload helpers ----
-  const downloadTemplate = async () => {
-    try {
-      const r = await api.get("/bank-guarantees/sample-excel", { responseType: "blob" });
-      const url = URL.createObjectURL(r.data);
-      const a = document.createElement("a");
-      a.href = url; a.download = "bank_guarantee_bulk_upload_template.xlsx";
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) { toast.error(formatError(e)); }
-  };
-
-  const runBulkPreview = async () => {
-    if (!bulkFile) { toast.error("Please choose an Excel file"); return; }
-    setBulkBusy(true); setBulkPreview(null);
-    try {
-      const fd = new FormData(); fd.append("file", bulkFile);
-      const r = await api.post("/bank-guarantees/bulk-preview", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
+      await api.post(`/bank-guarantees/${d.bg.id}/status`, {
+        status: d.to, remarks: d.remarks || "",
+        department: d.department, submission_ref_no: d.submission_ref_no,
+        verification_remarks: d.verification_remarks,
       });
-      setBulkPreview(r.data);
-      if (r.data.valid === 0) toast.error("No valid rows found in file");
-      else toast.success(`${r.data.valid} valid, ${r.data.failed} failed — review before upload`);
+      toast.success(`Status changed to ${ST[d.to]?.label || d.to}`);
+      setStDialog(null); load();
+      if (viewing?.id === d.bg.id) openView({ ...viewing, status: d.to });
     } catch (e) { toast.error(formatError(e)); }
-    finally { setBulkBusy(false); }
   };
 
-  const confirmBulkUpload = async () => {
-    if (!bulkFile || !bulkPreview || bulkPreview.valid === 0) return;
-    setBulkBusy(true);
-    try {
-      const fd = new FormData(); fd.append("file", bulkFile);
-      const r = await api.post("/bank-guarantees/bulk-upload", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      toast.success(`Uploaded ${r.data.uploaded} BG(s). ${r.data.failed} skipped.`);
-      setBulkOpen(false); setBulkFile(null); setBulkPreview(null);
-      if (bulkFileRef.current) bulkFileRef.current.value = "";
-      load();
-    } catch (e) { toast.error(formatError(e)); }
-    finally { setBulkBusy(false); }
+  const doDelete = async (bg) => {
+    if (!window.confirm(`Delete BG ${bg.bg_number}? This cannot be undone.`)) return;
+    try { await api.delete(`/bank-guarantees/${bg.id}`); toast.success("Deleted"); load(); }
+    catch (e) { toast.error(formatError(e)); }
   };
 
-  const closeBulk = () => {
-    setBulkOpen(false); setBulkFile(null); setBulkPreview(null);
-    if (bulkFileRef.current) bulkFileRef.current.value = "";
-  };
+  const clearFilters = () => { setFilters({ search: "", project_id: "all", center_id: "all", fy: "all", bank: "" }); setQuick("all"); };
+
+  const kpi = summary?.counts || {};
+  const fin = summary?.financial || {};
 
   return (
-    <div className="space-y-4" data-testid="bg-page">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+    <div className="space-y-5" data-testid="bg-page">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pb-4 border-b border-slate-200">
         <div>
-          <div className="overline">Finance · Guarantees</div>
-          <h1 className="font-heading font-black tracking-tight text-3xl mt-1 flex items-center gap-3">
-            <Landmark size={26} className="text-[var(--brand)]" /> Bank Guarantee Tracking
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 font-heading flex items-center gap-2.5">
+            <span className="p-2 rounded-lg bg-blue-900 text-white"><ShieldCheck size={20} /></span>
+            Bank Guarantee Management
           </h1>
-          <div className="text-sm text-[var(--muted)] mt-1">Attach BG PDFs, track claim expiry, and get a dashboard alert 30 days before expiry.</div>
+          <div className="text-sm text-slate-500 mt-1">Work Order → PBG Requirement → Bank Guarantee. All linked to Batch Management.</div>
         </div>
-        {canWrite && (
-          <div className="flex flex-wrap gap-2">
-            {user?.role === "admin" && (
-              <Button variant="outline" onClick={async () => {
-                setRunningAlerts(true);
-                try {
-                  const { data } = await api.post("/bank-guarantees/run-alerts?force=true");
-                  toast.success(`Alerts sent to ${data.recipients?.length || 0} recipient(s) for ${data.sent} BG(s)`);
-                } catch (e) { toast.error(formatError(e)); }
-                finally { setRunningAlerts(false); }
-              }} disabled={runningAlerts} className="rounded-none gap-2 text-red-700 border-red-400" data-testid="btn-run-alerts" title="Manually send Day-30/15/7/0 email alerts">
-                <AlertTriangle size={14} /> {runningAlerts ? "Sending…" : "Send Alerts Now"}
-              </Button>
-            )}
-            <Button variant="outline" onClick={() => setBulkOpen(true)} className="rounded-none gap-2" data-testid="btn-bulk-upload">
-              <Upload size={14} /> Bulk Upload
-            </Button>
-            <Button onClick={openAdd} className="brand-btn rounded-none gap-2" data-testid="btn-add-bg"><Plus size={16} /> Add Bank Guarantee</Button>
-          </div>
-        )}
+        {canWrite && <Button onClick={openAdd} className="bg-blue-900 hover:bg-blue-800 text-white rounded-lg gap-2" data-testid="btn-add-bg"><Plus size={16} /> Add Bank Guarantee</Button>}
       </div>
 
-      {/* Filter bar */}
-      <div className="swiss-card p-4 grid grid-cols-1 md:grid-cols-4 gap-3">
-        <div className="md:col-span-2">
-          <Label className="overline">Search</Label>
-          <div className="relative">
-            <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
-            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="BG number / LoI / WO / Bank / Location" className="rounded-none pl-7" data-testid="bg-search" />
+      {/* KPI cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        {[
+          { k: "total", label: "Total BG", icon: Landmark, ic: "bg-blue-600/10 text-blue-700" },
+          { k: "active", label: "Active", icon: CheckCircle2, ic: "bg-emerald-600/10 text-emerald-700" },
+          { k: "submitted", label: "Submitted", icon: FileText, ic: "bg-blue-600/10 text-blue-700" },
+          { k: "under_verification", label: "Verification", icon: ClipboardCheck, ic: "bg-violet-600/10 text-violet-700" },
+          { k: "expiring_soon", label: "Expiring Soon", icon: Clock, ic: "bg-amber-600/10 text-amber-700" },
+          { k: "expired", label: "Expired", icon: XCircle, ic: "bg-red-600/10 text-red-700" },
+          { k: "released", label: "Released", icon: RotateCcw, ic: "bg-teal-600/10 text-teal-700" },
+        ].map((c) => (
+          <button key={c.k} onClick={() => setQuick(ST[c.k] ? c.k : "all")} className="text-left bg-white rounded-xl border border-slate-200/80 p-3 shadow-sm hover:shadow-md hover:border-slate-300 transition-all" data-testid={`bg-kpi-${c.k}`}>
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">{c.label}</span>
+              <span className={`p-1.5 rounded-lg ${c.ic}`}><c.icon size={14} /></span>
+            </div>
+            <div className="text-2xl font-bold text-slate-900 font-heading mt-1">{kpi[c.k] ?? 0}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* Financial summary */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        {[
+          { label: "Total PBG Required", v: fin.total_pbg_required, icon: ShieldCheck, ic: "bg-blue-600/10 text-blue-700" },
+          { label: "Total BG Issued", v: fin.total_bg_amount, icon: Wallet, ic: "bg-emerald-600/10 text-emerald-700" },
+          { label: "Active BG Value", v: fin.active_bg_value, icon: TrendingUp, ic: "bg-teal-600/10 text-teal-700" },
+          { label: "Expired BG Value", v: fin.expired_bg_value, icon: XCircle, ic: "bg-red-600/10 text-red-700" },
+          { label: "Outstanding / Pending", v: fin.outstanding, icon: AlertTriangle, ic: "bg-amber-600/10 text-amber-700" },
+        ].map((c) => (
+          <div key={c.label} className="bg-white rounded-xl border border-slate-200/80 p-3 shadow-sm flex items-center gap-3">
+            <span className={`p-2 rounded-lg ${c.ic}`}><c.icon size={16} /></span>
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 truncate">{c.label}</div>
+              <div className="text-base font-bold text-slate-900 font-heading">{inr(c.v)}</div>
+            </div>
           </div>
+        ))}
+      </div>
+
+      {/* Filters */}
+      <div className="bg-white p-3 rounded-xl border border-slate-200/80 shadow-sm space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {QUICK.map((q) => (
+            <button key={q.k} onClick={() => setQuick(q.k)} className={`text-xs px-3 py-1.5 rounded-full border transition-colors ${quick === q.k ? "bg-blue-900 text-white border-blue-900" : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"}`} data-testid={`bg-quick-${q.k}`}>{q.label}</button>
+          ))}
         </div>
-        <div>
-          <Label className="overline">Center</Label>
-          <Select value={centerFilter} onValueChange={setCenterFilter}>
-            <SelectTrigger className="rounded-none" data-testid="bg-center-filter"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Centers</SelectItem>
-              {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}</SelectItem>)}
-            </SelectContent>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Input value={filters.search} onChange={(e) => setFilters((f) => ({ ...f, search: e.target.value }))} placeholder="Search BG No. / WO No. / Project / Centre" className="pl-9 h-9 rounded-lg bg-slate-50 border-slate-200 text-sm" data-testid="bg-search" />
+          </div>
+          <Select value={filters.project_id} onValueChange={(v) => setFilters((f) => ({ ...f, project_id: v }))}>
+            <SelectTrigger className="h-9 w-36 rounded-lg bg-slate-50 border-slate-200 text-xs" data-testid="bg-filter-project"><SelectValue placeholder="Project" /></SelectTrigger>
+            <SelectContent><SelectItem value="all">All Projects</SelectItem>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
           </Select>
-        </div>
-        <div className="flex items-end">
-          <label className="text-xs flex items-center gap-2 text-[var(--muted)]">
-            <input type="checkbox" checked={showRenewed} onChange={(e) => setShowRenewed(e.target.checked)} data-testid="bg-show-renewed" />
-            Show renewed
-          </label>
+          <Select value={filters.center_id} onValueChange={(v) => setFilters((f) => ({ ...f, center_id: v }))}>
+            <SelectTrigger className="h-9 w-36 rounded-lg bg-slate-50 border-slate-200 text-xs" data-testid="bg-filter-center"><SelectValue placeholder="Centre" /></SelectTrigger>
+            <SelectContent><SelectItem value="all">All Centres</SelectItem>{centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
+          </Select>
+          <Select value={filters.fy} onValueChange={(v) => setFilters((f) => ({ ...f, fy: v }))}>
+            <SelectTrigger className="h-9 w-28 rounded-lg bg-slate-50 border-slate-200 text-xs" data-testid="bg-filter-fy"><SelectValue placeholder="FY" /></SelectTrigger>
+            <SelectContent><SelectItem value="all">All FY</SelectItem>{fyOptions.map((y) => <SelectItem key={y} value={y}>{y}</SelectItem>)}</SelectContent>
+          </Select>
+          <Input value={filters.bank} onChange={(e) => setFilters((f) => ({ ...f, bank: e.target.value }))} placeholder="Bank / Issued By" className="h-9 w-40 rounded-lg bg-slate-50 border-slate-200 text-xs" data-testid="bg-filter-bank" />
+          <Button variant="outline" onClick={clearFilters} className="h-9 rounded-lg text-xs gap-1.5 border-slate-200" data-testid="bg-clear-filters"><RotateCcw size={13} /> Clear</Button>
         </div>
       </div>
 
       {/* Table */}
-      <div className="swiss-card overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50">
-            <tr className="border-b border-[var(--border)] overline">
-              <th className="text-left p-3">Status</th>
-              <th className="text-left p-3">BG Number</th>
-              <th className="text-left p-3">Issued By</th>
-              <th className="text-right p-3">Amount</th>
-              <th className="text-left p-3">In Favour Of</th>
-              <th className="text-left p-3">Center · Location</th>
-              <th className="text-left p-3">Issued</th>
-              <th className="text-left p-3">Valid Till</th>
-              <th className="text-left p-3">Claim Expiry</th>
-              <th className="text-right p-3 no-print">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr><td colSpan={10} className="text-center py-8 text-xs text-[var(--muted)]">{loading ? "Loading…" : "No bank guarantees yet."}</td></tr>
-            ) : rows.map((r) => {
-              const d = daysToExpiry(r.bg_claim_expiry_date);
-              const isExpired = d !== null && d < 0;
-              const isSoon = d !== null && d >= 0 && d <= 30;
-              const chip = r.is_renewed
-                ? { c: "bg-gray-100 text-gray-600", t: "Renewed" }
-                : isExpired ? { c: "bg-red-600 text-white", t: "EXPIRED" }
-                : isSoon ? { c: "bg-red-100 text-red-800 border border-red-400 font-bold", t: `${d}d left` }
-                : { c: "bg-emerald-50 text-emerald-700 border border-emerald-200", t: "Active" };
-              return (
-                <tr key={r.id} className="border-b border-[var(--border)] hover:bg-gray-50" data-testid={`bg-row-${r.id}`}>
-                  <td className="p-3"><span className={`px-2 py-0.5 text-[10px] uppercase ${chip.c}`}>{chip.t}</span></td>
-                  <td className="p-3 font-mono text-xs">{r.bg_number}</td>
-                  <td className="p-3">{r.issued_by}</td>
-                  <td className="p-3 text-right num">{inr(r.amount)}</td>
-                  <td className="p-3">{r.in_favour_of || "—"}</td>
-                  <td className="p-3">{r.center_id ? (centerNameById.get(r.center_id) || r.center_id) : "—"}{r.location ? <span className="text-[var(--muted)]"> · {r.location}</span> : ""}</td>
-                  <td className="p-3 num">{r.date_of_issuance || "—"}</td>
-                  <td className="p-3 num">{r.valid_till || "—"}</td>
-                  <td className={`p-3 num ${(isSoon || isExpired) && !r.is_renewed ? "text-red-700 font-bold" : ""}`}>{r.bg_claim_expiry_date || "—"}</td>
-                  <td className="p-3 text-right">
-                    <div className="inline-flex gap-0.5 justify-end">
-                      <Button size="icon" variant="ghost" onClick={() => setViewing(r)} className="h-7 w-7 rounded-none" title="View" data-testid={`bg-view-${r.id}`}><Eye size={13} /></Button>
-                      {canWrite && !r.is_renewed && (
-                        <Button size="icon" variant="ghost" onClick={() => openEdit(r)} className="h-7 w-7 rounded-none" title="Edit" data-testid={`bg-edit-${r.id}`}><Edit3 size={13} /></Button>
-                      )}
-                      {canWrite && !r.is_renewed && (isSoon || isExpired) && (
-                        <Button size="icon" variant="ghost" onClick={() => markRenewed(r)} className="h-7 w-7 rounded-none text-emerald-700" title="Mark renewed" data-testid={`bg-renew-${r.id}`}><ShieldCheck size={13} /></Button>
-                      )}
-                      {canDelete && (
-                        <Button size="icon" variant="ghost" onClick={() => remove(r)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]" title="Delete" data-testid={`bg-del-${r.id}`}><Trash2 size={13} /></Button>
+      <div className="bg-white rounded-xl border border-slate-200/80 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs min-w-[1080px]">
+            <thead className="bg-slate-50/90 text-[11px] font-semibold text-slate-600 uppercase tracking-wider">
+              <tr className="[&>th]:py-2.5 [&>th]:px-3 [&>th]:text-left">
+                <th>BG Number</th><th>Work Order</th><th>Project</th><th>Centre</th><th>FY</th>
+                <th className="!text-right">BG Amount</th><th>Issue Date</th><th>Valid Till</th><th>Claim Expiry</th>
+                <th>Status</th><th>Days Left</th><th className="!text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && <tr><td colSpan={12} className="p-6 text-center text-slate-400">Loading…</td></tr>}
+              {!loading && rows.length === 0 && <tr><td colSpan={12} className="p-8 text-center text-slate-400">No bank guarantees found.</td></tr>}
+              {rows.map((bg) => (
+                <tr key={bg.id} className="border-b border-slate-100 hover:bg-blue-50/30 transition-colors text-slate-800" data-testid={`bg-row-${bg.id}`}>
+                  <td className="py-2.5 px-3 font-mono font-semibold text-blue-700">{bg.bg_number}</td>
+                  <td className="py-2.5 px-3 font-mono text-slate-500">{bg.work_order_no || "—"}</td>
+                  <td className="py-2.5 px-3">{bg.project_name || "—"}</td>
+                  <td className="py-2.5 px-3">{bg.center_name || "—"}</td>
+                  <td className="py-2.5 px-3 font-mono text-slate-500">{bg.fy || "—"}</td>
+                  <td className="py-2.5 px-3 text-right font-semibold">{inr(bg.amount)}</td>
+                  <td className="py-2.5 px-3">{fmtDate(bg.date_of_issuance)}</td>
+                  <td className="py-2.5 px-3">{fmtDate(bg.valid_till)}</td>
+                  <td className="py-2.5 px-3">{fmtDate(bg.bg_claim_expiry_date)}</td>
+                  <td className="py-2.5 px-3"><StatusBadge s={bg.effective_status} /></td>
+                  <td className="py-2.5 px-3"><DaysBadge d={bg.days_remaining} /></td>
+                  <td className="py-2.5 px-3">
+                    <div className="flex items-center gap-1.5 justify-end">
+                      <button onClick={() => openView(bg)} className="px-2 py-1 text-[11px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded flex items-center gap-1" data-testid={`bg-view-${bg.id}`}><Eye size={12} /> View</button>
+                      {canWrite && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button className="p-1 text-slate-500 hover:bg-slate-100 rounded" data-testid={`bg-more-${bg.id}`}><MoreVertical size={14} /></button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-44">
+                            <DropdownMenuItem onClick={() => openEdit(bg)} data-testid={`bg-edit-${bg.id}`}><Pencil size={13} className="mr-2" /> Edit</DropdownMenuItem>
+                            {nextStates(bg).length > 0 && <DropdownMenuItem onClick={() => setStDialog({ bg, to: nextStates(bg)[0], remarks: "" })} data-testid={`bg-status-${bg.id}`}><ClipboardCheck size={13} className="mr-2" /> Change Status</DropdownMenuItem>}
+                            <DropdownMenuItem onClick={() => openRenew(bg)} data-testid={`bg-renew-${bg.id}`}><RefreshCw size={13} className="mr-2" /> Renew / Extend</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={() => openView(bg)}><History size={13} className="mr-2" /> Audit / Work Order</DropdownMenuItem>
+                            {canDelete && <DropdownMenuItem onClick={() => doDelete(bg)} className="text-red-600 focus:text-red-600"><XCircle size={13} className="mr-2" /> Delete</DropdownMenuItem>}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       )}
                     </div>
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* Add / Edit dialog */}
-      <Dialog open={openForm} onOpenChange={(o) => { if (!o) { setOpenForm(false); setEditing(null); setFile(null); } }}>
-        <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto" data-testid="bg-form">
-          <DialogHeader><DialogTitle className="font-heading">{editing?.id ? "Edit" : "Add"} Bank Guarantee</DialogTitle></DialogHeader>
-          {editing && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {/* Renewal chain — only shown when creating a new BG. Picking one
-                  auto-flips the referenced BG to Renewed on submit and stitches
-                  the audit trail. */}
-              {!editing.id && renewableBgs.length > 0 && (
-                <div className="md:col-span-2 border-l-4 border-emerald-500 bg-emerald-50/60 p-3">
-                  <Label className="overline text-emerald-800">Renews BG (optional)</Label>
-                  <Select value={renewsBgId || ""} onValueChange={(v) => setRenewsBgId(v === "__none__" ? "" : v)}>
-                    <SelectTrigger className="rounded-none" data-testid="bg-field-renews_bg_id">
-                      <SelectValue placeholder="Not a renewal — leave empty" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">— Not a renewal —</SelectItem>
-                      {renewableBgs.map((b) => (
-                        <SelectItem key={b.id} value={b.id}>
-                          {b.bg_number} · {b.issued_by} · expires {b.bg_claim_expiry_date}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <div className="text-[10px] text-emerald-800 mt-1">Selected BG will auto-mark as <b>Renewed</b> and get linked as its successor.</div>
-                </div>
-              )}
-              {FIELDS.map((f) => (
-                <div key={f.key} className={f.key === "letter_of_intent_no" ? "md:col-span-2" : ""}>
-                  <Label className="overline">{f.label}{f.required && <span className="text-[var(--danger)]">*</span>}</Label>
-                  <Input
-                    type={f.type || "text"}
-                    value={editing[f.key] || ""}
-                    onChange={(e) => setEditing((s) => ({ ...s, [f.key]: e.target.value }))}
-                    className="rounded-none"
-                    data-testid={`bg-field-${f.key}`}
-                  />
-                </div>
-              ))}
-              <div>
-                <Label className="overline">Center</Label>
-                <Select value={editing.center_id || ""} onValueChange={(v) => setEditing((s) => ({ ...s, center_id: v === "__none__" ? "" : v }))}>
-                  <SelectTrigger className="rounded-none" data-testid="bg-field-center_id"><SelectValue placeholder="Select…" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">— None —</SelectItem>
-                    {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label className="overline">Location</Label>
-                <Input value={editing.location || ""} onChange={(e) => setEditing((s) => ({ ...s, location: e.target.value }))} className="rounded-none" data-testid="bg-field-location" />
-              </div>
-              <div className="md:col-span-2">
-                <Label className="overline">Remarks</Label>
-                <Textarea value={editing.remarks || ""} onChange={(e) => setEditing((s) => ({ ...s, remarks: e.target.value }))} className="rounded-none" rows={2} data-testid="bg-field-remarks" />
-              </div>
-              {!editing.id && (
-                <div className="md:col-span-2">
-                  <Label className="overline">Attachment <span className="text-[var(--danger)]">*</span> <span className="text-[10px] text-[var(--muted)]">(must be &lt; 2MB, PDF/JPG/PNG)</span></Label>
-                  <input ref={fileRef} type="file" accept=".pdf,image/*" onChange={(e) => setFile(e.target.files?.[0] || null)} className="block w-full text-sm mt-1" data-testid="bg-field-file" />
-                  {file && <div className="text-xs text-[var(--brand)] mt-1">{file.name} · {(file.size / 1024).toFixed(0)} KB</div>}
-                </div>
-              )}
-              {editing.id && editing.attachment?.filename && (
-                <div className="md:col-span-2 text-xs text-[var(--muted)]">
-                  <Paperclip size={12} className="inline mr-1" /> Attached: {editing.attachment.filename}
-                </div>
-              )}
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setOpenForm(false); setEditing(null); setFile(null); }} className="rounded-none">Cancel</Button>
-            <Button onClick={save} disabled={saving} className="brand-btn rounded-none" data-testid="bg-save">{saving ? "Saving…" : (editing?.id ? "Save changes" : "Add")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Viewer */}
-      <Dialog open={!!viewing} onOpenChange={(o) => !o && setViewing(null)}>
-        <DialogContent className="rounded-none max-w-2xl max-h-[85vh] overflow-y-auto" data-testid="bg-view">
-          {viewing && (
-            <>
-              <DialogHeader><DialogTitle className="font-heading">BG {viewing.bg_number}</DialogTitle></DialogHeader>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                {[
-                  ...FIELDS,
-                  { key: "center_id", label: "Center" },
-                  { key: "location", label: "Location" },
-                  { key: "remarks", label: "Remarks" },
-                ].map((f) => (
-                  <div key={f.key}>
-                    <div className="overline text-[10px]">{f.label}</div>
-                    <div className="mt-0.5">
-                      {f.key === "amount" ? inr(viewing.amount)
-                        : f.key === "center_id" ? (viewing.center_id ? (centerNameById.get(viewing.center_id) || viewing.center_id) : "—")
-                        : (viewing[f.key] || "—")}
-                    </div>
-                  </div>
-                ))}
-                {viewing.attachment?.path && (
-                  <div className="md:col-span-2">
-                    <div className="overline text-[10px]">Attachment</div>
-                    <a
-                      href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(viewing.attachment.path)}`}
-                      target="_blank" rel="noreferrer"
-                      className="text-[var(--brand)] hover:underline text-sm inline-flex items-center gap-1 mt-1"
-                      data-testid="bg-attach-download"
-                    >
-                      <Download size={12} /> {viewing.attachment.filename}
-                    </a>
-                  </div>
-                )}
-                {chain && chain.chain?.length > 1 && (
-                  <div className="md:col-span-2 border-t border-[var(--border)] pt-3" data-testid="bg-chain">
-                    <div className="overline text-[10px] mb-2">Renewal Audit Chain ({chain.count})</div>
-                    <ol className="space-y-1 text-xs">
-                      {chain.chain.map((b, i) => {
-                        const isCurrent = b.id === viewing.id;
-                        const isLast = i === chain.chain.length - 1;
-                        return (
-                          <li key={b.id} className="flex items-center gap-2">
-                            <span className={`inline-flex items-center justify-center h-5 w-5 text-[10px] font-bold ${isCurrent ? "bg-[var(--brand)] text-white" : "bg-gray-200 text-[var(--muted)]"}`}>{i + 1}</span>
-                            <span className={`font-mono ${isCurrent ? "font-bold text-[var(--brand)]" : ""}`}>{b.bg_number}</span>
-                            <span className="text-[var(--muted)]">· {b.issued_by} · exp {b.bg_claim_expiry_date}</span>
-                            {b.is_renewed && <span className="ml-1 text-[10px] uppercase text-emerald-700">Renewed</span>}
-                            {isCurrent && <span className="ml-1 text-[10px] uppercase text-[var(--brand)]">Current</span>}
-                            {!isLast && <span className="text-[var(--muted)]">→</span>}
-                          </li>
-                        );
-                      })}
-                    </ol>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
-
-      {/* Bulk Upload dialog */}
-      <Dialog open={bulkOpen} onOpenChange={(o) => !o && closeBulk()}>
-        <DialogContent className="rounded-none max-w-4xl max-h-[90vh] overflow-y-auto" data-testid="bg-bulk-dialog">
+      {/* ============ ADD / EDIT / RENEW FORM ============ */}
+      <Dialog open={formOpen} onOpenChange={setFormOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto rounded-xl" data-testid="bg-form-dialog">
           <DialogHeader>
-            <DialogTitle className="font-heading flex items-center gap-2">
-              <Upload size={18} className="text-[var(--brand)]" /> Bulk Upload — Bank Guarantees
-            </DialogTitle>
+            <DialogTitle className="font-heading">{editing ? "Edit Bank Guarantee" : form.renews_bg_id ? "Renew Bank Guarantee" : "Add Bank Guarantee"}</DialogTitle>
+            <DialogDescription className="text-xs">Select a Work Order first — FY, Project, Centre, LOI, WO Value and PBG auto-populate.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 text-sm">
-            {/* Step 1: template */}
-            <div className="border-l-4 border-[var(--brand)] bg-blue-50/40 p-3">
-              <div className="font-bold flex items-center gap-2"><FileSpreadsheet size={14} /> Step 1 · Download sample template</div>
-              <p className="text-xs text-[var(--muted)] mt-1">Excel me 14 columns hain — FY, LoI No, Work Order, In Favour Of, Applicant, Issued By, BG Number, Amount, Date of Issuance, Valid Till, BG Claim Expiry Date, Center (exact name), Location, Remarks. Mandatory: Issued By, BG Number, Amount, aur teenon dates. Center column me center ka exact naam likhein (case-insensitive).</p>
-              <Button variant="outline" onClick={downloadTemplate} className="rounded-none gap-2 mt-2" data-testid="btn-bulk-template">
-                <Download size={12} /> Download Sample Excel
-              </Button>
-            </div>
-            {/* Step 2: choose file */}
-            <div className="border-l-4 border-gray-300 bg-gray-50 p-3">
-              <div className="font-bold flex items-center gap-2"><Upload size={14} /> Step 2 · Choose Excel file (.xlsx / .xls)</div>
-              <input
-                ref={bulkFileRef}
-                type="file"
-                accept=".xlsx,.xls"
-                onChange={(e) => { setBulkFile(e.target.files?.[0] || null); setBulkPreview(null); }}
-                className="mt-2 block text-xs"
-                data-testid="input-bulk-file"
-              />
-              {bulkFile && (
-                <div className="text-xs text-[var(--muted)] mt-1">
-                  Selected: <span className="font-mono">{bulkFile.name}</span> ({Math.round(bulkFile.size / 1024)} KB)
-                </div>
-              )}
-              <div className="flex gap-2 mt-2">
-                <Button onClick={runBulkPreview} disabled={!bulkFile || bulkBusy} className="brand-btn rounded-none gap-1" data-testid="btn-bulk-preview">
-                  {bulkBusy && !bulkPreview ? "Validating…" : "Preview"}
-                </Button>
-                {bulkFile && (
-                  <Button variant="outline" onClick={() => { setBulkFile(null); setBulkPreview(null); if (bulkFileRef.current) bulkFileRef.current.value = ""; }} className="rounded-none gap-1">
-                    <X size={12} /> Clear
-                  </Button>
-                )}
-              </div>
-            </div>
-            {/* Step 3: preview */}
-            {bulkPreview && (
-              <div className="border-l-4 border-emerald-500 bg-emerald-50/40 p-3 space-y-2">
-                <div className="font-bold flex items-center gap-2 flex-wrap">
-                  <CheckCircle2 size={14} className="text-emerald-600" /> Step 3 · Preview
-                  <span className="text-xs font-normal ml-2">
-                    Total rows: <b>{bulkPreview.total_rows}</b> ·
-                    <span className="text-emerald-700 ml-1">Valid: <b>{bulkPreview.valid}</b></span> ·
-                    <span className="text-red-700 ml-1">Failed: <b>{bulkPreview.failed}</b></span>
+
+          {/* Section: Work Order Link */}
+          <Section title="Work Order Link">
+            {editing ? (
+              <div className="text-sm text-slate-700">Linked WO: <b className="font-mono text-blue-700">{editing.work_order_no}</b> <span className="text-slate-400">(cannot be changed on edit)</span></div>
+            ) : (
+              <div className="relative">
+                <Label className="text-[10px] uppercase tracking-wider text-slate-500">Select Work Order *</Label>
+                <button type="button" onClick={() => setWoPickerOpen((o) => !o)} className="w-full mt-1 h-10 px-3 rounded-lg border border-slate-200 bg-slate-50 text-left text-sm flex items-center justify-between" data-testid="bg-wo-picker">
+                  <span className={form.work_order_id ? "text-slate-900" : "text-slate-400"}>
+                    {form.work_order_id ? (woCtx?.work_order ? `${woCtx.work_order.project_name} · ${woCtx.work_order.center_name} · ${woCtx.work_order.fy} · ${woCtx.work_order.wo_number}` : "Loading…") : "Search / Select Work Order"}
                   </span>
-                </div>
-                {/* Errors table */}
-                {bulkPreview.errors?.length > 0 && (
-                  <div className="mt-2" data-testid="bulk-errors">
-                    <div className="overline text-[10px] text-red-700 mb-1">Rows that will be skipped</div>
-                    <div className="overflow-x-auto border border-red-200 max-h-40 overflow-y-auto">
-                      <table className="w-full text-[11px]">
-                        <thead className="bg-red-100 sticky top-0"><tr>
-                          <th className="p-1.5 text-left">Row</th><th className="p-1.5 text-left">Reason</th><th className="p-1.5 text-left">BG Number</th>
-                        </tr></thead>
-                        <tbody>
-                          {bulkPreview.errors.map((er, i) => (
-                            <tr key={i} className="border-t border-red-100">
-                              <td className="p-1.5 font-mono">{er.row}</td>
-                              <td className="p-1.5 text-red-800"><XCircle size={11} className="inline mr-1" />{er.reason}</td>
-                              <td className="p-1.5 font-mono">{er.data?.bg_number || "—"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-                {/* Valid rows table — full detail view so users can verify every column pre-insert */}
-                {bulkPreview.valid_rows?.length > 0 && (
-                  <div className="mt-2" data-testid="bulk-valid-rows">
-                    <div className="overline text-[10px] text-emerald-700 mb-1">Rows that will be inserted (all fields)</div>
-                    <div className="overflow-x-auto border border-emerald-200 max-h-72 overflow-y-auto">
-                      <table className="w-max min-w-full text-[11px]">
-                        <thead className="bg-emerald-100 sticky top-0"><tr>
-                          <th className="p-1.5 text-left">Row</th>
-                          <th className="p-1.5 text-left">FY</th>
-                          <th className="p-1.5 text-left">LoI No</th>
-                          <th className="p-1.5 text-left">Work Order</th>
-                          <th className="p-1.5 text-left">In Favour Of</th>
-                          <th className="p-1.5 text-left">Applicant</th>
-                          <th className="p-1.5 text-left">Issued By</th>
-                          <th className="p-1.5 text-left">BG Number</th>
-                          <th className="p-1.5 text-left">Amount</th>
-                          <th className="p-1.5 text-left">Issued</th>
-                          <th className="p-1.5 text-left">Valid Till</th>
-                          <th className="p-1.5 text-left">Claim Expiry</th>
-                          <th className="p-1.5 text-left">Center</th>
-                          <th className="p-1.5 text-left">Location</th>
-                          <th className="p-1.5 text-left">Remarks</th>
-                        </tr></thead>
-                        <tbody>
-                          {bulkPreview.valid_rows.map((v) => (
-                            <tr key={v.row} className="border-t border-emerald-100 hover:bg-emerald-50">
-                              <td className="p-1.5 font-mono">{v.row}</td>
-                              <td className="p-1.5">{v.data.fy || "—"}</td>
-                              <td className="p-1.5 font-mono">{v.data.letter_of_intent_no || "—"}</td>
-                              <td className="p-1.5 font-mono">{v.data.work_order_no || "—"}</td>
-                              <td className="p-1.5">{v.data.in_favour_of || "—"}</td>
-                              <td className="p-1.5">{v.data.applicant || "—"}</td>
-                              <td className="p-1.5">{v.data.issued_by}</td>
-                              <td className="p-1.5 font-mono font-bold">{v.data.bg_number}</td>
-                              <td className="p-1.5">{inr(v.data.amount)}</td>
-                              <td className="p-1.5">{v.data.date_of_issuance}</td>
-                              <td className="p-1.5">{v.data.valid_till}</td>
-                              <td className="p-1.5 font-bold">{v.data.bg_claim_expiry_date}</td>
-                              <td className="p-1.5">{v.data.center_name ? <span className="text-emerald-700">✓ {v.data.center_name}</span> : "—"}</td>
-                              <td className="p-1.5">{v.data.location || "—"}</td>
-                              <td className="p-1.5 max-w-[180px] truncate" title={v.data.remarks || ""}>{v.data.remarks || "—"}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                  <ChevronRight size={14} className="text-slate-400 rotate-90" />
+                </button>
+                {woPickerOpen && (
+                  <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-lg max-h-72 overflow-y-auto">
+                    <div className="p-2 sticky top-0 bg-white border-b"><Input autoFocus value={woQuery} onChange={(e) => setWoQuery(e.target.value)} placeholder="Search WO No / LOI / Project / Centre" className="h-8 text-xs rounded-lg" data-testid="bg-wo-search" /></div>
+                    {filteredWO.length === 0 && <div className="p-3 text-xs text-slate-400">No work orders found.</div>}
+                    {filteredWO.map((w) => (
+                      <button key={w.id} type="button" onClick={() => onPickWO(w)} className="w-full text-left px-3 py-2 hover:bg-blue-50 text-xs border-b border-slate-50" data-testid={`bg-wo-opt-${w.id}`}>
+                        <span className="font-semibold">{w.project_name}</span> · {w.center_name} · <span className="font-mono">{w.fy}</span> · <span className="font-mono text-blue-700">{w.wo_number}</span>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
             )}
-          </div>
-          <DialogFooter className="mt-3">
-            <Button variant="outline" onClick={closeBulk} className="rounded-none">Cancel</Button>
-            <Button
-              onClick={confirmBulkUpload}
-              disabled={!bulkPreview || bulkPreview.valid === 0 || bulkBusy}
-              className="brand-btn rounded-none gap-2"
-              data-testid="btn-bulk-confirm"
-            >
-              <Upload size={14} /> {bulkBusy && bulkPreview ? "Uploading…" : `Upload ${bulkPreview?.valid || 0} BG${(bulkPreview?.valid || 0) === 1 ? "" : "s"}`}
-            </Button>
+          </Section>
+
+          {/* Section: Auto-linked information */}
+          {woCtx && (
+            <Section title="Auto-Linked Information (from Work Order)">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-2.5 text-sm">
+                <ReadField label="FY" value={woCtx.work_order.fy} />
+                <ReadField label="Project" value={woCtx.work_order.project_name} />
+                <ReadField label="Centre" value={woCtx.work_order.center_name} />
+                <ReadField label="Work Order No." value={woCtx.work_order.wo_number} />
+                <ReadField label="LOI No." value={woCtx.work_order.loi_number} />
+                <ReadField label="Work Order Value" value={inr(woCtx.work_order.work_order_value)} />
+                <ReadField label="PBG Required" value={inr(woCtx.pbg.required)} highlight />
+                <ReadField label="BG Already Received" value={inr(woCtx.pbg.bg_received)} />
+                <ReadField label="PBG Balance" value={inr(woCtx.pbg.balance)} />
+              </div>
+              <div className="mt-2 text-[11px] text-slate-500 flex items-center gap-3">
+                <span>Coverage: <b className={woCtx.pbg.coverage_pct >= 100 ? "text-emerald-600" : "text-amber-600"}>{woCtx.pbg.coverage_pct}%</b></span>
+                <span className="text-slate-300">|</span>
+                <span>Batches: <b>{woCtx.batch.total_batches}</b> (Active {woCtx.batch.active_batches}) · Target {woCtx.batch.total_target} · Allocated {woCtx.batch.allocated} · Candidates {woCtx.batch.candidates}</span>
+              </div>
+            </Section>
+          )}
+
+          {/* Section: BG details */}
+          <Section title="Bank Guarantee Details">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="Bank Guarantee Number *"><Input value={form.bg_number} onChange={(e) => setF("bg_number", e.target.value)} className="rounded-lg" data-testid="bg-f-number" /></Field>
+              <Field label="Amount *" hint={pbgRequired ? "Auto-linked from Work Order PBG Amount" : ""}>
+                <Input type="number" value={form.amount} onChange={(e) => setF("amount", e.target.value)} className="rounded-lg" data-testid="bg-f-amount" />
+              </Field>
+              <Field label="Issued By (Bank) *"><Input value={form.issued_by} onChange={(e) => setF("issued_by", e.target.value)} className="rounded-lg" data-testid="bg-f-issuedby" /></Field>
+              <Field label="In Favour Of"><Input value={form.in_favour_of} onChange={(e) => setF("in_favour_of", e.target.value)} className="rounded-lg" data-testid="bg-f-favour" /></Field>
+              <Field label="Date of Issuance *"><Input type="date" value={form.date_of_issuance} onChange={(e) => setF("date_of_issuance", e.target.value)} className="rounded-lg" data-testid="bg-f-issue" /></Field>
+              <Field label="Valid Till *"><Input type="date" value={form.valid_till} onChange={(e) => setF("valid_till", e.target.value)} className="rounded-lg" data-testid="bg-f-validtill" /></Field>
+              <Field label="BG Claim Expiry Date *"><Input type="date" value={form.bg_claim_expiry_date} onChange={(e) => setF("bg_claim_expiry_date", e.target.value)} className="rounded-lg" data-testid="bg-f-claim" /></Field>
+              <Field label="Applicant"><Input value={form.applicant} onChange={(e) => setF("applicant", e.target.value)} className="rounded-lg" data-testid="bg-f-applicant" /></Field>
+            </div>
+            {shortfall && (
+              <div className="mt-3 flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-xs" data-testid="bg-shortfall-warn">
+                <AlertTriangle size={16} className="text-red-600 shrink-0 mt-0.5" />
+                <div>
+                  <b className="text-red-700">PBG Shortfall.</b> Required PBG: <b>{inr(pbgRequired)}</b>, Entered BG: <b>{inr(amtNum)}</b>, Shortfall: <b>{inr(pbgRequired - amtNum)}</b>.
+                  {canOverride ? <span className="text-red-600"> As an authorized user, saving will record an override.</span> : <span className="text-red-700"> You are not authorized to override — enter at least the required PBG.</span>}
+                </div>
+              </div>
+            )}
+          </Section>
+
+          {/* Section: Additional */}
+          <Section title="Additional Information">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="Location"><Input value={form.location} onChange={(e) => setF("location", e.target.value)} className="rounded-lg" data-testid="bg-f-location" /></Field>
+              <Field label="Remarks"><Input value={form.remarks} onChange={(e) => setF("remarks", e.target.value)} className="rounded-lg" data-testid="bg-f-remarks" /></Field>
+            </div>
+            <div className="mt-3">
+              <Label className="text-[10px] uppercase tracking-wider text-slate-500">Attachments</Label>
+              <div className="flex items-center gap-2 mt-1">
+                <input id="bg-file" type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadAttachment(f, "BG Copy"); e.target.value = ""; }} data-testid="bg-f-file" />
+                <label htmlFor="bg-file" className="cursor-pointer text-xs px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 flex items-center gap-1.5"><Paperclip size={13} /> Upload Document</label>
+              </div>
+              {(form.attachments || []).length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {form.attachments.map((a, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-1.5">
+                      <span className="truncate">{a.filename} <span className="text-slate-400">({a.doc_type})</span></span>
+                      <button onClick={() => setForm((f) => ({ ...f, attachments: f.attachments.filter((_, j) => j !== i) }))} className="text-slate-400 hover:text-red-600"><X size={13} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Section>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setFormOpen(false)} className="rounded-lg">Cancel</Button>
+            {!editing && <Button variant="outline" onClick={() => doSave(false)} disabled={saving} className="rounded-lg" data-testid="bg-save-draft">Save Draft</Button>}
+            <Button onClick={() => doSave(!editing)} disabled={saving} className="bg-blue-900 hover:bg-blue-800 rounded-lg" data-testid="bg-submit">{saving ? "Saving…" : editing ? "Save Changes" : "Submit"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* ============ STATUS DIALOG ============ */}
+      <Dialog open={!!stDialog} onOpenChange={(o) => !o && setStDialog(null)}>
+        <DialogContent className="max-w-md rounded-xl" data-testid="bg-status-dialog">
+          <DialogHeader><DialogTitle className="font-heading">Change Status</DialogTitle>
+            <DialogDescription className="text-xs">{stDialog && <>Current: <StatusBadge s={stDialog.bg.effective_status} /></>}</DialogDescription>
+          </DialogHeader>
+          {stDialog && (
+            <div className="space-y-3">
+              <Field label="New Status">
+                <Select value={stDialog.to} onValueChange={(v) => setStDialog((d) => ({ ...d, to: v }))}>
+                  <SelectTrigger className="rounded-lg" data-testid="bg-status-select"><SelectValue /></SelectTrigger>
+                  <SelectContent>{nextStates(stDialog.bg).map((s) => <SelectItem key={s} value={s}>{ST[s]?.label || s}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              {stDialog.to === "submitted" && (
+                <div className="grid grid-cols-2 gap-2">
+                  <Field label="Department"><Input value={stDialog.department || ""} onChange={(e) => setStDialog((d) => ({ ...d, department: e.target.value }))} className="rounded-lg" /></Field>
+                  <Field label="Submission Ref No."><Input value={stDialog.submission_ref_no || ""} onChange={(e) => setStDialog((d) => ({ ...d, submission_ref_no: e.target.value }))} className="rounded-lg" /></Field>
+                </div>
+              )}
+              {stDialog.to === "under_verification" && (
+                <Field label="Verification Remarks"><Input value={stDialog.verification_remarks || ""} onChange={(e) => setStDialog((d) => ({ ...d, verification_remarks: e.target.value }))} className="rounded-lg" /></Field>
+              )}
+              <Field label="Remarks"><Textarea value={stDialog.remarks} onChange={(e) => setStDialog((d) => ({ ...d, remarks: e.target.value }))} className="rounded-lg" rows={2} data-testid="bg-status-remarks" /></Field>
+              {["active", "released", "cancelled"].includes(stDialog.to) && !canOverride && (
+                <div className="text-xs text-red-600">Only authorized roles can set this status.</div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setStDialog(null)} className="rounded-lg">Cancel</Button>
+            <Button onClick={submitStatus} className="bg-blue-900 hover:bg-blue-800 rounded-lg" data-testid="bg-status-save">Update Status</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ============ VIEW DRAWER ============ */}
+      <Sheet open={!!viewing} onOpenChange={(o) => !o && setViewing(null)}>
+        <SheetContent side="right" className="w-full sm:max-w-2xl p-0 flex flex-col" data-testid="bg-view-drawer">
+          <SheetHeader className="px-6 py-4 border-b border-slate-200 bg-slate-50">
+            <SheetTitle className="font-heading flex items-center gap-2">{viewing?.bg_number} <StatusBadge s={viewing?.effective_status} /></SheetTitle>
+            <SheetDescription className="text-xs">{viewing ? `${viewing.project_name || ""} · ${viewing.center_name || ""} · ${viewing.fy || ""}` : ""}</SheetDescription>
+          </SheetHeader>
+          {viewing && (
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+                <ReadField label="BG Amount" value={inr(viewing.amount)} highlight />
+                <ReadField label="PBG Required" value={inr(viewing.pbg_required)} />
+                <ReadField label="Issued By" value={viewing.issued_by} />
+                <ReadField label="In Favour Of" value={viewing.in_favour_of} />
+                <ReadField label="Date of Issuance" value={fmtDate(viewing.date_of_issuance)} />
+                <ReadField label="Valid Till" value={fmtDate(viewing.valid_till)} />
+                <ReadField label="Claim Expiry" value={fmtDate(viewing.bg_claim_expiry_date)} />
+                <ReadField label="Days Remaining" value={viewing.days_remaining == null ? "—" : viewing.days_remaining < 0 ? "Expired" : `${viewing.days_remaining} days`} />
+                <ReadField label="Applicant" value={viewing.applicant} />
+                <ReadField label="Location" value={viewing.location} />
+              </div>
+
+              {/* WO + Batch linkage */}
+              {viewCtx && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">Work Order Summary</h4>
+                    <a href="/batch-management" className="text-[11px] text-blue-700 hover:underline flex items-center gap-1">View Work Order <ChevronRight size={12} /></a>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-2 text-xs">
+                    <ReadField label="WO No." value={viewCtx.work_order.wo_number} sm />
+                    <ReadField label="LOI No." value={viewCtx.work_order.loi_number} sm />
+                    <ReadField label="WO Value" value={inr(viewCtx.work_order.work_order_value)} sm />
+                    <ReadField label="PBG Required" value={inr(viewCtx.pbg.required)} sm />
+                    <ReadField label="BG Received" value={inr(viewCtx.pbg.bg_received)} sm />
+                    <ReadField label="Coverage" value={`${viewCtx.pbg.coverage_pct}%`} sm />
+                    <ReadField label="Total Target" value={viewCtx.batch.total_target} sm />
+                    <ReadField label="Allocated" value={viewCtx.batch.allocated} sm />
+                    <ReadField label="Remaining" value={viewCtx.batch.remaining} sm />
+                    <ReadField label="Batches" value={viewCtx.batch.total_batches} sm />
+                    <ReadField label="Active Batches" value={viewCtx.batch.active_batches} sm />
+                    <ReadField label="Candidates" value={viewCtx.batch.candidates} sm />
+                  </div>
+                </div>
+              )}
+
+              {/* Attachments */}
+              {(viewing.attachments || []).length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Attachments</h4>
+                  <div className="space-y-1.5">
+                    {viewing.attachments.map((a, i) => (
+                      <a key={i} href={`${api.defaults.baseURL}/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="flex items-center justify-between text-xs border border-slate-100 rounded-lg px-3 py-2 hover:bg-slate-50" data-testid={`bg-att-${i}`}>
+                        <span className="truncate flex items-center gap-1.5"><Paperclip size={12} /> {a.filename} <span className="text-slate-400">({a.doc_type})</span></span>
+                        <Download size={13} className="text-blue-600" />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Audit trail */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1.5"><History size={13} /> Audit Trail</h4>
+                <div className="space-y-2">
+                  {(viewing.status_history || []).map((h, i) => (
+                    <div key={i} className="flex items-start gap-2 text-xs" data-testid={`bg-audit-${i}`}>
+                      <span className="w-2 h-2 rounded-full bg-blue-500 mt-1.5 shrink-0" />
+                      <div>
+                        <div className="text-slate-700"><b>{h.from ? `${ST[h.from]?.label || h.from} → ` : ""}{ST[h.to]?.label || h.to}</b> {h.remarks ? `— ${h.remarks}` : ""}</div>
+                        <div className="text-slate-400">{new Date(h.at).toLocaleString("en-IN")} · {h.user_name}</div>
+                      </div>
+                    </div>
+                  ))}
+                  {(viewing.status_history || []).length === 0 && <div className="text-xs text-slate-400">No history.</div>}
+                </div>
+              </div>
+            </div>
+          )}
+          {viewing && canWrite && (
+            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex flex-wrap gap-2">
+              <Button variant="outline" className="rounded-lg text-xs gap-1.5" onClick={() => { openEdit(viewing); setViewing(null); }} data-testid="bg-drawer-edit"><Pencil size={13} /> Edit</Button>
+              {nextStates(viewing).length > 0 && <Button variant="outline" className="rounded-lg text-xs gap-1.5" onClick={() => setStDialog({ bg: viewing, to: nextStates(viewing)[0], remarks: "" })} data-testid="bg-drawer-status"><ClipboardCheck size={13} /> Change Status</Button>}
+              <Button variant="outline" className="rounded-lg text-xs gap-1.5" onClick={() => { openRenew(viewing); setViewing(null); }} data-testid="bg-drawer-renew"><RefreshCw size={13} /> Renew</Button>
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
+    </div>
+  );
+}
+
+/* --- tiny presentational helpers --- */
+function Section({ title, children }) {
+  return (
+    <div className="rounded-xl border border-slate-200 p-4">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">{title}</h3>
+      {children}
+    </div>
+  );
+}
+function Field({ label, hint, children }) {
+  return (
+    <div>
+      <Label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</Label>
+      <div className="mt-1">{children}</div>
+      {hint && <div className="text-[10px] text-emerald-600 mt-0.5">{hint}</div>}
+    </div>
+  );
+}
+function ReadField({ label, value, highlight, sm }) {
+  return (
+    <div className={sm ? "" : "border-b border-slate-100 pb-2"}>
+      <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">{label}</div>
+      <div className={`mt-0.5 font-semibold ${highlight ? "text-blue-700" : "text-slate-900"}`}>{value ?? "—"}</div>
     </div>
   );
 }
@@ -615,7 +663,7 @@ export default function BankGuarantees() {
 /* -----------------------------------------------------------------
    Dashboard alert — imported by the Dashboard page. Shows a big red
    bold banner while any active BG's claim expiry is within 30 days
-   or already expired. Disappears when every such BG is marked renewed.
+   or already expired.
    ----------------------------------------------------------------- */
 export function BGExpiryAlert() {
   const [data, setData] = useState({ expiring: [], expired: [] });
@@ -627,13 +675,11 @@ export function BGExpiryAlert() {
   const total = (data.expiring?.length || 0) + (data.expired?.length || 0);
   if (!total) return null;
   return (
-    <div className="border-2 border-red-600 bg-red-50 p-4 shadow-lg animate-pulse" data-testid="bg-expiry-alert">
+    <div className="border-2 border-red-600 bg-red-50 p-4 shadow-lg" data-testid="bg-expiry-alert">
       <div className="flex items-start gap-3">
         <AlertTriangle className="text-red-600 flex-shrink-0 mt-0.5" size={28} />
         <div className="flex-1">
-          <div className="text-red-700 font-heading font-black text-lg uppercase tracking-wide">
-            Bank Guarantee Expiry Alert
-          </div>
+          <div className="text-red-700 font-heading font-black text-lg uppercase tracking-wide">Bank Guarantee Expiry Alert</div>
           <div className="text-red-800 font-bold text-sm mt-1">
             {data.expired.length > 0 && <div>⚠️ {data.expired.length} BG{data.expired.length > 1 ? "s have" : " has"} already <b>EXPIRED</b>.</div>}
             {data.expiring.length > 0 && <div>⏳ {data.expiring.length} BG{data.expiring.length > 1 ? "s expire" : " expires"} within the next 30 days.</div>}
@@ -641,20 +687,15 @@ export function BGExpiryAlert() {
           <ul className="mt-2 text-xs text-red-900 space-y-1">
             {[...data.expired, ...data.expiring].slice(0, 6).map((bg) => (
               <li key={bg.id} className="border-l-4 border-red-500 pl-2">
-                <span className="font-mono font-bold">{bg.bg_number}</span>
-                {" — "}
-                <span>{bg.issued_by}</span>
-                {" · "}
-                <span className="font-bold">expires {bg.bg_claim_expiry_date}</span>
+                <span className="font-mono font-bold">{bg.bg_number}</span>{" — "}
+                <span>{bg.issued_by}</span>{" · "}
+                <span className="font-bold">expires {fmtDate(bg.bg_claim_expiry_date)}</span>
                 {bg.in_favour_of ? <span> · in favour of {bg.in_favour_of}</span> : null}
               </li>
             ))}
           </ul>
           <div className="mt-3">
-            <a href="/bank-guarantees" className="brand-btn rounded-none px-3 py-1 text-xs inline-block" data-testid="bg-alert-cta">
-              Open Bank Guarantee Tracking →
-            </a>
-            <span className="text-[10px] text-red-700 ml-3 italic">Alert stays until each BG is marked as renewed.</span>
+            <a href="/bank-guarantees" className="brand-btn rounded-none px-3 py-1 text-xs inline-block" data-testid="bg-alert-cta">Open Bank Guarantee Tracking →</a>
           </div>
         </div>
       </div>
