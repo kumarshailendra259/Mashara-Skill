@@ -1067,7 +1067,7 @@ function AttendanceTab({ openCheckIn, summary }) {
   const [selectedDate, setSelectedDate] = useState(null);
   const [myReg, setMyReg] = useState([]);
   const [regOpen, setRegOpen] = useState(false);
-  const [regForm, setRegForm] = useState({ date: "", status: "present", reason: "" });
+  const [regForm, setRegForm] = useState({ date: "", status: "present", in_time: "", out_time: "", reason: "" });
   const [regTrackId, setRegTrackId] = useState(null);
 
   const todayInfo = summary?.today;
@@ -1223,16 +1223,24 @@ function AttendanceTab({ openCheckIn, summary }) {
                     </SelectContent>
                   </Select>
                 </div>
+                {regForm.status !== "leave" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><Label className="overline">In Time</Label><Input type="time" value={regForm.in_time} onChange={(e) => setRegForm({ ...regForm, in_time: e.target.value })} className="rounded-none h-11" data-testid="reg-in-time" /></div>
+                    <div><Label className="overline">Out Time</Label><Input type="time" value={regForm.out_time} onChange={(e) => setRegForm({ ...regForm, out_time: e.target.value })} className="rounded-none h-11" data-testid="reg-out-time" /></div>
+                  </div>
+                )}
                 <div><Label className="overline">Reason</Label><Textarea value={regForm.reason} onChange={(e) => setRegForm({ ...regForm, reason: e.target.value })} placeholder="Why was attendance missed?" className="rounded-none" rows={3} data-testid="reg-reason" /></div>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setRegOpen(false)} className="rounded-none">Cancel</Button>
                 <Button onClick={async () => {
                   if (!regForm.date || !regForm.reason.trim()) { toast.error("Date and reason required"); return; }
+                  if (regForm.status !== "leave" && !regForm.in_time) { toast.error("In Time is required"); return; }
+                  if (regForm.in_time && regForm.out_time && regForm.out_time <= regForm.in_time) { toast.error("Out Time must be after In Time"); return; }
                   try {
                     await api.post("/regularisations", regForm);
                     setRegOpen(false);
-                    setRegForm({ date: "", status: "present", reason: "" });
+                    setRegForm({ date: "", status: "present", in_time: "", out_time: "", reason: "" });
                     loadMonthly();
                     toast.success("Submitted — awaiting approval");
                   } catch (e) { toast.error(formatError(e)); }

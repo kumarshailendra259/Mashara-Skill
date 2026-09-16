@@ -2313,3 +2313,13 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 - Job Role field now WO-course-driven when a WO is linked (options = WO courses, label "Job Role · from Work Order"); selecting one fills Category, Job Role Hours, No. of Candidates → Per Hour Rate + Total WO Value auto-compute. Falls back to the job-role-master dropdown (+ add) when no WO is linked. WO change resets `wo_course_index`.
 
 **Verified (screenshot):** Linking WO-BG-SEED-01 → dropdown shows "Seed · Cat I · 200h"; select → Category I, Hours 200, Candidates 30, FY 2026-27, Rate ₹56.35, Total ₹3,38,100. No console errors.
+
+## Phase 88 (Jun 2026) — Regularise Attendance: capture In/Out time
+
+**User ask:** Attendance regularise karte samay date ke saath time bhi mention ho.
+
+**Backend (server.py):** RegularisationIn now has optional `in_time`/`out_time` (HH:MM, IST). On approval (approvals/act, request_type=regularisation) the attendance row's `check_in_at` = `{date}T{in_time}:00+05:30` and `check_out_at` = `{date}T{out_time}:00+05:30` (check_out_via='regularised') instead of the approval `now`. Falls back to `now` if in_time absent.
+
+**Frontend (CheckIn.jsx):** Regularise modal now has "In Time" + "Out Time" time inputs (shown for Present/Half; hidden for Leave). In Time required for non-leave; Out Time must be after In Time. Sent in the POST payload.
+
+**Verified:** curl e2e — submit with in_time 10:00/out_time 18:30 → approve → attendance 2026-09-09 check_in_at 10:00+05:30, check_out_at 18:30+05:30, status present. Modal fields render + interactive (screenshot).

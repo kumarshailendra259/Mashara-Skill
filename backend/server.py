@@ -4900,6 +4900,10 @@ class RegularisationIn(BaseModel):
     # Renamed on save to attendance_status so it doesn't clash with the chain status
     # ('pending'/'approved'/'rejected') used by the unified approval engine.
     status: Literal["present", "half", "leave"] = "present"
+    # Wall-clock times (HH:MM, IST) for the regularised day. in_time is used as the
+    # check-in and out_time as the check-out when the request is approved.
+    in_time: Optional[str] = None
+    out_time: Optional[str] = None
     reason: str  # mandatory explanation
 
 
@@ -7094,18 +7098,27 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             }
         elif body.request_type == "regularisation":
             # Final-approval upserts the attendance row for the staff/date as 'regularised'.
+            # Use the requested wall-clock in/out times (IST) when provided so the
+            # attendance reflects the ACTUAL time, not the approval moment.
             now = datetime.now(timezone.utc).isoformat()
             new_id = str(uuid.uuid4())
+            rdate = rec["date"]
+            ci = f"{rdate}T{rec['in_time']}:00+05:30" if rec.get("in_time") else now
+            co = f"{rdate}T{rec['out_time']}:00+05:30" if rec.get("out_time") else None
+            set_fields = {
+                "staff_id": rec["staff_id"], "date": rdate,
+                "status": rec.get("attendance_status") or "present",
+                "marked_via": "regularised",
+                "marked_at": now, "marked_by": user["id"],
+                "check_in_at": ci,
+                "regularised": True, "regularisation_id": rec["id"],
+            }
+            if co:
+                set_fields["check_out_at"] = co
+                set_fields["check_out_via"] = "regularised"
             await db.attendance.update_one(
-                {"staff_id": rec["staff_id"], "date": rec["date"]},
-                {"$set": {
-                    "staff_id": rec["staff_id"], "date": rec["date"],
-                    "status": rec.get("attendance_status") or "present",
-                    "marked_via": "regularised",
-                    "marked_at": now, "marked_by": user["id"],
-                    "check_in_at": now,
-                    "regularised": True, "regularisation_id": rec["id"],
-                }, "$setOnInsert": {"id": new_id}},
+                {"staff_id": rec["staff_id"], "date": rdate},
+                {"$set": set_fields, "$setOnInsert": {"id": new_id}},
                 upsert=True,
             )
             update = {
