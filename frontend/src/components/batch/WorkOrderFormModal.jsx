@@ -1,16 +1,20 @@
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
 import { inr } from "@/lib/i18n";
+import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2, Lock } from "lucide-react";
 import { toast } from "sonner";
+import CourseCombobox from "@/components/course/CourseCombobox";
+import CourseMasterFormDialog from "@/components/course/CourseMasterFormDialog";
 
 const FY_OPTIONS = ["2024-25", "2025-26", "2026-27", "2027-28", "2028-29"];
 const EMPTY_COURSE = {
+  course_master_id: null,
   sector: "", sub_sector: "", course: "", qp_code: "", category: "1", nsqf_level: "",
   course_hours: 0, cost_per_hour: 0, boarding_per_day: 0, boarding_days: 0, beneficiaries: 0,
 };
@@ -32,6 +36,50 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
   };
   const [f, setF] = useState(blank);
   const [saving, setSaving] = useState(false);
+  const { user } = useAuth();
+  const isAdmin = ["admin", "super_admin", "company_admin"].includes(user?.role);
+  const [masters, setMasters] = useState([]);
+  const [addCourseOpen, setAddCourseOpen] = useState(false);
+  const [addTargetRow, setAddTargetRow] = useState(null);
+
+  const loadMasters = useCallback(async () => {
+    try { const r = await api.get("/job-role-master", { params: { active_only: true } }); setMasters(r.data || []); }
+    catch { setMasters([]); }
+  }, []);
+  useEffect(() => { if (open) loadMasters(); }, [open, loadMasters]);
+
+  // Apply a master's mapped values onto a course row.
+  const applyMaster = (i, m) => setF((s) => ({
+    ...s,
+    courses: s.courses.map((c, idx) => idx === i ? {
+      ...c,
+      course_master_id: m.id,
+      sector: m.sector || "",
+      sub_sector: m.sub_sector || "",
+      course: m.name || "",
+      qp_code: m.qp_code || "",
+      category: String(m.category || c.category || "1"),
+      nsqf_level: String(m.nsqf_level || ""),
+      course_hours: Number(m.training_hours || m.default_hours || 0),
+      cost_per_hour: Number(m.cost_per_hour || 0),
+      boarding_per_day: Number(m.boarding_per_day || 0),
+      boarding_days: Number(m.default_days || 0),
+    } : c),
+  }));
+
+  const onMasterCreated = async () => {
+    // Reload masters, then auto-select the newly created one into the target row.
+    try {
+      const r = await api.get("/job-role-master", { params: { active_only: true } });
+      const list = r.data || [];
+      setMasters(list);
+      if (addTargetRow != null && list.length) {
+        // newest by created_at
+        const latest = [...list].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""))[0];
+        if (latest) applyMaster(addTargetRow, latest);
+      }
+    } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -93,6 +141,7 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={(o) => !o && onClose && onClose()}>
       <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto" data-testid="wo-form-modal">
         <DialogHeader>
@@ -165,10 +214,11 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
             <Button size="sm" variant="outline" onClick={addCourse} className="h-7 text-[11px]" data-testid="wo-add-course"><Plus size={12} /> Add Course</Button>
           </div>
           <div className="overflow-x-auto border border-[var(--border)] rounded-md">
-            <table className="w-full text-[11px] min-w-[1100px]">
+            <table className="w-full text-[11px] min-w-[1250px]">
               <thead className="bg-slate-50">
                 <tr className="[&>th]:p-1.5 [&>th]:text-left [&>th]:overline [&>th]:text-[9px] [&>th]:whitespace-nowrap">
-                  <th>Sector</th><th>Sub Sector</th><th>Course</th><th>QP Code</th><th>Cat</th><th>NSQF</th>
+                  <th>Job Role / Course</th>
+                  <th>Sector</th><th>Sub Sector</th><th>QP Code</th><th>Cat</th><th>NSQF</th>
                   <th className="text-right">Hours</th><th className="text-right">Cost/Hr</th>
                   <th className="text-right">Board/Day</th><th className="text-right">Days</th><th className="text-right">Benef.</th>
                   <th className="text-right">Total Fee</th><th></th>
@@ -177,18 +227,42 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
               <tbody>
                 {f.courses.map((c, i) => {
                   const r = rowFee(c);
+                  const mapped = !!c.course_master_id;
+                  const locked = mapped && !isAdmin;   // read-only for non-admins
+                  const lockCls = locked ? "bg-slate-50 text-slate-600" : "";
+                  const roCell = (field, extraCls = "") => (
+                    <Input value={c[field] ?? ""} onChange={(e) => setCourse(i, field, e.target.value)}
+                      readOnly={locked} className={`h-7 text-[11px] ${extraCls} ${lockCls}`} />
+                  );
+                  const numCell = (field, w) => (
+                    <Input type="number" value={c[field]} onChange={(e) => setCourse(i, field, e.target.value)}
+                      readOnly={locked} className={`h-7 text-[11px] ${w} text-right ${lockCls}`} />
+                  );
                   return (
-                    <tr key={i} className="border-t border-[var(--border)] [&>td]:p-1" data-testid={`wo-course-row-${i}`}>
-                      <td><Input value={c.sector} onChange={(e) => setCourse(i, "sector", e.target.value)} className="h-7 text-[11px]" /></td>
-                      <td><Input value={c.sub_sector} onChange={(e) => setCourse(i, "sub_sector", e.target.value)} className="h-7 text-[11px]" /></td>
-                      <td><Input value={c.course} onChange={(e) => setCourse(i, "course", e.target.value)} className="h-7 text-[11px] min-w-[120px]" /></td>
-                      <td><Input value={c.qp_code} onChange={(e) => setCourse(i, "qp_code", e.target.value)} className="h-7 text-[11px]" /></td>
-                      <td><Input value={c.category} onChange={(e) => setCourse(i, "category", e.target.value)} className="h-7 text-[11px] w-12" /></td>
-                      <td><Input value={c.nsqf_level} onChange={(e) => setCourse(i, "nsqf_level", e.target.value)} className="h-7 text-[11px] w-12" /></td>
-                      <td><Input type="number" value={c.course_hours} onChange={(e) => setCourse(i, "course_hours", e.target.value)} className="h-7 text-[11px] w-16 text-right" /></td>
-                      <td><Input type="number" value={c.cost_per_hour} onChange={(e) => setCourse(i, "cost_per_hour", e.target.value)} className="h-7 text-[11px] w-20 text-right" /></td>
-                      <td><Input type="number" value={c.boarding_per_day} onChange={(e) => setCourse(i, "boarding_per_day", e.target.value)} className="h-7 text-[11px] w-20 text-right" /></td>
-                      <td><Input type="number" value={c.boarding_days} onChange={(e) => setCourse(i, "boarding_days", e.target.value)} className="h-7 text-[11px] w-14 text-right" /></td>
+                    <tr key={i} className="border-t border-[var(--border)] [&>td]:p-1 align-top" data-testid={`wo-course-row-${i}`}>
+                      <td>
+                        <CourseCombobox
+                          courses={masters} value={c.course_master_id}
+                          canAdd={isAdmin}
+                          onSelect={(m) => applyMaster(i, m)}
+                          onAddNew={() => { setAddTargetRow(i); setAddCourseOpen(true); }}
+                          testid={`wo-course-combo-${i}`}
+                        />
+                        {mapped && (
+                          <div className="text-[9px] text-emerald-700 mt-0.5 flex items-center gap-0.5">
+                            <Lock size={9} /> Mapped from Course Master
+                          </div>
+                        )}
+                      </td>
+                      <td>{roCell("sector")}</td>
+                      <td>{roCell("sub_sector")}</td>
+                      <td>{roCell("qp_code")}</td>
+                      <td>{roCell("category", "w-12")}</td>
+                      <td>{roCell("nsqf_level", "w-12")}</td>
+                      <td>{numCell("course_hours", "w-16")}</td>
+                      <td>{numCell("cost_per_hour", "w-20")}</td>
+                      <td>{numCell("boarding_per_day", "w-20")}</td>
+                      <td>{numCell("boarding_days", "w-14")}</td>
                       <td><Input type="number" value={c.beneficiaries} onChange={(e) => setCourse(i, "beneficiaries", e.target.value)} className="h-7 text-[11px] w-16 text-right" /></td>
                       <td className="text-right num font-semibold whitespace-nowrap">{inr(r.total)}</td>
                       <td><Button size="icon" variant="ghost" onClick={() => delCourse(i)} className="h-6 w-6 hover:text-red-600"><Trash2 size={12} /></Button></td>
@@ -239,5 +313,11 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <CourseMasterFormDialog
+      open={addCourseOpen}
+      onClose={() => setAddCourseOpen(false)}
+      onSaved={onMasterCreated}
+    />
+    </>
   );
 }

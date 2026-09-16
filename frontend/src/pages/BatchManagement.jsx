@@ -488,7 +488,7 @@ export default function BatchManagement() {
   };
   const pickJobRole = (rid) => {
     const r = jobRoles.find((x) => x.id === rid);
-    setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: rid, job_role: r?.name || prev.job_role, job_role_hours: r?.default_hours || prev.job_role_hours }) : prev);
+    setBEdit((prev) => prev ? ({ ...prev, job_role_master_id: rid, job_role: r?.name || prev.job_role, job_role_hours: (r?.training_hours || r?.default_hours) || prev.job_role_hours, category: r?.category ? String(r.category) : prev.category }) : prev);
   };
   // Pick a job role from the linked Work Order's courses → auto-fill everything.
   const pickWOCourse = (idx) => {

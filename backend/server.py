@@ -13145,6 +13145,7 @@ WO_READ_ROLES = (*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager")
 
 class WorkOrderCourseIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    course_master_id: Optional[str] = None    # FK to db.job_role_master (Phase 88 · single source of truth)
     sector: Optional[str] = ""
     sub_sector: Optional[str] = ""
     course: Optional[str] = ""
@@ -13214,6 +13215,40 @@ def _wo_effective_status(doc: dict) -> str:
     return st or "active"
 
 
+async def _resolve_course_masters(courses: list, is_admin: bool) -> list:
+    """Fill master-linked fields on WO course rows from db.job_role_master.
+
+    Phase 88 · Course Master is the single source of truth. For NON-admin users,
+    master values OVERWRITE the descriptive + rate fields (so a tampered
+    frontend payload can't diverge from the master). Super/Company Admin may
+    override (their submitted values are kept), but the master link is always
+    recorded. `beneficiaries` is always WO-specific and never overwritten.
+    """
+    ids = [c.get("course_master_id") for c in (courses or []) if c.get("course_master_id")]
+    masters: dict = {}
+    if ids:
+        async for m in db.job_role_master.find({"id": {"$in": ids}}, {"_id": 0}):
+            masters[m["id"]] = m
+    out = []
+    for c in (courses or []):
+        c = dict(c)
+        mid = c.get("course_master_id")
+        m = masters.get(mid) if mid else None
+        if m and not is_admin:
+            c["sector"] = m.get("sector", "") or ""
+            c["sub_sector"] = m.get("sub_sector", "") or ""
+            c["course"] = m.get("name", "") or c.get("course", "")
+            c["qp_code"] = m.get("qp_code", "") or ""
+            c["category"] = str(m.get("category") or c.get("category") or "")
+            c["nsqf_level"] = str(m.get("nsqf_level") or "")
+            c["course_hours"] = float(m.get("training_hours") or m.get("default_hours") or c.get("course_hours") or 0)
+            c["cost_per_hour"] = float(m.get("cost_per_hour") or c.get("cost_per_hour") or 0)
+            c["boarding_per_day"] = float(m.get("boarding_per_day") or c.get("boarding_per_day") or 0)
+            c["boarding_days"] = float(m.get("default_days") or c.get("boarding_days") or 0)
+        out.append(c)
+    return out
+
+
 def _compute_work_order(courses: list, pbg_percent: float, value_override) -> dict:
     """Backend-authoritative WO financials. Value = Σ(Total Fee) unless a manual
     override (>0) is supplied. Never trusts client-sent derived totals."""
@@ -13232,6 +13267,7 @@ def _compute_work_order(courses: list, pbg_percent: float, value_override) -> di
         boarding = round(bpd * days * benef, 2)
         total_fee = round(classroom + boarding, 2)
         rows.append({
+            "course_master_id": c.get("course_master_id") or None,
             "sector": c.get("sector", "") or "", "sub_sector": c.get("sub_sector", "") or "",
             "course": c.get("course", "") or "", "qp_code": c.get("qp_code", "") or "",
             "category": c.get("category", "") or "", "nsqf_level": c.get("nsqf_level", "") or "",
@@ -13296,6 +13332,7 @@ async def create_work_order(body: WorkOrderIn, user=Depends(require_role(*TARGET
         raise HTTPException(400, "company_id does not exist")
     now = datetime.now(timezone.utc).isoformat()
     payload = body.model_dump()
+    payload["courses"] = await _resolve_course_masters(payload.get("courses"), user.get("role") in _COURSE_OVERRIDE_ROLES)
     derived = _compute_work_order(payload.get("courses"), payload.get("pbg_percent"), payload.get("work_order_value_override"))
     doc = {"id": str(uuid.uuid4()), **payload, **derived,
            "created_by": user["id"], "created_at": now, "updated_at": now}
@@ -13360,7 +13397,7 @@ async def get_work_order(wid: str, user=Depends(require_role(*WO_READ_ROLES))):
 
 
 @api.patch("/work-orders/{wid}", response_model=WorkOrderOut)
-async def update_work_order(wid: str, body: WorkOrderIn, _=Depends(require_role(*TARGET_ADMIN_ROLES))):
+async def update_work_order(wid: str, body: WorkOrderIn, user=Depends(require_role(*TARGET_ADMIN_ROLES))):
     existing = await db.work_orders.find_one({"id": wid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Work Order not found")
@@ -13369,6 +13406,7 @@ async def update_work_order(wid: str, body: WorkOrderIn, _=Depends(require_role(
     if not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "center_id does not exist")
     payload = body.model_dump()
+    payload["courses"] = await _resolve_course_masters(payload.get("courses"), user.get("role") in _COURSE_OVERRIDE_ROLES)
     derived = _compute_work_order(payload.get("courses"), payload.get("pbg_percent"), payload.get("work_order_value_override"))
     upd = {**payload, **derived, "updated_at": datetime.now(timezone.utc).isoformat()}
     res = await db.work_orders.find_one_and_update({"id": wid}, {"$set": upd}, return_document=True)
@@ -14430,48 +14468,150 @@ async def calculate_wo(payload: dict = Body(...), _=Depends(get_current_user)):
             "work_order_value": total}
 
 
-# ---------- Job Role Master ----------
+# ---------- Course / Job Role Master (Phase 88 — central single source of truth) ----------
+# Extends the legacy `job_role_master` collection with full course dimensions so
+# every module (Work Order, Batch, Candidate, Reports) references ONE master.
+# `default_hours` is retained (== training_hours) for backward-compat with the
+# batch-creation flow which reads `r.default_hours`.
 class JobRoleMasterIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    name: str = Field(min_length=1)
-    default_hours: float = Field(default=0, ge=0)
+    name: str = Field(min_length=1)            # Job Role / Course Name
+    qp_code: Optional[str] = ""
+    sector: Optional[str] = ""
+    sub_sector: Optional[str] = ""
+    category: Optional[str] = ""               # 1 / 2 / 3 (or I/II/III)
     nsqf_level: Optional[str] = ""
-    category_hint: Optional[str] = ""  # I/II/III suggestion
+    qp_hours: float = Field(default=0, ge=0)
+    training_hours: float = Field(default=0, ge=0)
+    default_hours: float = Field(default=0, ge=0)   # legacy alias, kept in sync with training_hours
+    cost_per_hour: float = Field(default=0, ge=0)
+    boarding_per_day: float = Field(default=0, ge=0)
+    default_days: float = Field(default=0, ge=0)
+    benefit: float = Field(default=0, ge=0)         # stipend / benefit
+    category_hint: Optional[str] = ""               # legacy
+    description: Optional[str] = ""
+    effective_from: Optional[str] = ""
+    effective_to: Optional[str] = ""
     active: bool = True
 
 
+_COURSE_OVERRIDE_ROLES = {"admin", "super_admin", "company_admin"}
+
+
+def _normalize_job_role_doc(body: JobRoleMasterIn) -> dict:
+    d = body.model_dump()
+    d["name"] = d["name"].strip()
+    # Keep training_hours <-> default_hours in sync (training_hours is authoritative).
+    th = float(d.get("training_hours") or 0)
+    dh = float(d.get("default_hours") or 0)
+    if th and not dh:
+        d["default_hours"] = th
+    elif dh and not th:
+        d["training_hours"] = dh
+    return d
+
+
+async def _course_master_usage(rid: str) -> dict:
+    """Count where a course master is referenced (best-effort, indexed id lookups)."""
+    wo = await db.work_orders.count_documents({"courses.course_master_id": rid})
+    batches = await db.batches.count_documents({
+        "$or": [{"job_role_master_id": rid}, {"job_roles.job_role_master_id": rid}]
+    })
+    candidates = await db.candidates.count_documents({"job_role_master_id": rid})
+    return {"work_orders": wo, "batches": batches, "candidates": candidates}
+
+
 @api.get("/job-role-master")
-async def list_job_roles(active_only: bool = True, _=Depends(get_current_user)):
-    q = {"active": True} if active_only else {}
-    docs = await db.job_role_master.find(q, {"_id": 0}).sort("name", 1).to_list(2000)
+async def list_job_roles(active_only: bool = True, q: Optional[str] = None,
+                          sector: Optional[str] = None, category: Optional[str] = None,
+                          with_usage: bool = False, _=Depends(get_current_user)):
+    query: dict = {}
+    if active_only:
+        query["active"] = True
+    if sector:
+        query["sector"] = {"$regex": f"^{re.escape(sector)}$", "$options": "i"}
+    if category:
+        query["category"] = str(category)
+    if q:
+        s = q.strip()
+        query["$or"] = [
+            {"name": {"$regex": s, "$options": "i"}},
+            {"qp_code": {"$regex": s, "$options": "i"}},
+            {"sector": {"$regex": s, "$options": "i"}},
+            {"sub_sector": {"$regex": s, "$options": "i"}},
+        ]
+    docs = await db.job_role_master.find(query, {"_id": 0}).sort("name", 1).to_list(3000)
+    if with_usage:
+        for d in docs:
+            d["usage"] = await _course_master_usage(d["id"])
     return docs
+
+
+@api.get("/job-role-master/{rid}/usage")
+async def job_role_usage(rid: str, _=Depends(get_current_user)):
+    if not await db.job_role_master.find_one({"id": rid}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Course / Job Role not found")
+    return await _course_master_usage(rid)
 
 
 @api.post("/job-role-master", status_code=201)
 async def create_job_role(body: JobRoleMasterIn,
-                            _=Depends(require_role("admin", "manager", "senior_manager", "hr", "center_manager"))):
+                            user=Depends(require_role("admin", "company_admin", "manager", "senior_manager", "hr", "center_manager"))):
     name = body.name.strip()
-    dup = await db.job_role_master.find_one({"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}, {"_id": 0, "id": 1})
-    if dup: raise HTTPException(409, f"Job Role '{name}' already exists")
+    qp = (body.qp_code or "").strip()
+    # Duplicate check on Job Role name OR QP Code (per spec §8).
+    dup_q = [{"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}]
+    if qp:
+        dup_q.append({"qp_code": {"$regex": f"^{re.escape(qp)}$", "$options": "i"}})
+    dup = await db.job_role_master.find_one({"$or": dup_q}, {"_id": 0, "id": 1, "name": 1, "qp_code": 1})
+    if dup:
+        raise HTTPException(409, f"This Job Role / QP Code already exists in Course Master ('{dup.get('name')}'). Update the existing master instead.")
     now = datetime.now(timezone.utc).isoformat()
-    doc = {"id": str(uuid.uuid4()), **body.model_dump(),
-           "name": name, "created_at": now}
+    doc = {"id": str(uuid.uuid4()), **_normalize_job_role_doc(body),
+           "created_by": user["id"], "updated_by": user["id"],
+           "created_at": now, "updated_at": now}
     await db.job_role_master.insert_one(doc)
     doc.pop("_id", None)
     return doc
 
 
+_JOB_ROLE_EDITABLE = ("name", "qp_code", "sector", "sub_sector", "category", "nsqf_level",
+                      "qp_hours", "training_hours", "default_hours", "cost_per_hour",
+                      "boarding_per_day", "default_days", "benefit", "category_hint",
+                      "description", "effective_from", "effective_to", "active")
+
+
 @api.patch("/job-role-master/{rid}")
 async def update_job_role(rid: str, payload: dict = Body(...),
-                            _=Depends(require_role("admin", "manager", "senior_manager"))):
-    upd = {k: v for k, v in payload.items() if k in ("name", "default_hours", "nsqf_level", "category_hint", "active")}
+                            user=Depends(require_role("admin", "company_admin", "manager", "senior_manager"))):
+    existing = await db.job_role_master.find_one({"id": rid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Job Role not found")
+    upd = {k: v for k, v in payload.items() if k in _JOB_ROLE_EDITABLE}
+    # Duplicate guard when renaming or changing QP code.
+    new_name = (upd.get("name") or existing.get("name") or "").strip()
+    new_qp = (upd.get("qp_code") if "qp_code" in upd else existing.get("qp_code") or "").strip()
+    dup_q = [{"name": {"$regex": f"^{re.escape(new_name)}$", "$options": "i"}}]
+    if new_qp:
+        dup_q.append({"qp_code": {"$regex": f"^{re.escape(new_qp)}$", "$options": "i"}})
+    dup = await db.job_role_master.find_one({"$or": dup_q, "id": {"$ne": rid}}, {"_id": 0, "id": 1, "name": 1})
+    if dup:
+        raise HTTPException(409, f"Another Course Master with this Job Role / QP Code already exists ('{dup.get('name')}').")
+    if "name" in upd:
+        upd["name"] = new_name
+    # Keep training_hours <-> default_hours synced.
+    if "training_hours" in upd and "default_hours" not in upd:
+        upd["default_hours"] = upd["training_hours"]
+    if "default_hours" in upd and "training_hours" not in upd:
+        upd["training_hours"] = upd["default_hours"]
+    upd["updated_by"] = user["id"]
+    upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     r = await db.job_role_master.find_one_and_update({"id": rid}, {"$set": upd}, return_document=True)
-    if not r: raise HTTPException(404, "Job Role not found")
     r.pop("_id", None); return r
 
 
 @api.delete("/job-role-master/{rid}", status_code=204)
-async def delete_job_role(rid: str, _=Depends(require_role("admin"))):
+async def delete_job_role(rid: str, _=Depends(require_role("admin", "company_admin"))):
     # Soft-delete by setting active=false so historical batches stay readable.
     r = await db.job_role_master.update_one({"id": rid}, {"$set": {"active": False}})
     if r.matched_count == 0: raise HTTPException(404, "Job Role not found")
