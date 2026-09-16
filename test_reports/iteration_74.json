@@ -1,0 +1,29 @@
+{
+  "summary": "Phase 89 (Mandatory Unique Entity ID & Relationship Linking) end-to-end verified. Backend: 19/19 pytest passed — Unique ID (entity_uid regex PART-XXXXXX / PROJ-XXXXXX for every partner/project, company_code/center_code exposed as entity_uid on companies/centers, immutable across PUT even when 'entity_uid':'PART-HACKED' is sent), Mandatory Center Mapping (POST without partner/project/company → 400 'mapping is required', POST with bogus partner_id → 400 'Selected Partner does not exist', POST with all 3 valid → 200 with entity_uid, PUT clearing partner_id → 400), Deletion Integrity (linked partner → 409 'This entity is linked with existing records', freshly-created unlinked partner → 200), Cascading Options (/entity-mapping-options no-params → all projects+companies; with partner_id → filtered w/ fallback), Reverse Visibility (/entities/partner/{id}/relationships returns entity_uid + linked_centers[] non-empty for mapped partner + linked_partners/projects/companies), Admin Mapping table (/entity-mappings returns {rows,total,unmapped}; unmapped_only=true filters to mapping_complete=false; q=<uid> matches; row keys include center_uid/partner_uid/project_uid/company_uid), Search /entities/center?q=<uid> filters, Audit Trail (create center → entity_mapping_audit row with action/new_mapping/actor_id/at). Frontend: /centers renders column order Unique ID | Name | Partner | Project | Company | Manager | Email | LWE | Login Mail | Description | Actions, 628 amber 'Mapping Required' badges (~213 rows × 3 fields), entity-search-center + entity-center-company/partner/project all present, Project field placeholder 'Select a Partner first' confirms cascading disable state, existing unmapped centers rendered (not blocked from viewing). /entity-mappings page renders 3 summary cards (Total Centers=213, Mapping Required=213, Fully Mapped=0), em-search + em-unmapped-toggle present, table shows Center → Partner → Project → Company with per-row Mapping Required status. Sidebar: Organization Management → Entity Mapping visible for admin. All 5 test artefacts (2 partners TEST_P89_*, 3 centers TEST_P89_*) cleaned up via module-scoped teardown fixture (DELETE returning 200).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_phase89_entity_mapping.py",
+    "/app/test_reports/pytest/phase89.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py now 24.6k lines — repeat of prior iteration flag. Phase 89 added ~350 lines of entity-mapping code around L2720-3075; strong candidate for extraction into routers/entities.py (create_entity/update_entity/delete_entity/list_entities/relationships/mappings/audit + helpers _enforce_center_mapping/_record_mapping_audit/_entity_dependency_count/_new_prefixed_code/_backfill_entity_uids).",
+    "_backfill_entity_uids runs on every startup and issues per-doc find_one_and_update loops. Fine at current 213 centers but O(N) writes on cold-start; consider a one-time migration flag doc or a bulk_write to avoid re-scanning at every process restart.",
+    "_enforce_center_mapping validates existence of each of the 3 ids sequentially with await db[coll].find_one — 3 round-trips per create. Consider $in single-query lookup or gather() them.",
+    "PUT update_entity strips company_code/center_code/entity_uid safely, but does NOT prevent an admin from swapping company_id on an existing center. If company changes, center_code (embedding old company prefix) becomes misleading. Consider either freezing company_id post-creation or regenerating a *new* entity_uid while archiving the old — with an audit note. Currently the audit only tracks partner/project/company id triple, not the resulting stale center_code.",
+    "GET /entity-mappings loads ALL centers (up to 3000) with in-memory q filter — fine now but will need $text or paginated cursor once centers > a few thousand.",
+    "Deletion integrity uses count_documents on centers/batches/transactions but not on staff (for partner/project/company). Deleting a partner that has staff linked would silently succeed — worth adding.",
+    "Cascading fallback: if partner has 0 mapped projects yet, endpoint returns ALL projects. This is user-friendly but could allow an admin to link a Project to a partner outside the historical mapping graph. Confirm this is by design (main agent's spec says 'falls back to all if none' — matches)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase89_entity_mapping.py"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% of Phase 89 scenarios"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "Test artefacts prefixed TEST_P89_: partners TEST_P89_ImmutableUid (created + kept for teardown), TEST_P89_ForDelete (created + deleted inline), centers TEST_P89_FullMap / TEST_P89_SearchableCenter / TEST_P89_AuditCenter. All non-inline ids tracked via created_ids fixture and DELETE'd in module teardown — verified 200 on final cleanup.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite /app/backend/tests/test_phase89_entity_mapping.py is idempotent (TEST_P89_ prefix + module-scoped teardown). Runs in ~4s against the preview URL. Note: pytest must be invoked with REACT_APP_BACKEND_URL env var set (not inherited from /app/frontend/.env). Frontend badges count of 628 = 213 unmapped centers × ~3 (partner/project/company columns) — do not attempt to map them all; they are legitimate seeded/legacy data. Existing partners=PART-HSFGBD, projects=PROJ-VNB37J backfilled uids confirmed via regex assertions.",
+  "rca of the issue": "N/A — Phase 89 acceptance criteria all met on first run. No backend or frontend defect surfaced."
+}
