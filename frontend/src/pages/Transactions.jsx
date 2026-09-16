@@ -10,15 +10,58 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare } from "lucide-react";
+import {
+  Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare,
+  Search, Filter, X, ChevronDown, ChevronLeft, ChevronRight, Eye, Check, Ban,
+  FileText, Clock, Building2, Rows, LayoutGrid, TrendingUp, TrendingDown,
+  Wallet, CircleCheck, CircleX, Hourglass, ListChecks, ArrowRightLeft,
+} from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 import SubmitButton from "@/components/SubmitButton";
 
 const TXN_TYPES = ["investment", "income", "expense"];
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
+
+const TYPE_STYLE = {
+  income: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  expense: "bg-rose-50 text-rose-700 border-rose-200",
+  investment: "bg-blue-50 text-blue-700 border-blue-200",
+};
+const TYPE_ICON = { income: TrendingUp, expense: TrendingDown, investment: ArrowRightLeft };
+const STATUS_STYLE = {
+  approved: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  rejected: "bg-rose-50 text-rose-700 border-rose-200",
+  pending: "bg-amber-50 text-amber-700 border-amber-200",
+};
+
+function StatusBadge({ status, title }) {
+  const s = status || "pending";
+  const cls = STATUS_STYLE[s] || "bg-slate-50 text-slate-600 border-slate-200";
+  const dot = s === "approved" ? "bg-emerald-500" : s === "rejected" ? "bg-rose-500" : s === "pending" ? "bg-amber-500" : "bg-slate-400";
+  return (
+    <span title={title || ""} className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full border ${cls}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
+      <span className="capitalize">{s}</span>
+    </span>
+  );
+}
+
+function TypeBadge({ type, t }) {
+  const Icon = TYPE_ICON[type] || Wallet;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium rounded border ${TYPE_STYLE[type] || "bg-slate-50 text-slate-600 border-slate-200"}`}>
+      <Icon size={11} /> {t(type)}
+    </span>
+  );
+}
 
 export default function Transactions() {
   const { t } = useLang();
@@ -30,16 +73,24 @@ export default function Transactions() {
   const myPartnerId = user?.assigned_partner_id || null;
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [items, setItems] = useState([]);
-  const [filters, setFilters] = useState({ type: "", status: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
-  // Sort state for the txn table — clickable Date and Amount headers cycle desc → asc → desc.
+  // Server-side filters (everything EXCEPT status, which we handle client-side
+  // so the KPI counts stay accurate regardless of the active status card).
+  const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
+  const [statusFilter, setStatusFilter] = useState(""); // "" | pending | approved | rejected
+  const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ field: "date", dir: "desc" });
+  const [view, setView] = useState("table"); // table | compact | grouped
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [selected, setSelected] = useState(new Set());
   const [itemSuggestions, setItemSuggestions] = useState([]);
+  const [drawer, setDrawer] = useState(null); // selected txn for details drawer
+  const [drawerTab, setDrawerTab] = useState("overview");
 
-  // Load distinct item names for the datalist (autocomplete)
   useEffect(() => {
     api.get("/items/suggestions").then((r) => setItemSuggestions(r.data || [])).catch(() => {});
   }, [open]);
@@ -61,40 +112,9 @@ export default function Transactions() {
     return p;
   }, [filters, pendingMyApproval]);
 
-  // Client-side sorted view of the loaded transactions.
-  const sortedItems = useMemo(() => {
-    const arr = [...items];
-    const { field, dir } = sort;
-    const mul = dir === "asc" ? 1 : -1;
-    arr.sort((a, b) => {
-      let av, bv;
-      if (field === "amount") { av = Number(a.amount || 0); bv = Number(b.amount || 0); }
-      else { av = a.date || ""; bv = b.date || ""; }
-      if (av === bv) {
-        // Tiebreak on created_at desc so newest still floats.
-        return (b.created_at || "").localeCompare(a.created_at || "");
-      }
-      return av < bv ? -mul : mul;
-    });
-    return arr;
-  }, [items, sort]);
-
-  const toggleSort = (field) => {
-    setSort((s) => (
-      s.field === field
-        ? { field, dir: s.dir === "asc" ? "desc" : "asc" }
-        : { field, dir: field === "amount" ? "desc" : "desc" }
-    ));
-  };
-  const sortIcon = (field) => {
-    if (sort.field !== field) return "↕";
-    return sort.dir === "asc" ? "↑" : "↓";
-  };
-
   const load = () => api.get("/transactions", { params }).then((r) => {
     const list = r.data || [];
     if (pendingMyApproval && isPartner && myPartnerId) {
-      // Client-side filter: only txns NOT created by me + with a partner_id != mine
       setItems(list.filter((it) =>
         it.status === "pending" && it.created_by !== user.id &&
         it.partner_id && it.partner_id !== myPartnerId
@@ -104,57 +124,90 @@ export default function Transactions() {
     }
   });
 
+  const nameOf = (etype, id) => entities[etype].find((e) => e.id === id)?.name || "—";
+
+  // ---- KPIs from the loaded (server-filtered, status-agnostic) set ----
+  const kpis = useMemo(() => {
+    const total = items.length;
+    const expense = items.filter((i) => i.type === "expense").reduce((s, i) => s + Number(i.amount || 0), 0);
+    const pending = items.filter((i) => (i.status || "pending") === "pending").length;
+    const approved = items.filter((i) => i.status === "approved").length;
+    const rejected = items.filter((i) => i.status === "rejected").length;
+    return { total, expense, pending, approved, rejected };
+  }, [items]);
+
+  // ---- Client filter (status + search) + sort ----
+  const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    let arr = items.filter((it) => {
+      if (statusFilter && (it.status || "pending") !== statusFilter) return false;
+      if (!needle) return true;
+      const hay = [
+        it.description, it.qrn, it.paid_by_name, String(it.amount),
+        nameOf("company", it.company_id), nameOf("partner", it.partner_id),
+        nameOf("center", it.center_id), nameOf("project", it.project_id),
+      ].join(" ").toLowerCase();
+      return hay.includes(needle);
+    });
+    const { field, dir } = sort;
+    const mul = dir === "asc" ? 1 : -1;
+    arr = [...arr].sort((a, b) => {
+      let av, bv;
+      if (field === "amount") { av = Number(a.amount || 0); bv = Number(b.amount || 0); }
+      else { av = a.date || ""; bv = b.date || ""; }
+      if (av === bv) return (b.created_at || "").localeCompare(a.created_at || "");
+      return av < bv ? -mul : mul;
+    });
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, statusFilter, search, sort, entities]);
+
+  const totalCount = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const pageItems = useMemo(() => {
+    if (view === "grouped") return filtered;
+    const start = (page - 1) * pageSize;
+    return filtered.slice(start, start + pageSize);
+  }, [filtered, page, pageSize, view]);
+
+  useEffect(() => { setPage(1); }, [statusFilter, search, filters, pageSize, view]);
+
+  const toggleSort = (field) => setSort((s) => (s.field === field ? { field, dir: s.dir === "asc" ? "desc" : "asc" } : { field, dir: "desc" }));
+  const sortIcon = (field) => (sort.field !== field ? "↕" : sort.dir === "asc" ? "↑" : "↓");
+
   const approveTxn = async (id) => {
-    try { await api.post(`/transactions/${id}/approve`); load(); toast.success("Approved"); }
+    try { await api.post(`/transactions/${id}/approve`); load(); toast.success("Approved"); setDrawer(null); }
     catch (e) { toast.error(formatError(e)); }
   };
   const rejectTxn = async (id) => {
     const reason = window.prompt("Reason (optional):") || "";
-    try { await api.post(`/transactions/${id}/reject`, { reason }); load(); toast.success("Rejected"); }
+    try { await api.post(`/transactions/${id}/reject`, { reason }); load(); toast.success("Rejected"); setDrawer(null); }
     catch (e) { toast.error(formatError(e)); }
   };
   const partnerApproveTxn = async (id) => {
-    try {
-      await api.post(`/transactions/${id}/partner-approve`);
-      load();
-      toast.success("Approved (partner cross-approval)");
-    } catch (e) { toast.error(formatError(e)); }
+    try { await api.post(`/transactions/${id}/partner-approve`); load(); toast.success("Approved (partner cross-approval)"); setDrawer(null); }
+    catch (e) { toast.error(formatError(e)); }
   };
-  // A partner can cross-approve a pending txn if it's NOT created by them, NOT their own partner profile,
-  // and (same project / center) OR a custom pairing exists. Custom pairing check is done server-side on click;
-  // here we show the button optimistically and let the server enforce eligibility (returns 403 with reason).
   const canPartnerCrossApprove = (it) => {
     if (!isPartner || !myPartnerId) return false;
-    if (it.status !== "pending") return false;
+    if (!it || it.status !== "pending") return false;
     if (it.created_by === user.id) return false;
     if (!it.partner_id || it.partner_id === myPartnerId) return false;
     return true;
   };
 
   const eligibleIds = items.filter((it) => it.status !== "approved").map((it) => it.id);
-  const allIds = items.map((it) => it.id);
-  const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id));
-  const toggleOne = (id) => setSelected((s) => {
-    const n = new Set(s);
-    if (n.has(id)) n.delete(id); else n.add(id);
-    return n;
-  });
-  const toggleAll = () => setSelected((s) => {
-    if (allIds.every((id) => s.has(id))) return new Set();
-    return new Set(allIds);
-  });
+  const pageIds = pageItems.map((it) => it.id);
+  const allSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const toggleOne = (id) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAll = () => setSelected((s) => (pageIds.every((id) => s.has(id)) ? new Set() : new Set(pageIds)));
   const bulkApprove = async () => {
     const ids = Array.from(selected).filter((id) => eligibleIds.includes(id));
     if (ids.length === 0) { toast.error("Nothing to approve"); return; }
-    try {
-      const { data } = await api.post("/transactions/bulk-approve", { ids });
-      setSelected(new Set());
-      await load();
-      toast.success(`Approved ${data.approved} transaction${data.approved === 1 ? "" : "s"}`);
-    } catch (e) { toast.error(formatError(e)); }
+    try { const { data } = await api.post("/transactions/bulk-approve", { ids }); setSelected(new Set()); await load(); toast.success(`Approved ${data.approved} transaction${data.approved === 1 ? "" : "s"}`); }
+    catch (e) { toast.error(formatError(e)); }
   };
 
-  // Bulk delete state
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
   const bulkDelete = async () => {
@@ -162,9 +215,7 @@ export default function Transactions() {
     try {
       const ids = Array.from(selected);
       const { data } = await api.post("/transactions/bulk-delete", { ids });
-      setSelected(new Set());
-      setBulkDeleteOpen(false);
-      await load();
+      setSelected(new Set()); setBulkDeleteOpen(false); await load();
       toast.success(`Deleted ${data.deleted} transaction${data.deleted === 1 ? "" : "s"}`);
     } catch (e) { toast.error(formatError(e)); }
     finally { setBulkDeleteBusy(false); }
@@ -173,7 +224,7 @@ export default function Transactions() {
   useEffect(() => { loadEntities(); }, []);
   useEffect(() => { load(); }, [params]);
 
-  const openNew = () => { setEditing(null); setForm(emptyForm); setOpen(true); };
+  const openNewType = (type) => { setEditing(null); setForm({ ...emptyForm, type }); setOpen(true); };
   const openEdit = (it) => {
     setEditing(it);
     setForm({
@@ -182,6 +233,7 @@ export default function Transactions() {
       center_id: it.center_id || "", project_id: it.project_id || "",
       items: it.items || [], attachments: it.attachments || [],
     });
+    setDrawer(null);
     setOpen(true);
   };
 
@@ -191,8 +243,7 @@ export default function Transactions() {
       if (i !== idx) return it;
       const next = { ...it, [key]: val };
       if (key === "quantity" || key === "rate") {
-        const q = parseFloat(next.quantity || 0);
-        const r = parseFloat(next.rate || 0);
+        const q = parseFloat(next.quantity || 0); const r = parseFloat(next.rate || 0);
         next.amount = +(q * r).toFixed(2);
       }
       return next;
@@ -212,9 +263,7 @@ export default function Transactions() {
     } catch (err) { toast.error(formatError(err)); }
     finally { setUploading(false); e.target.value = ""; }
   };
-
   const removeAttachment = (id) => setForm((s) => ({ ...s, attachments: s.attachments.filter((a) => a.id !== id) }));
-
   const itemsTotal = form.items.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
 
   const save = async () => {
@@ -231,27 +280,20 @@ export default function Transactions() {
 
   const [deleting, setDeleting] = useState(new Set());
   const remove = async (it) => {
-    if (deleting.has(it.id)) return; // prevent double-click race
+    if (deleting.has(it.id)) return;
     if (!window.confirm(t("confirm_delete"))) return;
     setDeleting((s) => new Set(s).add(it.id));
-    // Optimistic: drop the row from local state immediately so it can't be re-clicked
     setItems((cur) => cur.filter((x) => x.id !== it.id));
-    try {
-      await api.delete(`/transactions/${it.id}`);
-      toast.success("Deleted");
-    } catch (e) {
-      toast.error(formatError(e));
-      load(); // restore list on failure
-    } finally {
-      setDeleting((s) => { const n = new Set(s); n.delete(it.id); return n; });
-    }
+    setDrawer(null);
+    try { await api.delete(`/transactions/${it.id}`); toast.success("Deleted"); }
+    catch (e) { toast.error(formatError(e)); load(); }
+    finally { setDeleting((s) => { const n = new Set(s); n.delete(it.id); return n; }); }
   };
-
-  const nameOf = (etype, id) => entities[etype].find((e) => e.id === id)?.name || "—";
 
   const exportCsv = () => {
     const header = ["type", "amount", "date", "description", "company", "partner", "center", "project"];
-    const rows = items.map((it) => [
+    const src = selected.size > 0 ? filtered.filter((i) => selected.has(i.id)) : filtered;
+    const rows = src.map((it) => [
       it.type, it.amount, it.date, (it.description || "").replace(/"/g, '""'),
       nameOf("company", it.company_id), nameOf("partner", it.partner_id),
       nameOf("center", it.center_id), nameOf("project", it.project_id),
@@ -259,11 +301,9 @@ export default function Transactions() {
     const csv = [header, ...rows].map((r) => r.map((c) => `"${String(c ?? "")}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `transactions_${Date.now()}.csv`; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `transactions_${Date.now()}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
-
   const importCsv = async (e) => {
     const f = e.target.files?.[0]; if (!f) return;
     const fd = new FormData(); fd.append("file", f);
@@ -276,244 +316,428 @@ export default function Transactions() {
   };
 
   const setF = (k, v) => setFilters((s) => ({ ...s, [k]: v }));
+  const activeChips = [
+    filters.type && { k: "type", label: `${t("type")}: ${t(filters.type)}`, clear: () => setF("type", "") },
+    statusFilter && { k: "status", label: `${t("status")}: ${t(statusFilter)}`, clear: () => setStatusFilter("") },
+    filters.company_id && { k: "company", label: `${t("company")}: ${nameOf("company", filters.company_id)}`, clear: () => setF("company_id", "") },
+    filters.partner_id && { k: "partner", label: `${t("partner")}: ${nameOf("partner", filters.partner_id)}`, clear: () => setF("partner_id", "") },
+    filters.center_id && { k: "center", label: `${t("center")}: ${nameOf("center", filters.center_id)}`, clear: () => setF("center_id", "") },
+    filters.project_id && { k: "project", label: `${t("project")}: ${nameOf("project", filters.project_id)}`, clear: () => setF("project_id", "") },
+    filters.start && { k: "start", label: `From: ${filters.start}`, clear: () => setF("start", "") },
+    filters.end && { k: "end", label: `To: ${filters.end}`, clear: () => setF("end", "") },
+    search && { k: "search", label: `“${search}”`, clear: () => setSearch("") },
+  ].filter(Boolean);
+  const clearAll = () => { setFilters({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" }); setStatusFilter(""); setSearch(""); };
+
+  const KPI = ({ id, icon: Icon, label, value, tone, active, onClick, sub }) => (
+    <button
+      onClick={onClick}
+      data-testid={`kpi-${id}`}
+      className={`text-left bg-white border rounded-xl p-4 transition-all hover:shadow-md hover:-translate-y-0.5 ${active ? "border-[var(--brand)] ring-1 ring-[var(--brand)]/30 shadow-sm" : "border-slate-200"}`}
+    >
+      <div className="flex items-center gap-3">
+        <span className={`w-10 h-10 rounded-lg flex items-center justify-center ${tone}`}><Icon size={18} /></span>
+        <div className="min-w-0">
+          <div className="overline text-[10px] text-slate-500 truncate">{label}</div>
+          <div className="text-xl font-heading font-black tracking-tight truncate">{value}</div>
+        </div>
+      </div>
+      {sub && <div className="mt-1 text-[11px] text-slate-400">{sub}</div>}
+    </button>
+  );
+
+  const rowPad = view === "compact" ? "py-2 px-3" : "py-3 px-4";
+
+  const renderRow = (it) => {
+    const attN = (it.attachments?.length || 0);
+    const itemN = (it.items?.length || 0);
+    return (
+      <tr
+        key={it.id}
+        onClick={() => { setDrawer(it); setDrawerTab("overview"); }}
+        className="border-b border-slate-100 hover:bg-blue-50/40 cursor-pointer transition-colors"
+        data-testid={`txn-row-${it.id}`}
+      >
+        {isAdmin && (
+          <td className={rowPad} onClick={(e) => e.stopPropagation()}>
+            <input type="checkbox" checked={selected.has(it.id)} onChange={() => toggleOne(it.id)} className="cursor-pointer" data-testid={`select-txn-${it.id}`} />
+          </td>
+        )}
+        <td className={`${rowPad} whitespace-nowrap text-slate-600 num`}>{it.date}</td>
+        <td className={rowPad}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <TypeBadge type={it.type} t={t} />
+            {attN > 0 && <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-500" title={`${attN} attachments`}><Paperclip size={11} /> {attN}</span>}
+            {itemN > 0 && <span className="inline-flex items-center gap-0.5 text-[10px] text-blue-600" title={`${itemN} items`}><List size={11} /> {itemN}</span>}
+          </div>
+          <div className="mt-1 text-sm font-medium text-slate-800 truncate max-w-[240px]">{it.description || "—"}</div>
+          {(it.qrn || it.paid_by_name) && (
+            <div className="mt-1 flex items-center gap-1.5 flex-wrap text-[10px]">
+              {it.qrn && <span className="border border-blue-200 bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-mono">QRN {it.qrn}</span>}
+              {it.paid_by_name && <span className="border border-emerald-200 bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded">✓ {it.paid_by_name}</span>}
+            </div>
+          )}
+        </td>
+        <td className={`${rowPad} text-slate-700`}>{nameOf("company", it.company_id)}</td>
+        <td className={`${rowPad} text-right whitespace-nowrap`}>
+          <span className={`text-base font-heading font-black tracking-tight ${it.type === "income" ? "text-emerald-600" : it.type === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(it.amount)}</span>
+        </td>
+        {view !== "compact" && (
+          <td className={`${rowPad} text-[11px] text-slate-500 leading-5`}>
+            <div><span className="text-slate-400">Partner:</span> {nameOf("partner", it.partner_id)}</div>
+            <div><span className="text-slate-400">Center:</span> {nameOf("center", it.center_id)}</div>
+            <div><span className="text-slate-400">Project:</span> {nameOf("project", it.project_id)}</div>
+          </td>
+        )}
+        <td className={rowPad}><StatusBadge status={it.status} title={it.rejected_reason} /></td>
+        {canEdit && (
+          <td className={`${rowPad} text-right`} onClick={(e) => e.stopPropagation()}>
+            <div className="inline-flex gap-0.5 items-center">
+              {isAdmin && it.status !== "approved" && (
+                <Button size="icon" variant="ghost" onClick={() => approveTxn(it.id)} className="h-8 w-8 rounded-lg text-emerald-600 hover:bg-emerald-50" title={t("approve")} data-testid={`approve-${it.id}`}><Check size={15} /></Button>
+              )}
+              {isAdmin && it.status !== "rejected" && (
+                <Button size="icon" variant="ghost" onClick={() => rejectTxn(it.id)} className="h-8 w-8 rounded-lg text-rose-600 hover:bg-rose-50" title={t("reject")} data-testid={`reject-${it.id}`}><Ban size={15} /></Button>
+              )}
+              {canPartnerCrossApprove(it) && (
+                <Button size="icon" variant="ghost" onClick={() => partnerApproveTxn(it.id)} className="h-8 w-8 rounded-lg text-emerald-600 border border-emerald-200" title="Partner approve" data-testid={`partner-approve-${it.id}`}><CheckSquare size={15} /></Button>
+              )}
+              <Button size="icon" variant="ghost" onClick={() => setDrawer(it)} className="h-8 w-8 rounded-lg text-slate-500 hover:bg-slate-100" title="View"><Eye size={15} /></Button>
+              <Button size="icon" variant="ghost" onClick={() => openEdit(it)} className="h-8 w-8 rounded-lg text-slate-500 hover:bg-slate-100" title={t("edit")}><Pencil size={14} /></Button>
+              {canDelete && <Button size="icon" variant="ghost" disabled={deleting.has(it.id)} onClick={() => remove(it)} className="h-8 w-8 rounded-lg text-slate-500 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40" title={t("delete")}><Trash2 size={14} /></Button>}
+            </div>
+          </td>
+        )}
+      </tr>
+    );
+  };
+
+  const colCount = 5 + (isAdmin ? 1 : 0) + (view !== "compact" ? 1 : 0) + (canEdit ? 1 : 0);
+  const groups = useMemo(() => {
+    if (view !== "grouped") return null;
+    const order = ["pending", "approved", "rejected"];
+    const map = {};
+    filtered.forEach((it) => { const s = it.status || "pending"; (map[s] = map[s] || []).push(it); });
+    return order.filter((s) => map[s]?.length).map((s) => ({ status: s, rows: map[s] }));
+  }, [filtered, view]);
 
   return (
-    <div className="space-y-5" data-testid="transactions-page">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+    <div className="space-y-4" data-testid="transactions-page">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="overline">{t("transactions")}</div>
+          <div className="text-xs text-slate-400 flex items-center gap-1.5">
+            <span>{t("grp_finance") || "Finance & Accounting"}</span>
+            <ChevronRight size={12} />
+            <span className="text-slate-600 font-medium">{t("transactions")}</span>
+          </div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("transactions")}</h1>
+          <p className="text-sm text-slate-500 mt-1 max-w-2xl">Manage all financial transactions, expenses and payments across your organization.</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {isAdmin && selected.size > 0 && (
-            <Button onClick={bulkApprove} className="brand-btn rounded-none gap-2" data-testid="btn-bulk-approve">
-              <CheckSquare size={14} /> Approve ({selected.size})
-            </Button>
-          )}
-          {isAdmin && selected.size > 0 && (
-            <Button onClick={() => setBulkDeleteOpen(true)} variant="outline" className="rounded-none gap-2 border-[var(--danger)] text-[var(--danger)] hover:bg-red-50" data-testid="btn-bulk-delete-txn">
-              <Trash2 size={14} /> Delete ({selected.size})
-            </Button>
-          )}
           <PrintButton />
-          <Button variant="outline" onClick={exportCsv} className="rounded-none gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
+          <Button variant="outline" onClick={exportCsv} className="rounded-lg gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
           {canEdit && (
             <>
               <input ref={fileRef} type="file" accept=".csv" hidden onChange={importCsv} data-testid="csv-file" />
-              <Button variant="outline" onClick={() => fileRef.current?.click()} className="rounded-none gap-2" data-testid="btn-import"><Upload size={14} /> {t("import_csv")}</Button>
-              <Button onClick={openNew} className="brand-btn rounded-none gap-2" data-testid="btn-new-txn"><Plus size={16} /> {t("new_transaction")}</Button>
+              <Button variant="outline" onClick={() => fileRef.current?.click()} className="rounded-lg gap-2" data-testid="btn-import"><Upload size={14} /> {t("import_csv")}</Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button className="brand-btn rounded-lg gap-2" data-testid="btn-new-txn"><Plus size={16} /> {t("new_transaction")} <ChevronDown size={14} /></Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => openNewType("expense")} data-testid="new-type-expense"><TrendingDown size={14} className="mr-2 text-rose-600" /> {t("expense")}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openNewType("income")} data-testid="new-type-income"><TrendingUp size={14} className="mr-2 text-emerald-600" /> {t("income")}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => openNewType("investment")} data-testid="new-type-investment"><ArrowRightLeft size={14} className="mr-2 text-blue-600" /> {t("investment")}</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </>
           )}
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="swiss-card p-4 space-y-3">
-        {isPartner && (
-          <div className="flex items-center gap-2 border-l-2 border-[var(--brand)] bg-blue-50 px-3 py-2">
-            <input
-              type="checkbox" id="pending-my-approval"
-              checked={pendingMyApproval}
-              onChange={(e) => setPendingMyApproval(e.target.checked)}
-              data-testid="filter-pending-my-approval"
-            />
-            <label htmlFor="pending-my-approval" className="text-sm cursor-pointer">
-              <span className="font-medium">Show only transactions awaiting MY partner-approval</span>
-              <span className="overline text-[10px] text-[var(--muted)] block">(submitted by associated partners, status=pending)</span>
-            </label>
+      {/* KPI cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+        <KPI id="total" icon={ListChecks} label="Total Transactions" value={kpis.total} tone="bg-blue-50 text-blue-600" active={!statusFilter && !filters.type} onClick={() => { setStatusFilter(""); setF("type", ""); }} />
+        <KPI id="expense" icon={Wallet} label="Total Expense" value={inr(kpis.expense)} tone="bg-rose-50 text-rose-600" active={filters.type === "expense"} onClick={() => setF("type", filters.type === "expense" ? "" : "expense")} />
+        <KPI id="pending" icon={Hourglass} label="Pending Approval" value={kpis.pending} tone="bg-amber-50 text-amber-600" active={statusFilter === "pending"} onClick={() => setStatusFilter(statusFilter === "pending" ? "" : "pending")} />
+        <KPI id="approved" icon={CircleCheck} label="Approved" value={kpis.approved} tone="bg-emerald-50 text-emerald-600" active={statusFilter === "approved"} onClick={() => setStatusFilter(statusFilter === "approved" ? "" : "approved")} />
+        <KPI id="rejected" icon={CircleX} label="Rejected" value={kpis.rejected} tone="bg-rose-50 text-rose-600" active={statusFilter === "rejected"} onClick={() => setStatusFilter(statusFilter === "rejected" ? "" : "rejected")} />
+      </div>
+
+      {isPartner && (
+        <div className="flex items-center gap-2 border-l-2 border-[var(--brand)] bg-blue-50 px-3 py-2 rounded-r-lg">
+          <input type="checkbox" id="pending-my-approval" checked={pendingMyApproval} onChange={(e) => setPendingMyApproval(e.target.checked)} data-testid="filter-pending-my-approval" />
+          <label htmlFor="pending-my-approval" className="text-sm cursor-pointer">
+            <span className="font-medium">Show only transactions awaiting MY partner-approval</span>
+          </label>
+        </div>
+      )}
+
+      {/* Smart filter toolbar */}
+      <div className="bg-white border border-slate-200 rounded-xl p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by transaction, partner, reference…" className="rounded-lg pl-8 h-9" data-testid="txn-search" />
           </div>
-        )}
-        <div className="grid grid-cols-2 md:grid-cols-7 gap-3">
-        <div>
-          <Label className="overline">{t("status")}</Label>
-          <Select value={filters.status || "__all"} onValueChange={(v) => setF("status", v === "__all" ? "" : v)}>
-            <SelectTrigger className="rounded-none" data-testid="filter-status"><SelectValue placeholder={t("all")} /></SelectTrigger>
+          <Select value={statusFilter || "__all"} onValueChange={(v) => setStatusFilter(v === "__all" ? "" : v)}>
+            <SelectTrigger className="rounded-lg h-9 w-[130px]" data-testid="filter-status"><SelectValue placeholder={t("status")} /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="__all">{t("all")}</SelectItem>
+              <SelectItem value="__all">{t("status")}: {t("all")}</SelectItem>
               <SelectItem value="pending">{t("pending")}</SelectItem>
               <SelectItem value="approved">{t("approved")}</SelectItem>
               <SelectItem value="rejected">{t("rejected")}</SelectItem>
             </SelectContent>
           </Select>
-        </div>
-        <div>
-          <Label className="overline">{t("type")}</Label>
           <Select value={filters.type || "__all"} onValueChange={(v) => setF("type", v === "__all" ? "" : v)}>
-            <SelectTrigger className="rounded-none" data-testid="filter-type"><SelectValue placeholder={t("all")} /></SelectTrigger>
+            <SelectTrigger className="rounded-lg h-9 w-[120px]" data-testid="filter-type"><SelectValue placeholder={t("type")} /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="__all">{t("all")}</SelectItem>
+              <SelectItem value="__all">{t("type")}: {t("all")}</SelectItem>
               {TXN_TYPES.map((tt) => <SelectItem key={tt} value={tt}>{t(tt)}</SelectItem>)}
             </SelectContent>
           </Select>
-        </div>
-        {ENTITY_TYPES.map((etype) => (
-          <div key={etype}>
-            <Label className="overline">{t(etype)}</Label>
-            <Select value={filters[`${etype}_id`] || "__all"} onValueChange={(v) => setF(`${etype}_id`, v === "__all" ? "" : v)}>
-              <SelectTrigger className="rounded-none"><SelectValue placeholder={t("all")} /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all">{t("all")}</SelectItem>
-                {entities[etype].map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
+          <Button variant="outline" onClick={() => setFiltersOpen(true)} className="rounded-lg h-9 gap-2" data-testid="btn-advanced-filters"><Filter size={14} /> Advanced Filters</Button>
+
+          {/* View options */}
+          <div className="ml-auto inline-flex rounded-lg border border-slate-200 overflow-hidden">
+            {[["table", Rows, "Table"], ["compact", List, "Compact"], ["grouped", LayoutGrid, "Grouped"]].map(([v, Icon, lbl]) => (
+              <button key={v} onClick={() => setView(v)} data-testid={`view-${v}`} className={`inline-flex items-center gap-1.5 px-3 h-9 text-xs font-medium transition-colors ${view === v ? "bg-[var(--brand)] text-white" : "bg-white text-slate-600 hover:bg-slate-50"}`}>
+                <Icon size={13} /> {lbl}
+              </button>
+            ))}
           </div>
-        ))}
-        <div>
-          <Label className="overline">From</Label>
-          <Input type="date" value={filters.start} onChange={(e) => setF("start", e.target.value)} className="rounded-none" />
         </div>
-        <div>
-          <Label className="overline">To</Label>
-          <Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-none" />
-        </div>
-        </div>
+
+        {activeChips.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-100">
+            <span className="text-[11px] text-slate-400 uppercase tracking-wide">Active Filters:</span>
+            {activeChips.map((c) => (
+              <span key={c.k} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-2.5 py-0.5 text-xs" data-testid={`chip-${c.k}`}>
+                {c.label}
+                <button onClick={c.clear} className="hover:text-blue-900"><X size={12} /></button>
+              </span>
+            ))}
+            <button onClick={clearAll} className="text-xs text-rose-600 hover:underline ml-1" data-testid="clear-all-filters">Clear All</button>
+          </div>
+        )}
       </div>
+
+      {/* Bulk toolbar */}
+      {isAdmin && selected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-2 bg-slate-900 text-white rounded-xl px-4 py-2.5" data-testid="bulk-toolbar">
+          <span className="text-sm font-medium">{selected.size} transaction{selected.size === 1 ? "" : "s"} selected</span>
+          <div className="ml-auto flex flex-wrap gap-2">
+            <Button size="sm" onClick={bulkApprove} className="rounded-lg bg-emerald-600 hover:bg-emerald-700 gap-1.5" data-testid="btn-bulk-approve"><Check size={14} /> Approve</Button>
+            <Button size="sm" variant="outline" onClick={exportCsv} className="rounded-lg gap-1.5 bg-transparent text-white border-white/30 hover:bg-white/10"><Download size={14} /> Export</Button>
+            <Button size="sm" variant="outline" onClick={() => setBulkDeleteOpen(true)} className="rounded-lg gap-1.5 bg-transparent text-rose-300 border-rose-400/40 hover:bg-rose-500/10" data-testid="btn-bulk-delete-txn"><Trash2 size={14} /> Delete</Button>
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} className="rounded-lg text-white/70 hover:bg-white/10"><X size={14} /></Button>
+          </div>
+        </div>
+      )}
 
       {/* Table */}
-      <div className="swiss-card overflow-x-auto" data-testid="txn-table">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-[var(--border)] overline bg-gray-50">
-              {isAdmin && (
-                <th className="text-left p-3 w-10">
-                  <input type="checkbox" checked={allSelected} onChange={toggleAll} className="cursor-pointer" data-testid="select-all-txn" disabled={eligibleIds.length === 0} />
-                </th>
-              )}
-              <th className="text-left p-3">
-                <button
-                  type="button"
-                  onClick={() => toggleSort("date")}
-                  className="inline-flex items-center gap-1 hover:text-[var(--ink)] transition-colors"
-                  data-testid="sort-date"
-                  title="Click to sort by date"
-                >
-                  {t("date")}
-                  <span className={`text-xs ${sort.field === "date" ? "text-[var(--brand)] font-bold" : "opacity-40"}`}>{sortIcon("date")}</span>
-                </button>
-              </th>
-              <th className="text-left p-3">{t("type")}</th>
-              <th className="text-right p-3">
-                <button
-                  type="button"
-                  onClick={() => toggleSort("amount")}
-                  className="inline-flex items-center gap-1 hover:text-[var(--ink)] transition-colors"
-                  data-testid="sort-amount"
-                  title="Click to sort by amount"
-                >
-                  {t("amount")}
-                  <span className={`text-xs ${sort.field === "amount" ? "text-[var(--brand)] font-bold" : "opacity-40"}`}>{sortIcon("amount")}</span>
-                </button>
-              </th>
-              <th className="text-left p-3">{t("company")}</th>
-              <th className="text-left p-3">{t("partner")}</th>
-              <th className="text-left p-3">{t("center")}</th>
-              <th className="text-left p-3">{t("project")}</th>
-              <th className="text-left p-3">{t("description")}</th>
-              <th className="text-left p-3">{t("status")}</th>
-              {canEdit && <th className="p-3 text-right w-40">{t("actions")}</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 ? (
-              <tr><td colSpan={isAdmin ? 11 : 10} className="text-center py-8 overline">{t("no_data")}</td></tr>
-            ) : sortedItems.map((it) => (
-              <tr key={it.id} className="border-b border-[var(--border)] hover:bg-gray-50">
-                {isAdmin && (
-                  <td className="p-3">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(it.id)}
-                      onChange={() => toggleOne(it.id)}
-                      className="cursor-pointer"
-                      data-testid={`select-txn-${it.id}`}
-                    />
-                  </td>
-                )}
-                <td className="p-3 num">{it.date}</td>
-                <td className="p-3">
-                  <span className={`inline-block px-2 py-0.5 text-xs border ${
-                    it.type === "income" ? "border-[var(--success)] text-[var(--success)]" :
-                    it.type === "expense" ? "border-[var(--danger)] text-[var(--danger)]" :
-                    "border-[var(--brand)] text-[var(--brand)]"
-                  }`}>{t(it.type)}</span>
-                </td>
-                <td className={`p-3 num font-medium ${it.type === "income" ? "value-positive" : it.type === "expense" ? "value-negative" : ""}`}>{inr(it.amount)}</td>
-                <td className="p-3">{nameOf("company", it.company_id)}</td>
-                <td className="p-3">{nameOf("partner", it.partner_id)}</td>
-                <td className="p-3">{nameOf("center", it.center_id)}</td>
-                <td className="p-3">{nameOf("project", it.project_id)}</td>
-                <td className="p-3 text-[var(--muted)] max-w-xs truncate">
-                  <div className="flex items-center gap-2">
-                    {(it.items?.length || 0) > 0 && (
-                      <span className="inline-flex items-center gap-1 text-xs text-[var(--brand)] border border-[var(--brand)] px-1.5 py-0.5" title={`${it.items.length} items`}>
-                        <List size={11} /> {it.items.length}
-                      </span>
-                    )}
-                    {(it.attachments?.length || 0) > 0 && (
-                      <span className="inline-flex items-center gap-1 text-xs text-[var(--muted)] border border-[var(--border)] px-1.5 py-0.5" title={`${it.attachments.length} attachments`}>
-                        <Paperclip size={11} /> {it.attachments.length}
-                      </span>
-                    )}
-                    <span className="truncate">{it.description}</span>
-                  </div>
-                  {/* Payment-request link + payer name — auto-populated when
-                      transaction was created from a Payment Request final approval */}
-                  {(it.qrn || it.paid_by_name) && (
-                    <div className="mt-1 flex items-center gap-2 flex-wrap text-[10px]">
-                      {it.qrn && (
-                        <span className="inline-flex items-center gap-1 border border-blue-200 bg-blue-50 text-blue-800 px-1.5 py-0.5 font-mono" data-testid={`txn-qrn-${it.id}`}>
-                          QRN {it.qrn}
-                        </span>
-                      )}
-                      {it.paid_by_name && (
-                        <span className="inline-flex items-center gap-1 border border-emerald-200 bg-emerald-50 text-emerald-800 px-1.5 py-0.5" data-testid={`txn-paidby-${it.id}`}>
-                          ✓ Paid by <strong className="ml-0.5">{it.paid_by_name}</strong>
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </td>
-                <td className="p-3">
-                  <span className={`inline-block px-2 py-0.5 text-xs border ${
-                    it.status === "approved" ? "border-[var(--success)] text-[var(--success)]" :
-                    it.status === "rejected" ? "border-[var(--danger)] text-[var(--danger)]" :
-                    "border-[var(--warning)] text-[#9a7a00]"
-                  }`} title={it.rejected_reason || ""}>{t(it.status || "pending")}</span>
-                </td>
-                {canEdit && (
-                  <td className="p-3 text-right">
-                    <div className="inline-flex gap-1">
-                      {isAdmin && it.status !== "approved" && (
-                        <Button size="sm" variant="ghost" onClick={() => approveTxn(it.id)} className="rounded-none h-8 px-2 text-[var(--success)]" data-testid={`approve-${it.id}`}>{t("approve")}</Button>
-                      )}
-                      {isAdmin && it.status !== "rejected" && (
-                        <Button size="sm" variant="ghost" onClick={() => rejectTxn(it.id)} className="rounded-none h-8 px-2 text-[var(--danger)]" data-testid={`reject-${it.id}`}>{t("reject")}</Button>
-                      )}
-                      {canPartnerCrossApprove(it) && (
-                        <Button
-                          size="sm" variant="ghost"
-                          onClick={() => partnerApproveTxn(it.id)}
-                          className="rounded-none h-8 px-2 text-[var(--success)] border border-[var(--success)]/40"
-                          title="Approve as associated partner"
-                          data-testid={`partner-approve-${it.id}`}
-                        >
-                          ✓ Partner Approve
-                        </Button>
-                      )}
-                      <Button size="icon" variant="ghost" onClick={() => openEdit(it)} className="rounded-none h-8 w-8"><Pencil size={14} /></Button>
-                      {canDelete && <Button size="icon" variant="ghost" disabled={deleting.has(it.id)} onClick={() => remove(it)} className="rounded-none h-8 w-8 hover:text-[var(--danger)] disabled:opacity-40"><Trash2 size={14} /></Button>}
-                    </div>
-                  </td>
-                )}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden" data-testid="txn-table">
+        <div className="overflow-x-auto max-h-[62vh] overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10">
+              <tr className="bg-slate-50 border-b border-slate-200 text-[11px] uppercase tracking-wide text-slate-500">
+                {isAdmin && <th className="text-left py-3 px-4 w-10"><input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={pageIds.length === 0} className="cursor-pointer" data-testid="select-all-txn" /></th>}
+                <th className="text-left py-3 px-4"><button onClick={() => toggleSort("date")} className="inline-flex items-center gap-1" data-testid="sort-date">{t("date")} <span className={sort.field === "date" ? "text-[var(--brand)]" : "opacity-40"}>{sortIcon("date")}</span></button></th>
+                <th className="text-left py-3 px-4">Transaction</th>
+                <th className="text-left py-3 px-4">Organization</th>
+                <th className="text-right py-3 px-4"><button onClick={() => toggleSort("amount")} className="inline-flex items-center gap-1" data-testid="sort-amount">{t("amount")} <span className={sort.field === "amount" ? "text-[var(--brand)]" : "opacity-40"}>{sortIcon("amount")}</span></button></th>
+                {view !== "compact" && <th className="text-left py-3 px-4">Allocation</th>}
+                <th className="text-left py-3 px-4">{t("status")}</th>
+                {canEdit && <th className="text-right py-3 px-4">{t("actions")}</th>}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filtered.length === 0 ? (
+                <tr><td colSpan={colCount} className="text-center py-12 text-slate-400">{t("no_data")}</td></tr>
+              ) : view === "grouped" ? (
+                groups.map((g) => (
+                  <React.Fragment key={g.status}>
+                    <tr className="bg-slate-100/70"><td colSpan={colCount} className="py-2 px-4 text-xs font-semibold uppercase tracking-wide text-slate-600 flex items-center gap-2"><StatusBadge status={g.status} /> <span className="text-slate-400">({g.rows.length})</span></td></tr>
+                    {g.rows.map(renderRow)}
+                  </React.Fragment>
+                ))
+              ) : (
+                pageItems.map(renderRow)
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Pagination */}
+        {view !== "grouped" && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-slate-100 text-sm">
+            <div className="flex items-center gap-2 text-slate-500">
+              <span>Rows per page</span>
+              <Select value={String(pageSize)} onValueChange={(v) => setPageSize(Number(v))}>
+                <SelectTrigger className="rounded-lg h-8 w-[72px]" data-testid="rows-per-page"><SelectValue /></SelectTrigger>
+                <SelectContent>{[10, 25, 50, 100].map((n) => <SelectItem key={n} value={String(n)}>{n}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="text-slate-500">
+              Showing {totalCount === 0 ? 0 : (page - 1) * pageSize + 1}–{Math.min(page * pageSize, totalCount)} of {totalCount} transactions
+            </div>
+            <div className="flex items-center gap-1">
+              <Button size="icon" variant="outline" className="rounded-lg h-8 w-8" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))} data-testid="page-prev"><ChevronLeft size={15} /></Button>
+              {Array.from({ length: totalPages }, (_, i) => i + 1).filter((n) => n === 1 || n === totalPages || Math.abs(n - page) <= 1).map((n, idx, arr) => (
+                <React.Fragment key={n}>
+                  {idx > 0 && n - arr[idx - 1] > 1 && <span className="px-1 text-slate-400">…</span>}
+                  <button onClick={() => setPage(n)} className={`h-8 min-w-8 px-2 rounded-lg text-sm ${n === page ? "bg-[var(--brand)] text-white" : "border border-slate-200 hover:bg-slate-50"}`} data-testid={`page-${n}`}>{n}</button>
+                </React.Fragment>
+              ))}
+              <Button size="icon" variant="outline" className="rounded-lg h-8 w-8" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))} data-testid="page-next"><ChevronRight size={15} /></Button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Dialog */}
+      {/* Details Drawer */}
+      <Sheet open={!!drawer} onOpenChange={(o) => !o && setDrawer(null)}>
+        <SheetContent className="w-full sm:max-w-md overflow-y-auto p-0" data-testid="txn-drawer">
+          {drawer && (
+            <div className="flex flex-col h-full">
+              <SheetHeader className="p-5 border-b border-slate-100">
+                <SheetTitle className="font-heading">Transaction Details</SheetTitle>
+              </SheetHeader>
+              <div className="p-5 space-y-4 flex-1">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center">{React.createElement(TYPE_ICON[drawer.type] || Wallet, { size: 16 })}</span>
+                      <span className="font-mono text-xs text-slate-500">TRX-{String(drawer.id).slice(0, 8).toUpperCase()}</span>
+                    </div>
+                    <div className="mt-2 text-lg font-heading font-black tracking-tight">{drawer.description || t(drawer.type)}</div>
+                    <div className={`mt-1 text-2xl font-heading font-black ${drawer.type === "income" ? "text-emerald-600" : drawer.type === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(drawer.amount)}</div>
+                  </div>
+                  <StatusBadge status={drawer.status} title={drawer.rejected_reason} />
+                </div>
+
+                <Tabs value={drawerTab} onValueChange={setDrawerTab}>
+                  <TabsList className="w-full">
+                    <TabsTrigger value="overview" className="flex-1" data-testid="drawer-tab-overview">Overview</TabsTrigger>
+                    <TabsTrigger value="attachments" className="flex-1" data-testid="drawer-tab-attachments">Attachments ({drawer.attachments?.length || 0})</TabsTrigger>
+                    <TabsTrigger value="history" className="flex-1" data-testid="drawer-tab-history">History</TabsTrigger>
+                  </TabsList>
+
+                  <TabsContent value="overview" className="mt-4 space-y-3">
+                    <div className="grid grid-cols-2 gap-3 text-sm">
+                      <DField label={t("date")} value={drawer.date} />
+                      <DField label={t("type")} value={t(drawer.type)} />
+                      <DField label={t("company")} value={nameOf("company", drawer.company_id)} />
+                      <DField label={t("partner")} value={nameOf("partner", drawer.partner_id)} />
+                      <DField label={t("center")} value={nameOf("center", drawer.center_id)} />
+                      <DField label={t("project")} value={nameOf("project", drawer.project_id)} />
+                    </div>
+                    <div>
+                      <div className="overline text-[10px] text-slate-400 mb-1">{t("description")}</div>
+                      <div className="text-sm text-slate-700">{drawer.description || "—"}</div>
+                    </div>
+                    {(drawer.items?.length || 0) > 0 && (
+                      <div>
+                        <div className="overline text-[10px] text-slate-400 mb-1">Items</div>
+                        <div className="border border-slate-100 rounded-lg divide-y divide-slate-100">
+                          {drawer.items.map((it, i) => (
+                            <div key={i} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                              <span>{it.name} <span className="text-slate-400">×{it.quantity}</span></span>
+                              <span className="num font-medium">{inr(it.amount)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="attachments" className="mt-4">
+                    {(drawer.attachments?.length || 0) === 0 ? (
+                      <div className="text-sm text-slate-400 py-6 text-center">No attachments.</div>
+                    ) : (
+                      <ul className="space-y-2">
+                        {drawer.attachments.map((a) => (
+                          <li key={a.id} className="flex items-center justify-between border border-slate-100 rounded-lg px-3 py-2 text-sm">
+                            <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate flex items-center gap-2"><FileText size={14} /> {a.filename}</a>
+                            <span className="text-[10px] text-slate-400 ml-2">{(a.size / 1024).toFixed(0)} KB</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </TabsContent>
+
+                  <TabsContent value="history" className="mt-4">
+                    <ol className="relative border-l border-slate-200 pl-4 space-y-4">
+                      <li>
+                        <span className="absolute -left-1.5 w-3 h-3 rounded-full bg-blue-500" />
+                        <div className="text-sm font-medium">Created</div>
+                        <div className="text-xs text-slate-400">{(drawer.created_at || "").slice(0, 16).replace("T", " ")}</div>
+                      </li>
+                      {drawer.paid_by_name && (
+                        <li>
+                          <span className="absolute -left-1.5 w-3 h-3 rounded-full bg-emerald-500" />
+                          <div className="text-sm font-medium">Paid by {drawer.paid_by_name}</div>
+                          {drawer.qrn && <div className="text-xs text-slate-400 font-mono">QRN {drawer.qrn}</div>}
+                        </li>
+                      )}
+                      <li>
+                        <span className={`absolute -left-1.5 w-3 h-3 rounded-full ${drawer.status === "approved" ? "bg-emerald-500" : drawer.status === "rejected" ? "bg-rose-500" : "bg-amber-500"}`} />
+                        <div className="text-sm font-medium capitalize">{drawer.status || "pending"}</div>
+                        {drawer.rejected_reason && <div className="text-xs text-rose-500">{drawer.rejected_reason}</div>}
+                      </li>
+                    </ol>
+                  </TabsContent>
+                </Tabs>
+              </div>
+
+              {/* Permitted actions */}
+              {canEdit && (
+                <div className="p-4 border-t border-slate-100 grid grid-cols-2 gap-2">
+                  {isAdmin && drawer.status !== "approved" && <Button onClick={() => approveTxn(drawer.id)} className="rounded-lg bg-emerald-600 hover:bg-emerald-700 gap-1.5" data-testid="drawer-approve"><Check size={15} /> {t("approve")}</Button>}
+                  {isAdmin && drawer.status !== "rejected" && <Button onClick={() => rejectTxn(drawer.id)} variant="outline" className="rounded-lg border-rose-300 text-rose-600 hover:bg-rose-50 gap-1.5" data-testid="drawer-reject"><Ban size={15} /> {t("reject")}</Button>}
+                  {canPartnerCrossApprove(drawer) && <Button onClick={() => partnerApproveTxn(drawer.id)} className="rounded-lg bg-emerald-600 hover:bg-emerald-700 gap-1.5 col-span-2"><CheckSquare size={15} /> Partner Approve</Button>}
+                  <Button onClick={() => openEdit(drawer)} variant="outline" className="rounded-lg gap-1.5" data-testid="drawer-edit"><Pencil size={14} /> {t("edit")}</Button>
+                  {canDelete && <Button onClick={() => remove(drawer)} variant="outline" className="rounded-lg border-rose-300 text-rose-600 hover:bg-rose-50 gap-1.5" data-testid="drawer-delete"><Trash2 size={14} /> {t("delete")}</Button>}
+                </div>
+              )}
+            </div>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Advanced Filters drawer */}
+      <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
+        <SheetContent className="w-full sm:max-w-sm overflow-y-auto" data-testid="filters-drawer">
+          <SheetHeader><SheetTitle className="font-heading">Advanced Filters</SheetTitle></SheetHeader>
+          <div className="mt-5 space-y-4">
+            {ENTITY_TYPES.map((etype) => (
+              <div key={etype}>
+                <Label className="overline">{t(etype)}</Label>
+                <Select value={filters[`${etype}_id`] || "__all"} onValueChange={(v) => setF(`${etype}_id`, v === "__all" ? "" : v)}>
+                  <SelectTrigger className="rounded-lg" data-testid={`adv-filter-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__all">{t("all")}</SelectItem>
+                    {entities[etype].map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+            <div className="grid grid-cols-2 gap-3">
+              <div><Label className="overline">From</Label><Input type="date" value={filters.start} onChange={(e) => setF("start", e.target.value)} className="rounded-lg" /></div>
+              <div><Label className="overline">To</Label><Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-lg" /></div>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <Button variant="outline" onClick={clearAll} className="rounded-lg flex-1">Clear All</Button>
+              <Button onClick={() => setFiltersOpen(false)} className="brand-btn rounded-lg flex-1">Apply</Button>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {/* New / Edit Dialog */}
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="rounded-lg max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="font-heading tracking-tight">{editing ? t("edit") : t("new_transaction")}</DialogTitle>
           </DialogHeader>
@@ -521,31 +745,23 @@ export default function Transactions() {
             <div>
               <Label>{t("type")}</Label>
               <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
-                <SelectTrigger className="rounded-none" data-testid="txn-type"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {TXN_TYPES.map((tt) => <SelectItem key={tt} value={tt}>{t(tt)}</SelectItem>)}
-                </SelectContent>
+                <SelectTrigger className="rounded-lg" data-testid="txn-type"><SelectValue /></SelectTrigger>
+                <SelectContent>{TXN_TYPES.map((tt) => <SelectItem key={tt} value={tt}>{t(tt)}</SelectItem>)}</SelectContent>
               </Select>
             </div>
             <div>
-              <Label>{t("amount")} {form.items.length > 0 && <span className="text-xs text-[var(--muted)]">(auto from items)</span>}</Label>
-              <Input
-                type="number" step="0.01"
-                value={form.items.length ? itemsTotal : form.amount}
-                onChange={(e) => setForm({ ...form, amount: e.target.value })}
-                disabled={form.items.length > 0}
-                className="rounded-none" data-testid="txn-amount"
-              />
+              <Label>{t("amount")} {form.items.length > 0 && <span className="text-xs text-slate-400">(auto from items)</span>}</Label>
+              <Input type="number" step="0.01" value={form.items.length ? itemsTotal : form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} disabled={form.items.length > 0} className="rounded-lg" data-testid="txn-amount" />
             </div>
             <div className="col-span-2">
               <Label>{t("date")}</Label>
-              <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="rounded-none" data-testid="txn-date" />
+              <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} className="rounded-lg" data-testid="txn-date" />
             </div>
             {ENTITY_TYPES.map((etype) => (
               <div key={etype}>
                 <Label>{t(etype)}</Label>
                 <Select value={form[`${etype}_id`] || "__none"} onValueChange={(v) => setForm({ ...form, [`${etype}_id`]: v === "__none" ? "" : v })}>
-                  <SelectTrigger className="rounded-none" data-testid={`txn-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
+                  <SelectTrigger className="rounded-lg" data-testid={`txn-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none">—</SelectItem>
                     {entities[etype].map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
@@ -555,86 +771,58 @@ export default function Transactions() {
             ))}
             <div className="col-span-2">
               <Label>{t("description")}</Label>
-              <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="rounded-none" rows={2} />
+              <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="rounded-lg" rows={2} />
             </div>
 
             {/* Items */}
-            <div className="col-span-2 border-t border-[var(--border)] pt-4 mt-2">
+            <div className="col-span-2 border-t border-slate-100 pt-4 mt-2">
               <div className="flex items-center justify-between mb-2">
                 <Label className="overline">{t("items") || "Items"}</Label>
-                <Button type="button" size="sm" variant="outline" className="rounded-none gap-2" onClick={addItem} data-testid="btn-add-item">
-                  <Plus size={14} /> {t("add") || "Add"}
-                </Button>
+                <Button type="button" size="sm" variant="outline" className="rounded-lg gap-2" onClick={addItem} data-testid="btn-add-item"><Plus size={14} /> {t("add") || "Add"}</Button>
               </div>
               {form.items.length === 0 ? (
-                <div className="overline text-center py-3 border border-dashed border-[var(--border)]">No items — optional. Add line items for granular tracking.</div>
+                <div className="overline text-center py-3 border border-dashed border-slate-200 rounded-lg">No items — optional. Add line items for granular tracking.</div>
               ) : (
                 <table className="w-full text-sm">
-                  <thead>
-                    <tr className="overline border-b border-[var(--border)]">
-                      <th className="text-left py-2">Item</th>
-                      <th className="text-right">Qty</th>
-                      <th className="text-right">Rate</th>
-                      <th className="text-right">Amount</th>
-                      <th></th>
-                    </tr>
-                  </thead>
+                  <thead><tr className="overline border-b border-slate-100"><th className="text-left py-2">Item</th><th className="text-right">Qty</th><th className="text-right">Rate</th><th className="text-right">Amount</th><th></th></tr></thead>
                   <tbody>
                     {form.items.map((it, idx) => {
-                      const itemKey = it._k || (it._k = `it-${Date.now()}-${Math.random().toString(36).slice(2,8)}`);
+                      const itemKey = it._k || (it._k = `it-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
                       return (
-                      <tr key={itemKey} className="border-b border-[var(--border)]">
-                        <td className="py-1.5 pr-2">
-                          <Input value={it.name} onChange={(e) => updateItem(idx, "name", e.target.value)} placeholder="Item name" list="txn-item-names" className="rounded-none h-8" data-testid={`item-name-${idx}`} />
-                        </td>
-                        <td className="py-1.5 pr-2 w-20">
-                          <Input type="number" step="0.01" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="rounded-none h-8 num" />
-                        </td>
-                        <td className="py-1.5 pr-2 w-28">
-                          <Input type="number" step="0.01" value={it.rate} onChange={(e) => updateItem(idx, "rate", e.target.value)} className="rounded-none h-8 num" />
-                        </td>
-                        <td className="py-1.5 pr-2 w-28">
-                          <Input type="number" step="0.01" value={it.amount} onChange={(e) => updateItem(idx, "amount", parseFloat(e.target.value) || 0)} className="rounded-none h-8 num font-medium" />
-                        </td>
-                        <td className="w-10">
-                          <Button type="button" size="icon" variant="ghost" onClick={() => removeItem(idx)} className="h-8 w-8 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
-                        </td>
-                      </tr>
+                        <tr key={itemKey} className="border-b border-slate-100">
+                          <td className="py-1.5 pr-2"><Input value={it.name} onChange={(e) => updateItem(idx, "name", e.target.value)} placeholder="Item name" list="txn-item-names" className="rounded-lg h-8" data-testid={`item-name-${idx}`} /></td>
+                          <td className="py-1.5 pr-2 w-20"><Input type="number" step="0.01" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="rounded-lg h-8 num" /></td>
+                          <td className="py-1.5 pr-2 w-28"><Input type="number" step="0.01" value={it.rate} onChange={(e) => updateItem(idx, "rate", e.target.value)} className="rounded-lg h-8 num" /></td>
+                          <td className="py-1.5 pr-2 w-28"><Input type="number" step="0.01" value={it.amount} onChange={(e) => updateItem(idx, "amount", parseFloat(e.target.value) || 0)} className="rounded-lg h-8 num font-medium" /></td>
+                          <td className="w-10"><Button type="button" size="icon" variant="ghost" onClick={() => removeItem(idx)} className="h-8 w-8 rounded-lg hover:text-rose-600"><Trash2 size={14} /></Button></td>
+                        </tr>
                       );
                     })}
-                    <tr>
-                      <td colSpan={3} className="text-right overline pt-2">Items Total</td>
-                      <td className="num font-bold pt-2">{inr(itemsTotal)}</td>
-                      <td></td>
-                    </tr>
+                    <tr><td colSpan={3} className="text-right overline pt-2">Items Total</td><td className="num font-bold pt-2">{inr(itemsTotal)}</td><td></td></tr>
                   </tbody>
                 </table>
               )}
             </div>
 
             {/* Attachments */}
-            <div className="col-span-2 border-t border-[var(--border)] pt-4 mt-2">
+            <div className="col-span-2 border-t border-slate-100 pt-4 mt-2">
               <div className="flex items-center justify-between mb-2">
                 <Label className="overline">Attachments</Label>
                 <div>
                   <input ref={attachRef} type="file" hidden onChange={uploadAttachment} data-testid="attach-input" />
-                  <Button type="button" size="sm" variant="outline" className="rounded-none gap-2" disabled={uploading} onClick={() => attachRef.current?.click()} data-testid="btn-attach">
-                    <Upload size={14} /> {uploading ? "Uploading…" : "Attach file"}
-                  </Button>
+                  <Button type="button" size="sm" variant="outline" className="rounded-lg gap-2" disabled={uploading} onClick={() => attachRef.current?.click()} data-testid="btn-attach"><Upload size={14} /> {uploading ? "Uploading…" : "Attach file"}</Button>
                 </div>
               </div>
               {form.attachments.length === 0 ? (
-                <div className="overline text-center py-3 border border-dashed border-[var(--border)]">No attachments — upload bills, receipts, invoices (max 10MB).</div>
+                <div className="overline text-center py-3 border border-dashed border-slate-200 rounded-lg">No attachments — upload bills, receipts, invoices (max 10MB).</div>
               ) : (
                 <ul className="space-y-1">
                   {form.attachments.map((a) => (
-                    <li key={a.id} className="flex items-center justify-between border border-[var(--border)] px-3 py-2 text-sm">
-                      <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate">
-                        {a.filename}
-                      </a>
+                    <li key={a.id} className="flex items-center justify-between border border-slate-100 rounded-lg px-3 py-2 text-sm">
+                      <a href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[var(--brand)] hover:underline truncate">{a.filename}</a>
                       <div className="flex items-center gap-3 ml-3">
                         <span className="overline">{(a.size / 1024).toFixed(0)} KB</span>
-                        <Button type="button" size="icon" variant="ghost" onClick={() => removeAttachment(a.id)} className="h-7 w-7 rounded-none hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
+                        <Button type="button" size="icon" variant="ghost" onClick={() => removeAttachment(a.id)} className="h-7 w-7 rounded-lg hover:text-rose-600"><Trash2 size={14} /></Button>
                       </div>
                     </li>
                   ))}
@@ -643,13 +831,10 @@ export default function Transactions() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)} className="rounded-none">{t("cancel")}</Button>
-            <SubmitButton onClick={save} className="brand-btn rounded-none" data-testid="txn-save" loadingLabel="Saving…">{t("save")}</SubmitButton>
+            <Button variant="outline" onClick={() => setOpen(false)} className="rounded-lg">{t("cancel")}</Button>
+            <SubmitButton onClick={save} className="brand-btn rounded-lg" data-testid="txn-save" loadingLabel="Saving…">{t("save")}</SubmitButton>
           </DialogFooter>
-          {/* Shared datalist for item-name autocomplete */}
-          <datalist id="txn-item-names">
-            {itemSuggestions.map((s) => <option key={s.name} value={s.name} />)}
-          </datalist>
+          <datalist id="txn-item-names">{itemSuggestions.map((s) => <option key={s.name} value={s.name} />)}</datalist>
         </DialogContent>
       </Dialog>
 
@@ -662,6 +847,15 @@ export default function Transactions() {
         onConfirm={bulkDelete}
         warning="Approved transactions will also be deleted — re-running 'mark received' on a milestone will recreate them."
       />
+    </div>
+  );
+}
+
+function DField({ label, value }) {
+  return (
+    <div>
+      <div className="overline text-[10px] text-slate-400 mb-0.5">{label}</div>
+      <div className="text-sm text-slate-700">{value == null || value === "" ? "—" : value}</div>
     </div>
   );
 }
