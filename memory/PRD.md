@@ -148,6 +148,19 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 92 — Security Audit Fixes (SEC-001..004) + Full-Page Staff Profile (Done, Jun 2026)
+- **Security fixes (all verified, iteration_77 — 19/19, 0 critical)**:
+  - **SEC-001 [CRITICAL]**: public `POST /api/auth/register` now hardcodes `safe_role = "viewer"` (previously only blocked admin/super_admin/company_admin, letting anyone self-grant senior_manager = org-wide access). Privileged roles ONLY via admin `POST /auth/users`.
+  - **SEC-002 [HIGH]**: `GET /api/payments/{pid}/voucher/download` now gated to `VOUCHER_ROLES` (or creator) + `_assert_center_access`.
+  - **SEC-003 [HIGH]**: `_assert_center_access` added to write/action twins — invoices `PATCH`/`POST /advance`/`GET /audit`, `PATCH /work-orders/{wid}`, `PATCH /batch-targets/{tid}` + `GET /{tid}/batches`, bank-guarantees `PATCH`/`POST /status`/`PATCH /renew`. Body center_id (WO/target) also validated in-scope.
+  - **SEC-004 [MEDIUM]**: candidate `PATCH` fail-open replaced with fail-closed `_assert_center_access`, moved to run BEFORE project/body validation (ordering bug found+fixed by testing agent).
+- **Full-Page Staff Profile (`/hrms/staff/:sid/profile`, new `StaffProfile.jsx`)**:
+  - Backend `GET /api/staff/{sid}/profile` — center-scoped, salary-stripped for non-salary roles, enriches center_name/reports_to_name/user_role. `/payroll` gained `staff_id` filter.
+  - Header (photo/initials, name, Employee ID, Center, Role, Status) + left section nav: Basic Information, HR Information, Center & Role Mapping, Attendance (month nav + P/A/H/L summary), Leave, Payroll (salary-roles only), Documents (admin/hr/manager/accountant only), Performance + Activity Timeline ("Coming soon" empty states).
+  - HRMS "View Profile" (IdCard) button now navigates to the page (dialog removed).
+  - **Verified**: admin sees Payroll+Documents+PAN/Aadhaar & salary; center_manager sees NO Payroll/Documents tabs, NO PAN/Aadhaar, salary absent from API (screenshots).
+
+
 ### Phase 91 — HRMS Staff: Salary Visibility Control + Universal Profile Card (Done, Jun 2026)
 - **User ask**: Salary sirf admin/hr/accountant/partner (+ manager/senior_manager per follow-up) ko dikhe; center_manager ko NAHI. Aur ek fixed set of employee master details (Emp ID, Name, Photo, Gender, DOB, Mobile, Email, Joining Date, Employment Status, Employment Type, Designation, Department, Reporting Manager) SAB roles ko dikhe.
 - **Backend (`server.py`)**:

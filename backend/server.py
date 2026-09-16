@@ -18654,12 +18654,14 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
     existing = await db.candidates.find_one({"id": cid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Candidate not found")
+    # Scope check FIRST (fail-closed) — a center-scoped user can only edit
+    # candidates within the centre(s) they are linked to. Head-level users
+    # pass through. Runs before any body/project validation so OOS users cannot
+    # infer existence or bypass the guard via payload shape.
+    await _assert_center_access(user, existing.get("center_id"))
     project = existing.get("project") or (payload.get("project") or "").upper()
     if project not in ("BOCWW", "JSDMS"):
         raise HTTPException(400, "Missing project")
-    # Scope check (fail-closed) — a center-scoped user can only edit candidates
-    # within the centre(s) they are linked to. Head-level users pass through.
-    await _assert_center_access(user, existing.get("center_id"))
     data = _normalise_candidate_payload(project, payload)
     if project == "BOCWW":
         rel_err = _validate_relation({**existing, **data})
