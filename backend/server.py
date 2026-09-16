@@ -1045,6 +1045,45 @@ def _scope_staff_query(user: dict, staff_q: dict, center_id: Optional[str] = Non
     return staff_q
 
 
+async def _assert_center_access(user: dict, center_id: Optional[str]):
+    """Golden rule guard — a user may only touch a document whose center_id is
+    inside the set of centers they are linked to. Head-level users (admin /
+    senior_manager, and company_admin scoped to their tenant) pass through.
+
+    * `allowed is None`  → org-wide / unrestricted → allow.
+    * `center_id` in allowed → allow.
+    * otherwise → 403.
+
+    Documents with no `center_id` are only visible to unrestricted users
+    (fail-closed for scoped users)."""
+    await _enrich_user_with_associations(user)
+    allowed = _scoped_center_ids(user)
+    if allowed is None:
+        return
+    allowed_set = set(allowed)
+    if not center_id or center_id not in allowed_set:
+        raise HTTPException(status_code=403, detail="Not authorized for this centre's data")
+
+
+async def _apply_invoice_scope(query: dict, user: dict) -> dict:
+    """Inject the user's center scope into an invoice Mongo query (mutates +
+    returns). Rejects an explicit out-of-scope center_id filter with 403 and
+    otherwise restricts results to the user's linked centers."""
+    await _enrich_user_with_associations(user)
+    allowed = _scoped_center_ids(user)
+    if allowed is None:
+        return query  # unrestricted
+    allowed_set = set(allowed)
+    requested = query.get("center_id")
+    if isinstance(requested, str):
+        if requested not in allowed_set:
+            raise HTTPException(status_code=403, detail="Not authorized for this centre's data")
+        # explicit single center already within scope — keep as-is
+    else:
+        query["center_id"] = {"$in": list(allowed_set) if allowed_set else ["__none__"]}
+    return query
+
+
 
 async def _centers_for_partner(partner_id: str) -> list:
     """Compute the set of center_ids where the given partner is mapped.
@@ -10401,6 +10440,7 @@ async def get_quotation(qid: str, user=Depends(get_current_user)):
     q = await db.quotations.find_one({"id": qid}, {"_id": 0})
     if not q:
         raise HTTPException(404, "Not found")
+    await _assert_center_access(user, q.get("center_id"))
     await _enrich_with_approval_status(q)
     return q
 
@@ -10724,6 +10764,7 @@ async def get_payment(pid: str, user=Depends(get_current_user)):
     p = await db.payments.find_one({"id": pid}, {"_id": 0})
     if not p:
         raise HTTPException(404, "Not found")
+    await _assert_center_access(user, p.get("center_id"))
     await _enrich_with_approval_status(p)
     return p
 
@@ -13350,9 +13391,10 @@ async def list_batch_targets(
 
 
 @api.get("/batch-targets/{tid}", response_model=BatchTargetOut)
-async def get_batch_target(tid: str, _=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
+async def get_batch_target(tid: str, user=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
     doc = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
     if not doc: raise HTTPException(404, "Target not found")
+    await _assert_center_access(user, doc.get("center_id"))
     enriched = await _enrich_target(doc)
     allocated = await _target_allocated_single(doc)
     total = int(doc.get("total_target") or 0)
@@ -13663,10 +13705,7 @@ async def get_work_order(wid: str, user=Depends(require_role(*WO_READ_ROLES))):
     doc = await db.work_orders.find_one({"id": wid}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Work Order not found")
-    if user.get("role") == "center_manager":
-        assigned = user.get("assigned_center_ids") or []
-        if doc.get("center_id") not in assigned:
-            raise HTTPException(403, "Not authorized for this centre's work order")
+    await _assert_center_access(user, doc.get("center_id"))
     return WorkOrderOut(**await _enrich_work_order(doc))
 
 
@@ -18527,10 +18566,11 @@ async def candidate_export_excel(
 
 
 @api.get("/candidates/{cid}")
-async def get_candidate(cid: str, _=Depends(require_role(*CANDIDATE_ROLES))):
+async def get_candidate(cid: str, user=Depends(require_role(*CANDIDATE_ROLES))):
     doc = await db.candidates.find_one({"id": cid}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Candidate not found")
+    await _assert_center_access(user, doc.get("center_id"))
     return doc
 
 
@@ -19381,12 +19421,13 @@ async def delete_bank_guarantee(bid: str, user=Depends(require_role("admin", "hr
 
 
 @api.get("/bank-guarantees/{bid}/chain")
-async def bg_renewal_chain(bid: str, _=Depends(require_role(*BG_ROLES))):
+async def bg_renewal_chain(bid: str, user=Depends(require_role(*BG_ROLES))):
     """Walk backwards + forwards along `renews_bg_id`/`renewed_by_bg_id` links so
     HR can see the full audit history of renewals for a given BG."""
     seed = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
     if not seed:
         raise HTTPException(404, "BG not found")
+    await _assert_center_access(user, seed.get("center_id"))
     chain = [seed]
     # Walk backwards through previous BGs this one renewed.
     cur = seed
@@ -22047,7 +22088,7 @@ async def invoice_dashboard(
     company_id: Optional[str] = None,
     center_id: Optional[str] = None,
     project_id: Optional[str] = None,
-    _=Depends(require_role(*INVOICE_READ_ROLES)),
+    user=Depends(require_role(*INVOICE_READ_ROLES)),
 ):
     """KPI cards: totals + per-stage counts + outstanding sum."""
     query = {}
@@ -22069,6 +22110,7 @@ async def invoice_dashboard(
             {"tsp_company_name": {"$regex": q, "$options": "i"}},
             {"district": {"$regex": q, "$options": "i"}},
         ]
+    await _apply_invoice_scope(query, user)
     rows = await db.invoices.find(query, {"_id": 0}).to_list(length=10000)
     total_count = len(rows)
     total_value = sum(float(r.get("net_payable") or 0) for r in rows)
@@ -22106,10 +22148,11 @@ async def export_invoices_csv(
     batch_id: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
-    _=Depends(require_role(*INVOICE_READ_ROLES)),
+    user=Depends(require_role(*INVOICE_READ_ROLES)),
 ):
     query = _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
                                   None, None, from_date, to_date, None)
+    await _apply_invoice_scope(query, user)
     rows = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).to_list(length=100000)
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -22192,10 +22235,11 @@ async def list_invoices(
     page: int = 1,
     page_size: int = 50,
     sort: Optional[str] = "-created_at",
-    _=Depends(require_role(*INVOICE_READ_ROLES)),
+    user=Depends(require_role(*INVOICE_READ_ROLES)),
 ):
     query = _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
                                   invoice_type, milestone_type, from_date, to_date, aging)
+    await _apply_invoice_scope(query, user)
     total = await db.invoices.count_documents(query)
     sort_field = sort.lstrip("-") if sort else "created_at"
     sort_dir = -1 if (sort or "").startswith("-") else 1
@@ -22262,10 +22306,11 @@ async def create_invoice(body: InvoiceIn, user=Depends(require_role(*INVOICE_WRI
 
 
 @api.get("/invoices/{iid}")
-async def get_invoice(iid: str, _=Depends(require_role(*INVOICE_READ_ROLES))):
+async def get_invoice(iid: str, user=Depends(require_role(*INVOICE_READ_ROLES))):
     inv = await db.invoices.find_one({"id": iid}, {"_id": 0})
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    await _assert_center_access(user, inv.get("center_id"))
     hydrated = await _hydrate_invoice(inv)
     hydrated["timeline"] = _compute_stage_durations(inv.get("stages") or {})
     return hydrated
