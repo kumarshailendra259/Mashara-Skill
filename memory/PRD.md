@@ -148,6 +148,17 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 91 — HRMS Staff: Salary Visibility Control + Universal Profile Card (Done, Jun 2026)
+- **User ask**: Salary sirf admin/hr/accountant/partner (+ manager/senior_manager per follow-up) ko dikhe; center_manager ko NAHI. Aur ek fixed set of employee master details (Emp ID, Name, Photo, Gender, DOB, Mobile, Email, Joining Date, Employment Status, Employment Type, Designation, Department, Reporting Manager) SAB roles ko dikhe.
+- **Backend (`server.py`)**:
+  - `SALARY_VISIBLE_ROLES = {admin, hr, accountant, partner, manager, senior_manager}`. `list_staff` strips `monthly_salary`/`per_day_rate` from the JSON for other roles (server-side, not UI-only); `staff_export_csv` blanks those columns too.
+  - `StaffIn` gained `department` + `employment_type` ("full_time"|"part_time"|"contract"). `list_staff` also enriches `reports_to_name`.
+- **Frontend (`HRMS.jsx`)**:
+  - `canViewSalary` gate hides Salary + Per-Day columns for center_manager/viewer/etc. Add/Edit Staff form gained Department (text) + Employment Type (select).
+  - New `StaffProfileDialog` — "View Profile" (IdCard) button on EVERY row, all roles → read-only card (photo, status auto-derived Active/Inactive/Resigned/Terminated, designation, department, employment type, gender, DOB, joining date, mobile, email, reporting manager). No salary/bank.
+- **Verified**: center_manager `/api/staff` omits salary keys + UI shows no Salary/Per-Day columns + profile card renders (screenshot); admin still gets salary (curl). test account `cmtest_salary@x.com`.
+
+
 ### Phase 90 — Center Data Isolation Security Audit Fixes (Done, Jun 2026)
 - **User Golden Rule (reaffirmed)**: ANY role's user linked to a center sees ONLY that center's data; if linked to multiple centers, sees all of those. Enforced server-side, never trusting frontend center_id.
 - **New shared guards (`server.py` ~line 1050)**:

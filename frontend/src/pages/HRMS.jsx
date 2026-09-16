@@ -14,7 +14,7 @@ import {
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye, RefreshCw, MoreVertical, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, Calendar, Circle } from "lucide-react";
+import { Plus, Check, X, CalendarCheck, CalendarDays, Upload, Trash2, Paperclip, Pencil, Download, FileText, GitMerge, Archive, Mail, FileDown, User, Receipt, Hash, KeyRound, ShieldCheck, ShieldAlert, Users, Clock, Wallet, TrendingUp, Eye, RefreshCw, MoreVertical, ChevronDown, ChevronRight, AlertCircle, CheckCircle2, Calendar, Circle, IdCard } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import PrintButton from "@/components/PrintButton";
@@ -86,7 +86,7 @@ export default function HRMS() {
 
   const [openS, setOpenS] = useState(false);
   const emptyStaffForm = {
-    name: "", designation: "", reports_to_id: "",
+    name: "", designation: "", department: "", employment_type: "", reports_to_id: "",
     monthly_salary: 0, per_day_rate: 0, joining_date: "",
     exit_date: "",  // last working day, blank = still active
     user_id: "", email: "", mobile: "",
@@ -490,7 +490,9 @@ export default function HRMS() {
   // Accountant + HR + Admin can *see* full staff details (bank / documents / etc.)
   // in a read-only "View Details" drawer even when they cannot edit the record.
   const canViewStaffFull = isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager";
+  const canViewSalary = isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager" || user?.role === "senior_manager" || user?.role === "partner";
   const [viewStaffId, setViewStaffId] = useState(null);
+  const [profileStaffId, setProfileStaffId] = useState(null);
 
   // Bulk archive staff (admin only)
   const [selectedStaff, setSelectedStaff] = useState(new Set());
@@ -517,6 +519,8 @@ export default function HRMS() {
     setStaffForm({
       name: s.name || "",
       designation: s.designation || "",
+      department: s.department || "",
+      employment_type: s.employment_type || "",
       reports_to_id: s.reports_to_id || "",
       monthly_salary: s.monthly_salary || 0,
       per_day_rate: s.per_day_rate || 0,
@@ -1278,6 +1282,18 @@ export default function HRMS() {
                     <div className="grid grid-cols-2 gap-3">
                       <div className="col-span-2"><Label>Name <span className="text-[var(--danger)]">*</span></Label><Input value={staffForm.name} onChange={(e) => setStaffForm({ ...staffForm, name: e.target.value })} className="rounded-none" data-testid="staff-name" /></div>
                       <div><Label>Designation</Label><Input value={staffForm.designation} onChange={(e) => setStaffForm({ ...staffForm, designation: e.target.value })} className="rounded-none" /></div>
+                      <div><Label>Department</Label><Input value={staffForm.department} onChange={(e) => setStaffForm({ ...staffForm, department: e.target.value })} className="rounded-none" placeholder="e.g. Training, Placement, Admin" data-testid="staff-department" /></div>
+                      <div><Label>Employment Type</Label>
+                        <Select value={staffForm.employment_type || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, employment_type: v === "__none" ? "" : v })}>
+                          <SelectTrigger className="rounded-none" data-testid="staff-employment-type"><SelectValue placeholder="—" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none">—</SelectItem>
+                            <SelectItem value="full_time">Full Time</SelectItem>
+                            <SelectItem value="part_time">Part Time</SelectItem>
+                            <SelectItem value="contract">Contract</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                       {isAdmin && (
                         <div><Label>Reports To <span className="overline text-[10px]">(admin only)</span></Label>
                           <Select value={staffForm.reports_to_id || "__none"} onValueChange={(v) => setStaffForm({ ...staffForm, reports_to_id: v === "__none" ? "" : v })}>
@@ -1434,11 +1450,12 @@ export default function HRMS() {
               <th className="text-left p-3">Email</th>
               <th className="text-left p-3">Mobile</th>
               <th className="text-left p-3">Bank</th>
-              <th className="text-right p-3">Salary</th>
-              <th className="text-right p-3">Per-Day</th>
+              {canViewSalary && <th className="text-right p-3">Salary</th>}
+              {canViewSalary && <th className="text-right p-3">Per-Day</th>}
+              <th className="text-right p-3 no-print">Profile</th>
               {(canManageStaff || canViewStaffFull) && <th className="text-right p-3 no-print">Actions</th>}
             </tr></thead><tbody>
-              {staff.length === 0 ? <tr><td colSpan={((canManageStaff || canViewStaffFull) ? 10 : 9) + (isAdmin ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
+              {staff.length === 0 ? <tr><td colSpan={7 + (isAdmin ? 1 : 0) + (canViewSalary ? 2 : 0) + 1 + ((canManageStaff || canViewStaffFull) ? 1 : 0)} className="text-center py-8 overline">No staff yet</td></tr> : staff.map((s) => (
                 <tr key={s.id} className={`border-b border-[var(--border)] hover:bg-gray-50 ${s.is_active === false ? "opacity-50" : ""}`}>
                   {isAdmin && (
                     <td className="p-3">
@@ -1464,8 +1481,17 @@ export default function HRMS() {
                       </span>
                     )}
                   </td>
-                  <td className="p-3 num">{inr(s.monthly_salary)}</td>
-                  <td className="p-3 num">{inr(s.per_day_rate)}</td>
+                  {canViewSalary && <td className="p-3 num">{inr(s.monthly_salary)}</td>}
+                  {canViewSalary && <td className="p-3 num">{inr(s.per_day_rate)}</td>}
+                  <td className="p-3 text-right no-print">
+                    <Button
+                      size="sm" variant="outline"
+                      onClick={() => setProfileStaffId(s.id)}
+                      className="rounded-none h-8 px-2"
+                      data-testid={`staff-profile-${s.id}`}
+                      title="View employee profile"
+                    ><IdCard size={14} /></Button>
+                  </td>
                   {(canManageStaff || canViewStaffFull) && (
                     <td className="p-3 text-right no-print">
                       <div className="flex justify-end gap-1">
@@ -2267,6 +2293,13 @@ export default function HRMS() {
         staffList={staff}
       />
 
+      {/* Employee Profile card — read-only, available to ALL roles (no salary / bank). */}
+      <StaffProfileDialog
+        staffId={profileStaffId}
+        onClose={() => setProfileStaffId(null)}
+        staffList={staff}
+      />
+
       {/* Phase 55 — Payroll batch detail dialog (approve/pay/reopen depending on role + status) */}
       <PayrollBatchDialog
         batchId={openBatchId}
@@ -2274,6 +2307,69 @@ export default function HRMS() {
         currentUser={user}
       />
     </div>
+  );
+}
+
+/* ============================================================
+   STAFF PROFILE CARD — read-only employee profile visible to ALL roles.
+   Non-sensitive master data only (no salary, no bank details).
+   ============================================================ */
+function StaffProfileDialog({ staffId, onClose, staffList }) {
+  const s = (staffList || []).find((x) => x.id === staffId) || {};
+  const dash = (v) => (v == null || v === "" ? "—" : v);
+  const fmtDate = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—");
+  const empType = { full_time: "Full Time", part_time: "Part Time", contract: "Contract" }[s.employment_type] || "—";
+  const isInactive = s.is_active === false || s.active === false;
+  const reason = (s.exit_reason || "").toLowerCase();
+  const empStatus = !isInactive
+    ? "Active"
+    : reason.includes("terminat") ? "Terminated"
+    : reason.includes("resign") ? "Resigned"
+    : "Inactive";
+  const statusTone = empStatus === "Active" ? "text-emerald-700 bg-emerald-50 border-emerald-300"
+    : empStatus === "Inactive" ? "text-slate-600 bg-slate-50 border-slate-300"
+    : "text-red-700 bg-red-50 border-red-300";
+  const gender = { male: "Male", female: "Female", other: "Other", m: "Male", f: "Female" }[(s.gender || "").toLowerCase()] || dash(s.gender);
+  const reportingManager = s.reports_to_name || (staffList || []).find((x) => x.id === s.reports_to_id)?.name || "—";
+  const initials = (s.name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  return (
+    <Dialog open={!!staffId} onOpenChange={(o) => !o && onClose?.()}>
+      <DialogContent className="rounded-none max-w-2xl" data-testid="staff-profile-dialog">
+        <DialogHeader>
+          <DialogTitle className="font-heading text-lg">Employee Profile</DialogTitle>
+          <DialogDescription className="text-xs text-[var(--muted)]">Read-only master details.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-5" data-testid="staff-profile-body">
+          <div className="flex items-center gap-4">
+            {s.photo_url ? (
+              <img src={s.photo_url} alt={s.name} className="w-20 h-20 object-cover border border-[var(--border)]" data-testid="profile-photo" />
+            ) : (
+              <div className="w-20 h-20 flex items-center justify-center bg-[var(--brand)] text-white text-xl font-heading" data-testid="profile-photo-fallback">{initials}</div>
+            )}
+            <div className="min-w-0">
+              <div className="text-lg font-heading truncate">{dash(s.name)}</div>
+              <div className="text-xs font-mono text-[var(--brand)]">{dash(s.employee_code)}</div>
+              <span className={`inline-block mt-1 px-2 py-0.5 text-[10px] font-semibold uppercase border ${statusTone}`} data-testid="profile-status">{empStatus}</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+            <ViewField label="Designation" value={dash(s.designation)} testid="profile-designation" />
+            <ViewField label="Department" value={dash(s.department)} testid="profile-department" />
+            <ViewField label="Employment Type" value={empType} testid="profile-emptype" />
+            <ViewField label="Gender" value={gender} testid="profile-gender" />
+            <ViewField label="Date of Birth" value={fmtDate(s.date_of_birth)} testid="profile-dob" />
+            <ViewField label="Joining Date" value={fmtDate(s.joining_date)} testid="profile-joining" />
+            <ViewField label="Mobile" value={dash(s.mobile)} testid="profile-mobile" />
+            <ViewField label="Email" value={dash(s.email)} testid="profile-email" />
+            <ViewField label="Reporting Manager" value={reportingManager} testid="profile-reporting-manager" />
+          </div>
+        </div>
+        <div className="flex justify-end pt-2">
+          <Button variant="outline" onClick={onClose} className="rounded-none" data-testid="staff-profile-close">Close</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

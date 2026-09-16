@@ -5074,10 +5074,15 @@ async def root():
 
 # ====================== HRMS + Payroll ======================
 
+SALARY_VISIBLE_ROLES = {"admin", "hr", "accountant", "partner", "manager", "senior_manager"}
+
+
 class StaffIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     name: str
     designation: Optional[str] = None
+    department: Optional[str] = None
+    employment_type: Optional[str] = None  # "full_time" | "part_time" | "contract"
     # Auto-generated on create if left blank — human-readable staff code like
     # "EMP-2026-0001" used on offer letter, ID card, payslip etc.
     employee_code: Optional[str] = None
@@ -5349,8 +5354,25 @@ async def list_staff(
     # Return the plain list body (matches historical response_model).
     Response  # keep import used
     from starlette.responses import JSONResponse
+    # Resolve reporting-manager names (for the read-only profile card).
+    rt_ids = list({d.get("reports_to_id") for d in docs if d.get("reports_to_id")})
+    rt_map = {}
+    if rt_ids:
+        for m in await db.staff.find({"id": {"$in": rt_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(2000):
+            rt_map[m["id"]] = m.get("name")
+    # Salary is finance-sensitive — strip from the payload for roles that must
+    # not see compensation (e.g. center_manager). Never rely on the UI alone.
+    show_salary = (user.get("role") in SALARY_VISIBLE_ROLES)
+    content = []
+    for d in docs:
+        out = StaffOut(**d).model_dump()
+        out["reports_to_name"] = rt_map.get(d.get("reports_to_id"))
+        if not show_salary:
+            out.pop("monthly_salary", None)
+            out.pop("per_day_rate", None)
+        content.append(out)
     return JSONResponse(
-        content=[StaffOut(**d).model_dump() for d in docs],
+        content=content,
         headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"},
     )
 
@@ -5433,14 +5455,15 @@ async def staff_export_csv(user=Depends(get_current_user)):
         "joining_date", "created_at",
     ])
     for d in docs:
+        _show_sal = role in SALARY_VISIBLE_ROLES
         w.writerow([
             d.get("employee_code") or "",
             d.get("name") or "",
             d.get("designation") or "",
             d.get("email") or "",
             d.get("mobile") or "",
-            d.get("monthly_salary") or 0,
-            d.get("per_day_rate") or 0,
+            (d.get("monthly_salary") or 0) if _show_sal else "",
+            (d.get("per_day_rate") or 0) if _show_sal else "",
             d.get("center_id") or "",
             "yes" if d.get("active", True) else "no",
             d.get("bank_name") or "",
