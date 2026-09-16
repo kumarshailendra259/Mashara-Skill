@@ -148,6 +148,19 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 93 — Transactions Page Enterprise UI/UX Redesign (Done, Jun 2026)
+- **User ask**: Redesign Finance & Accounting → Transactions into a premium enterprise ERP look (reference image), UI-ONLY — no backend/business/RBAC/API changes. 100% existing functionality retained.
+- **Frontend (`Transactions.jsx` full rewrite, all existing handlers preserved verbatim: load/approve/reject/partner-approve/bulk-approve/bulk-delete/save/remove/export/import)**:
+  - Header: breadcrumb (Finance & Accounting → Transactions) + title + subtitle; Print/Export CSV/Import CSV + New Transaction as a dropdown (Expense/Income/Investment — only existing types).
+  - 5 interactive KPI cards (Total Transactions, Total Expense ₹, Pending, Approved, Rejected) computed from REAL loaded data; clicking a card filters the table (status client-side; expense→type filter).
+  - Smart filter toolbar: search (client), Status, Type, Advanced Filters right-drawer (company/partner/center/project + date range), active filter chips + Clear All.
+  - Redesigned table: checkbox, Date (sortable), Transaction (type badge + description + attachment/items indicators), Organization, Amount (prominent/colored), Allocation (partner/center/project), Status pills (green/amber/red/neutral), Actions. Sticky header, row hover, row-click opens right Details Drawer.
+  - Transaction Details Drawer (Sheet): TRX id, title/amount/status, tabs Overview/Attachments/History (timeline from created_at + paid_by + status), bottom actions gated by existing RBAC (Approve/Reject/Partner-Approve/Edit/Delete).
+  - Bulk contextual toolbar (admin): N selected + Approve/Export/Delete.
+  - View options Table/Compact/Grouped (presentation only; Grouped = group-by-status). Client pagination (rows-per-page 10/25/50/100, page numbers, prev/next, "Showing X–Y of N").
+- **Verified (iteration_78)**: 100% frontend, all 15 flows pass, 0 bugs/regressions. NOTE: no backend/API/RBAC changes. Follow-up idea: server-side pagination for very large tenants (client currently loads full list).
+
+
 ### Phase 92 — Security Audit Fixes (SEC-001..004) + Full-Page Staff Profile (Done, Jun 2026)
 - **Security fixes (all verified, iteration_77 — 19/19, 0 critical)**:
   - **SEC-001 [CRITICAL]**: public `POST /api/auth/register` now hardcodes `safe_role = "viewer"` (previously only blocked admin/super_admin/company_admin, letting anyone self-grant senior_manager = org-wide access). Privileged roles ONLY via admin `POST /auth/users`.
