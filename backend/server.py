@@ -13237,6 +13237,8 @@ async def _resolve_course_masters(courses: list, is_admin: bool) -> list:
         m = masters.get(mid) if mid else None
         if m:
             c["course_master_version"] = m.get("version", 1)   # snapshot version stamp
+        else:
+            c["course_master_version"] = None
         if m and not is_admin:
             c["sector"] = m.get("sector", "") or ""
             c["sub_sector"] = m.get("sub_sector", "") or ""
@@ -14773,7 +14775,6 @@ async def _link_signature_everywhere(name: str, qp: str, master_id: str, version
             await db.work_orders.update_one({"id": wo["id"]}, {"$set": {"courses": courses}})
             wo_updated += 1
     batch_res = await db.batches.update_many(
-        {"job_role_master_id": {"$in": [None, ""]}, "job_role": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"}} if not qp else
         {"job_role_master_id": {"$in": [None, ""]}, "job_role": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"}},
         {"$set": {"job_role_master_id": master_id}})
     return {"wo_updated": wo_updated, "batches_updated": batch_res.modified_count}
