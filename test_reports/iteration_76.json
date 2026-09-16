@@ -1,0 +1,27 @@
+{
+  "summary": "Verified backend center-based data isolation fixes (SEC-001/002/003). Logged in as admin (global) and center-scoped accountant test_center_manager_c6912430@x.com (center 9cf18e69-312d-488d-a484-2d68d62d48a7). Discovered out-of-scope document IDs from admin listings across candidates, payments, quotations, work-orders, batch-targets, bank-guarantees. Confirmed 403 for all cross-center GET-by-id and list-with-center_id-filter as scoped user, and 200 for admin. 14 passed / 2 skipped (invoices collection empty for admin => no cross-center invoice detail available).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/invoices (admin)", "issue": "Admin listing returned 0 invoices in this environment, so in-scope/out-of-scope invoice-detail 403/200 could not be exercised against real invoice documents. List/dashboard/export.csv scope checks still validated via explicit center_id filter."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_center_isolation_sec.py",
+    "/app/test_reports/pytest/iter76.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "All out-of-scope detail endpoints now correctly fail-closed with 403 for /api/candidates/{id}, /api/payments/{id}, /api/quotations/{id}, /api/work-orders/{id}, /api/batch-targets/{id}, /api/bank-guarantees/{id}/chain.",
+    "GET /api/invoices with ?center_id=<other> and /api/invoices/export.csv?center_id=<other> return 403 as scoped user; admin unaffected.",
+    "GET /api/invoices as scoped user returned only in-scope (currently empty) — no leakage."
+  ],
+  "updated_files": ["/app/backend/tests/test_center_isolation_sec.py"],
+  "success_rate": {"backend": "100% (14/14 executed passed, 2 skipped due to empty invoices collection)", "frontend": "N/A"},
+  "test_credentials": "admin@finance.app / Admin@123 ; test_center_manager_c6912430@x.com / Test@1234",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Invoices collection is empty in this environment; if invoice records are seeded later, re-run backend/tests/test_center_isolation_sec.py to also verify invoice-by-id 403/200 for OOS/in-scope docs. Scoped user has 0 in-scope docs across every collection, so 'in-scope 200' branch of _detail_check was not exercised — primary OOS 403 checks all passed."
+}

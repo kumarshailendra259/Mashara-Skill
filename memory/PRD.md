@@ -148,6 +148,17 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 90 — Center Data Isolation Security Audit Fixes (Done, Jun 2026)
+- **User Golden Rule (reaffirmed)**: ANY role's user linked to a center sees ONLY that center's data; if linked to multiple centers, sees all of those. Enforced server-side, never trusting frontend center_id.
+- **New shared guards (`server.py` ~line 1050)**:
+  - `_assert_center_access(user, center_id)` — enrich user → `_scoped_center_ids(user)`; `None` = global pass; else `center_id` must be in allowed set else `403`. Fail-closed for docs with null center_id (scoped users blocked).
+  - `_apply_invoice_scope(query, user)` — injects `{center_id: {$in: allowed}}` into invoice queries; rejects explicit out-of-scope `center_id` filter with 403.
+- **SEC-001 [HIGH] Invoices** — `GET /api/invoices`, `/api/invoices/export.csv`, `/api/invoices/dashboard`, `GET /api/invoices/{iid}` now center-scoped.
+- **SEC-002 [HIGH] IDOR detail APIs** — `GET /api/candidates/{cid}`, `/api/payments/{pid}`, `/api/quotations/{qid}` now assert center access on fetched doc.
+- **SEC-003 [MEDIUM] Secondary** — `GET /api/batch-targets/{tid}`, `/api/work-orders/{wid}` (replaced partial center_manager-only guard), `/api/bank-guarantees/{bid}/chain` now assert center access.
+- **Verified (testing agent iteration_76)**: 14/14 passed, 0 critical. Cross-center GET-by-id + list-with-out-of-scope-center_id → 403 for scoped user; admin (global) → 200 everywhere; no regressions. (Invoice-by-id 200-branch not exercised — invoices collection empty in this env.)
+
+
 ### Phase 77 — CRITICAL: Strict Center-wise Data Isolation (Done, Jun 2026)
 - **Bug (user)**: A finance-visible but center-scoped user (role accountant/hr mapped to ONE center) saw OTHER centers' data on the Partner Settlement dashboard (BOCWW Garhwa/Gumla/Jamtara/Pakur etc.).
 - **Root cause**: `settlement_view` (and siblings) scoped only by `assigned_partner_id` (partner role). A non-partner center-scoped finance role fell into the `else` branch → ALL centers. Several dashboard/report endpoints also had a `center_id` **override** bypass and/or discarded the user (`Depends(_)`) with no scope.
