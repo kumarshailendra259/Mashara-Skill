@@ -2718,29 +2718,70 @@ ENTITY_COLLECTION = {
 
 
 # ---------- Phase 89 · Mandatory Entity Linking (Center → Partner/Project/Company) ----------
-async def _enforce_center_mapping(doc: dict):
-    """Center must be linked to Partner + Project + Company (DB/API enforcement).
-    Validates each id actually exists. Raises 400 otherwise."""
-    missing = [k for k in ("partner_id", "project_id", "company_id") if not (doc.get(k) or "").strip()]
-    if missing:
+async def _normalize_center_mappings(doc: dict):
+    """Phase 89b — a Center carries a LIST of complete Partner→Project→Company
+    mappings. Accepts either `mappings:[{partner_id,project_id,company_id}]` or
+    the legacy single fields. Validates ≥1 complete row + existence, dedupes,
+    then syncs the FIRST (primary) mapping back to legacy fields for backward
+    compatibility with finance/batch modules. Raises 400 otherwise."""
+    raw = doc.get("mappings")
+    rows = raw if isinstance(raw, list) and raw else [
+        {"partner_id": doc.get("partner_id"), "project_id": doc.get("project_id"), "company_id": doc.get("company_id")}
+    ]
+    cleaned = []
+    for r in rows:
+        pid = (r.get("partner_id") or "").strip()
+        prid = (r.get("project_id") or "").strip()
+        cid = (r.get("company_id") or "").strip()
+        if not (pid or prid or cid):
+            continue  # skip a fully-empty row
+        if not (pid and prid and cid):
+            raise HTTPException(400, "Each Partner mapping must have Partner, Project and Company selected.")
+        cleaned.append({"partner_id": pid, "project_id": prid, "company_id": cid})
+    if not cleaned:
         raise HTTPException(400, "Partner, Project and Company mapping is required before saving this Center.")
-    checks = [("partner_id", "partners", "Partner"), ("project_id", "projects", "Project"), ("company_id", "companies", "Company")]
-    for field, coll, label in checks:
-        if not await db[coll].find_one({"id": doc[field]}, {"_id": 0, "id": 1}):
+    for ids, coll, label in [
+        ({r["partner_id"] for r in cleaned}, "partners", "Partner"),
+        ({r["project_id"] for r in cleaned}, "projects", "Project"),
+        ({r["company_id"] for r in cleaned}, "companies", "Company"),
+    ]:
+        found = set(await db[coll].distinct("id", {"id": {"$in": list(ids)}}))
+        if found != ids:
             raise HTTPException(400, f"Selected {label} does not exist")
+    seen, uniq = set(), []
+    for r in cleaned:
+        k = (r["partner_id"], r["project_id"], r["company_id"])
+        if k in seen:
+            continue
+        seen.add(k); uniq.append(r)
+    doc["mappings"] = uniq
+    doc["partner_id"] = uniq[0]["partner_id"]
+    doc["project_id"] = uniq[0]["project_id"]
+    doc["company_id"] = uniq[0]["company_id"]
+
+
+def _center_mapping_list(doc: dict) -> list:
+    """Normalized mapping list from a stored center doc (handles legacy singles)."""
+    m = doc.get("mappings")
+    if isinstance(m, list) and m:
+        return m
+    if doc.get("partner_id") or doc.get("project_id") or doc.get("company_id"):
+        return [{"partner_id": doc.get("partner_id"), "project_id": doc.get("project_id"), "company_id": doc.get("company_id")}]
+    return []
 
 
 async def _record_mapping_audit(center_id: str, before: Optional[dict], after: dict, user: dict, action: str):
     """Append-only audit of a center's Partner/Project/Company mapping changes."""
-    def _m(d):
-        d = d or {}
-        return {"partner_id": d.get("partner_id"), "project_id": d.get("project_id"), "company_id": d.get("company_id")}
-    old_m, new_m = _m(before), _m(after)
+    def _norm(d):
+        return sorted([(r.get("partner_id"), r.get("project_id"), r.get("company_id")) for r in _center_mapping_list(d or {})])
+    old_m, new_m = (_norm(before) if before is not None else None), _norm(after)
     if action == "update" and old_m == new_m:
         return
+    def _fmt(lst):
+        return None if lst is None else [{"partner_id": p, "project_id": pr, "company_id": c} for (p, pr, c) in lst]
     await db.entity_mapping_audit.insert_one({
         "id": str(uuid.uuid4()), "center_id": center_id, "action": action,
-        "previous_mapping": old_m if before is not None else None, "new_mapping": new_m,
+        "previous_mapping": _fmt(old_m), "new_mapping": _fmt(new_m),
         "actor_id": user.get("id"), "actor_name": user.get("name") or user.get("email"),
         "at": datetime.now(timezone.utc).isoformat(),
     })
@@ -2751,7 +2792,8 @@ async def _entity_dependency_count(etype: str, eid: str) -> dict:
     counts: dict = {}
     if etype in ("partner", "project", "company"):
         field = {"partner": "partner_id", "project": "project_id", "company": "company_id"}[etype]
-        counts["centers"] = await db.centers.count_documents({field: eid})
+        # Centers reference via either the mappings[] array or legacy single fields.
+        counts["centers"] = await db.centers.count_documents({"$or": [{field: eid}, {f"mappings.{field}": eid}]})
         counts["batches"] = await db.batches.count_documents({field: eid})
         counts["transactions"] = await db.transactions.count_documents({field: eid})
     if etype == "center":
@@ -2870,21 +2912,32 @@ async def list_entities(etype: EntityType, q: Optional[str] = None, user=Depends
     docs = await db[col].find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     # Phase 89 — enrich centers with mapped Partner/Project/Company names + mapping status.
     if etype == "center" and docs:
-        pids = {d.get("partner_id") for d in docs if d.get("partner_id")}
-        prids = {d.get("project_id") for d in docs if d.get("project_id")}
-        cids = {d.get("company_id") for d in docs if d.get("company_id")}
-        pmap = {p["id"]: p for p in await db.partners.find({"id": {"$in": list(pids)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(2000)} if pids else {}
-        prmap = {p["id"]: p for p in await db.projects.find({"id": {"$in": list(prids)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(2000)} if prids else {}
-        cmap = {c["id"]: c for c in await db.companies.find({"id": {"$in": list(cids)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).to_list(2000)} if cids else {}
+        allp, allpr, allc = set(), set(), set()
         for d in docs:
-            p, pr, c = pmap.get(d.get("partner_id")), prmap.get(d.get("project_id")), cmap.get(d.get("company_id"))
-            d["partner_name"] = (p or {}).get("name")
-            d["partner_uid"] = (p or {}).get("entity_uid")
-            d["project_name"] = (pr or {}).get("name")
-            d["project_uid"] = (pr or {}).get("entity_uid")
-            d["company_name"] = (c or {}).get("name")
-            d["company_uid"] = (c or {}).get("entity_uid") or (c or {}).get("company_code")
-            d["mapping_complete"] = bool(d.get("partner_id") and d.get("project_id") and d.get("company_id"))
+            for m in _center_mapping_list(d):
+                if m.get("partner_id"): allp.add(m["partner_id"])
+                if m.get("project_id"): allpr.add(m["project_id"])
+                if m.get("company_id"): allc.add(m["company_id"])
+        pmap = {p["id"]: p for p in await db.partners.find({"id": {"$in": list(allp)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(3000)} if allp else {}
+        prmap = {p["id"]: p for p in await db.projects.find({"id": {"$in": list(allpr)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(3000)} if allpr else {}
+        cmap = {c["id"]: c for c in await db.companies.find({"id": {"$in": list(allc)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).to_list(3000)} if allc else {}
+        for d in docs:
+            mlist = _center_mapping_list(d)
+            resolved = []
+            for m in mlist:
+                p, pr, c = pmap.get(m.get("partner_id")), prmap.get(m.get("project_id")), cmap.get(m.get("company_id"))
+                resolved.append({
+                    "partner_id": m.get("partner_id"), "partner_name": (p or {}).get("name"), "partner_uid": (p or {}).get("entity_uid"),
+                    "project_id": m.get("project_id"), "project_name": (pr or {}).get("name"), "project_uid": (pr or {}).get("entity_uid"),
+                    "company_id": m.get("company_id"), "company_name": (c or {}).get("name"), "company_uid": (c or {}).get("entity_uid") or (c or {}).get("company_code"),
+                })
+            d["mappings_resolved"] = resolved
+            primary = resolved[0] if resolved else {}
+            d["partner_name"] = primary.get("partner_name"); d["partner_uid"] = primary.get("partner_uid")
+            d["project_name"] = primary.get("project_name"); d["project_uid"] = primary.get("project_uid")
+            d["company_name"] = primary.get("company_name"); d["company_uid"] = primary.get("company_uid")
+            d["mapping_count"] = len(resolved)
+            d["mapping_complete"] = bool(resolved)
     if q:
         s = q.strip().lower()
         docs = [d for d in docs if s in (d.get("entity_uid") or "").lower()
@@ -2898,9 +2951,9 @@ async def list_entities(etype: EntityType, q: Optional[str] = None, user=Depends
 async def create_entity(etype: EntityType, body: EntityIn, user=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
     doc = _entity_doc(body, etype)
-    # Phase 89 — Center MUST be mapped to Partner + Project + Company.
+    # Phase 89 — Center MUST be mapped to ≥1 complete Partner→Project→Company.
     if etype == "center":
-        await _enforce_center_mapping(doc)
+        await _normalize_center_mappings(doc)
     # Auto-assign a unique short code to every new company (e.g. UXU7SO).
     if etype == "company":
         doc["company_code"] = await _new_company_code()
@@ -2944,7 +2997,11 @@ async def update_entity(etype: EntityType, eid: str, body: EntityIn, user=Depend
     # Phase 89 — editing a Center requires a complete Partner/Project/Company mapping.
     if etype == "center":
         merged = {**existing, **update}
-        await _enforce_center_mapping(merged)
+        await _normalize_center_mappings(merged)
+        update["mappings"] = merged["mappings"]
+        update["partner_id"] = merged["partner_id"]
+        update["project_id"] = merged["project_id"]
+        update["company_id"] = merged["company_id"]
     # If email changed AND entity already has a linked user, mirror the change on the user record
     old_email = (existing.get("email") or "").lower()
     new_email = (update.get("email") or "").lower()
@@ -2993,14 +3050,22 @@ async def entity_relationship_options(partner_id: Optional[str] = None, project_
     all_companies = await db.companies.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).sort("name", 1).to_list(2000)
     if not partner_id:
         return {"projects": all_projects, "companies": all_companies}
-    # Projects previously linked with this partner (via center mappings)
-    proj_ids = await db.centers.distinct("project_id", {"partner_id": partner_id, "project_id": {"$ne": None}})
-    projects = [p for p in all_projects if p["id"] in set(proj_ids)] or all_projects
-    comp_q = {"partner_id": partner_id, "company_id": {"$ne": None}}
-    if project_id:
-        comp_q["project_id"] = project_id
-    comp_ids = await db.centers.distinct("company_id", comp_q)
-    companies = [c for c in all_companies if c["id"] in set(comp_ids)] or all_companies
+    # Projects/Companies historically mapped WITH this partner (same mapping row), via $unwind.
+    pipeline = [
+        {"$project": {"m": {"$cond": [{"$isArray": "$mappings"}, "$mappings",
+                     [{"partner_id": "$partner_id", "project_id": "$project_id", "company_id": "$company_id"}]]}}},
+        {"$unwind": "$m"},
+        {"$match": {"m.partner_id": partner_id}},
+    ]
+    proj_ids, comp_ids = set(), set()
+    async for row in db.centers.aggregate(pipeline):
+        m = row.get("m") or {}
+        if m.get("project_id"): proj_ids.add(m["project_id"])
+        if project_id and m.get("project_id") != project_id:
+            continue
+        if m.get("company_id"): comp_ids.add(m["company_id"])
+    projects = [p for p in all_projects if p["id"] in proj_ids] or all_projects
+    companies = [c for c in all_companies if c["id"] in comp_ids] or all_companies
     return {"projects": projects, "companies": companies}
 
 
@@ -3020,15 +3085,23 @@ async def entity_relationships(etype: EntityType, eid: str, _=Depends(require_ro
     out = {"id": eid, "name": ent.get("name"), "entity_uid": _entity_uid_of(etype, ent)}
     if etype in ("partner", "project", "company"):
         field = {"partner": "partner_id", "project": "project_id", "company": "company_id"}[etype]
-        centers = await db.centers.find({field: eid}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "partner_id": 1, "project_id": 1, "company_id": 1}).to_list(3000)
+        centers = await db.centers.find({"$or": [{field: eid}, {f"mappings.{field}": eid}]},
+                                        {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "mappings": 1, "partner_id": 1, "project_id": 1, "company_id": 1}).to_list(3000)
         out["linked_centers"] = [{"id": c["id"], "name": c.get("name"), "uid": c.get("entity_uid")} for c in centers]
-        out["linked_partners"] = await _resolve("partners", [c.get("partner_id") for c in centers])
-        out["linked_projects"] = await _resolve("projects", [c.get("project_id") for c in centers])
-        out["linked_companies"] = await _resolve("companies", [c.get("company_id") for c in centers])
+        pset, prset, cset = set(), set(), set()
+        for c in centers:
+            for m in _center_mapping_list(c):
+                if m.get("partner_id"): pset.add(m["partner_id"])
+                if m.get("project_id"): prset.add(m["project_id"])
+                if m.get("company_id"): cset.add(m["company_id"])
+        out["linked_partners"] = await _resolve("partners", pset)
+        out["linked_projects"] = await _resolve("projects", prset)
+        out["linked_companies"] = await _resolve("companies", cset)
     else:
-        out["linked_partners"] = await _resolve("partners", [ent.get("partner_id")])
-        out["linked_projects"] = await _resolve("projects", [ent.get("project_id")])
-        out["linked_companies"] = await _resolve("companies", [ent.get("company_id")])
+        mlist = _center_mapping_list(ent)
+        out["linked_partners"] = await _resolve("partners", [m.get("partner_id") for m in mlist])
+        out["linked_projects"] = await _resolve("projects", [m.get("project_id") for m in mlist])
+        out["linked_companies"] = await _resolve("companies", [m.get("company_id") for m in mlist])
     return out
 
 
@@ -3038,32 +3111,39 @@ async def entity_mappings(q: Optional[str] = None, partner_id: Optional[str] = N
                           unmapped_only: bool = False, user=Depends(require_role("admin", "manager"))):
     """Admin relationship interface: Center → Partner → Project → Company table."""
     query: dict = {}
-    if partner_id: query["partner_id"] = partner_id
-    if project_id: query["project_id"] = project_id
-    if company_id: query["company_id"] = company_id
+    if partner_id: query["$or"] = [{"partner_id": partner_id}, {"mappings.partner_id": partner_id}]
+    if project_id: query.setdefault("$and", []).append({"$or": [{"project_id": project_id}, {"mappings.project_id": project_id}]})
+    if company_id: query.setdefault("$and", []).append({"$or": [{"company_id": company_id}, {"mappings.company_id": company_id}]})
     centers = await db.centers.find(query, {"_id": 0}).sort("created_at", -1).to_list(3000)
     pmap = {p["id"]: p for p in await db.partners.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(3000)}
     prmap = {p["id"]: p for p in await db.projects.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(3000)}
     cmap = {c["id"]: c for c in await db.companies.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).to_list(3000)}
     rows = []
     for c in centers:
-        complete = bool(c.get("partner_id") and c.get("project_id") and c.get("company_id"))
+        mlist = _center_mapping_list(c)
+        complete = bool(mlist)
+        cu, cn = (c.get("entity_uid") or c.get("center_code")), c.get("name")
         if unmapped_only and complete:
             continue
-        p, pr, co = pmap.get(c.get("partner_id")), prmap.get(c.get("project_id")), cmap.get(c.get("company_id"))
-        row = {
-            "center_id": c["id"], "center_uid": c.get("entity_uid") or c.get("center_code"), "center_name": c.get("name"),
-            "partner_id": c.get("partner_id"), "partner_uid": (p or {}).get("entity_uid"), "partner_name": (p or {}).get("name"),
-            "project_id": c.get("project_id"), "project_uid": (pr or {}).get("entity_uid"), "project_name": (pr or {}).get("name"),
-            "company_id": c.get("company_id"), "company_uid": (co or {}).get("entity_uid") or (co or {}).get("company_code"), "company_name": (co or {}).get("name"),
-            "mapping_complete": complete,
-        }
-        if q:
-            s = q.strip().lower()
-            hay = " ".join(str(v or "") for v in row.values()).lower()
-            if s not in hay:
-                continue
-        rows.append(row)
+        if not mlist:
+            rows.append({"center_id": c["id"], "center_uid": cu, "center_name": cn, "mapping_index": 0, "mapping_total": 0,
+                         "partner_id": None, "partner_uid": None, "partner_name": None,
+                         "project_id": None, "project_uid": None, "project_name": None,
+                         "company_id": None, "company_uid": None, "company_name": None, "mapping_complete": False})
+        for idx, m in enumerate(mlist):
+            p, pr, co = pmap.get(m.get("partner_id")), prmap.get(m.get("project_id")), cmap.get(m.get("company_id"))
+            row = {
+                "center_id": c["id"], "center_uid": cu, "center_name": cn, "mapping_index": idx, "mapping_total": len(mlist),
+                "partner_id": m.get("partner_id"), "partner_uid": (p or {}).get("entity_uid"), "partner_name": (p or {}).get("name"),
+                "project_id": m.get("project_id"), "project_uid": (pr or {}).get("entity_uid"), "project_name": (pr or {}).get("name"),
+                "company_id": m.get("company_id"), "company_uid": (co or {}).get("entity_uid") or (co or {}).get("company_code"), "company_name": (co or {}).get("name"),
+                "mapping_complete": True,
+            }
+            if q:
+                s = q.strip().lower()
+                if s not in " ".join(str(v or "") for v in row.values()).lower():
+                    continue
+            rows.append(row)
     return {"rows": rows, "total": len(rows),
             "unmapped": sum(1 for r in rows if not r["mapping_complete"])}
 
@@ -23231,6 +23311,12 @@ async def _backfill_entity_uids():
         await db.partners.update_one({"id": p["id"]}, {"$set": {"entity_uid": await _new_prefixed_code("PART", "partners")}})
     async for p in db.projects.find({"entity_uid": {"$in": [None, ""]}}, {"_id": 0, "id": 1}):
         await db.projects.update_one({"id": p["id"]}, {"$set": {"entity_uid": await _new_prefixed_code("PROJ", "projects")}})
+    # Phase 89b — migrate legacy single-mapping centers into a mappings[] array.
+    async for c in db.centers.find({"mappings": {"$exists": False}, "partner_id": {"$nin": [None, ""]},
+                                     "project_id": {"$nin": [None, ""]}, "company_id": {"$nin": [None, ""]}},
+                                    {"_id": 0, "id": 1, "partner_id": 1, "project_id": 1, "company_id": 1}):
+        await db.centers.update_one({"id": c["id"]}, {"$set": {"mappings": [
+            {"partner_id": c["partner_id"], "project_id": c["project_id"], "company_id": c["company_id"]}]}})
 
 
 async def _migrate_multicompany():

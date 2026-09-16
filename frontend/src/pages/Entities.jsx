@@ -28,7 +28,7 @@ const EMPTY_FORM = {
   },
   center: {
     name: "", description: "", manager_name: "", email: "", mobile: "",
-    company_id: "", partner_id: "", project_id: "",
+    mappings: [],
     address: "", city: "", state: "", pincode: "",
   },
   project: {
@@ -93,25 +93,41 @@ export default function Entities({ etype }) {
   const openNew = () => { setEditing(null); setForm(EMPTY_FORM[etype]); setMapOpts({ projects: null, companies: null }); setOpen(true); };
   const openEdit = (it) => {
     setEditing(it);
-    // Pick only fields relevant to this etype + spread known to avoid stale data
     const base = EMPTY_FORM[etype];
     const next = { ...base };
     Object.keys(base).forEach((k) => { if (it[k] !== undefined && it[k] !== null) next[k] = it[k]; });
+    if (etype === "center") {
+      let m = Array.isArray(it.mappings) && it.mappings.length ? it.mappings
+        : (it.partner_id || it.project_id || it.company_id)
+          ? [{ partner_id: it.partner_id || "", project_id: it.project_id || "", company_id: it.company_id || "" }] : [];
+      next.mappings = m.map((r) => ({ partner_id: r.partner_id || "", project_id: r.project_id || "", company_id: r.company_id || "" }));
+    }
     setForm(next);
-    if (etype === "center" && it.partner_id) loadMapOptions(it.partner_id, it.project_id);
-    else setMapOpts({ projects: null, companies: null });
     setOpen(true);
   };
+
+  // Center mapping-row helpers (multi Partner→Project→Company)
+  const addMapping = () => setForm((f) => ({ ...f, mappings: [...(f.mappings || []), { partner_id: "", project_id: "", company_id: "" }] }));
+  const removeMapping = (i) => setForm((f) => ({ ...f, mappings: (f.mappings || []).filter((_, idx) => idx !== i) }));
+  const setMapping = (i, key, val) => setForm((f) => ({
+    ...f,
+    mappings: (f.mappings || []).map((r, idx) => idx === i
+      ? { ...r, [key]: val, ...(key === "partner_id" ? { project_id: "", company_id: "" } : {}) } : r),
+  }));
 
   const save = async () => {
     try {
       if (!form.name?.trim()) { toast.error("Name is required"); return; }
-      if (etype === "center" && (!form.partner_id || !form.project_id || !form.company_id)) {
-        toast.error("Partner, Project and Company mapping is required before saving this Center.");
-        return;
+      if (etype === "center") {
+        const rows = form.mappings || [];
+        const complete = rows.filter((r) => r.partner_id && r.project_id && r.company_id);
+        if (complete.length === 0) { toast.error("Partner, Project and Company mapping is required before saving this Center."); return; }
+        if (rows.some((r) => (r.partner_id || r.project_id || r.company_id) && !(r.partner_id && r.project_id && r.company_id))) {
+          toast.error("Each Partner mapping must have Partner, Project and Company selected."); return;
+        }
       }
-      // Clean empties so backend doesn't store ""
       const payload = Object.fromEntries(Object.entries(form).filter(([, v]) => v !== "" && v !== null));
+      if (etype === "center") payload.mappings = (form.mappings || []).filter((r) => r.partner_id && r.project_id && r.company_id);
       const res = editing
         ? await api.put(`/entities/${etype}/${editing.id}`, payload)
         : await api.post(`/entities/${etype}`, payload);
@@ -191,7 +207,8 @@ export default function Entities({ etype }) {
       const nameKey = { _partner: "partner_name", _project: "project_name", _company: "company_name" }[key];
       const uidKey = { _partner: "partner_uid", _project: "project_uid", _company: "company_uid" }[key];
       if (it[nameKey]) {
-        return <span className="text-[13px]">{it[nameKey]}<span className="block text-[10px] num text-[var(--muted)]">{it[uidKey] || ""}</span></span>;
+        const extra = (it.mapping_count || 1) - 1;
+        return <span className="text-[13px]">{it[nameKey]}<span className="block text-[10px] num text-[var(--muted)]">{it[uidKey] || ""}{extra > 0 ? ` · +${extra} more` : ""}</span></span>;
       }
       return <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-100 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase rounded" data-testid={`mapping-required-${it.id}`}>Mapping Required</span>;
     }
@@ -252,33 +269,43 @@ export default function Entities({ etype }) {
           <Label>Email <span className="overline text-[10px] text-[var(--muted)]">(becomes Center Manager&apos;s login ID — auto-generated password emailed)</span></Label>
           <Input type="email" value={form.email || ""} onChange={(e) => setForm({ ...form, email: e.target.value })} className="rounded-none" data-testid="entity-email" />
         </div>
-        <div>
-          <Label>Company <span className="text-[var(--danger)]">*</span></Label>
-          <Select value={form.company_id || ""} onValueChange={(v) => setForm({ ...form, company_id: v })}>
-            <SelectTrigger className="rounded-none" data-testid="entity-center-company"><SelectValue placeholder="Select Company" /></SelectTrigger>
-            <SelectContent>
-              {(mapOpts.companies || companies).map((c) => <SelectItem key={c.id} value={c.id}>{c.name}{c.entity_uid ? ` · ${c.entity_uid}` : ""}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
-          <Label>Partner <span className="text-[var(--danger)]">*</span></Label>
-          <Select value={form.partner_id || ""} onValueChange={(v) => { setForm({ ...form, partner_id: v, project_id: "", company_id: "" }); loadMapOptions(v, ""); }}>
-            <SelectTrigger className="rounded-none" data-testid="entity-center-partner"><SelectValue placeholder="Select Partner" /></SelectTrigger>
-            <SelectContent>
-              {partners.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.entity_uid ? ` · ${p.entity_uid}` : ""}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
         <div className="col-span-2">
-          <Label>Project <span className="text-[var(--danger)]">*</span></Label>
-          <Select value={form.project_id || ""} onValueChange={(v) => { setForm({ ...form, project_id: v }); loadMapOptions(form.partner_id, v); }} disabled={!form.partner_id}>
-            <SelectTrigger className="rounded-none" data-testid="entity-center-project"><SelectValue placeholder={form.partner_id ? "Select Project" : "Select a Partner first"} /></SelectTrigger>
-            <SelectContent>
-              {(mapOpts.projects || projects).map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.entity_uid ? ` · ${p.entity_uid}` : ""}</SelectItem>)}
-            </SelectContent>
-          </Select>
-          <div className="text-[10px] text-[var(--muted)] mt-1">Center → Partner → Project → Company mapping is mandatory. IDs are stored (names can change).</div>
+          <div className="flex items-center justify-between mb-1">
+            <Label>Partner → Project → Company Mapping <span className="text-[var(--danger)]">*</span></Label>
+            <Button type="button" size="sm" variant="outline" className="h-7 rounded-none" onClick={addMapping} data-testid="entity-center-add-mapping"><Plus size={13} className="mr-1" />Add Partner Mapping</Button>
+          </div>
+          <div className="space-y-2 border border-[var(--border)] p-2 rounded-none bg-gray-50/50">
+            {(form.mappings || []).length === 0 && <div className="text-[11px] text-[var(--muted)] py-1">No mapping yet. Click "Add Partner Mapping" to link this Center.</div>}
+            {(form.mappings || []).map((m, i) => (
+              <div key={i} className="grid grid-cols-12 gap-2 items-end bg-white p-2 border border-[var(--border)]" data-testid={`center-mapping-row-${i}`}>
+                <div className="col-span-4">
+                  <Label className="text-[10px] overline">Partner</Label>
+                  <Select value={m.partner_id || ""} onValueChange={(v) => setMapping(i, "partner_id", v)}>
+                    <SelectTrigger className="rounded-none h-8 text-xs" data-testid={`center-map-partner-${i}`}><SelectValue placeholder="Partner" /></SelectTrigger>
+                    <SelectContent>{partners.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.entity_uid ? ` · ${p.entity_uid}` : ""}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <div className="col-span-4">
+                  <Label className="text-[10px] overline">Project</Label>
+                  <Select value={m.project_id || ""} onValueChange={(v) => setMapping(i, "project_id", v)} disabled={!m.partner_id}>
+                    <SelectTrigger className="rounded-none h-8 text-xs" data-testid={`center-map-project-${i}`}><SelectValue placeholder={m.partner_id ? "Project" : "Partner first"} /></SelectTrigger>
+                    <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.entity_uid ? ` · ${p.entity_uid}` : ""}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <div className="col-span-3">
+                  <Label className="text-[10px] overline">Company</Label>
+                  <Select value={m.company_id || ""} onValueChange={(v) => setMapping(i, "company_id", v)} disabled={!m.partner_id}>
+                    <SelectTrigger className="rounded-none h-8 text-xs" data-testid={`center-map-company-${i}`}><SelectValue placeholder="Company" /></SelectTrigger>
+                    <SelectContent>{companies.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}{c.entity_uid ? ` · ${c.entity_uid}` : ""}</SelectItem>)}</SelectContent>
+                  </Select>
+                </div>
+                <div className="col-span-1 flex justify-center">
+                  <Button type="button" size="icon" variant="ghost" className="h-8 w-8 hover:text-red-600" onClick={() => removeMapping(i)} data-testid={`center-map-remove-${i}`}><Trash2 size={14} /></Button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="text-[10px] text-[var(--muted)] mt-1">A Center can serve multiple Partners. Each mapping needs Partner + Project + Company. IDs are stored (names can change).</div>
         </div>
       </>}
 
