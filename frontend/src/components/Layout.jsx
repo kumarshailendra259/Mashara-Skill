@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare, AlertCircle,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
-  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building, Handshake, GraduationCap,
+  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building, Handshake, GraduationCap, Percent,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -60,6 +60,7 @@ const navGroups = [
     icon: Target,
     items: [
       { to: "/batch-management", key: "batch_management", icon: Target, batchMgmtAccess: true },
+      { to: "/rate-config", key: "rate_config", icon: Percent, adminOnly: true },
     ],
   },
   {

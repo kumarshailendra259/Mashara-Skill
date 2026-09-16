@@ -8,11 +8,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Search, Pencil, Power, GraduationCap } from "lucide-react";
 import { toast } from "sonner";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import CourseMasterFormDialog from "@/components/course/CourseMasterFormDialog";
+import CourseMigrationTab from "@/components/course/CourseMigrationTab";
 
 export default function CourseMaster() {
   const { user } = useAuth();
   const canManage = ["admin", "super_admin", "company_admin", "manager", "senior_manager"].includes(user?.role);
+  const isAnyAdmin = ["admin", "super_admin", "company_admin"].includes(user?.role);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -72,6 +75,12 @@ export default function CourseMaster() {
         )}
       </div>
 
+      <Tabs defaultValue="courses" className="w-full">
+        <TabsList data-testid="cm-tabs">
+          <TabsTrigger value="courses" data-testid="cm-tab-courses">Courses</TabsTrigger>
+          {isAnyAdmin && <TabsTrigger value="migration" data-testid="cm-tab-migration">Migration & Mapping</TabsTrigger>}
+        </TabsList>
+        <TabsContent value="courses" className="space-y-5 mt-4">
       <div className="swiss-card p-3 flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[200px]">
           <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
@@ -140,6 +149,13 @@ export default function CourseMaster() {
           </TableBody>
         </Table>
       </div>
+        </TabsContent>
+        {isAnyAdmin && (
+          <TabsContent value="migration" className="mt-4">
+            <CourseMigrationTab masters={rows} onChanged={load} />
+          </TabsContent>
+        )}
+      </Tabs>
 
       <CourseMasterFormDialog open={formOpen} initial={editing} onClose={() => setFormOpen(false)} onSaved={load} />
     </div>

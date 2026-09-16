@@ -13146,6 +13146,7 @@ WO_READ_ROLES = (*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager")
 class WorkOrderCourseIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     course_master_id: Optional[str] = None    # FK to db.job_role_master (Phase 88 · single source of truth)
+    course_master_version: Optional[int] = None  # snapshot version used at record time
     sector: Optional[str] = ""
     sub_sector: Optional[str] = ""
     course: Optional[str] = ""
@@ -13234,6 +13235,8 @@ async def _resolve_course_masters(courses: list, is_admin: bool) -> list:
         c = dict(c)
         mid = c.get("course_master_id")
         m = masters.get(mid) if mid else None
+        if m:
+            c["course_master_version"] = m.get("version", 1)   # snapshot version stamp
         if m and not is_admin:
             c["sector"] = m.get("sector", "") or ""
             c["sub_sector"] = m.get("sub_sector", "") or ""
@@ -13268,6 +13271,7 @@ def _compute_work_order(courses: list, pbg_percent: float, value_override) -> di
         total_fee = round(classroom + boarding, 2)
         rows.append({
             "course_master_id": c.get("course_master_id") or None,
+            "course_master_version": c.get("course_master_version"),
             "sector": c.get("sector", "") or "", "sub_sector": c.get("sub_sector", "") or "",
             "course": c.get("course", "") or "", "qp_code": c.get("qp_code", "") or "",
             "category": c.get("category", "") or "", "nsqf_level": c.get("nsqf_level", "") or "",
@@ -13756,6 +13760,7 @@ async def add_batch_candidate(bid: str, body: BulkCandidateRow, user=Depends(req
         "is_deleted": False,
         "created_by": user["id"], "created_at": now,
     }
+    doc.update(await _candidate_course_stamp(b))
     await db.candidates.insert_one(doc)
     doc.pop("_id", None)
     return {"candidate": doc, "capacity_state": await _batch_capacity_state(bid)}
@@ -13851,6 +13856,7 @@ async def bulk_commit_candidates(bid: str, payload: dict = Body(...), user=Depen
             raise HTTPException(403, "Center manager can only enroll into own batches")
     b = state["batch"]
     now = datetime.now(timezone.utc).isoformat()
+    stamp = await _candidate_course_stamp(b)
     docs = []
     for r in rows:
         docs.append({
@@ -13866,6 +13872,7 @@ async def bulk_commit_candidates(bid: str, payload: dict = Body(...), user=Depen
             "job_role": r.get("job_role") or "",
             "status": "enrolled", "is_deleted": False,
             "created_by": user["id"], "created_at": now,
+            **{k: v for k, v in stamp.items() if not (k == "job_role" and r.get("job_role"))},
         })
     if docs:
         await db.candidates.insert_many(docs)
@@ -14448,6 +14455,43 @@ async def update_rate_slab(slab_id: str, payload: dict = Body(...),
     r.pop("_id", None); return r
 
 
+@api.post("/work-order/rate-config", status_code=201)
+async def create_rate_slab(payload: dict = Body(...), _=Depends(require_role("admin"))):
+    """Super Admin: add a new FY slab. rates must cover I/II/III."""
+    label = (payload.get("label") or "").strip()
+    if not label:
+        raise HTTPException(400, "label is required")
+    try:
+        fy_from = int(payload.get("fy_from"))
+        fy_to = int(payload.get("fy_to", 9999))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "fy_from / fy_to must be integers (e.g. 2026)")
+    if fy_from < 0:
+        raise HTTPException(400, "fy_from cannot be negative")
+    rates_in = payload.get("rates") or {}
+    if any(k not in VALID_CATEGORIES for k in rates_in.keys()):
+        raise HTTPException(400, f"rates keys must be a subset of {VALID_CATEGORIES}")
+    rates = {cat: float(rates_in.get(cat) or 0) for cat in VALID_CATEGORIES}
+    # Guard overlapping FY ranges (a given FY must map to exactly one slab).
+    for s in await _get_active_rate_slabs():
+        if int(s["fy_from"]) <= fy_to and fy_from <= int(s.get("fy_to", 9999)):
+            raise HTTPException(400, f"FY range {fy_from}-{fy_to} overlaps existing slab '{s.get('label')}' ({s['fy_from']}-{s.get('fy_to')})")
+    doc = {"id": f"slab-{uuid.uuid4().hex[:8]}", "label": label,
+           "fy_from": fy_from, "fy_to": fy_to, "rates": rates}
+    await db.rate_config.insert_one(doc)
+    doc.pop("_id", None); return doc
+
+
+@api.delete("/work-order/rate-config/{slab_id}", status_code=204)
+async def delete_rate_slab(slab_id: str, _=Depends(require_role("admin"))):
+    if await db.rate_config.count_documents({}) <= 1:
+        raise HTTPException(400, "Cannot delete the only remaining rate slab")
+    r = await db.rate_config.delete_one({"id": slab_id})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Rate slab not found")
+    return Response(status_code=204)
+
+
 @api.post("/work-order/calculate")
 async def calculate_wo(payload: dict = Body(...), _=Depends(get_current_user)):
     """Preview endpoint — used by the UI on every field change. Returns the
@@ -14568,6 +14612,7 @@ async def create_job_role(body: JobRoleMasterIn,
         raise HTTPException(409, f"This Job Role / QP Code already exists in Course Master ('{dup.get('name')}'). Update the existing master instead.")
     now = datetime.now(timezone.utc).isoformat()
     doc = {"id": str(uuid.uuid4()), **_normalize_job_role_doc(body),
+           "version": 1,
            "created_by": user["id"], "updated_by": user["id"],
            "created_at": now, "updated_at": now}
     await db.job_role_master.insert_one(doc)
@@ -14606,7 +14651,7 @@ async def update_job_role(rid: str, payload: dict = Body(...),
         upd["training_hours"] = upd["default_hours"]
     upd["updated_by"] = user["id"]
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
-    r = await db.job_role_master.find_one_and_update({"id": rid}, {"$set": upd}, return_document=True)
+    r = await db.job_role_master.find_one_and_update({"id": rid}, {"$set": upd, "$inc": {"version": 1}}, return_document=True)
     r.pop("_id", None); return r
 
 
@@ -14616,6 +14661,217 @@ async def delete_job_role(rid: str, _=Depends(require_role("admin", "company_adm
     r = await db.job_role_master.update_one({"id": rid}, {"$set": {"active": False}})
     if r.matched_count == 0: raise HTTPException(404, "Job Role not found")
     return Response(status_code=204)
+
+
+# ---------- Phase D · Course Master Migration & Mapping ----------
+def _course_sig(name: str, qp: str) -> tuple:
+    return ((name or "").strip().lower(), (qp or "").strip().lower())
+
+
+async def _collect_course_signatures() -> dict:
+    """Scan Work Orders + Batches for distinct course signatures that are NOT
+    yet linked to a Course Master. Returns sig_key -> representative record."""
+    sigs: dict = {}
+    async for wo in db.work_orders.find({}, {"_id": 0, "id": 1, "courses": 1}):
+        for c in (wo.get("courses") or []):
+            if c.get("course_master_id"):
+                continue
+            name = c.get("course") or ""
+            qp = c.get("qp_code") or ""
+            if not name.strip() and not qp.strip():
+                continue
+            key = _course_sig(name, qp)
+            rec = sigs.setdefault(key, {"name": name.strip(), "qp_code": qp.strip(),
+                                        "sector": c.get("sector") or "", "sub_sector": c.get("sub_sector") or "",
+                                        "category": str(c.get("category") or ""), "nsqf_level": str(c.get("nsqf_level") or ""),
+                                        "training_hours": float(c.get("course_hours") or 0),
+                                        "cost_per_hour": float(c.get("cost_per_hour") or 0),
+                                        "boarding_per_day": float(c.get("boarding_per_day") or 0),
+                                        "default_days": float(c.get("boarding_days") or 0),
+                                        "wo_count": 0, "batch_count": 0})
+            rec["wo_count"] += 1
+    async for b in db.batches.find({}, {"_id": 0, "id": 1, "job_role": 1, "job_role_master_id": 1, "category": 1, "job_role_hours": 1}):
+        if b.get("job_role_master_id"):
+            continue
+        name = b.get("job_role") or ""
+        if not name.strip():
+            continue
+        key = _course_sig(name, "")
+        rec = sigs.setdefault(key, {"name": name.strip(), "qp_code": "", "sector": "", "sub_sector": "",
+                                    "category": str(b.get("category") or ""), "nsqf_level": "",
+                                    "training_hours": float(b.get("job_role_hours") or 0), "cost_per_hour": 0,
+                                    "boarding_per_day": 0, "default_days": 0, "wo_count": 0, "batch_count": 0})
+        rec["batch_count"] += 1
+    return sigs
+
+
+def _match_masters(name: str, qp: str, masters: list) -> list:
+    name_l = (name or "").strip().lower()
+    qp_l = (qp or "").strip().lower()
+    out = []
+    for m in masters:
+        mn = (m.get("name") or "").strip().lower()
+        mq = (m.get("qp_code") or "").strip().lower()
+        if qp_l and mq and mq == qp_l:
+            out.append(m); continue
+        if mn and mn == name_l and (not qp_l or not mq):
+            out.append(m)
+    # dedupe by id
+    seen = set(); uniq = []
+    for m in out:
+        if m["id"] not in seen:
+            seen.add(m["id"]); uniq.append(m)
+    return uniq
+
+
+@api.get("/course-master/migration/preview")
+async def course_migration_preview(_=Depends(require_role("admin", "company_admin"))):
+    masters = await db.job_role_master.find({}, {"_id": 0}).to_list(3000)
+    sigs = await _collect_course_signatures()
+    auto_link, create_new, ambiguous = [], [], []
+    for key, rec in sigs.items():
+        matches = _match_masters(rec["name"], rec["qp_code"], masters)
+        item = {"sig": {"name": rec["name"], "qp_code": rec["qp_code"]},
+                "name": rec["name"], "qp_code": rec["qp_code"],
+                "sector": rec["sector"], "category": rec["category"], "nsqf_level": rec["nsqf_level"],
+                "wo_count": rec["wo_count"], "batch_count": rec["batch_count"]}
+        if len(matches) == 1:
+            item["master_id"] = matches[0]["id"]; item["master_name"] = matches[0]["name"]
+            auto_link.append(item)
+        elif len(matches) == 0:
+            create_new.append(item)
+        else:
+            item["candidates"] = [{"id": m["id"], "name": m["name"], "qp_code": m.get("qp_code") or ""} for m in matches]
+            ambiguous.append(item)
+    return {"summary": {"auto_link": len(auto_link), "create_new": len(create_new),
+                        "ambiguous": len(ambiguous), "total_signatures": len(sigs)},
+            "auto_link": auto_link, "create_new": create_new, "ambiguous": ambiguous}
+
+
+class MigrationApplyIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    do_auto_link: bool = True
+    do_create_new: bool = True
+    mappings: List[dict] = Field(default_factory=list)   # [{name, qp_code, master_id | "__create__"}]
+
+
+async def _link_signature_everywhere(name: str, qp: str, master_id: str, version: int) -> dict:
+    """Set course_master_id on every matching WO course row + batch."""
+    key = _course_sig(name, qp)
+    wo_updated = 0
+    async for wo in db.work_orders.find({}, {"_id": 0, "id": 1, "courses": 1}):
+        changed = False
+        courses = wo.get("courses") or []
+        for c in courses:
+            if c.get("course_master_id"):
+                continue
+            if _course_sig(c.get("course") or "", c.get("qp_code") or "") == key:
+                c["course_master_id"] = master_id
+                c["course_master_version"] = version
+                changed = True
+        if changed:
+            await db.work_orders.update_one({"id": wo["id"]}, {"$set": {"courses": courses}})
+            wo_updated += 1
+    batch_res = await db.batches.update_many(
+        {"job_role_master_id": {"$in": [None, ""]}, "job_role": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"}} if not qp else
+        {"job_role_master_id": {"$in": [None, ""]}, "job_role": {"$regex": f"^{re.escape(name.strip())}$", "$options": "i"}},
+        {"$set": {"job_role_master_id": master_id}})
+    return {"wo_updated": wo_updated, "batches_updated": batch_res.modified_count}
+
+
+@api.post("/course-master/migration/apply")
+async def course_migration_apply(body: MigrationApplyIn, user=Depends(require_role("admin", "company_admin"))):
+    masters = await db.job_role_master.find({}, {"_id": 0}).to_list(3000)
+    sigs = await _collect_course_signatures()
+    manual = {_course_sig(m.get("name") or "", m.get("qp_code") or ""): m for m in body.mappings}
+    now = datetime.now(timezone.utc).isoformat()
+    created, linked = 0, {"wo_updated": 0, "batches_updated": 0}
+    for key, rec in sigs.items():
+        target_id = None
+        matches = _match_masters(rec["name"], rec["qp_code"], masters)
+        if key in manual:
+            sel = manual[key].get("master_id")
+            if sel and sel != "__create__":
+                target_id = sel
+            elif sel == "__create__":
+                target_id = "__create__"
+        elif len(matches) == 1 and body.do_auto_link:
+            target_id = matches[0]["id"]
+        elif len(matches) == 0 and body.do_create_new:
+            target_id = "__create__"
+        if not target_id:
+            continue
+        if target_id == "__create__":
+            # Re-check for an exact duplicate to avoid double-create.
+            existing = _match_masters(rec["name"], rec["qp_code"], masters)
+            if len(existing) == 1:
+                target_id = existing[0]["id"]
+            else:
+                new = {"id": str(uuid.uuid4()), "name": rec["name"], "qp_code": rec["qp_code"],
+                       "sector": rec["sector"], "sub_sector": rec["sub_sector"], "category": rec["category"],
+                       "nsqf_level": rec["nsqf_level"], "qp_hours": 0, "training_hours": rec["training_hours"],
+                       "default_hours": rec["training_hours"], "cost_per_hour": rec["cost_per_hour"],
+                       "boarding_per_day": rec["boarding_per_day"], "default_days": rec["default_days"],
+                       "benefit": 0, "description": "Auto-created during migration", "effective_from": "",
+                       "effective_to": "", "active": True, "version": 1, "migrated": True,
+                       "created_by": user["id"], "updated_by": user["id"], "created_at": now, "updated_at": now}
+                await db.job_role_master.insert_one(new)
+                masters.append(new)
+                created += 1
+                target_id = new["id"]
+        mdoc = next((m for m in masters if m["id"] == target_id), None)
+        ver = int((mdoc or {}).get("version") or 1)
+        res = await _link_signature_everywhere(rec["name"], rec["qp_code"], target_id, ver)
+        linked["wo_updated"] += res["wo_updated"]
+        linked["batches_updated"] += res["batches_updated"]
+    return {"created_masters": created, **linked}
+
+
+@api.post("/course-master/backfill-candidates")
+async def backfill_candidates(_=Depends(require_role("admin", "company_admin"))):
+    """Stamp course fields onto existing candidates from their batch's linked master."""
+    updated = 0
+    batch_cache: dict = {}
+    master_cache: dict = {}
+    async for c in db.candidates.find({"is_deleted": {"$ne": True}, "job_role_master_id": {"$in": [None, ""]}},
+                                      {"_id": 0, "id": 1, "batch_id": 1}):
+        bid = c.get("batch_id")
+        if not bid:
+            continue
+        if bid not in batch_cache:
+            batch_cache[bid] = await db.batches.find_one({"id": bid}, {"_id": 0, "job_role_master_id": 1, "job_role": 1, "category": 1, "job_role_hours": 1})
+        b = batch_cache[bid] or {}
+        stamp = await _candidate_course_stamp(b, master_cache)
+        if stamp:
+            await db.candidates.update_one({"id": c["id"]}, {"$set": stamp})
+            updated += 1
+    return {"candidates_updated": updated}
+
+
+async def _candidate_course_stamp(batch: dict, master_cache: Optional[dict] = None) -> dict:
+    """Build the course-master fields to stamp on a candidate from its batch."""
+    if not batch:
+        return {}
+    mid = batch.get("job_role_master_id")
+    m = None
+    if mid:
+        if master_cache is not None and mid in master_cache:
+            m = master_cache[mid]
+        else:
+            m = await db.job_role_master.find_one({"id": mid}, {"_id": 0})
+            if master_cache is not None:
+                master_cache[mid] = m
+    stamp = {
+        "job_role_master_id": mid or None,
+        "job_role": (m.get("name") if m else batch.get("job_role")) or "",
+        "qp_code": (m.get("qp_code") if m else "") or "",
+        "sector": (m.get("sector") if m else "") or "",
+        "sub_sector": (m.get("sub_sector") if m else "") or "",
+        "nsqf_level": str((m.get("nsqf_level") if m else "") or ""),
+        "course_master_category": str((m.get("category") if m else batch.get("category")) or ""),
+        "course_hours": float((m.get("training_hours") or m.get("default_hours")) if m else (batch.get("job_role_hours") or 0)),
+    }
+    return stamp
 
 
 # ---------- LWE flag on District (Center) Master ----------
@@ -17973,8 +18229,12 @@ async def candidate_export_excel(
     if proj_key in ("BOCWW", "JSDMS"):
         cols = _cand_columns(proj_key)
     else:
-        # Union view — include an extra Project column at the front
-        cols = [("project", "Project")] + BOCWW_COLUMNS  # BOCWW has all fields
+        # Union view — include an extra Project column at the front + Course
+        # Master reference columns (Phase 88) at the end.
+        cols = [("project", "Project")] + BOCWW_COLUMNS + [
+            ("qp_code", "QP Code"), ("sector", "Sector"), ("sub_sector", "Sub Sector"),
+            ("nsqf_level", "NSQF Level"), ("course_hours", "Course Hours"),
+        ]
     for idx, (_k, header) in enumerate(cols, start=1):
         c = ws.cell(row=1, column=idx, value=header)
         c.font = header_font
