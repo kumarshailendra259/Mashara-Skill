@@ -1,0 +1,28 @@
+{
+  "summary": "Phase 88 (Course/Job Role Master + WO integration) end-to-end verified. Backend: 12/12 pytest cases passed covering CRUD (full-field create + default_hours auto-sync), 409 duplicate guards (name + qp_code, on POST and PATCH), PATCH updates with updated_by/updated_at + training_hours<->default_hours sync, DELETE soft-deactivate (204 + active=false), GET filters (q/sector/category/active_only/with_usage), 404 on usage for unknown id, WO integration (course_master_id stored + returned), value math 300*41*20=246000 / PBG 3%=7380 verified, admin override kept, non-admin (manager via hr@finance.app) enforcement: tampered/blank sector/sub_sector/course/qp/category/nsqf/hours/cost overwritten from master while beneficiaries preserved -> WO value recomputed to 246000/PBG 7380, and WO without course_master_id still works (100000/3000). Frontend: /course-master page renders with all filters + Add button; created a TEST_UI course, edited cost 41->45, deactivate/reactivate toggle works. New Work Order modal (bm-tgt-add-wo-btn): course combobox loaded 2 items on 'TEST_UI_' search, '+ Add New Course' opens the shared CourseMasterFormDialog inline, saving auto-selects the new course into the row and shows 'Mapped from Course Master' lock indicator, auto-populated Sector/SubSector/QP/Cat/NSQF/Hours/Cost as expected, saving created WO (300*45*20=270000, PBG 3%=8100, both shown in Financial Summary row). Cleanup: 3 test course masters deactivated + 1 test WO deleted (no leftover dummy rows).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "New Work Order modal (BatchManagement)", "issues": ["React dev-mode 'Uncaught runtime errors: ResizeObserver loop completed with undelivered notifications' error overlay appears when the WO modal opens (bundle.js handleError). Non-blocking (does not affect functionality - WO saved fine and math computed correctly) but the red overlay is noisy in preview. Typically caused by shadcn Popover/Command resizing inside the modal. Consider wrapping window.addEventListener('error', suppressResizeObserver) or ignoring these in the errorOverlay config."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_phase88_course_master.py", "/app/test_reports/pytest/phase88.xml"],
+  "action_items": [
+    "(Optional / low priority) Silence the ResizeObserver loop error overlay in dev/preview builds — appears whenever the WO course combobox/popover opens inside the modal. Functionality is intact; only the red overlay is cosmetic noise."
+  ],
+  "critical_code_review_comments": [
+    "server.py `_resolve_course_masters` correctly enforces master values for non-admins and keeps admin overrides — verified via a manager account. beneficiaries stays client-side. Good separation.",
+    "_normalize_job_role_doc keeps training_hours<->default_hours in sync one-way at create (if one empty). PATCH also syncs. Behaviour verified.",
+    "server.py is still ~24k lines — modularisation flagged in prior iterations still stands (unchanged this phase)."
+  ],
+  "updated_files": ["/app/backend/tests/test_phase88_course_master.py"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% of Phase 88 scenarios"},
+  "test_credentials": "admin@finance.app / Admin@123 ; hr@finance.app / Hr@12345 (currently role=manager on company LPEKKN — used for non-admin enforcement test)",
+  "seed_data_creation": "Created + then cleaned up: 3 test course masters (TEST_UI_*, TEST_Inline_*, plus pytest-created ones all soft-deactivated) and 1 test WO (TEST-UI-WO-* deleted). Pytest fixture also teardowns its own resources.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Phase 88 backend + frontend fully green. Non-admin enforcement test uses hr@finance.app which currently resolves to role=manager (memberships-based). If HR's default membership changes, the TestNonAdminEnforcement class may need a different manager account. Regression suite /app/backend/tests/test_phase88_course_master.py is stable and safe to re-run.",
+  "rca of the issue": "N/A — all requested scenarios passed. Only cosmetic observation: React dev overlay for ResizeObserver loop warnings when opening the WO modal (Popover/Command inside Dialog)."
+}
