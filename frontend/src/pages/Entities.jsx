@@ -28,7 +28,7 @@ const EMPTY_FORM = {
   },
   center: {
     name: "", description: "", manager_name: "", email: "", mobile: "",
-    company_id: "", partner_id: "",
+    company_id: "", partner_id: "", project_id: "",
     address: "", city: "", state: "", pincode: "",
   },
   project: {
@@ -47,6 +47,9 @@ export default function Entities({ etype }) {
   // For center form — need companies + partners lists to populate the default dropdowns
   const [companies, setCompanies] = useState([]);
   const [partners, setPartners] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [q, setQ] = useState("");
+  const [mapOpts, setMapOpts] = useState({ projects: null, companies: null }); // cascading (null = show all)
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM[etype] || EMPTY_FORM.company);
@@ -58,9 +61,10 @@ export default function Entities({ etype }) {
   const [copied, setCopied] = useState(false);
 
   const load = () =>
-    api.get(`/entities/${etype}`).then((r) => { setItems(r.data); setSelected(new Set()); });
+    api.get(`/entities/${etype}`, { params: q ? { q } : {} }).then((r) => { setItems(r.data); setSelected(new Set()); });
 
-  useEffect(() => { load(); }, [etype]);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [etype]);
+  useEffect(() => { const id = setTimeout(load, 300); return () => clearTimeout(id); /* eslint-disable-next-line */ }, [q]);
 
   // Project types only needed on Projects page
   useEffect(() => {
@@ -69,14 +73,24 @@ export default function Entities({ etype }) {
     }
   }, [etype]);
 
-  // For center form — fetch companies + partners for the "default" dropdowns.
+  // For center form — fetch companies + partners + projects for the mandatory mapping dropdowns.
   useEffect(() => {
     if (etype !== "center") return;
     api.get("/entities/company").then((r) => setCompanies(r.data || [])).catch(() => {});
     api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
+    api.get("/entities/project").then((r) => setProjects(r.data || [])).catch(() => {});
   }, [etype]);
 
-  const openNew = () => { setEditing(null); setForm(EMPTY_FORM[etype]); setOpen(true); };
+  // Cascading: when the selected Partner (or Project) changes, narrow Project/Company options.
+  const loadMapOptions = async (partner_id, project_id) => {
+    if (!partner_id) { setMapOpts({ projects: null, companies: null }); return; }
+    try {
+      const r = await api.get("/entity-mapping-options", { params: { partner_id, project_id } });
+      setMapOpts({ projects: r.data.projects || null, companies: r.data.companies || null });
+    } catch { setMapOpts({ projects: null, companies: null }); }
+  };
+
+  const openNew = () => { setEditing(null); setForm(EMPTY_FORM[etype]); setMapOpts({ projects: null, companies: null }); setOpen(true); };
   const openEdit = (it) => {
     setEditing(it);
     // Pick only fields relevant to this etype + spread known to avoid stale data
@@ -84,12 +98,18 @@ export default function Entities({ etype }) {
     const next = { ...base };
     Object.keys(base).forEach((k) => { if (it[k] !== undefined && it[k] !== null) next[k] = it[k]; });
     setForm(next);
+    if (etype === "center" && it.partner_id) loadMapOptions(it.partner_id, it.project_id);
+    else setMapOpts({ projects: null, companies: null });
     setOpen(true);
   };
 
   const save = async () => {
     try {
       if (!form.name?.trim()) { toast.error("Name is required"); return; }
+      if (etype === "center" && (!form.partner_id || !form.project_id || !form.company_id)) {
+        toast.error("Partner, Project and Company mapping is required before saving this Center.");
+        return;
+      }
       // Clean empties so backend doesn't store ""
       const payload = Object.fromEntries(Object.entries(form).filter(([, v]) => v !== "" && v !== null));
       const res = editing
@@ -144,7 +164,7 @@ export default function Entities({ etype }) {
   const extraColumns = useMemo(() => {
     if (etype === "company") return [{ key: "gst_number", label: "GST" }, { key: "email", label: "Email" }];
     if (etype === "partner") return [{ key: "email", label: "Email" }, { key: "mobile", label: "Mobile" }, { key: "_mail_status", label: "Login Mail" }];
-    if (etype === "center")  return [{ key: "manager_name", label: "Manager" }, { key: "email", label: "Email" }, { key: "_lwe", label: "LWE" }, { key: "_mail_status", label: "Login Mail" }];
+    if (etype === "center")  return [{ key: "_partner", label: "Partner" }, { key: "_project", label: "Project" }, { key: "_company", label: "Company" }, { key: "manager_name", label: "Manager" }, { key: "email", label: "Email" }, { key: "_lwe", label: "LWE" }, { key: "_mail_status", label: "Login Mail" }];
     if (etype === "project") return [{ key: "project_type", label: "Type" }, { key: "project_code", label: "Code" }];
     return [];
   }, [etype]);
@@ -167,6 +187,14 @@ export default function Entities({ etype }) {
   };
 
   const renderCell = (it, key) => {
+    if (key === "_partner" || key === "_project" || key === "_company") {
+      const nameKey = { _partner: "partner_name", _project: "project_name", _company: "company_name" }[key];
+      const uidKey = { _partner: "partner_uid", _project: "project_uid", _company: "company_uid" }[key];
+      if (it[nameKey]) {
+        return <span className="text-[13px]">{it[nameKey]}<span className="block text-[10px] num text-[var(--muted)]">{it[uidKey] || ""}</span></span>;
+      }
+      return <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-amber-100 border border-amber-300 text-amber-800 text-[9px] font-bold uppercase rounded" data-testid={`mapping-required-${it.id}`}>Mapping Required</span>;
+    }
     if (key === "_mail_status") {
       if (!it.email) return <span className="text-[var(--muted)]">—</span>;
       if (it.credentials_mail_sent) {
@@ -225,24 +253,32 @@ export default function Entities({ etype }) {
           <Input type="email" value={form.email || ""} onChange={(e) => setForm({ ...form, email: e.target.value })} className="rounded-none" data-testid="entity-email" />
         </div>
         <div>
-          <Label>Default Company <span className="overline text-[10px] text-[var(--muted)]">(auto-tags all txns at this center)</span></Label>
-          <Select value={form.company_id || "__none"} onValueChange={(v) => setForm({ ...form, company_id: v === "__none" ? "" : v })}>
-            <SelectTrigger className="rounded-none" data-testid="entity-center-company"><SelectValue placeholder="— None —" /></SelectTrigger>
+          <Label>Company <span className="text-[var(--danger)]">*</span></Label>
+          <Select value={form.company_id || ""} onValueChange={(v) => setForm({ ...form, company_id: v })}>
+            <SelectTrigger className="rounded-none" data-testid="entity-center-company"><SelectValue placeholder="Select Company" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="__none">— None —</SelectItem>
-              {companies.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+              {(mapOpts.companies || companies).map((c) => <SelectItem key={c.id} value={c.id}>{c.name}{c.entity_uid ? ` · ${c.entity_uid}` : ""}</SelectItem>)}
             </SelectContent>
           </Select>
         </div>
         <div>
-          <Label>Default Partner <span className="overline text-[10px] text-[var(--muted)]">(single-partner centers only)</span></Label>
-          <Select value={form.partner_id || "__none"} onValueChange={(v) => setForm({ ...form, partner_id: v === "__none" ? "" : v })}>
-            <SelectTrigger className="rounded-none" data-testid="entity-center-partner"><SelectValue placeholder="— None —" /></SelectTrigger>
+          <Label>Partner <span className="text-[var(--danger)]">*</span></Label>
+          <Select value={form.partner_id || ""} onValueChange={(v) => { setForm({ ...form, partner_id: v, project_id: "", company_id: "" }); loadMapOptions(v, ""); }}>
+            <SelectTrigger className="rounded-none" data-testid="entity-center-partner"><SelectValue placeholder="Select Partner" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="__none">— None —</SelectItem>
-              {partners.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+              {partners.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.entity_uid ? ` · ${p.entity_uid}` : ""}</SelectItem>)}
             </SelectContent>
           </Select>
+        </div>
+        <div className="col-span-2">
+          <Label>Project <span className="text-[var(--danger)]">*</span></Label>
+          <Select value={form.project_id || ""} onValueChange={(v) => { setForm({ ...form, project_id: v }); loadMapOptions(form.partner_id, v); }} disabled={!form.partner_id}>
+            <SelectTrigger className="rounded-none" data-testid="entity-center-project"><SelectValue placeholder={form.partner_id ? "Select Project" : "Select a Partner first"} /></SelectTrigger>
+            <SelectContent>
+              {(mapOpts.projects || projects).map((p) => <SelectItem key={p.id} value={p.id}>{p.name}{p.entity_uid ? ` · ${p.entity_uid}` : ""}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <div className="text-[10px] text-[var(--muted)] mt-1">Center → Partner → Project → Company mapping is mandatory. IDs are stored (names can change).</div>
         </div>
       </>}
 
@@ -322,6 +358,10 @@ export default function Entities({ etype }) {
         </div>
       </div>
 
+      <div className="swiss-card p-2">
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search by Unique ID or name…`} className="rounded-none h-9 max-w-sm" data-testid={`entity-search-${etype}`} />
+      </div>
+
       <div className="swiss-card overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -331,6 +371,7 @@ export default function Entities({ etype }) {
                   <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={allIds.length === 0} className="cursor-pointer" data-testid={`select-all-${etype}`} />
                 </th>
               )}
+              <th className="text-left p-3">Unique ID</th>
               <th className="text-left p-3">{t("name")}</th>
               {extraColumns.map((c) => <th key={c.key} className="text-left p-3">{c.label}</th>)}
               <th className="text-left p-3">{t("description")}</th>
@@ -339,7 +380,7 @@ export default function Entities({ etype }) {
           </thead>
           <tbody>
             {items.length === 0 ? (
-              <tr><td colSpan={extraColumns.length + (canDelete ? 4 : 3)} className="text-center py-8 overline">{t("no_data")}</td></tr>
+              <tr><td colSpan={extraColumns.length + (canDelete ? 5 : 4)} className="text-center py-8 overline">{t("no_data")}</td></tr>
             ) : items.map((it) => (
               <tr key={it.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                 {canDelete && (
@@ -347,6 +388,7 @@ export default function Entities({ etype }) {
                     <input type="checkbox" checked={selected.has(it.id)} onChange={() => toggleOne(it.id)} className="cursor-pointer" data-testid={`select-${etype}-${it.id}`} />
                   </td>
                 )}
+                <td className="p-3 num text-xs font-semibold text-[var(--brand)]" data-testid={`entity-uid-${it.id}`}>{it.entity_uid || it.company_code || it.center_code || "—"}</td>
                 <td className="p-3 font-medium">{it.name}</td>
                 {extraColumns.map((c) => (
                   <td key={c.key} className="p-3 num">{renderCell(it, c.key)}</td>

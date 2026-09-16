@@ -2717,6 +2717,51 @@ ENTITY_COLLECTION = {
 }
 
 
+# ---------- Phase 89 · Mandatory Entity Linking (Center → Partner/Project/Company) ----------
+async def _enforce_center_mapping(doc: dict):
+    """Center must be linked to Partner + Project + Company (DB/API enforcement).
+    Validates each id actually exists. Raises 400 otherwise."""
+    missing = [k for k in ("partner_id", "project_id", "company_id") if not (doc.get(k) or "").strip()]
+    if missing:
+        raise HTTPException(400, "Partner, Project and Company mapping is required before saving this Center.")
+    checks = [("partner_id", "partners", "Partner"), ("project_id", "projects", "Project"), ("company_id", "companies", "Company")]
+    for field, coll, label in checks:
+        if not await db[coll].find_one({"id": doc[field]}, {"_id": 0, "id": 1}):
+            raise HTTPException(400, f"Selected {label} does not exist")
+
+
+async def _record_mapping_audit(center_id: str, before: Optional[dict], after: dict, user: dict, action: str):
+    """Append-only audit of a center's Partner/Project/Company mapping changes."""
+    def _m(d):
+        d = d or {}
+        return {"partner_id": d.get("partner_id"), "project_id": d.get("project_id"), "company_id": d.get("company_id")}
+    old_m, new_m = _m(before), _m(after)
+    if action == "update" and old_m == new_m:
+        return
+    await db.entity_mapping_audit.insert_one({
+        "id": str(uuid.uuid4()), "center_id": center_id, "action": action,
+        "previous_mapping": old_m if before is not None else None, "new_mapping": new_m,
+        "actor_id": user.get("id"), "actor_name": user.get("name") or user.get("email"),
+        "at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def _entity_dependency_count(etype: str, eid: str) -> dict:
+    """Count records that would be orphaned if this entity were deleted."""
+    counts: dict = {}
+    if etype in ("partner", "project", "company"):
+        field = {"partner": "partner_id", "project": "project_id", "company": "company_id"}[etype]
+        counts["centers"] = await db.centers.count_documents({field: eid})
+        counts["batches"] = await db.batches.count_documents({field: eid})
+        counts["transactions"] = await db.transactions.count_documents({field: eid})
+    if etype == "center":
+        counts["batches"] = await db.batches.count_documents({"center_id": eid})
+        counts["candidates"] = await db.candidates.count_documents({"center_id": eid, "is_deleted": {"$ne": True}})
+        counts["transactions"] = await db.transactions.count_documents({"center_id": eid})
+        counts["staff"] = await db.staff.count_documents({"center_id": eid})
+    return {k: v for k, v in counts.items() if v}
+
+
 def _entity_doc(body: EntityIn, etype: str) -> dict:
     """Build entity dict including ALL extra fields the user passed (gst, mobile, etc).
     Uses Pydantic .model_dump() so extra-allow fields make it through."""
@@ -2814,7 +2859,7 @@ async def _auto_create_user_for_entity(etype: str, entity_doc: dict) -> Optional
 
 
 @api.get("/entities/{etype}", response_model=List[EntityOut])
-async def list_entities(etype: EntityType, user=Depends(get_current_user)):
+async def list_entities(etype: EntityType, q: Optional[str] = None, user=Depends(get_current_user)):
     col = ENTITY_COLLECTION[etype]
     query: dict = {}
     visible = await _visible_entity_ids(user, etype)
@@ -2823,16 +2868,43 @@ async def list_entities(etype: EntityType, user=Depends(get_current_user)):
             return []
         query["id"] = {"$in": list(visible)}
     docs = await db[col].find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    # Phase 89 — enrich centers with mapped Partner/Project/Company names + mapping status.
+    if etype == "center" and docs:
+        pids = {d.get("partner_id") for d in docs if d.get("partner_id")}
+        prids = {d.get("project_id") for d in docs if d.get("project_id")}
+        cids = {d.get("company_id") for d in docs if d.get("company_id")}
+        pmap = {p["id"]: p for p in await db.partners.find({"id": {"$in": list(pids)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(2000)} if pids else {}
+        prmap = {p["id"]: p for p in await db.projects.find({"id": {"$in": list(prids)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(2000)} if prids else {}
+        cmap = {c["id"]: c for c in await db.companies.find({"id": {"$in": list(cids)}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).to_list(2000)} if cids else {}
+        for d in docs:
+            p, pr, c = pmap.get(d.get("partner_id")), prmap.get(d.get("project_id")), cmap.get(d.get("company_id"))
+            d["partner_name"] = (p or {}).get("name")
+            d["partner_uid"] = (p or {}).get("entity_uid")
+            d["project_name"] = (pr or {}).get("name")
+            d["project_uid"] = (pr or {}).get("entity_uid")
+            d["company_name"] = (c or {}).get("name")
+            d["company_uid"] = (c or {}).get("entity_uid") or (c or {}).get("company_code")
+            d["mapping_complete"] = bool(d.get("partner_id") and d.get("project_id") and d.get("company_id"))
+    if q:
+        s = q.strip().lower()
+        docs = [d for d in docs if s in (d.get("entity_uid") or "").lower()
+                or s in (d.get("name") or "").lower()
+                or s in (d.get("company_code") or "").lower()
+                or s in (d.get("center_code") or "").lower()]
     return [EntityOut(**d) for d in docs]
 
 
 @api.post("/entities/{etype}", response_model=EntityOut)
-async def create_entity(etype: EntityType, body: EntityIn, _=Depends(require_role("admin", "manager"))):
+async def create_entity(etype: EntityType, body: EntityIn, user=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
     doc = _entity_doc(body, etype)
+    # Phase 89 — Center MUST be mapped to Partner + Project + Company.
+    if etype == "center":
+        await _enforce_center_mapping(doc)
     # Auto-assign a unique short code to every new company (e.g. UXU7SO).
     if etype == "company":
         doc["company_code"] = await _new_company_code()
+        doc["entity_uid"] = doc["company_code"]
     # Auto-assign a center_code + access defaults to every new center.
     if etype == "center":
         cc = None
@@ -2840,25 +2912,39 @@ async def create_entity(etype: EntityType, body: EntityIn, _=Depends(require_rol
             comp = await db.companies.find_one({"id": doc["company_id"]}, {"_id": 0, "company_code": 1})
             cc = (comp or {}).get("company_code")
         doc["center_code"] = await _new_center_code(cc)
+        doc["entity_uid"] = doc["center_code"]
         doc.setdefault("access_status", "enabled")
         doc.setdefault("access_type", "free")
         doc.setdefault("center_status", "active")
+    if etype == "partner":
+        doc["entity_uid"] = await _new_prefixed_code("PART", "partners")
+    if etype == "project":
+        doc["entity_uid"] = await _new_prefixed_code("PROJ", "projects")
     plain_password = await _auto_create_user_for_entity(etype, doc)
     await db[col].insert_one(doc)
     doc.pop("_id", None)
+    if etype == "center":
+        await _record_mapping_audit(doc["id"], None, doc, user, "create")
     if plain_password:
         return EntityOut(**{**doc, "generated_password": plain_password})
     return EntityOut(**doc)
 
 
 @api.put("/entities/{etype}/{eid}", response_model=EntityOut)
-async def update_entity(etype: EntityType, eid: str, body: EntityIn, _=Depends(require_role("admin", "manager"))):
+async def update_entity(etype: EntityType, eid: str, body: EntityIn, user=Depends(require_role("admin", "manager"))):
     col = ENTITY_COLLECTION[etype]
     existing = await db[col].find_one({"id": eid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Not found")
     update = body.model_dump()
     update.pop("linked_user_id", None)  # cannot be set from client
+    update.pop("entity_uid", None)      # Unique ID is permanent — never changes
+    update.pop("company_code", None)
+    update.pop("center_code", None)
+    # Phase 89 — editing a Center requires a complete Partner/Project/Company mapping.
+    if etype == "center":
+        merged = {**existing, **update}
+        await _enforce_center_mapping(merged)
     # If email changed AND entity already has a linked user, mirror the change on the user record
     old_email = (existing.get("email") or "").lower()
     new_email = (update.get("email") or "").lower()
@@ -2876,6 +2962,8 @@ async def update_entity(etype: EntityType, eid: str, body: EntityIn, _=Depends(r
         update["linked_user_id"] = (await db[col].find_one({"id": eid}, {"_id": 0, "linked_user_id": 1}) or {}).get("linked_user_id")
     res = await db[col].find_one_and_update({"id": eid}, {"$set": update}, return_document=True)
     res.pop("_id", None)
+    if etype == "center":
+        await _record_mapping_audit(eid, existing, res, user, "update")
     if plain_password:
         return EntityOut(**{**res, "generated_password": plain_password})
     return EntityOut(**res)
@@ -2884,10 +2972,107 @@ async def update_entity(etype: EntityType, eid: str, body: EntityIn, _=Depends(r
 @api.delete("/entities/{etype}/{eid}")
 async def delete_entity(etype: EntityType, eid: str, _=Depends(require_role("admin"))):
     col = ENTITY_COLLECTION[etype]
+    if not await db[col].find_one({"id": eid}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Not found")
+    deps = await _entity_dependency_count(etype, eid)
+    if deps:
+        detail = ", ".join(f"{v} {k}" for k, v in deps.items())
+        raise HTTPException(409, f"This entity is linked with existing records ({detail}). Please remove/reassign the mappings before deletion, or Deactivate/Archive instead.")
     r = await db[col].delete_one({"id": eid})
     if r.deleted_count == 0:
         raise HTTPException(404, "Not found")
     return {"ok": True}
+
+
+@api.get("/entity-mapping-options")
+async def entity_relationship_options(partner_id: Optional[str] = None, project_id: Optional[str] = None,
+                                       _=Depends(require_role("admin", "manager", "senior_manager"))):
+    """Cascading options for Center mapping, derived from the existing center-mapping graph.
+    If no mappings exist yet for the chosen partner, all active entities are allowed."""
+    all_projects = await db.projects.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).sort("name", 1).to_list(2000)
+    all_companies = await db.companies.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).sort("name", 1).to_list(2000)
+    if not partner_id:
+        return {"projects": all_projects, "companies": all_companies}
+    # Projects previously linked with this partner (via center mappings)
+    proj_ids = await db.centers.distinct("project_id", {"partner_id": partner_id, "project_id": {"$ne": None}})
+    projects = [p for p in all_projects if p["id"] in set(proj_ids)] or all_projects
+    comp_q = {"partner_id": partner_id, "company_id": {"$ne": None}}
+    if project_id:
+        comp_q["project_id"] = project_id
+    comp_ids = await db.centers.distinct("company_id", comp_q)
+    companies = [c for c in all_companies if c["id"] in set(comp_ids)] or all_companies
+    return {"projects": projects, "companies": companies}
+
+
+@api.get("/entities/{etype}/{eid}/relationships")
+async def entity_relationships(etype: EntityType, eid: str, _=Depends(require_role("admin", "manager", "senior_manager", "accountant", "hr"))):
+    """Reverse relationship visibility for a Partner / Project / Company / Center."""
+    col = ENTITY_COLLECTION[etype]
+    ent = await db[col].find_one({"id": eid}, {"_id": 0})
+    if not ent:
+        raise HTTPException(404, "Not found")
+    async def _resolve(coll, ids):
+        ids = [i for i in ids if i]
+        if not ids:
+            return []
+        rows = await db[coll].find({"id": {"$in": list(set(ids))}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1, "center_code": 1}).to_list(3000)
+        return [{"id": r["id"], "name": r.get("name"), "uid": r.get("entity_uid") or r.get("company_code") or r.get("center_code")} for r in rows]
+    out = {"id": eid, "name": ent.get("name"), "entity_uid": _entity_uid_of(etype, ent)}
+    if etype in ("partner", "project", "company"):
+        field = {"partner": "partner_id", "project": "project_id", "company": "company_id"}[etype]
+        centers = await db.centers.find({field: eid}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "partner_id": 1, "project_id": 1, "company_id": 1}).to_list(3000)
+        out["linked_centers"] = [{"id": c["id"], "name": c.get("name"), "uid": c.get("entity_uid")} for c in centers]
+        out["linked_partners"] = await _resolve("partners", [c.get("partner_id") for c in centers])
+        out["linked_projects"] = await _resolve("projects", [c.get("project_id") for c in centers])
+        out["linked_companies"] = await _resolve("companies", [c.get("company_id") for c in centers])
+    else:
+        out["linked_partners"] = await _resolve("partners", [ent.get("partner_id")])
+        out["linked_projects"] = await _resolve("projects", [ent.get("project_id")])
+        out["linked_companies"] = await _resolve("companies", [ent.get("company_id")])
+    return out
+
+
+@api.get("/entity-mappings")
+async def entity_mappings(q: Optional[str] = None, partner_id: Optional[str] = None,
+                          project_id: Optional[str] = None, company_id: Optional[str] = None,
+                          unmapped_only: bool = False, user=Depends(require_role("admin", "manager"))):
+    """Admin relationship interface: Center → Partner → Project → Company table."""
+    query: dict = {}
+    if partner_id: query["partner_id"] = partner_id
+    if project_id: query["project_id"] = project_id
+    if company_id: query["company_id"] = company_id
+    centers = await db.centers.find(query, {"_id": 0}).sort("created_at", -1).to_list(3000)
+    pmap = {p["id"]: p for p in await db.partners.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(3000)}
+    prmap = {p["id"]: p for p in await db.projects.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1}).to_list(3000)}
+    cmap = {c["id"]: c for c in await db.companies.find({}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "company_code": 1}).to_list(3000)}
+    rows = []
+    for c in centers:
+        complete = bool(c.get("partner_id") and c.get("project_id") and c.get("company_id"))
+        if unmapped_only and complete:
+            continue
+        p, pr, co = pmap.get(c.get("partner_id")), prmap.get(c.get("project_id")), cmap.get(c.get("company_id"))
+        row = {
+            "center_id": c["id"], "center_uid": c.get("entity_uid") or c.get("center_code"), "center_name": c.get("name"),
+            "partner_id": c.get("partner_id"), "partner_uid": (p or {}).get("entity_uid"), "partner_name": (p or {}).get("name"),
+            "project_id": c.get("project_id"), "project_uid": (pr or {}).get("entity_uid"), "project_name": (pr or {}).get("name"),
+            "company_id": c.get("company_id"), "company_uid": (co or {}).get("entity_uid") or (co or {}).get("company_code"), "company_name": (co or {}).get("name"),
+            "mapping_complete": complete,
+        }
+        if q:
+            s = q.strip().lower()
+            hay = " ".join(str(v or "") for v in row.values()).lower()
+            if s not in hay:
+                continue
+        rows.append(row)
+    return {"rows": rows, "total": len(rows),
+            "unmapped": sum(1 for r in rows if not r["mapping_complete"])}
+
+
+@api.get("/entity-mappings/audit")
+async def entity_mappings_audit(center_id: Optional[str] = None, _=Depends(require_role("admin", "manager"))):
+    query = {"center_id": center_id} if center_id else {}
+    logs = await db.entity_mapping_audit.find(query, {"_id": 0}).sort("at", -1).to_list(500)
+    return logs
 
 
 @api.post("/entities/{etype}/{eid}/resend-credentials")
@@ -22911,6 +23096,10 @@ async def _seed_subscription_catalog():
         await _backfill_user_company_ids()
         # Centers + multi-company-user migration (codes, access, memberships).
         await _migrate_multicompany()
+        # Phase 89 — ensure every entity has a human Unique ID (entity_uid).
+        await _backfill_entity_uids()
+        await db.partners.create_index("entity_uid", unique=True, partialFilterExpression={"entity_uid": {"$type": "string"}})
+        await db.projects.create_index("entity_uid", unique=True, partialFilterExpression={"entity_uid": {"$type": "string"}})
     except Exception as exc:  # noqa: BLE001
         logger.warning("Subscription seed failed: %s", exc)
 
@@ -23003,6 +23192,45 @@ async def _new_center_code(company_code: Optional[str]) -> str:
         if not await db.centers.find_one({"center_code": code}, {"_id": 1}):
             return code
     return f"{prefix}-{_rand_code(6)}"
+
+
+async def _new_prefixed_code(prefix: str, coll: str, field: str = "entity_uid") -> str:
+    """Unique `{PREFIX}-XXXXXX` code for partners/projects (Phase 89)."""
+    for _ in range(50):
+        code = f"{prefix}-{_rand_code(6)}"
+        if not await db[coll].find_one({field: code}, {"_id": 1}):
+            return code
+    return f"{prefix}-{_rand_code(8)}"
+
+
+def _entity_uid_of(etype: str, doc: dict) -> Optional[str]:
+    """Return the human Unique ID for an entity doc (Phase 89 single accessor)."""
+    if not doc:
+        return None
+    if doc.get("entity_uid"):
+        return doc["entity_uid"]
+    if etype == "company":
+        return doc.get("company_code")
+    if etype == "center":
+        return doc.get("center_code")
+    return None
+
+
+async def _backfill_entity_uids():
+    """Idempotent: ensure every company/center/partner/project has entity_uid."""
+    async for c in db.companies.find({"entity_uid": {"$in": [None, ""]}}, {"_id": 0, "id": 1, "company_code": 1}):
+        code = c.get("company_code") or await _new_company_code()
+        await db.companies.update_one({"id": c["id"]}, {"$set": {"entity_uid": code, "company_code": code}})
+    async for c in db.centers.find({"entity_uid": {"$in": [None, ""]}}, {"_id": 0, "id": 1, "center_code": 1, "company_id": 1}):
+        code = c.get("center_code")
+        if not code:
+            comp = await db.companies.find_one({"id": c.get("company_id")}, {"_id": 0, "company_code": 1}) if c.get("company_id") else None
+            code = await _new_center_code((comp or {}).get("company_code"))
+        await db.centers.update_one({"id": c["id"]}, {"$set": {"entity_uid": code, "center_code": code}})
+    async for p in db.partners.find({"entity_uid": {"$in": [None, ""]}}, {"_id": 0, "id": 1}):
+        await db.partners.update_one({"id": p["id"]}, {"$set": {"entity_uid": await _new_prefixed_code("PART", "partners")}})
+    async for p in db.projects.find({"entity_uid": {"$in": [None, ""]}}, {"_id": 0, "id": 1}):
+        await db.projects.update_one({"id": p["id"]}, {"$set": {"entity_uid": await _new_prefixed_code("PROJ", "projects")}})
 
 
 async def _migrate_multicompany():

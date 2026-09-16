@@ -50,6 +50,7 @@ import CompanySelect from "@/pages/CompanySelect";
 import PartnerSettlement from "@/pages/PartnerSettlement";
 import CourseMaster from "@/pages/CourseMaster";
 import RateConfig from "@/pages/RateConfig";
+import EntityMappings from "@/pages/EntityMappings";
 import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
@@ -107,6 +108,7 @@ function App() {
             <Route path="/center-management" element={<ProtectedRoute><Shell><CenterManagement /></Shell></ProtectedRoute>} />
             <Route path="/course-master" element={<ProtectedRoute><Shell><CourseMaster /></Shell></ProtectedRoute>} />
             <Route path="/rate-config" element={<ProtectedRoute requireAdmin><Shell><RateConfig /></Shell></ProtectedRoute>} />
+            <Route path="/entity-mappings" element={<ProtectedRoute><Shell><EntityMappings /></Shell></ProtectedRoute>} />
             <Route path="/programs" element={<ProtectedRoute><Shell><Programs /></Shell></ProtectedRoute>} />
             <Route path="/batch-management" element={<ProtectedRoute><Shell><BatchManagement /></Shell></ProtectedRoute>} />
             <Route path="/partner-associations" element={<ProtectedRoute><Shell><PartnerAssociations /></Shell></ProtectedRoute>} />

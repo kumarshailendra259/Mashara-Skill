@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Building2, Users, MapPin, Briefcase,
   ArrowLeftRight, FileBarChart2, LogOut, Languages, ShieldCheck, Bell, Package, ClipboardCheck, Layers, GitMerge, Settings2, Link2, Receipt, Inbox, History, Box, UserCog, FileSignature, Users2, UserPlus, Landmark, MessageSquare, AlertCircle,
   Menu, Fingerprint, MoreHorizontal, Wallet, PieChart, BarChart3, Target,
-  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building, Handshake, GraduationCap, Percent,
+  ChevronDown, ChevronRight, Star, ChevronsRight, FileText, CreditCard, Lock, Building, Handshake, GraduationCap, Percent, Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,6 +51,7 @@ const navGroups = [
       { to: "/centers", key: "centers", icon: MapPin },
       { to: "/center-management", key: "center_management", icon: MapPin, adminOnly: true },
       { to: "/course-master", key: "course_master", icon: GraduationCap, batchMgmtAccess: true },
+      { to: "/entity-mappings", key: "entity_mappings", icon: Network, adminOnly: true },
       { to: "/projects", key: "projects", icon: Briefcase },
       { to: "/menu-access-control", key: "roles_permissions", icon: ShieldCheck, adminOnly: true },
     ],
