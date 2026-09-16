@@ -1,0 +1,42 @@
+{
+  "summary": "Phase 89b — Center → MULTIPLE Partner+Project+Company mappings, end-to-end. Backend: 15/16 pytest passed (see failure below). Verified: (a) POST /entities/center with mappings:[m0,m1] → 200, primary partner_id/project_id/company_id == mappings[0], entity_uid generated, list endpoint returns mapping_count=2 + mappings_resolved[] with resolved partner_name/project_name/company_name; (b) duplicate identical rows deduped to 1; (c) empty mappings→400 'Partner, Project and Company mapping is required', incomplete row (blank project)→400 'Each Partner mapping must have Partner, Project and Company selected.', bogus partner_id in a row→400 'Selected Partner does not exist'; (d) PUT adding a 2nd mapping persists both; (e) legacy single-mapping PUT (no mappings sent, name-only edit) preserves existing mapping; (f) migration — existing centers with legacy partner_id/project_id/company_id return mapping_count≥1, unmapped centers show mapping_complete=false; (g) GET /entity-mappings expands 2-mapping center into 2 rows w/ mapping_index 0/1 + mapping_total=2, unmapped centers yield exactly 1 row per center, ?partner_id= matches centers where partner is ANY mapping row (not just primary); (h) /entities/partner/{id}/relationships finds center via secondary-row partner and aggregates linked_projects across rows; (i) /entity-mapping-options?partner_id= returns row-scoped projects/companies via $unwind; (j) deleting a partner referenced ONLY in a secondary-row mapping returns 409 (via mappings.partner_id $or legacy).\n\nFrontend (UI, /centers): Add Center dialog renders 'Partner → Project → Company Mapping *' section with 'Add Partner Mapping' button (entity-center-add-mapping). Save with 0 rows shows correct error toast. Adding 2 rows via UI (center-mapping-row-0/1), each with center-map-partner/project/company selects + center-map-remove, saved successfully. List row for the new center shows primary Partner/Project/Company + '+1 more' badge next to each. Edit → clicked center-map-remove-1 → row 1 disappeared → Save → post-save API confirms mapping_count=1. Cleanup DELETE returned 200.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PUT /api/entities/center/{id}", "issue": "Sending explicit mappings:[] (empty list) with only a name change does NOT return 400 — instead the empty list falls into the legacy fallback branch in _normalize_center_mappings (raw is falsy → else uses legacy singles from merged doc) and the existing mapping silently persists, returning 200. Spec says: 'PUT clearing all mappings → 400'. Recommend: in _normalize_center_mappings, distinguish between 'mappings key absent' (fallback to legacy) and 'mappings key present as an empty list' (raise 400). e.g., check `isinstance(raw, list) and not raw` explicitly."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Add/Edit Center dialog", "issues": ["Project & Company Select triggers do not expose data-disabled/aria-disabled when partner_id is empty in a row — the `disabled` prop is set on Radix Select root but not reflected on the SelectTrigger element. Functionally the placeholder correctly reads 'Partner first' and clicking is a no-op in practice (verified by no options appearing without partner), but assistive tech / automated tests can't detect the disabled state via ARIA. Non-blocking."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase89b_multi_mapping.py",
+    "/app/test_reports/pytest/phase89b.xml"
+  ],
+  "action_items": [
+    "Backend: reject PUT /api/entities/center with explicit mappings:[] (empty array) → 400 'Partner, Project and Company mapping is required' — matches spec bullet 'PUT clearing all mappings → 400'. Fix location: _normalize_center_mappings in /app/backend/server.py ~L2727: `raw = doc.get('mappings'); if isinstance(raw, list) and not raw: raise HTTPException(400, ...)` before falling back to legacy singles.",
+    "Optional: add aria-disabled to project/company SelectTrigger in Entities.jsx mapping-row so screen readers + a11y tests can detect the cascading disabled state."
+  ],
+  "critical_code_review_comments": [
+    "server.py still ~24.7k lines — Phase 89 + 89b entity-mapping code (~L2720-3150) is a clear extraction candidate into routers/entities.py alongside _normalize_center_mappings, _center_mapping_list, _record_mapping_audit, _entity_dependency_count.",
+    "PUT clear-mappings edge case (documented above) — empty `mappings:[]` silently fallback-resolves to legacy singles. Semantic mismatch with spec.",
+    "_normalize_center_mappings validates existence via 3 sequential `db[coll].distinct('id',...)` — one round-trip per collection is fine; consider asyncio.gather() for a small latency win.",
+    "entity-mappings loads ALL centers (to 3000) then filters q in Python. Manageable now (~213 centers) but paginate once beyond a few thousand.",
+    "_entity_dependency_count for partner/project/company now correctly checks `mappings.partner_id` via $or with legacy — but still misses `staff.partner_id` (also flagged in iteration_74). Deleting a partner with only staff linked would silently succeed.",
+    "$unwind cascading fallback returns ALL projects/companies when a partner has zero historical mappings. Confirmed by design per spec ('falls back to all if none') — worth a UI note so admins know they're not filtered."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase89b_multi_mapping.py"
+  ],
+  "success_rate": {"backend": "94% (15/16)", "frontend": "100% of Phase 89b UI scenarios"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "All test artefacts prefixed TEST_P89B_ (centers TwoMaps/DedupeMaps/EditAdd/Clear/Legacy/EMRows/PFilter/RevVis/Casc/DelSec + UI TEST_P89B_UITWO) plus one partner TEST_P89B_SecOnly. All created ids tracked and DELETE'd in module-scoped teardown. UI center cleaned up inline (DELETE 200 confirmed).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite /app/backend/tests/test_phase89b_multi_mapping.py runs against preview URL in ~10s (16 tests). Requires REACT_APP_BACKEND_URL env var. Uses first 2 seed partners/projects/companies from DB — safe on any environment with ≥2 of each. Note the ONE known backend deviation: PUT with explicit mappings:[] returns 200 instead of 400 (test_clear_all_mappings_put_400). The iteration_74 Phase 89 suite (test_phase89_entity_mapping.py) also still runs green.",
+  "rca of the issue": "PUT clearing mappings=[] returns 200 rather than 400: In _normalize_center_mappings (/app/backend/server.py L2727-2730), `raw = doc.get('mappings')`; the guard `raw if isinstance(raw, list) and raw else [{...legacy...}]` treats an EMPTY list identically to an ABSENT key — both fall back to the legacy single-field triple carried in `merged = {**existing, **update}` from update_entity. Since existing.partner_id/project_id/company_id survive the merge (update.model_dump() likely doesn't overwrite them with None due to Pydantic field defaults), cleaned ends up populated with the OLD legacy mapping and 200 is returned. Reproduction: create a center via POST with a full mapping, then PUT {name:'x', mappings:[]} → expect 400, observed 200 with mapping intact. Mitigation: split the guard so an explicit empty list raises immediately, e.g., `if isinstance(raw, list) and not raw: raise HTTPException(400, 'Partner, Project and Company mapping is required before saving this Center.')`."
+}

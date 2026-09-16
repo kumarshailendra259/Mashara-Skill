@@ -2725,6 +2725,9 @@ async def _normalize_center_mappings(doc: dict):
     then syncs the FIRST (primary) mapping back to legacy fields for backward
     compatibility with finance/batch modules. Raises 400 otherwise."""
     raw = doc.get("mappings")
+    if isinstance(raw, list) and not raw:
+        # explicit empty list = user cleared all mappings → reject
+        raise HTTPException(400, "Partner, Project and Company mapping is required before saving this Center.")
     rows = raw if isinstance(raw, list) and raw else [
         {"partner_id": doc.get("partner_id"), "project_id": doc.get("project_id"), "company_id": doc.get("company_id")}
     ]

@@ -51,6 +51,12 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified**: testing agent iteration_74 — backend 19/19 pytest (uid regex+immutable, mandatory 400s, delete 409, cascading, reverse, admin mapping, audit, search) + frontend 100% (centers columns+badges+search+mandatory cascading form; /entity-mappings cards+table). Center isolation intact. Test data cleaned.
 - **Deferred (Phase 2)**: Unique codes surfaced across batch/candidate/attendance/finance/invoice/settlement/reports/exports; reassign-mapping directly from the mapping page; explicit staff dependency in deletion check.
 
+### Phase 89b — Multi-Partner Center Mapping (Done, Jun 2026)
+- **User asked**: Ek center 2+ partners se map ho sake. Choices: har row = complete Partner+Project+Company triple; `mappings[]` array on center; first=primary synced to legacy fields; min 1 complete + har row complete; existing single-mapping auto-migrate; sab views update.
+- **Backend**: `_normalize_center_mappings` (accepts `mappings[]` or legacy singles; validates ≥1 complete + existence + dedupe; syncs primary→legacy `partner_id/project_id/company_id`; explicit `mappings:[]` → 400) + `_center_mapping_list`. create/update_entity wired. `list_entities` returns `mappings_resolved[]` + `mapping_count`. `entity_mappings` admin table expands ONE ROW PER MAPPING (mapping_index/total). Cascading `$unwind` row-scoped; reverse visibility + deletion-integrity match `mappings.partner_id` via `$or` legacy. Startup migration legacy→mappings[].
+- **Frontend `Entities.jsx`**: center form single dropdowns → repeatable "Partner → Project → Company Mapping" editor (Add Partner Mapping / per-row remove, Project/Company disabled till Partner); save validates ≥1 complete + no partial rows. List columns show primary + "+N more".
+- **Verified**: testing agent iteration_75 — backend 16/16 after fix (multi-create, dedupe, 400s, edit add/remove, migration, per-mapping admin rows, reverse, cascading, deletion 409, empty-mappings PUT→400) + frontend 100% (multi-row editor create/edit/remove; +N more badge). Regression green. Test data cleaned.
+
 
 ### Phase 83 — Attendance next-day carry-over bug FIXED (Jun 2026)
 - **Bug**: Forgot-to-checkout on day N showed "You're checked in" on day N+1. Root cause: `/api/me/summary` (staff dashboard) used `datetime.now(timezone.utc).date()` (UTC) → between 00:00–05:30 IST the UTC date was still yesterday, so it returned yesterday's open row; and stale-close only ran on check-in, never on page load.
