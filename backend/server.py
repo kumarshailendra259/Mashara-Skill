@@ -2129,9 +2129,10 @@ async def register(body: RegisterIn, response: Response):
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already registered")
-    # SECURITY: normal users must not assign themselves privileged roles.
-    PROHIBITED_SELF_SIGNUP = {"admin", "super_admin", "company_admin"}
-    safe_role = body.role if body.role not in PROHIBITED_SELF_SIGNUP else "viewer"
+    # SECURITY: public self-registration may NEVER grant a privileged or scoped
+    # role. Anyone who signs up gets the lowest-privilege "viewer" role; all
+    # other roles are created only by an admin via POST /auth/users.
+    safe_role = "viewer"
     user = {
         "id": str(uuid.uuid4()),
         "email": email,
@@ -6031,6 +6032,32 @@ async def list_staff_documents(sid: str, _=Depends(require_role("admin", "hr", "
     return await db.staff_documents.find({"staff_id": sid}, {"_id": 0}).sort("uploaded_at", -1).to_list(200)
 
 
+@api.get("/staff/{sid}/profile")
+async def get_staff_profile(sid: str, user=Depends(get_current_user)):
+    """Single staff record for the read-only Employee Profile page. Center-scoped
+    (fail-closed) and salary-stripped for roles that must not see compensation.
+    Enriches center_name, reports_to_name and the linked user's system role."""
+    doc = await db.staff.find_one({"id": sid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Staff not found")
+    await _assert_center_access(user, doc.get("center_id"))
+    out = StaffOut(**doc).model_dump()
+    # Enrichments
+    if doc.get("center_id"):
+        c = await db.centers.find_one({"id": doc["center_id"]}, {"_id": 0, "name": 1})
+        out["center_name"] = c.get("name") if c else None
+    if doc.get("reports_to_id"):
+        m = await db.staff.find_one({"id": doc["reports_to_id"]}, {"_id": 0, "name": 1})
+        out["reports_to_name"] = m.get("name") if m else None
+    if doc.get("user_id"):
+        u = await db.users.find_one({"id": doc["user_id"]}, {"_id": 0, "role": 1})
+        out["user_role"] = u.get("role") if u else None
+    if user.get("role") not in SALARY_VISIBLE_ROLES:
+        out.pop("monthly_salary", None)
+        out.pop("per_day_rate", None)
+    return out
+
+
 @api.delete("/staff-documents/{did}")
 async def delete_staff_document(did: str, user=Depends(get_current_user)):
     """Staff can delete their own doc; admin/HR can delete any."""
@@ -8891,6 +8918,7 @@ async def list_payroll(
     month: Optional[int] = None, year: Optional[int] = None,
     q: Optional[str] = None,
     status: Optional[str] = None,
+    staff_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 5000,
     user=Depends(get_current_user),
@@ -8918,6 +8946,13 @@ async def list_payroll(
         query["month"] = month
     if year:
         query["year"] = year
+    if staff_id:
+        # Narrow to one staff — still bounded by the center scope applied above.
+        if isinstance(query.get("staff_id"), dict):
+            scoped_ids = set(query["staff_id"].get("$in") or [])
+            if scoped_ids and staff_id not in scoped_ids:
+                raise HTTPException(403, "Not authorised to view this staff's payroll")
+        query["staff_id"] = staff_id
     if status and status != "all":
         query["status"] = status
     if q:
@@ -13427,9 +13462,12 @@ async def get_batch_target(tid: str, user=Depends(require_role(*TARGET_ADMIN_ROL
 
 
 @api.patch("/batch-targets/{tid}", response_model=BatchTargetOut)
-async def update_batch_target(tid: str, body: BatchTargetIn, _=Depends(require_role(*TARGET_ADMIN_ROLES))):
+async def update_batch_target(tid: str, body: BatchTargetIn, user=Depends(require_role(*TARGET_ADMIN_ROLES))):
     existing = await db.batch_targets.find_one({"id": tid}, {"_id": 0})
     if not existing: raise HTTPException(404, "Target not found")
+    await _assert_center_access(user, existing.get("center_id"))
+    if body.center_id and body.center_id != existing.get("center_id"):
+        await _assert_center_access(user, body.center_id)
     # Can't shrink total_target below already-allocated portion (live-derived).
     allocated = await _target_allocated_single(existing)
     if body.total_target < allocated:
@@ -13460,7 +13498,11 @@ async def delete_batch_target(tid: str, _=Depends(require_role("admin"))):
 
 
 @api.get("/batch-targets/{tid}/batches", response_model=List[BatchOut])
-async def batches_under_target(tid: str, _=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
+async def batches_under_target(tid: str, user=Depends(require_role(*TARGET_ADMIN_ROLES, "accountant", "hr", "center_manager"))):
+    target = await db.batch_targets.find_one({"id": tid}, {"_id": 0, "center_id": 1})
+    if not target:
+        raise HTTPException(404, "Target not found")
+    await _assert_center_access(user, target.get("center_id"))
     docs = await db.batches.find({"target_id": tid}, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return [BatchOut(**d) for d in docs]
 
@@ -13737,6 +13779,9 @@ async def update_work_order(wid: str, body: WorkOrderIn, user=Depends(require_ro
     existing = await db.work_orders.find_one({"id": wid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Work Order not found")
+    await _assert_center_access(user, existing.get("center_id"))
+    if body.center_id and body.center_id != existing.get("center_id"):
+        await _assert_center_access(user, body.center_id)
     if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "project_id does not exist")
     if not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
@@ -17598,6 +17643,13 @@ async def download_payment_voucher(pid: str, user=Depends(get_current_user)):
     p = await db.payments.find_one({"id": pid}, {"_id": 0})
     if not p:
         raise HTTPException(404, "Payment not found")
+    # SECURITY: voucher carries payee bank + amount PII. Restrict to finance/mgmt
+    # roles (or the creator) AND enforce center scope so nobody can read another
+    # centre's vendor payment.
+    VOUCHER_ROLES = {"admin", "hr", "accountant", "senior_manager", "manager", "partner"}
+    if user.get("role") not in VOUCHER_ROLES and p.get("created_by") != user.get("id"):
+        raise HTTPException(403, "Not authorized to download this voucher")
+    await _assert_center_access(user, p.get("center_id"))
     if p.get("status") != "paid":
         raise HTTPException(400, "Voucher available only after final approval")
     voucher = await db.payment_vouchers.find_one({"payment_id": pid}, {"_id": 0})
@@ -18605,11 +18657,9 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
     project = existing.get("project") or (payload.get("project") or "").upper()
     if project not in ("BOCWW", "JSDMS"):
         raise HTTPException(400, "Missing project")
-    # Scope check — partner / center_manager can only edit within their centers.
-    await _enrich_user_with_associations(user)
-    scoped = _user_scoped_center_ids(user)
-    if scoped and existing.get("center_id") not in scoped:
-        raise HTTPException(403, "You can only edit candidates for your assigned center(s)")
+    # Scope check (fail-closed) — a center-scoped user can only edit candidates
+    # within the centre(s) they are linked to. Head-level users pass through.
+    await _assert_center_access(user, existing.get("center_id"))
     data = _normalise_candidate_payload(project, payload)
     if project == "BOCWW":
         rel_err = _validate_relation({**existing, **data})
@@ -19322,6 +19372,7 @@ async def update_bank_guarantee(bid: str, payload: dict = Body(...), user=Depend
     existing = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
     if not existing:
         raise HTTPException(404, "Bank guarantee not found")
+    await _assert_center_access(user, existing.get("center_id"))
     allowed = {
         "bg_number", "amount", "amount_override", "issued_by", "date_of_issuance",
         "valid_till", "bg_claim_expiry_date", "location", "remarks", "in_favour_of",
@@ -19372,6 +19423,7 @@ async def change_bg_status(bid: str, payload: dict = Body(...), user=Depends(req
     doc = await db.bank_guarantees.find_one({"id": bid}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Bank guarantee not found")
+    await _assert_center_access(user, doc.get("center_id"))
     to = (payload.get("status") or "").strip().lower()
     remarks = (payload.get("remarks") or "").strip()
     if to not in BG_WORKFLOW_STATES:
@@ -19421,8 +19473,12 @@ async def change_bg_status(bid: str, payload: dict = Body(...), user=Depends(req
 
 
 @api.patch("/bank-guarantees/{bid}/renew")
-async def renew_bank_guarantee(bid: str, _=Depends(require_role(*BG_WRITE_ROLES))):
+async def renew_bank_guarantee(bid: str, user=Depends(require_role(*BG_WRITE_ROLES))):
     """Mark a bank guarantee as renewed — silences the dashboard expiry popup."""
+    existing = await db.bank_guarantees.find_one({"id": bid, "is_deleted": {"$ne": True}}, {"_id": 0, "center_id": 1})
+    if not existing:
+        raise HTTPException(404, "Bank guarantee not found")
+    await _assert_center_access(user, existing.get("center_id"))
     r = await db.bank_guarantees.update_one(
         {"id": bid, "is_deleted": {"$ne": True}},
         {"$set": {"is_renewed": True, "renewed_at": datetime.now(timezone.utc).isoformat()}},
@@ -22345,6 +22401,7 @@ async def update_invoice(iid: str, body: InvoiceUpdateIn,
     inv = await db.invoices.find_one({"id": iid})
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    await _assert_center_access(user, inv.get("center_id"))
     patch = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
     # Recompute money fields if any changed
     if any(k in patch for k in ("amount_payable", "adjustment", "gross_payment", "deduction")):
@@ -22371,6 +22428,7 @@ async def advance_invoice(iid: str, body: StageAdvanceIn,
     inv = await db.invoices.find_one({"id": iid})
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
+    await _assert_center_access(user, inv.get("center_id"))
     to_stage = int(body.to_stage)
     if to_stage not in INVOICE_STAGE_BY_CODE:
         raise HTTPException(status_code=400, detail="Invalid stage")
@@ -22415,7 +22473,11 @@ async def advance_invoice(iid: str, body: StageAdvanceIn,
 
 
 @api.get("/invoices/{iid}/audit")
-async def get_invoice_audit(iid: str, _=Depends(require_role(*INVOICE_READ_ROLES))):
+async def get_invoice_audit(iid: str, user=Depends(require_role(*INVOICE_READ_ROLES))):
+    inv = await db.invoices.find_one({"id": iid}, {"_id": 0, "center_id": 1})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    await _assert_center_access(user, inv.get("center_id"))
     rows = await db.invoice_audit.find({"invoice_id": iid}, {"_id": 0}).sort("timestamp", -1).to_list(length=1000)
     return rows
 

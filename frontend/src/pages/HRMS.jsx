@@ -492,7 +492,6 @@ export default function HRMS() {
   const canViewStaffFull = isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager";
   const canViewSalary = isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager" || user?.role === "senior_manager" || user?.role === "partner";
   const [viewStaffId, setViewStaffId] = useState(null);
-  const [profileStaffId, setProfileStaffId] = useState(null);
 
   // Bulk archive staff (admin only)
   const [selectedStaff, setSelectedStaff] = useState(new Set());
@@ -1486,7 +1485,7 @@ export default function HRMS() {
                   <td className="p-3 text-right no-print">
                     <Button
                       size="sm" variant="outline"
-                      onClick={() => setProfileStaffId(s.id)}
+                      onClick={() => nav(`/hrms/staff/${s.id}/profile`)}
                       className="rounded-none h-8 px-2"
                       data-testid={`staff-profile-${s.id}`}
                       title="View employee profile"
@@ -2293,12 +2292,7 @@ export default function HRMS() {
         staffList={staff}
       />
 
-      {/* Employee Profile card — read-only, available to ALL roles (no salary / bank). */}
-      <StaffProfileDialog
-        staffId={profileStaffId}
-        onClose={() => setProfileStaffId(null)}
-        staffList={staff}
-      />
+      {/* Employee Profile is a dedicated page at /hrms/staff/:id/profile */}
 
       {/* Phase 55 — Payroll batch detail dialog (approve/pay/reopen depending on role + status) */}
       <PayrollBatchDialog
@@ -2307,69 +2301,6 @@ export default function HRMS() {
         currentUser={user}
       />
     </div>
-  );
-}
-
-/* ============================================================
-   STAFF PROFILE CARD — read-only employee profile visible to ALL roles.
-   Non-sensitive master data only (no salary, no bank details).
-   ============================================================ */
-function StaffProfileDialog({ staffId, onClose, staffList }) {
-  const s = (staffList || []).find((x) => x.id === staffId) || {};
-  const dash = (v) => (v == null || v === "" ? "—" : v);
-  const fmtDate = (v) => (v ? new Date(v).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" }) : "—");
-  const empType = { full_time: "Full Time", part_time: "Part Time", contract: "Contract" }[s.employment_type] || "—";
-  const isInactive = s.is_active === false || s.active === false;
-  const reason = (s.exit_reason || "").toLowerCase();
-  const empStatus = !isInactive
-    ? "Active"
-    : reason.includes("terminat") ? "Terminated"
-    : reason.includes("resign") ? "Resigned"
-    : "Inactive";
-  const statusTone = empStatus === "Active" ? "text-emerald-700 bg-emerald-50 border-emerald-300"
-    : empStatus === "Inactive" ? "text-slate-600 bg-slate-50 border-slate-300"
-    : "text-red-700 bg-red-50 border-red-300";
-  const gender = { male: "Male", female: "Female", other: "Other", m: "Male", f: "Female" }[(s.gender || "").toLowerCase()] || dash(s.gender);
-  const reportingManager = s.reports_to_name || (staffList || []).find((x) => x.id === s.reports_to_id)?.name || "—";
-  const initials = (s.name || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
-
-  return (
-    <Dialog open={!!staffId} onOpenChange={(o) => !o && onClose?.()}>
-      <DialogContent className="rounded-none max-w-2xl" data-testid="staff-profile-dialog">
-        <DialogHeader>
-          <DialogTitle className="font-heading text-lg">Employee Profile</DialogTitle>
-          <DialogDescription className="text-xs text-[var(--muted)]">Read-only master details.</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-5" data-testid="staff-profile-body">
-          <div className="flex items-center gap-4">
-            {s.photo_url ? (
-              <img src={s.photo_url} alt={s.name} className="w-20 h-20 object-cover border border-[var(--border)]" data-testid="profile-photo" />
-            ) : (
-              <div className="w-20 h-20 flex items-center justify-center bg-[var(--brand)] text-white text-xl font-heading" data-testid="profile-photo-fallback">{initials}</div>
-            )}
-            <div className="min-w-0">
-              <div className="text-lg font-heading truncate">{dash(s.name)}</div>
-              <div className="text-xs font-mono text-[var(--brand)]">{dash(s.employee_code)}</div>
-              <span className={`inline-block mt-1 px-2 py-0.5 text-[10px] font-semibold uppercase border ${statusTone}`} data-testid="profile-status">{empStatus}</span>
-            </div>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
-            <ViewField label="Designation" value={dash(s.designation)} testid="profile-designation" />
-            <ViewField label="Department" value={dash(s.department)} testid="profile-department" />
-            <ViewField label="Employment Type" value={empType} testid="profile-emptype" />
-            <ViewField label="Gender" value={gender} testid="profile-gender" />
-            <ViewField label="Date of Birth" value={fmtDate(s.date_of_birth)} testid="profile-dob" />
-            <ViewField label="Joining Date" value={fmtDate(s.joining_date)} testid="profile-joining" />
-            <ViewField label="Mobile" value={dash(s.mobile)} testid="profile-mobile" />
-            <ViewField label="Email" value={dash(s.email)} testid="profile-email" />
-            <ViewField label="Reporting Manager" value={reportingManager} testid="profile-reporting-manager" />
-          </div>
-        </div>
-        <div className="flex justify-end pt-2">
-          <Button variant="outline" onClick={onClose} className="rounded-none" data-testid="staff-profile-close">Close</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 
