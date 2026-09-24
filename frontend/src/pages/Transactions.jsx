@@ -389,7 +389,12 @@ export default function Transactions() {
             <div><span className="text-slate-400">Project:</span> {nameOf("project", it.project_id)}</div>
           </td>
         )}
-        <td className={rowPad}><StatusBadge status={it.status} title={it.rejected_reason} /></td>
+        <td className={rowPad}>
+          <StatusBadge status={it.status} title={it.rejected_reason} />
+          {(it.status || "pending") === "pending" && it.pending_at && (
+            <div className="mt-1 text-[10px] text-amber-700" data-testid={`pending-at-${it.id}`}>Pending at <span className="font-medium">{it.pending_at}</span></div>
+          )}
+        </td>
         {canEdit && (
           <td className={`${rowPad} text-right`} onClick={(e) => e.stopPropagation()}>
             <div className="inline-flex gap-0.5 items-center">
@@ -683,7 +688,11 @@ export default function Transactions() {
                       )}
                       <li>
                         <span className={`absolute -left-1.5 w-3 h-3 rounded-full ${drawer.status === "approved" ? "bg-emerald-500" : drawer.status === "rejected" ? "bg-rose-500" : "bg-amber-500"}`} />
-                        <div className="text-sm font-medium capitalize">{drawer.status || "pending"}</div>
+                        <div className="text-sm font-medium capitalize" data-testid="drawer-pending-at">
+                          {(drawer.status || "pending") === "pending" && drawer.pending_at
+                            ? <>Pending at <span className="text-amber-700">{drawer.pending_at}</span></>
+                            : (drawer.status || "pending")}
+                        </div>
                         {drawer.rejected_reason && <div className="text-xs text-rose-500">{drawer.rejected_reason}</div>}
                       </li>
                     </ol>

@@ -845,6 +845,9 @@ class TransactionOut(TransactionIn):
     transaction_ref: Optional[str] = None
     paid_by_user_id: Optional[str] = None
     paid_by_name: Optional[str] = None
+    # Dynamic "Pending at <approver>" label — who the transaction is currently
+    # waiting on. Computed on read (not stored). None for non-pending txns.
+    pending_at: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -1110,6 +1113,18 @@ async def _centers_for_partner(partner_id: str) -> list:
     ):
         if c.get("id"):
             centers.add(c["id"])
+    # Source #2b: the multi-partner mapping array (centers.mappings[].partner_id).
+    # This is the source of truth for the Center↔Partner relationship configured
+    # via the mapping UI — a partner mapped here belongs to the centre even with
+    # no batch/txn history. Honour the per-entry `active` flag.
+    async for c in db.centers.find(
+        {"mappings.partner_id": partner_id},
+        {"_id": 0, "id": 1, "mappings": 1},
+    ):
+        for m in (c.get("mappings") or []):
+            if m.get("partner_id") == partner_id and m.get("active", True) is not False:
+                centers.add(c["id"])
+                break
     # Source #3: derive from transactions where this partner has actually transacted at a center.
     # This covers data where batch.center_id is None but the partner has center-level txn history.
     txn_centers = await db.transactions.distinct(
@@ -2617,6 +2632,54 @@ async def reset_password(body: ResetPwdIn):
     return {"ok": True, "message": "Password updated successfully. Please log in."}
 
 
+async def _center_cross_approvers(center_id: str) -> set:
+    """Set of partner_ids mapped to `center_id` (via centers.mappings) that are
+    ACTIVE and have cross_approval enabled. Source of truth for who may
+    cross-approve a transaction at this centre. Flags default to True (ON) when
+    absent so pre-existing mappings keep working."""
+    if not center_id:
+        return set()
+    c = await db.centers.find_one({"id": center_id}, {"_id": 0, "mappings": 1})
+    out = set()
+    for m in (c or {}).get("mappings") or []:
+        pid = m.get("partner_id")
+        if pid and m.get("active", True) is not False and m.get("cross_approval", True) is not False:
+            out.add(pid)
+    return out
+
+
+async def _attach_pending_at(docs: list):
+    """Enrich pending transactions with a dynamic `pending_at` label = the
+    person/role the txn is currently awaiting. Batched (3 queries max) so the
+    list endpoint stays fast. Cross-approval txns → co-mapped partner name(s);
+    otherwise → 'Admin' (the role that finalises approval)."""
+    pend = [d for d in docs if d.get("status") == "pending"]
+    if not pend:
+        return
+    center_ids = {d.get("center_id") for d in pend if d.get("center_id")}
+    cmap: dict = {}
+    if center_ids:
+        async for c in db.centers.find({"id": {"$in": list(center_ids)}}, {"_id": 0, "id": 1, "mappings": 1}):
+            appr = set()
+            for m in (c.get("mappings") or []):
+                pid = m.get("partner_id")
+                if pid and m.get("active", True) is not False and m.get("cross_approval", True) is not False:
+                    appr.add(pid)
+            cmap[c["id"]] = appr
+    need_pids = set()
+    for d in pend:
+        need_pids |= cmap.get(d.get("center_id"), set())
+    pname: dict = {}
+    if need_pids:
+        async for p in db.partners.find({"id": {"$in": list(need_pids)}}, {"_id": 0, "id": 1, "name": 1}):
+            pname[p["id"]] = p.get("name")
+    for d in pend:
+        appr = cmap.get(d.get("center_id"), set())
+        owner = d.get("partner_id")
+        others = [pname.get(pid) for pid in appr if pid != owner and pname.get(pid)]
+        d["pending_at"] = ", ".join(others) if others else "Admin"
+
+
 # ---------- Partner Associations (cross-approval mapping) ----------
 def _norm_pair(a: str, b: str) -> tuple:
     return tuple(sorted([a, b]))
@@ -2726,14 +2789,24 @@ async def _can_partner_approve(user: dict, txn: dict) -> tuple[bool, str]:
     if not owner_pid:
         return (False, "Transaction has no partner attached")
     # Hard center-mapping gate — must be enforced regardless of other associations.
+    # Uses the COMPUTED centre set (assigned_center_ids ∪ centres derived from the
+    # partner↔centre mapping) so a partner linked only via centers.mappings still
+    # qualifies. Enrich is idempotent.
+    await _enrich_user_with_associations(user)
     txn_cid = txn.get("center_id")
     if txn_cid:
-        assigned = user.get("assigned_center_ids") or []
-        if txn_cid not in assigned:
-            return (False, "You are not mapped to this transaction's center in User Management")
+        allowed = set(user.get("assigned_center_ids") or []) | set(user.get("_associated_center_ids") or [])
+        if txn_cid not in allowed:
+            return (False, "You are not mapped to this transaction's center")
     # Block creator-self only (NOT same-partner — peers under one partner entity should approve each other)
     if txn.get("created_by") == user["id"]:
         return (False, "You cannot approve a transaction you created")
+    # PRIMARY RULE — Center↔Partner mapping is the source of truth: any ACTIVE
+    # partner mapped to the txn's centre with cross_approval enabled is eligible.
+    if txn_cid:
+        approvers = await _center_cross_approvers(txn_cid)
+        if approver_pid in approvers:
+            return (True, "Active cross-approval partner mapped to the centre")
     # Peer under the same partner entity
     if approver_pid == owner_pid:
         return (True, "Peer user under the same partner entity")
@@ -3344,6 +3417,7 @@ async def list_transactions(
             rng["$lte"] = end
         q["date"] = rng
     docs = await db.transactions.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
+    await _attach_pending_at(docs)
     return [TransactionOut(**d) for d in docs]
 
 

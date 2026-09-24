@@ -148,6 +148,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 95 — Partner Cross-Approval Fix + "Pending at ___" Label (Phase 1 of 4, Done Jun 2026)
+- **Context**: Big multi-part request (cross-approval fix, Pending-at label, Center↔Partner↔Staff mapping UI, center security sweep, attendance Late chip). User approved build order: P1 cross-approval+label → P2 mapping UI → P3 attendance Late → P4 security sweep. Data model confirmed: extend `center.mappings[]` entries with `active`+`cross_approval` flags (default ON); staff `assigned_center_ids[]` for multi-center.
+- **Root cause of cross-approval bug**: `_centers_for_partner()` derived a partner's centres only from batches / legacy `centers.partner_id` / txn-history — it IGNORED the new `centers.mappings[].partner_id`. So a partner mapped to a centre only via the mapping UI (no txn/batch history) had an empty centre set → co-partner's txn was neither in scope nor cross-approvable.
+- **Fix (`server.py`, Phase 1)**:
+  - `_centers_for_partner` now also reads `centers.mappings[].partner_id` (honours per-entry `active`).
+  - New helpers `_center_cross_approvers(center_id)` (active + cross_approval partners at a centre) and `_attach_pending_at(docs)` (batched, 3 queries).
+  - `_can_partner_approve` — gate now uses computed `assigned_center_ids ∪ _associated_center_ids`; PRIMARY eligibility rule = approver is an active cross-approval partner mapped to the txn's centre (source of truth = `center.mappings`). Creator still blocked from self-approval.
+  - `TransactionOut.pending_at` (computed) + `list_transactions` attaches it. Frontend `Transactions.jsx` shows "Pending at <name/Admin>" under the status pill and in the details-drawer history.
+- **Verified (API + screenshot)**: seeded 2 partners + 1 centre (both mapped, cross_approval ON) + partner users. Shailendra creates pending txn → Rajiv SEES it (pending_at="Rajiv") and APPROVES (approval_via=partner_cross); Shailendra CANNOT self-approve ("cannot approve a transaction you created"); Rajiv mapping set inactive → txn no longer visible + approve blocked. Seed data cleaned up after.
+- **PENDING (P2-P4)**: Mapping UI on Center/Partner/Staff detail pages (with active+cross_approval toggles, +Add Partner/Staff/Center), attendance Late chip (shift-based), full center-security regression sweep.
+
+
 ### Phase 94 — Attendance "Incomplete" Bug Fix (both punches → Present, Done Jun 2026)
 - **Bug (user)**: Jab morning check-in AND evening check-out dono record the (incl. auto-closed 5:30 PM checkout), row phir bhi "INCOMPLETE" dikhta tha aur salary me absent count hota tha.
 - **Root cause**: raw `status` "auto_closed"/"incomplete" ko display + payroll logic check-out hone par bhi incomplete/absent maanta tha.
