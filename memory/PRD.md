@@ -148,6 +148,13 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 97 — Duplication Audit + DUP-004 & DUP-002 Consolidation (Jun 2026)
+- Full read-only architecture/duplication audit delivered (13 duplicate groups, 4 conflicting-logic areas, matrix + commonization plan). No code changed during audit.
+- **DUP-004 (attendance effective-status)**: 4 inline copies (attendance list ~6827, salary daily ~9416, dashboard `_effective_status` ~11193) → single canonical `_attendance_effective_status(row)` (module-level ~941). All callers delegate. Behaviour-preserving (verified: 08-10 auto_closed→present, present_days=1.0 unchanged). Root cause class of Phase 94 bug removed.
+- **DUP-002 (conflicting center-access fns)**: `_user_scoped_center_ids` now a thin behaviour-preserving wrapper over canonical `_scoped_center_ids` (removes duplicated role branching; head roles still unrestricted for the create-guard, exact prior outputs kept). A stricter hr/manager unification left as an explicit future decision.
+- Remaining audit backlog (awaiting approval): DUP-001 center-access service, DUP-003 role registry, DUP-005 partner-mapping stores, DUP-006 late calc, DUP-007 working-days, DUP-008 frontend canEdit divergence, DUP-009 currency formatter (16 files), DUP-010..013 UI/util.
+
+
 ### Phase 96 — Center↔Partner↔Staff Mapping UI (Phase 2 of 4, Done Jun 2026)
 - **Backend (`server.py`, extends existing `center.mappings[]` + staff `assigned_center_ids[]`; no new ID system)**:
   - `GET/POST/PATCH/DELETE /centers/{cid}/mapped-partners` — partner mappings with `active` + `cross_approval` flags (default ON) + role. Dedupe (no duplicate partner per center).

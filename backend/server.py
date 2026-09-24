@@ -939,6 +939,35 @@ class ApprovalActionIn(BaseModel):
     bank_account_id: Optional[str] = None
 
 
+def _attendance_effective_status(row: dict) -> str:
+    """SINGLE SOURCE OF TRUTH for a day's effective attendance status (DUP-004).
+
+    Rules (must stay identical to the historical inline copies):
+      * Regularised approvals → present (or half if explicitly half).
+      * half / absent / leave → returned as-is.
+      * Both check-in AND check-out present → present (auto-closed checkout counts;
+        lateness is handled separately via shift rules, never dropped to incomplete).
+      * incomplete / auto_closed (without a checkout) → incomplete.
+      * present with a check-in but no checkout → incomplete.
+      * otherwise → the raw status, or 'absent' when unknown.
+    """
+    raw = row.get("status")
+    has_in = bool(row.get("check_in_at"))
+    has_out = bool(row.get("check_out_at"))
+    if row.get("regularised") or row.get("marked_via") == "regularised":
+        return raw if raw in ("present", "half") else "present"
+    if raw in ("half", "absent", "leave"):
+        return raw
+    if has_in and has_out:
+        return "present"
+    if raw in ("incomplete", "auto_closed"):
+        return "incomplete"
+    if raw == "present":
+        return "incomplete" if (has_in and not has_out) else "present"
+    return raw or "absent"
+
+
+
 def _txn_scope_for_user(user: dict) -> dict:
     """Return Mongo query filter restricting transactions to user's scope.
 
@@ -6824,23 +6853,9 @@ async def list_attendance(
     docs = await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
     # Attach `effective_status` so the UI can show "Incomplete" when a staff
     # only punched in but never punched out — instead of misleading "Present".
+    # Attach `effective_status` via the single canonical helper (DUP-004).
     for d in docs:
-        s = d.get("status")
-        has_in = bool(d.get("check_in_at"))
-        has_out = bool(d.get("check_out_at"))
-        if s in ("half", "absent", "leave"):
-            d["effective_status"] = s
-        elif has_in and has_out:
-            # Both punches recorded → present (auto-closed checkout counts too).
-            d["effective_status"] = "present"
-        elif s in ("incomplete", "auto_closed"):
-            d["effective_status"] = s
-        elif s == "present" and has_in and not has_out:
-            d["effective_status"] = "incomplete"
-        elif s == "present":
-            d["effective_status"] = "present"
-        else:
-            d["effective_status"] = s or "absent"
+        d["effective_status"] = _attendance_effective_status(d)
     return docs
 
 
@@ -9411,34 +9426,14 @@ async def staff_salary_summary(
         is_week_off = wd in weekly_off_ints
         is_future = iso > today_ist
         if row:
-            # Effective status — regularised approvals are ALWAYS present, even if
-            # the raw row was auto-closed as "incomplete" earlier (fix for Phase 54).
-            raw = row.get("status")
-            has_in = bool(row.get("check_in_at"))
-            has_out = bool(row.get("check_out_at"))
-            if row.get("regularised") or row.get("marked_via") == "regularised":
-                effective = row.get("status") if row.get("status") in ("present", "half") else "present"
-            elif raw in ("half", "absent", "leave"):
-                effective = raw
-            elif has_in and has_out:
-                # Both morning check-in AND evening check-out present → attended.
-                # Counts as present even if the checkout was auto-closed (lateness
-                # is handled separately via shift rules, not by marking incomplete).
-                effective = "present"
-            elif raw in ("incomplete", "auto_closed"):
-                effective = "incomplete"
-            elif raw == "present":
-                effective = "present"
-            elif has_in and not has_out:
-                effective = "incomplete"
-            else:
-                effective = raw or "absent"
+            # Effective status — single canonical helper (DUP-004).
+            effective = _attendance_effective_status(row)
             daily_rows.append({
                 **row,
                 "id": row.get("id") or f"synth-{iso}",
                 "date": iso,
                 "status": effective,
-                "raw_status": raw,
+                "raw_status": row.get("status"),
                 "synthetic": False,
                 "is_regularised": bool(row.get("regularised") or row.get("marked_via") == "regularised"),
                 "holiday_name": (holiday or {}).get("name"),
@@ -11191,16 +11186,7 @@ async def my_summary(user=Depends(get_current_user)):
     month_rows = await db.attendance.find({"staff_id": staff["id"], "date": {"$regex": f"^{yyyy_mm}"}}, {"_id": 0}).to_list(40)
 
     def _effective_status(r):
-        s = r.get("status")
-        if s in ("absent", "leave", "half"):
-            return s
-        if r.get("check_in_at") and r.get("check_out_at"):
-            return "present"  # both punches → present (auto-closed checkout counts)
-        if s == "auto_closed":
-            return "incomplete"
-        if s == "present" and r.get("check_in_at") and not r.get("check_out_at"):
-            return "incomplete"
-        return s or "absent"
+        return _attendance_effective_status(r)
 
     counts = {"present": 0, "absent": 0, "half": 0, "leave": 0, "incomplete": 0}
     for r in month_rows:
@@ -18431,14 +18417,19 @@ async def _candidate_scope_filter(user: dict) -> dict:
 
 
 def _user_scoped_center_ids(user: dict) -> list:
-    """Small helper — used by the create endpoint to enforce that a partner /
-    center_manager can only create candidates for a center they own."""
+    """Create-guard helper: the centres a partner / center_manager / center_staff
+    may create/edit records for. Behaviour-preserving thin wrapper over the
+    canonical `_scoped_center_ids` (DUP-002 consolidation) — returns [] for
+    head-level roles (no restriction) and the explicit centre list otherwise.
+
+    NOTE: hr/manager/admin/senior_manager remain UNRESTRICTED for this specific
+    guard (unchanged). A stricter unification (also scoping hr/manager here) is a
+    separate product decision and must be tested before adopting."""
     role = user.get("role")
-    if role in ("center_manager", "center_staff"):
-        return user.get("assigned_center_ids") or []
-    if role == "partner":
-        return list(user.get("_associated_center_ids") or [])
-    return []  # admin/hr/manager/senior_manager — no restriction
+    if role in ("center_manager", "center_staff", "partner"):
+        cids = _scoped_center_ids(user)
+        return list(cids) if cids is not None else []
+    return []
 
 
 def _cand_columns(project: str) -> list:
