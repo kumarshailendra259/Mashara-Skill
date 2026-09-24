@@ -148,6 +148,18 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 96 — Center↔Partner↔Staff Mapping UI (Phase 2 of 4, Done Jun 2026)
+- **Backend (`server.py`, extends existing `center.mappings[]` + staff `assigned_center_ids[]`; no new ID system)**:
+  - `GET/POST/PATCH/DELETE /centers/{cid}/mapped-partners` — partner mappings with `active` + `cross_approval` flags (default ON) + role. Dedupe (no duplicate partner per center).
+  - `GET/POST/DELETE /centers/{cid}/mapped-staff` — staff mapped via `assigned_center_ids` (primary `center_id` protected from unmapping).
+  - `GET /partners/{pid}/mapped-centers` and `GET /staff/{sid}/mapped-centers` — reverse "Assigned Centers" views.
+  - Fixed `_record_mapping_audit._norm` None-safe sort (was raising TypeError on new entries).
+  - These flags are the SAME source of truth Phase 1 cross-approval reads (`_center_cross_approvers`), so toggling Cross Approval here directly controls who can cross-approve.
+- **Frontend**: new `MappingManagerDialog.jsx` (reusable). Center rows → "Mappings" (Network icon) opens Partners/Staff tabs with +Add (searchable picker), Cross-Approval Switch, active toggle, remove. Partner rows → "Assigned Centers" (+Add Center, remove). Staff Profile → "Center & Role Mapping" tab → "Manage Centers" (admin/manager/hr). Hooked into `Entities.jsx` + `StaffProfile.jsx`.
+- **Verified**: center↔partner add/patch(cross_approval)/delete, center↔staff add/list/delete, partner + staff reverse — all curl 200 + reflected. Dialogs render (screenshots). Self-tested (curl + screenshots), not full testing_agent.
+- **PENDING**: Phase 3 attendance Late chip, Phase 4 center-security regression sweep.
+
+
 ### Phase 95 — Partner Cross-Approval Fix + "Pending at ___" Label (Phase 1 of 4, Done Jun 2026)
 - **Context**: Big multi-part request (cross-approval fix, Pending-at label, Center↔Partner↔Staff mapping UI, center security sweep, attendance Late chip). User approved build order: P1 cross-approval+label → P2 mapping UI → P3 attendance Late → P4 security sweep. Data model confirmed: extend `center.mappings[]` entries with `active`+`cross_approval` flags (default ON); staff `assigned_center_ids[]` for multi-center.
 - **Root cause of cross-approval bug**: `_centers_for_partner()` derived a partner's centres only from batches / legacy `centers.partner_id` / txn-history — it IGNORED the new `centers.mappings[].partner_id`. So a partner mapped to a centre only via the mapping UI (no txn/batch history) had an empty centre set → co-partner's txn was neither in scope nor cross-approvable.

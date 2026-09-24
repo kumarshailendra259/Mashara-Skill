@@ -4,6 +4,7 @@ import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import MappingManagerDialog from "@/components/MappingManagerDialog";
 import {
   ArrowLeft, User, Briefcase, Building2, CalendarCheck, CalendarDays,
   Wallet, FileText, TrendingUp, Clock, ChevronLeft, ChevronRight, Mail,
@@ -47,6 +48,8 @@ export default function StaffProfile() {
   const [s, setS] = useState(null);
   const [loading, setLoading] = useState(true);
   const [section, setSection] = useState("basic");
+  const [mapOpen, setMapOpen] = useState(false);
+  const canManageMap = ["admin", "manager", "hr"].includes(role);
 
   // section data
   const now = new Date();
@@ -215,14 +218,18 @@ export default function StaffProfile() {
 
           {section === "mapping" && (
             <div>
-              <div className="overline text-[var(--brand)] mb-4">Center &amp; Role Mapping</div>
+              <div className="flex items-center justify-between mb-4">
+                <div className="overline text-[var(--brand)]">Center &amp; Role Mapping</div>
+                {canManageMap && <Button size="sm" variant="outline" className="rounded-lg gap-1" onClick={() => setMapOpen(true)} data-testid="manage-staff-centers"><Building2 size={14} /> Manage Centers</Button>}
+              </div>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                <Field label="Center" value={dash(s.center_name)} testid="map-center" />
+                <Field label="Primary Center" value={dash(s.center_name)} testid="map-center" />
                 <Field label="System Role" value={roleLabel} testid="map-role" />
                 <Field label="Employee ID" value={dash(s.employee_code)} testid="map-empid" />
                 <Field label="Has Login" value={s.user_id ? "Yes" : "No"} testid="map-haslogin" />
                 <Field label="Mapped Since" value={fmtDate(s.joining_date)} />
               </div>
+              <p className="text-[11px] text-slate-400 mt-3">Use "Manage Centers" to assign this staff to additional centers.</p>
             </div>
           )}
 
@@ -339,6 +346,8 @@ export default function StaffProfile() {
           )}
         </div>
       </div>
+
+      <MappingManagerDialog open={mapOpen} onClose={() => setMapOpen(false)} mode="staff" entity={{ id: sid, name: s.name }} />
     </div>
   );
 }

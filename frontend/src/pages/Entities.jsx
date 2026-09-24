@@ -11,9 +11,10 @@ import {
 } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Pencil, Trash2, Plus, Copy, Mail, KeyRound, Check } from "lucide-react";
+import { Pencil, Trash2, Plus, Copy, Mail, KeyRound, Check, Network } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
+import MappingManagerDialog from "@/components/MappingManagerDialog";
 
 // Empty-form templates per entity type — only the relevant fields surface in the dialog.
 const EMPTY_FORM = {
@@ -52,6 +53,7 @@ export default function Entities({ etype }) {
   const [mapOpts, setMapOpts] = useState({ projects: null, companies: null }); // cascading (null = show all)
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [mapEntity, setMapEntity] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM[etype] || EMPTY_FORM.company);
   const [selected, setSelected] = useState(new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -424,6 +426,11 @@ export default function Entities({ etype }) {
                 {canEdit && (
                   <td className="p-3 text-right">
                     <div className="inline-flex gap-1">
+                      {(etype === "center" || etype === "partner") && (
+                        <Button size="icon" variant="ghost" onClick={() => setMapEntity(it)} className="rounded-none h-8 w-8 hover:text-[var(--brand)]" title={etype === "center" ? "Manage partner & staff mappings" : "Manage assigned centers"} data-testid={`mappings-${it.id}`}>
+                          <Network size={14} />
+                        </Button>
+                      )}
                       {(etype === "center" || etype === "partner") && it.email && (
                         <Button size="icon" variant="ghost" onClick={() => resendCredentials(it)} className="rounded-none h-8 w-8" title="Re-send login credentials (new password)" data-testid={`resend-${it.id}`}>
                           <Mail size={14} />
@@ -442,6 +449,13 @@ export default function Entities({ etype }) {
 
       <BulkDeleteDialog open={bulkOpen} onClose={() => setBulkOpen(false)} count={selected.size} itemLabel={titleKey} busy={bulkBusy} onConfirm={bulkDelete}
         warning="Related transactions referencing these entities will become orphaned." />
+
+      <MappingManagerDialog
+        open={!!mapEntity}
+        onClose={() => setMapEntity(null)}
+        mode={etype === "center" ? "center" : "partner"}
+        entity={mapEntity}
+      />
 
       {/* Auto-created credentials reveal modal */}
       <Dialog open={!!credModal} onOpenChange={(v) => !v && setCredModal(null)}>

@@ -2889,7 +2889,10 @@ def _center_mapping_list(doc: dict) -> list:
 async def _record_mapping_audit(center_id: str, before: Optional[dict], after: dict, user: dict, action: str):
     """Append-only audit of a center's Partner/Project/Company mapping changes."""
     def _norm(d):
-        return sorted([(r.get("partner_id"), r.get("project_id"), r.get("company_id")) for r in _center_mapping_list(d or {})])
+        return sorted(
+            [(r.get("partner_id"), r.get("project_id"), r.get("company_id")) for r in _center_mapping_list(d or {})],
+            key=lambda x: tuple((v or "") for v in x),
+        )
     old_m, new_m = (_norm(before) if before is not None else None), _norm(after)
     if action == "update" and old_m == new_m:
         return
@@ -3219,6 +3222,200 @@ async def entity_relationships(etype: EntityType, eid: str, _=Depends(require_ro
         out["linked_projects"] = await _resolve("projects", [m.get("project_id") for m in mlist])
         out["linked_companies"] = await _resolve("companies", [m.get("company_id") for m in mlist])
     return out
+
+
+# ---------- Phase 95/2 · Center ↔ Partner / Staff mapping management ----------
+_MAP_READ_ROLES = ("admin", "manager", "senior_manager", "accountant", "hr")
+_MAP_WRITE_ROLES = ("admin", "manager")
+
+
+async def _partner_name_map(pids: list) -> dict:
+    pids = [p for p in set(pids) if p]
+    if not pids:
+        return {}
+    rows = await db.partners.find({"id": {"$in": pids}},
+                                  {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "partner_type": 1, "active": 1}).to_list(3000)
+    return {r["id"]: r for r in rows}
+
+
+@api.get("/centers/{cid}/mapped-partners")
+async def center_mapped_partners(cid: str, _=Depends(require_role(*_MAP_READ_ROLES))):
+    c = await db.centers.find_one({"id": cid}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Center not found")
+    mlist = _center_mapping_list(c)
+    pmap = await _partner_name_map([m.get("partner_id") for m in mlist])
+    seen, out = set(), []
+    for m in mlist:
+        pid = m.get("partner_id")
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        p = pmap.get(pid, {})
+        out.append({
+            "partner_id": pid, "entity_uid": p.get("entity_uid"), "name": p.get("name") or "(unknown)",
+            "role": m.get("role") or p.get("partner_type") or "Partner",
+            "active": m.get("active", True) is not False,
+            "cross_approval": m.get("cross_approval", True) is not False,
+            "project_id": m.get("project_id"), "company_id": m.get("company_id"),
+        })
+    return out
+
+
+@api.post("/centers/{cid}/mapped-partners")
+async def add_center_partner(cid: str, body: dict = Body(...), user=Depends(require_role(*_MAP_WRITE_ROLES))):
+    partner_id = (body or {}).get("partner_id")
+    if not partner_id:
+        raise HTTPException(400, "partner_id required")
+    c = await db.centers.find_one({"id": cid}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Center not found")
+    if not await db.partners.find_one({"id": partner_id}, {"_id": 0, "id": 1}):
+        raise HTTPException(400, "Partner not found")
+    mlist = list(_center_mapping_list(c))
+    if any(m.get("partner_id") == partner_id for m in mlist):
+        raise HTTPException(400, "Partner is already mapped to this center")
+    base = mlist[0] if mlist else {}
+    mlist.append({
+        "partner_id": partner_id,
+        "project_id": body.get("project_id") or base.get("project_id"),
+        "company_id": body.get("company_id") or base.get("company_id") or c.get("company_id"),
+        "active": body.get("active", True) is not False,
+        "cross_approval": body.get("cross_approval", True) is not False,
+        "role": body.get("role"),
+    })
+    await db.centers.update_one({"id": cid}, {"$set": {"mappings": mlist}})
+    await _record_mapping_audit(cid, c, {"mappings": mlist}, user, "update")
+    return {"ok": True}
+
+
+@api.patch("/centers/{cid}/mapped-partners/{partner_id}")
+async def update_center_partner(cid: str, partner_id: str, body: dict = Body(...), user=Depends(require_role(*_MAP_WRITE_ROLES))):
+    c = await db.centers.find_one({"id": cid}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Center not found")
+    mlist = list(_center_mapping_list(c))
+    found = False
+    for m in mlist:
+        if m.get("partner_id") == partner_id:
+            if "active" in body:
+                m["active"] = bool(body["active"])
+            if "cross_approval" in body:
+                m["cross_approval"] = bool(body["cross_approval"])
+            if "role" in body:
+                m["role"] = body["role"]
+            found = True
+    if not found:
+        raise HTTPException(404, "Partner not mapped to this center")
+    await db.centers.update_one({"id": cid}, {"$set": {"mappings": mlist}})
+    await _record_mapping_audit(cid, c, {"mappings": mlist}, user, "update")
+    return {"ok": True}
+
+
+@api.delete("/centers/{cid}/mapped-partners/{partner_id}")
+async def remove_center_partner(cid: str, partner_id: str, user=Depends(require_role(*_MAP_WRITE_ROLES))):
+    c = await db.centers.find_one({"id": cid}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Center not found")
+    mlist = [m for m in _center_mapping_list(c) if m.get("partner_id") != partner_id]
+    await db.centers.update_one({"id": cid}, {"$set": {"mappings": mlist}})
+    await _record_mapping_audit(cid, c, {"mappings": mlist}, user, "update")
+    return {"ok": True}
+
+
+@api.get("/centers/{cid}/mapped-staff")
+async def center_mapped_staff(cid: str, _=Depends(require_role(*_MAP_READ_ROLES))):
+    rows = await db.staff.find(
+        {"$or": [{"center_id": cid}, {"assigned_center_ids": cid}]},
+        {"_id": 0, "id": 1, "employee_code": 1, "name": 1, "designation": 1,
+         "is_active": 1, "active": 1, "center_id": 1, "user_id": 1},
+    ).to_list(3000)
+    out = []
+    for s in rows:
+        inactive = s.get("is_active") is False or s.get("active") is False
+        out.append({
+            "staff_id": s["id"], "employee_code": s.get("employee_code"), "name": s.get("name"),
+            "role": s.get("designation") or "Staff",
+            "status": "Inactive" if inactive else "Active",
+            "access_level": "Login" if s.get("user_id") else "No Login",
+            "is_primary": s.get("center_id") == cid,
+        })
+    return out
+
+
+@api.post("/centers/{cid}/mapped-staff")
+async def add_center_staff(cid: str, body: dict = Body(...), _=Depends(require_role(*_MAP_WRITE_ROLES))):
+    staff_id = (body or {}).get("staff_id")
+    if not staff_id:
+        raise HTTPException(400, "staff_id required")
+    if not await db.centers.find_one({"id": cid}, {"_id": 0, "id": 1}):
+        raise HTTPException(404, "Center not found")
+    st = await db.staff.find_one({"id": staff_id}, {"_id": 0, "id": 1, "center_id": 1, "assigned_center_ids": 1})
+    if not st:
+        raise HTTPException(400, "Staff not found")
+    if st.get("center_id") == cid or cid in (st.get("assigned_center_ids") or []):
+        raise HTTPException(400, "Staff is already mapped to this center")
+    await db.staff.update_one({"id": staff_id}, {"$addToSet": {"assigned_center_ids": cid}})
+    return {"ok": True}
+
+
+@api.delete("/centers/{cid}/mapped-staff/{staff_id}")
+async def remove_center_staff(cid: str, staff_id: str, _=Depends(require_role(*_MAP_WRITE_ROLES))):
+    st = await db.staff.find_one({"id": staff_id}, {"_id": 0, "id": 1, "center_id": 1})
+    if not st:
+        raise HTTPException(404, "Staff not found")
+    if st.get("center_id") == cid:
+        raise HTTPException(400, "This is the staff's primary center — change it from the staff record instead of unmapping.")
+    await db.staff.update_one({"id": staff_id}, {"$pull": {"assigned_center_ids": cid}})
+    return {"ok": True}
+
+
+@api.get("/partners/{pid}/mapped-centers")
+async def partner_mapped_centers(pid: str, _=Depends(require_role(*_MAP_READ_ROLES))):
+    """Reverse view for Partner Detail → Assigned Centers (explicit mappings + flags)."""
+    centers = await db.centers.find(
+        {"$or": [{"partner_id": pid}, {"mappings.partner_id": pid}]},
+        {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "center_code": 1, "mappings": 1, "partner_id": 1},
+    ).to_list(3000)
+    out = []
+    for c in centers:
+        entry = next((m for m in _center_mapping_list(c) if m.get("partner_id") == pid), {})
+        out.append({
+            "center_id": c["id"], "name": c.get("name"),
+            "entity_uid": c.get("entity_uid") or c.get("center_code"),
+            "role": entry.get("role") or "Partner",
+            "cross_approval": entry.get("cross_approval", True) is not False,
+            "active": entry.get("active", True) is not False,
+        })
+    return out
+
+
+@api.get("/staff/{sid}/mapped-centers")
+async def staff_mapped_centers(sid: str, _=Depends(require_role(*_MAP_READ_ROLES))):
+    """Reverse view for Staff Detail → Assigned Centers (primary + assigned)."""
+    st = await db.staff.find_one({"id": sid}, {"_id": 0, "id": 1, "center_id": 1, "assigned_center_ids": 1, "designation": 1, "user_id": 1})
+    if not st:
+        raise HTTPException(404, "Staff not found")
+    ids = []
+    if st.get("center_id"):
+        ids.append(st["center_id"])
+    for c in (st.get("assigned_center_ids") or []):
+        if c not in ids:
+            ids.append(c)
+    cmap = {c["id"]: c for c in await db.centers.find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1, "entity_uid": 1, "center_code": 1}).to_list(2000)}
+    out = []
+    for cid in ids:
+        c = cmap.get(cid, {})
+        out.append({
+            "center_id": cid, "name": c.get("name") or "(unknown)",
+            "entity_uid": c.get("entity_uid") or c.get("center_code"),
+            "role": st.get("designation") or "Staff",
+            "access_level": "Login" if st.get("user_id") else "No Login",
+            "status": "Active",
+            "is_primary": st.get("center_id") == cid,
+        })
+    return out
+
 
 
 @api.get("/entity-mappings")
