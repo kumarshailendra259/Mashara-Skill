@@ -6555,11 +6555,18 @@ async def list_attendance(
     # only punched in but never punched out — instead of misleading "Present".
     for d in docs:
         s = d.get("status")
-        if s in ("incomplete", "auto_closed"):
+        has_in = bool(d.get("check_in_at"))
+        has_out = bool(d.get("check_out_at"))
+        if s in ("half", "absent", "leave"):
             d["effective_status"] = s
-        elif s == "present" and d.get("check_in_at") and not d.get("check_out_at"):
+        elif has_in and has_out:
+            # Both punches recorded → present (auto-closed checkout counts too).
+            d["effective_status"] = "present"
+        elif s in ("incomplete", "auto_closed"):
+            d["effective_status"] = s
+        elif s == "present" and has_in and not has_out:
             d["effective_status"] = "incomplete"
-        elif s == "present" and d.get("check_in_at") and d.get("check_out_at"):
+        elif s == "present":
             d["effective_status"] = "present"
         else:
             d["effective_status"] = s or "absent"
@@ -8590,18 +8597,24 @@ async def _compute_payroll_for_staff(s: dict, month: int, year: int,
         att = att_by_date.get(iso)
         if att:
             st = att.get("status")
-            if st == "present":
-                present_days += 1
-            elif st == "half":
+            has_in = bool(att.get("check_in_at"))
+            has_out = bool(att.get("check_out_at"))
+            is_reg = bool(att.get("regularised") or att.get("marked_via") == "regularised")
+            if st == "half":
                 half_days += 1
-            elif st == "absent":
-                absent_days += 1
             elif st == "unpaid_leave":
                 unpaid_leave_days += 1
             elif st in ("leave", "paid_leave"):
                 paid_leave_days += 1
+            elif st == "present" or is_reg or (has_in and has_out):
+                # Attended: explicit present, regularised, OR both punches recorded
+                # (auto-closed checkout counts as present too — lateness handled by
+                # shift-rule deductions, not by dropping the day to absent).
+                present_days += 1
+            elif st == "absent":
+                absent_days += 1
             else:
-                # Unknown status — treat as absent to be safe
+                # Genuinely incomplete (check-in but no check-out) / unknown → absent
                 absent_days += 1
         # 3) approved leave for this date
         elif iso in leave_by_date:
@@ -9130,13 +9143,22 @@ async def staff_salary_summary(
             # Effective status — regularised approvals are ALWAYS present, even if
             # the raw row was auto-closed as "incomplete" earlier (fix for Phase 54).
             raw = row.get("status")
+            has_in = bool(row.get("check_in_at"))
+            has_out = bool(row.get("check_out_at"))
             if row.get("regularised") or row.get("marked_via") == "regularised":
                 effective = row.get("status") if row.get("status") in ("present", "half") else "present"
+            elif raw in ("half", "absent", "leave"):
+                effective = raw
+            elif has_in and has_out:
+                # Both morning check-in AND evening check-out present → attended.
+                # Counts as present even if the checkout was auto-closed (lateness
+                # is handled separately via shift rules, not by marking incomplete).
+                effective = "present"
             elif raw in ("incomplete", "auto_closed"):
                 effective = "incomplete"
-            elif raw in ("present", "half", "absent", "leave"):
-                effective = raw
-            elif row.get("check_in_at") and not row.get("check_out_at"):
+            elif raw == "present":
+                effective = "present"
+            elif has_in and not has_out:
                 effective = "incomplete"
             else:
                 effective = raw or "absent"
@@ -10901,10 +10923,10 @@ async def my_summary(user=Depends(get_current_user)):
         s = r.get("status")
         if s in ("absent", "leave", "half"):
             return s
+        if r.get("check_in_at") and r.get("check_out_at"):
+            return "present"  # both punches → present (auto-closed checkout counts)
         if s == "auto_closed":
             return "incomplete"
-        if s == "present" and r.get("check_in_at") and r.get("check_out_at"):
-            return "present"
         if s == "present" and r.get("check_in_at") and not r.get("check_out_at"):
             return "incomplete"
         return s or "absent"

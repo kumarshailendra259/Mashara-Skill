@@ -148,6 +148,14 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - **Verified E2E (testing agent iteration_60 — 100% backend 9/9 + full frontend)**: Super Admin center CRUD + auto codes (e.g. `3YJW4A-LACZ`); single + bulk access toggle; hr multi-company login → Company Selector → switch changes role (company_admin↔manager) + center scope; membership dialog add/remove/save; security — 403 on non-member switch + cross-company center create; fail-closed (assigned_center_ids=[] + needs_mapping when all centers disabled). Only a minor pre-existing Radix aria-describedby a11y warning.
 - **NOTE**: Existing single-company operational users now also pass through the one-time company selector on each fresh login (per user choice 4b).
 
+### Phase 94 — Attendance "Incomplete" Bug Fix (both punches → Present, Done Jun 2026)
+- **Bug (user)**: Jab morning check-in AND evening check-out dono record the (incl. auto-closed 5:30 PM checkout), row phir bhi "INCOMPLETE" dikhta tha aur salary me absent count hota tha.
+- **Root cause**: raw `status` "auto_closed"/"incomplete" ko display + payroll logic check-out hone par bhi incomplete/absent maanta tha.
+- **Fix (`server.py`) — rule: check_in_at AND check_out_at dono ho → PRESENT** (auto-closed checkout bhi present; lateness alag se shift-rule deduction se handle hota hai):
+  - Salary daily view (`staff_salary_summary` ~9146), attendance list `effective_status` (~6558), staff dashboard `_effective_status` (~10916), aur payroll count `_compute_payroll_for_staff` (~8598) — sab me both-punch → present.
+- **Verified**: staff 3a9f089b Aug-2026 → present_days 0→1, salary page par koi INCOMPLETE label nahi (API + screenshot).
+
+
 ### Phase 93 — Transactions Page Enterprise UI/UX Redesign (Done, Jun 2026)
 - **User ask**: Redesign Finance & Accounting → Transactions into a premium enterprise ERP look (reference image), UI-ONLY — no backend/business/RBAC/API changes. 100% existing functionality retained.
 - **Frontend (`Transactions.jsx` full rewrite, all existing handlers preserved verbatim: load/approve/reject/partner-approve/bulk-approve/bulk-delete/save/remove/export/import)**:
