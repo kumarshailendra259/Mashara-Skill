@@ -3689,6 +3689,18 @@ def _fy_for_date(date_str: Optional[str]) -> Optional[str]:
     return _fy_value(sy)
 
 
+def _finyr_dt_range(fy: Optional[str]) -> Optional[dict]:
+    """Mongo range fragment for a DATETIME (ISO) field constrained to an FY.
+    Uses [FY-start, next-FY-start) so it works for both 'YYYY-MM-DD' and full
+    'YYYY-MM-DDTHH:MM:SS+TZ' values. None when fy is 'all'/None/invalid."""
+    b = _finyr_bounds(fy)
+    if not b:
+        return None
+    fs, _fe = b
+    y = int(fs[:4])
+    return {"$gte": fs, "$lt": f"{y + 1}-04-01"}
+
+
 @api.get("/financial-years")
 async def list_financial_years(_=Depends(get_current_user)):
     """Centralized FY option list + current FY, consumed by the global FY selector."""
@@ -3720,7 +3732,36 @@ async def backfill_financial_year(user=Depends(require_role("admin")), dry_run: 
             if not dry_run:
                 await db.transactions.update_one({"id": d["id"]}, {"$set": {"financial_year": fyv}})
                 updated += 1
-    return {"dry_run": dry_run, "scanned": scanned, "to_update": to_update, "updated": updated, "samples": samples}
+
+    # --- Advance requests (FY from `date`, fallback created_at) ---
+    adv_updated = 0
+    adv_cursor = db.advance_requests.find({}, {"_id": 0, "id": 1, "date": 1, "created_at": 1, "financial_year": 1})
+    async for d in adv_cursor:
+        scanned += 1
+        raw = d.get("date") or (str(d.get("created_at") or "")[:10])
+        fyv = _fy_for_date(raw)
+        if fyv and d.get("financial_year") != fyv:
+            to_update += 1
+            if not dry_run:
+                await db.advance_requests.update_one({"id": d["id"]}, {"$set": {"financial_year": fyv}})
+                adv_updated += 1
+
+    # --- Invoices (FY from stages.generated.timestamp, fallback created_at) ---
+    inv_updated = 0
+    inv_cursor = db.invoices.find({}, {"_id": 0, "id": 1, "stages": 1, "created_at": 1, "financial_year": 1})
+    async for d in inv_cursor:
+        scanned += 1
+        gen = (((d.get("stages") or {}).get("generated") or {}).get("timestamp")) or d.get("created_at")
+        fyv = _fy_for_date(str(gen or "")[:10])
+        if fyv and d.get("financial_year") != fyv:
+            to_update += 1
+            if not dry_run:
+                await db.invoices.update_one({"id": d["id"]}, {"$set": {"financial_year": fyv}})
+                inv_updated += 1
+
+    return {"dry_run": dry_run, "scanned": scanned, "to_update": to_update,
+            "updated": updated, "advances_updated": adv_updated, "invoices_updated": inv_updated,
+            "samples": samples}
 
 
 # ---------- Transactions ----------
@@ -17363,6 +17404,7 @@ async def create_advance_request(
         "id": str(uuid.uuid4()),
         "advance_no": await _next_advance_no(),
         "date": now_iso[:10],
+        "financial_year": _fy_for_date(now_iso[:10]),
         "created_by": user["id"],
         "created_by_name": user.get("name") or user.get("email"),
         "employee_staff_id": staff.get("id"),
@@ -17401,6 +17443,7 @@ async def create_advance_request(
 async def list_advance_requests(
     status: Optional[str] = None,
     q: Optional[str] = None,
+    fy: Optional[str] = None,
     skip: int = 0,
     limit: int = 200,
     user=Depends(get_current_user),
@@ -17414,6 +17457,10 @@ async def list_advance_requests(
     query: dict = _advance_scope_filter(user)
     if status and status != "all":
         query["status"] = status
+    # Financial Year filter (on the advance `date`); 'all'/None → no filter.
+    _fb = _finyr_bounds(fy)
+    if _fb:
+        query["date"] = {"$gte": _fb[0], "$lte": _fb[1]}
     if q:
         needle = q.strip()
         if needle:
@@ -19728,10 +19775,12 @@ async def list_bank_guarantees(
 
 
 @api.get("/bank-guarantees/summary")
-async def bg_summary(_=Depends(require_role(*BG_ROLES))):
+async def bg_summary(fy: Optional[str] = Query(None), _=Depends(require_role(*BG_ROLES))):
     """Live KPI + financial summary for the BG management dashboard."""
-    docs = await db.bank_guarantees.find(
-        {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}}, {"_id": 0}).to_list(3000)
+    _q: dict = {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}}
+    if fy and fy != "all":
+        _q["fy"] = fy
+    docs = await db.bank_guarantees.find(_q, {"_id": 0}).to_list(3000)
     counts = {"total": len(docs), "draft": 0, "submitted": 0, "under_verification": 0,
               "active": 0, "expiring_soon": 0, "expired": 0, "released": 0, "cancelled": 0}
     total_bg_amount = active_value = expired_value = pending_value = 0.0
@@ -22604,6 +22653,7 @@ async def invoice_dashboard(
     company_id: Optional[str] = None,
     center_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    fy: Optional[str] = None,
     user=Depends(require_role(*INVOICE_READ_ROLES)),
 ):
     """KPI cards: totals + per-stage counts + outstanding sum."""
@@ -22614,12 +22664,18 @@ async def invoice_dashboard(
         query["center_id"] = center_id
     if project_id:
         query["project_id"] = project_id
-    if from_date or to_date:
-        query["stages.generated.timestamp"] = {}
-        if from_date:
-            query["stages.generated.timestamp"]["$gte"] = from_date
-        if to_date:
-            query["stages.generated.timestamp"]["$lte"] = to_date + "T23:59:59"
+    _fyr = _finyr_dt_range(fy)
+    if from_date or to_date or _fyr:
+        rng: dict = {}
+        lo = from_date
+        if _fyr:
+            lo = max(lo, _fyr["$gte"]) if lo else _fyr["$gte"]
+            rng["$lt"] = _fyr["$lt"]
+        elif to_date:
+            rng["$lte"] = to_date + "T23:59:59"
+        if lo:
+            rng["$gte"] = lo
+        query["stages.generated.timestamp"] = rng
     if q:
         query["$or"] = [
             {"invoice_no": {"$regex": q, "$options": "i"}},
@@ -22664,15 +22720,16 @@ async def export_invoices_csv(
     batch_id: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    fy: Optional[str] = None,
     user=Depends(require_role(*INVOICE_READ_ROLES)),
 ):
     query = _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
-                                  None, None, from_date, to_date, None)
+                                  None, None, from_date, to_date, None, fy)
     await _apply_invoice_scope(query, user)
     rows = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).to_list(length=100000)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Invoice No", "Generated Date", "TSP/Company", "District", "Training Centre",
+    writer.writerow(["Invoice No", "Financial Year", "Generated Date", "TSP/Company", "District", "Training Centre",
                       "Project", "Batch No", "Invoice Type", "Milestone Type", "Total Candidates",
                       "Amount Payable", "Adjustment", "Gross Payment", "Deduction", "Net Payable",
                       "Current Stage", "Current Stage At", "Days Pending", "Disbursed Amount",
@@ -22680,7 +22737,9 @@ async def export_invoices_csv(
     for r in rows:
         h = await _hydrate_invoice(r)
         writer.writerow([
-            h["invoice_no"], h["generated_date"] or "", h["tsp_company_name"] or "",
+            h["invoice_no"],
+            r.get("financial_year") or _fy_for_date(str(h.get("generated_date") or "")[:10]) or "",
+            h["generated_date"] or "", h["tsp_company_name"] or "",
             h["district"] or "", h["center_name"] or "", h["project_name"] or "",
             h["batch_no"] or "", h["invoice_type"] or "", h["milestone_type"] or "",
             h["total_candidates"], h["amount_payable"], h["adjustment"], h["gross_payment"],
@@ -22695,7 +22754,7 @@ async def export_invoices_csv(
 
 
 def _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
-                          invoice_type, milestone_type, from_date, to_date, aging):
+                          invoice_type, milestone_type, from_date, to_date, aging, fy=None):
     query = {}
     if company_id:
         query["tsp_company_id"] = company_id
@@ -22709,12 +22768,25 @@ def _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
         query["invoice_type"] = invoice_type
     if milestone_type:
         query["milestone_type"] = milestone_type
-    if from_date or to_date:
-        query["stages.generated.timestamp"] = {}
-        if from_date:
-            query["stages.generated.timestamp"]["$gte"] = from_date
-        if to_date:
-            query["stages.generated.timestamp"]["$lte"] = to_date + "T23:59:59"
+    # Financial Year narrows the generated-timestamp window; intersects with
+    # any explicit from/to. 'all'/None → no FY constraint.
+    _fyr = _finyr_dt_range(fy)
+    if from_date or to_date or _fyr:
+        rng: dict = {}
+        lo = from_date
+        hi = to_date + "T23:59:59" if to_date else None
+        if _fyr:
+            lo = max(lo, _fyr["$gte"]) if lo else _fyr["$gte"]
+            # _fyr upper is exclusive ($lt); keep the tighter of the two
+            if hi is None or _fyr["$lt"] <= hi:
+                rng["$lt"] = _fyr["$lt"]
+            else:
+                rng["$lte"] = hi
+        elif hi is not None:
+            rng["$lte"] = hi
+        if lo:
+            rng["$gte"] = lo
+        query["stages.generated.timestamp"] = rng
     if q:
         query["$or"] = [
             {"invoice_no": {"$regex": q, "$options": "i"}},
@@ -22747,6 +22819,7 @@ async def list_invoices(
     milestone_type: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    fy: Optional[str] = None,
     aging: Optional[str] = None,  # normal | attention | overdue
     page: int = 1,
     page_size: int = 50,
@@ -22754,7 +22827,7 @@ async def list_invoices(
     user=Depends(require_role(*INVOICE_READ_ROLES)),
 ):
     query = _build_invoice_query(q, status, company_id, center_id, project_id, batch_id,
-                                  invoice_type, milestone_type, from_date, to_date, aging)
+                                  invoice_type, milestone_type, from_date, to_date, aging, fy)
     await _apply_invoice_scope(query, user)
     total = await db.invoices.count_documents(query)
     sort_field = sort.lstrip("-") if sort else "created_at"
@@ -22812,6 +22885,7 @@ async def create_invoice(body: InvoiceIn, user=Depends(require_role(*INVOICE_WRI
         "disbursed_amount": 0.0,
         "remarks": body.remarks,
         "stages": stages,
+        "financial_year": _fy_for_date(str(generated_ts or "")[:10]),
         "created_at": _now_ist_iso(),
         "created_by": user.get("id"),
         "created_by_name": user.get("name") or user.get("email"),

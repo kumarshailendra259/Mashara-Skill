@@ -10,6 +10,7 @@ import {
 import { toast } from "sonner";
 import { Download, FileBarChart2, Receipt } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import { useFY } from "@/context/FYContext";
 
 const QUARTERS = [
   { v: "all", label: "All Quarters" },
@@ -46,14 +47,24 @@ function buildFYOptions() {
 
 export default function TdsRegister() {
   const { user } = useAuth();
+  const { fy: globalFy, options: globalFyOptions } = useFY();
   const canExport = ["admin", "accountant", "senior_manager", "hr"].includes(user?.role);
-  const [fy, setFy] = useState(currentFY());
+  const [fy, setFy] = useState(globalFy && globalFy !== "all" ? globalFy : currentFY());
   const [quarter, setQuarter] = useState("all");
   const [projectId, setProjectId] = useState("__all");
   const [projects, setProjects] = useState([]);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
-  const fyOptions = useMemo(buildFYOptions, []);
+  // Use the app-wide FY list (7 years, no 'all' — TDS needs a specific FY).
+  const fyOptions = useMemo(
+    () => globalFyOptions.filter((o) => o.value !== "all").map((o) => o.value),
+    [globalFyOptions],
+  );
+
+  // Follow the global FY selector when the user picks a specific year.
+  useEffect(() => {
+    if (globalFy && globalFy !== "all") setFy(globalFy);
+  }, [globalFy]);
 
   useEffect(() => {
     api.get("/entities/project").then((r) => setProjects(r.data || [])).catch(() => {});

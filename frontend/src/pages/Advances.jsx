@@ -19,6 +19,8 @@ import { toast } from "sonner";
 import { Plus, Wallet, Receipt, Search, X as XIcon } from "lucide-react";
 import ApprovalTimelineModal from "@/components/ApprovalTimelineModal";
 import AttachmentUploader from "@/components/AttachmentUploader";
+import { useFY } from "@/context/FYContext";
+import FYSwitcher from "@/components/FYSwitcher";
 
 const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
@@ -41,6 +43,7 @@ export default function Advances() {
   const isStaffOnly = !["admin", "hr", "accountant", "senior_manager", "manager", "center_manager"].includes(user?.role);
 
   const [tab, setTab] = useState(isStaffOnly ? "my" : "all");
+  const { fy } = useFY();
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -101,7 +104,7 @@ export default function Advances() {
         if (t != null) setTotal(Number(t));
       }
     } catch (e) { toast.error(formatError(e)); }
-  }, [tab, page, statusFilter, q]);
+  }, [tab, page, statusFilter, q, fy]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -272,6 +275,7 @@ export default function Advances() {
           <p className="text-sm text-[var(--muted)] mt-1">Raise, approve, release and track employee advances.</p>
         </div>
         <div className="flex items-center gap-2">
+          <FYSwitcher variant="inline" />
           {user?.role === "admin" && (
             <Button
               variant="outline"

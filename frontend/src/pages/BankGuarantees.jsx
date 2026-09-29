@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
+import { useFY } from "@/context/FYContext";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -73,6 +74,7 @@ const EMPTY_FORM = {
 
 export default function BankGuarantees() {
   const { user } = useAuth();
+  const { fy: globalFy } = useFY();
   const canWrite = WRITE_ROLES.includes(user?.role);
   const canOverride = OVERRIDE_ROLES.includes(user?.role);
   const canDelete = ["admin", "hr"].includes(user?.role);
@@ -109,7 +111,7 @@ export default function BankGuarantees() {
       if (quick !== "all") params.set("status", quick);
       const [r, s] = await Promise.all([
         api.get(`/bank-guarantees?${params.toString()}`),
-        api.get("/bank-guarantees/summary"),
+        api.get("/bank-guarantees/summary", { params: filters.fy !== "all" ? { fy: filters.fy } : {} }),
       ]);
       setRows(r.data || []); setSummary(s.data || null);
     } catch (e) { toast.error(formatError(e)); }
@@ -118,6 +120,11 @@ export default function BankGuarantees() {
 
   useEffect(() => { loadRefs(); }, [loadRefs]);
   useEffect(() => { load(); }, [load]);
+
+  // Follow the global FY selector (from the header).
+  useEffect(() => {
+    setFilters((f) => ({ ...f, fy: globalFy && globalFy !== "all" ? globalFy : "all" }));
+  }, [globalFy]);
 
   const fyOptions = useMemo(() => Array.from(new Set(woList.map((w) => w.fy).filter(Boolean))).sort(), [woList]);
 

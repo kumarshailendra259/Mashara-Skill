@@ -18,6 +18,8 @@ import {
   FileText, Filter, RefreshCw, Plus, Download, ArrowRight, Settings, Search,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { useFY } from "@/context/FYContext";
+import FYSwitcher from "@/components/FYSwitcher";
 
 const STAGE_TONES = {
   generated:  "bg-slate-100 text-slate-700 border-slate-300",
@@ -56,6 +58,7 @@ function fmtDT(iso) {
 
 export default function Invoices() {
   const { user } = useAuth();
+  const { fy } = useFY();
   const nav = useNavigate();
   const canWrite = ["admin", "accountant", "hr", "senior_manager", "manager"].includes(user?.role);
   const isAdmin = user?.role === "admin";
@@ -147,7 +150,7 @@ export default function Invoices() {
   };
 
   useEffect(() => { loadMasters(); loadAging(); }, []);
-  useEffect(() => { loadRows(); loadDashboard(); }, [page, filters]);
+  useEffect(() => { loadRows(); loadDashboard(); }, [page, filters, fy]);
 
   const resetFilters = () => {
     setFilters({
@@ -211,6 +214,7 @@ export default function Invoices() {
     try {
       const params = new URLSearchParams();
       Object.entries(filters).forEach(([k, v]) => { if (v) params.set(k, v); });
+      if (fy && fy !== "all") params.set("fy", fy);
       const url = `${process.env.REACT_APP_BACKEND_URL}/api/invoices/export.csv?${params.toString()}`;
       const res = await fetch(url, { credentials: "include" });
       if (!res.ok) throw new Error("Export failed");
@@ -249,6 +253,7 @@ export default function Invoices() {
           <p className="text-sm text-[var(--muted)] mt-1">Track every invoice from portal generation to disbursement across 5 business stages.</p>
         </div>
         <div className="flex items-center gap-2">
+          <FYSwitcher variant="inline" />
           <Button variant="outline" size="sm" onClick={() => { loadRows(); loadDashboard(); }} data-testid="btn-refresh">
             <RefreshCw size={14} className="mr-1" /> Refresh
           </Button>
