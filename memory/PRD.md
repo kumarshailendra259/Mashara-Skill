@@ -2458,3 +2458,19 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **Verified (testing_agent iter79, 100%):** backend 8/8 (options+current, txn/summary/payment FY filtering, create stamps FY 2025-26 for 2025-08-15, FY does NOT bypass center isolation, cross-center still 403), frontend FY flows (header + inline selectors, live row-count change All→FY2025-26→FY2023-24→All, persistence).
 
 **Phase 2 (pending):** Extend FY selector/filter + fy stamping to Invoices/InvoiceDetail, Advances, TdsRegister, BankGuarantees, BankReconciliation, Vendor/Staff payments, MIS, and FY-aware exports on those pages.
+
+## Phase 93 (Jun 2026) — Financial Year (FY) System — Phase 2 (remaining payment modules)
+
+**Scope:** Extended the Phase-1 FY system to Advances, Invoices, TDS Register, Bank Guarantees.
+
+**Backend (server.py):** Added `_finyr_dt_range(fy)` (datetime-field FY range, [start, next-start)). `POST /api/admin/backfill-financial-year` now also stamps advance_requests (from `date`) and invoices (from stages.generated.timestamp) — returns advances_updated/invoices_updated. `list_advance_requests` gets `fy` param (filters advance `date`); advance create stamps `financial_year`. `list_invoices` + `invoice_dashboard` + `export_invoices_csv` + `_build_invoice_query` accept `fy` (filter stages.generated.timestamp, intersect with from/to); invoice create stamps `financial_year`; CSV export gained a "Financial Year" column. `bg_summary` accepts `fy`; BG list already had `fy`.
+
+**SECURITY FIX (critical, found by testing_agent iter80):** `GET /api/bank-guarantees` and `GET /api/bank-guarantees/summary` had NO center-scope isolation — scoped users could see other centers' BGs. Fixed both to enforce `_scoped_center_ids(user)` (out-of-scope center_id → 403). Verified: admin sees all; accountant scoped to 9cf18e69 now sees 0 of the 4d7fc745 BGs; cross-center request → 403. (BG expiring-soon, chain, patch already guarded.)
+
+**Frontend:** Advances.jsx + Invoices.jsx — `useFY`, refetch on global FY change, inline FYSwitcher, invoice CSV export sends fy. TdsRegister.jsx — its own FY dropdown now uses the app-wide 7-FY list and follows the global header FY selector. BankGuarantees.jsx — its `filters.fy` now syncs to the global header FY selector; summary call passes fy.
+
+**Migration:** backfill re-run on preview DB — advances 160, invoices 5 stamped.
+
+**Verified:** backend curl (advances fy=2026-27=160/fy=2023-24=0; invoices dashboard ALL=5/fy=2026-27=5; BG summary FY filter; BG isolation fix) + testing_agent iter80 (frontend FY flows 100% across all 4 pages: global→inline propagation, TDS/BG sync-to-global, invoice CSV FY column, center-scope preserved with fy).
+
+**FY feature — remaining/backlog:** MIS payment views, Bank Reconciliation, vendor-payment reports, and FY-aware exports on Advances/TDS if desired; a shared Python FY module mirroring frontend fy.js (currently helpers live inline in server.py).

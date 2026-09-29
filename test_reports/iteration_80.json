@@ -1,0 +1,39 @@
+{
+  "summary": "Phase 2 FY testing complete (Advances, Invoices, TDS Register, Bank Guarantees). Backend: 11/12 pytest cases PASS. UI: global FY selector propagates to inline selectors on all four pages; row counts change correctly. TDS local FY (data-testid='tds-fy') and BG local FY (data-testid='bg-filter-fy') both sync to global header FY. Invoices CSV export includes 'Financial Year' column and respects fy. Advances/Invoices FY endpoints properly enforce center-scope isolation for the accountant user. ONE SECURITY ISSUE FOUND (pre-existing but in Phase-2 scope): /api/bank-guarantees and /api/bank-guarantees/summary DO NOT enforce center-scope isolation — the center-scoped accountant (mapped to center 9cf18e69) sees BGs from center 4d7fc745 both with and without fy param. Backend code (server.py list_bank_guarantees ~L19731 and bg_summary ~L19777) only requires BG_ROLES and never applies center/company scope filtering.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET /api/bank-guarantees, GET /api/bank-guarantees/summary", "issue": "No center-scope isolation. Center-scoped accountant (test_center_manager_c6912430@x.com, mapped only to center 9cf18e69-312d-488d-a484-2d68d62d48a7) receives BGs whose center_id=4d7fc745-c28c-4298-baab-58c63dbe8734. This is not FY-bypass (leak occurs with and without fy) — the endpoints lack center scoping altogether. Similar risk should be audited on other BG endpoints (POST/PATCH/DELETE, /bank-guarantees/{id}).", "priority": "CRITICAL"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global (multiple dashboards)", "issues": ["Pre-existing Recharts ResponsiveContainer width(-1)/height(-1) warnings — cosmetic, not FY related"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter80_fy_phase2.py",
+    "/app/test_reports/pytest/iter80.xml"
+  ],
+  "action_items": [
+    "CRITICAL: Add center-scope filtering to /api/bank-guarantees and /api/bank-guarantees/summary (mirror the pattern used on /api/advance-requests and /api/invoices). Center-scoped accountants must only see BGs for their assigned center_ids. Also audit /api/bank-guarantees/{id} GET/PATCH/DELETE and any BG write endpoints.",
+    "(Pre-existing, non-blocking) Fix Recharts container width/height warnings across dashboards."
+  ],
+  "critical_code_review_comments": [
+    "BG list/summary endpoints only require role and skip tenancy/center scoping — this is exploitable across centers even outside FY context.",
+    "server.py still ~25k lines — modularization pending (Advances/Invoices/BG/TDS routers).",
+    "FY handling is now duplicated across 5+ endpoints via _fy_clamp — a FastAPI dependency would enforce it uniformly and log narrow/widen actions."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter80_fy_phase2.py (new)"
+  ],
+  "success_rate": {"backend": "91.6% (11/12)", "frontend": "100% of FY flows verified"},
+  "test_credentials": "admin@finance.app / Admin@123; test_center_manager_c6912430@x.com / Test@1234 (accountant scoped to center 9cf18e69-312d-488d-a484-2d68d62d48a7)",
+  "seed_data_creation": "test_create_advance_stamps_fy attempts to POST an advance with amount=1234.56, date=2026-08-15, purpose starts with TEST_FY_ADV_; deletes on success. Skips gracefully if endpoint rejects payload shape.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "All Phase-2 FY UI flows verified working (Advances, Invoices, TDS Register, Bank Guarantees) — global FY switcher updates inline selectors and re-fetches. Invoice CSV includes Financial Year column. Remaining critical bug: BG list & summary endpoints skip center-scope filtering (see backend/server.py L19731+ and L19777+). Fix pattern: reuse _apply_center_scope logic from list_advance_requests / _build_invoice_query.",
+  "rca of the issue": "list_bank_guarantees and bg_summary construct a raw Mongo query that only applies is_deleted, is_renewed, and optional center_id/project_id/fy filters — no automatic center-scope enforcement based on the caller's assigned_center_ids. Any authenticated BG_ROLES user therefore sees all centers' BGs. Reproduction: POST /api/auth/login with test_center_manager_c6912430@x.com; GET /api/bank-guarantees?fy=2026-27 returns 2 BGs with center_id=4d7fc745 while the user is mapped to 9cf18e69. Mitigation: on entry, apply the caller's assigned_center_ids as a mandatory {'$in': [...]} filter on q['center_id'] whenever user.role is not admin/global; do the same in bg_summary. Also verify GET/PATCH/DELETE by id perform an ownership check."
+}

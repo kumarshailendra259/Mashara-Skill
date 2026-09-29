@@ -19738,15 +19738,23 @@ async def list_bank_guarantees(
     bank: Optional[str] = Query(None),        # issued_by contains
     include_deleted: bool = Query(False),
     include_renewed: bool = Query(True),
-    _=Depends(require_role(*BG_ROLES)),
+    user=Depends(require_role(*BG_ROLES)),
 ):
     q: dict = {}
     if not include_deleted:
         q["is_deleted"] = {"$ne": True}
     if not include_renewed:
         q["is_renewed"] = {"$ne": True}
+    # SECURITY: center-based isolation — scoped users only see their centers'
+    # BGs; an out-of-scope center_id filter is rejected.
+    await _enrich_user_with_associations(user)
+    allowed = _scoped_center_ids(user)
     if center_id:
+        if allowed is not None and center_id not in set(allowed):
+            raise HTTPException(status_code=403, detail="Not authorized for this centre's data")
         q["center_id"] = center_id
+    elif allowed is not None:
+        q["center_id"] = {"$in": list(allowed) if allowed else ["__none__"]}
     if project_id:
         q["project_id"] = project_id
     if fy:
@@ -19775,11 +19783,16 @@ async def list_bank_guarantees(
 
 
 @api.get("/bank-guarantees/summary")
-async def bg_summary(fy: Optional[str] = Query(None), _=Depends(require_role(*BG_ROLES))):
+async def bg_summary(fy: Optional[str] = Query(None), user=Depends(require_role(*BG_ROLES))):
     """Live KPI + financial summary for the BG management dashboard."""
     _q: dict = {"is_deleted": {"$ne": True}, "is_renewed": {"$ne": True}}
     if fy and fy != "all":
         _q["fy"] = fy
+    # SECURITY: restrict summary to the user's authorized centers.
+    await _enrich_user_with_associations(user)
+    _allowed = _scoped_center_ids(user)
+    if _allowed is not None:
+        _q["center_id"] = {"$in": list(_allowed) if _allowed else ["__none__"]}
     docs = await db.bank_guarantees.find(_q, {"_id": 0}).to_list(3000)
     counts = {"total": len(docs), "draft": 0, "submitted": 0, "under_verification": 0,
               "active": 0, "expiring_soon": 0, "expired": 0, "released": 0, "cancelled": 0}
