@@ -2441,3 +2441,20 @@ Full 12-section MIS module split into 5 phases to protect existing Finance/HR/At
 **Frontend (CheckIn.jsx):** Regularise modal now has "In Time" + "Out Time" time inputs (shown for Present/Half; hidden for Leave). In Time required for non-leave; Out Time must be after In Time. Sent in the POST payload.
 
 **Verified:** curl e2e — submit with in_time 10:00/out_time 18:30 → approve → attendance 2026-09-09 check_in_at 10:00+05:30, check_out_at 18:30+05:30, status present. Modal fields render + interactive (screenshot).
+
+## Phase 92 (Jun 2026) — Financial Year (FY) System — Phase 1 (core)
+
+**User ask:** Payment/finance ke sabhi modules me Financial Year filter — centralized, backend-level filtering (na sirf UI), p
+uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default current FY. Delivered as Phase 1 (core pages) with Phase 2 for the rest.
+
+**User choices:** (1) GLOBAL header FY selector near company switcher + inline on each finance page; (2) include "All Financial Years" option; (3) DEFAULT = All FY (show everything; filter only when a specific FY chosen — non-breaking); (4) FY from each record's transaction date (Indian FY Apr–Mar); (5) options All + FY 2023-24..2029-30; current FY = 2026-27.
+
+**Backend (server.py, ~line 3610 block):** Centralized FY helpers — `_fy_options`, `_finyr_bounds` (inclusive end 03-31; renamed to avoid collision with the PRE-EXISTING MIS `_fy_bounds` at ~16408 which has exclusive end), `_fy_clamp(start,end,fy)` (intersects, never widens → security-safe), `_fy_for_date`, `_current_fy_value`. New endpoints: `GET /api/financial-years` (options+current), `POST /api/admin/backfill-financial-year?dry_run=` (idempotent, stamps `financial_year` on all txns from date — non-destructive). `fy` param added + clamped on: list_transactions, dashboard_summary, dashboard_all (pass-through), milestone_income_summary, fooding_income_summary, payment_dashboard_summary, settlement_view, settlement_history. create/update_transaction now stamp `financial_year`. TransactionOut exposes `financial_year`.
+
+**Frontend:** `lib/fy.js` (config — bump FY_MAX_START_YEAR to add FY 2030-31), `context/FYContext.jsx` (useFY, persists to localStorage 'mashara_fy'), `lib/api.js` interceptor auto-appends `fy` to finance GETs (setApiFy/getApiFy), `components/FYSwitcher.jsx` (header + inline). Wired into App.js (FYProvider) + Layout header. Core pages fy-aware (refetch on change) + inline selector: Transactions, PaymentDashboard, Dashboard, Reports, PartnerSettlement (SettlementDashboard). Transactions CSV export now has a `financial_year` column.
+
+**Migration:** Backfill run on preview DB — 1142/1142 txns stamped.
+
+**Verified (testing_agent iter79, 100%):** backend 8/8 (options+current, txn/summary/payment FY filtering, create stamps FY 2025-26 for 2025-08-15, FY does NOT bypass center isolation, cross-center still 403), frontend FY flows (header + inline selectors, live row-count change All→FY2025-26→FY2023-24→All, persistence).
+
+**Phase 2 (pending):** Extend FY selector/filter + fy stamping to Invoices/InvoiceDetail, Advances, TdsRegister, BankGuarantees, BankReconciliation, Vendor/Staff payments, MIS, and FY-aware exports on those pages.
