@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import { inr } from "@/lib/i18n";
 import { useLang } from "@/context/LangContext";
 import { useAuth } from "@/context/AuthContext";
+import { useFY } from "@/context/FYContext";
 import KpiCard from "@/components/KpiCard";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,6 +34,7 @@ const shortName = (n = "") => (n.length > 16 ? n.slice(0, 15) + "…" : n);
 export default function SettlementDashboard() {
   const { t } = useLang();
   const { user } = useAuth();
+  const { fy } = useFY();
   const isAdmin = user?.role === "admin";
   const canRecord = ["admin", "senior_manager", "manager", "accountant", "partner"].includes(user?.role);
   const canUndo = ["admin", "accountant", "senior_manager"].includes(user?.role);
@@ -79,7 +81,7 @@ export default function SettlementDashboard() {
     }
   };
 
-  useEffect(() => { loadSettlement(); /* eslint-disable-next-line */ }, [filters.start, filters.end]);
+  useEffect(() => { loadSettlement(); /* eslint-disable-next-line */ }, [filters.start, filters.end, fy]);
 
   // Best-effort company mapping (for the Company filter). Fails silently for
   // roles without entity access — the Company filter then just stays "All".

@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { useFY } from "@/context/FYContext";
 import { inr } from "@/lib/i18n";
 import KpiCard from "@/components/KpiCard";
 import PrintButton from "@/components/PrintButton";
+import FYSwitcher from "@/components/FYSwitcher";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -53,11 +55,13 @@ export default function PaymentDashboard() {
       .catch(() => {});
   }, []);
 
+  const { fy } = useFY();
   const query = useMemo(() => {
     const p = {};
     Object.entries(filters).forEach(([k, v]) => { if (v) p[k] = v; });
+    if (fy && fy !== "all") p.fy = fy;
     return p;
-  }, [filters]);
+  }, [filters, fy]);
 
   const load = () => {
     setLoading(true);
@@ -88,6 +92,7 @@ export default function PaymentDashboard() {
           <p className="text-sm text-[var(--muted)] mt-1">Expense &amp; income insights across your operations</p>
         </div>
         <div className="flex items-center gap-2">
+          <FYSwitcher variant="inline" />
           <Button
             variant="outline"
             size="sm"

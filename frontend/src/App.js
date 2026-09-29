@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { LangProvider } from "@/context/LangContext";
 import { AuthProvider } from "@/context/AuthContext";
 import { PermissionProvider } from "@/context/PermissionContext";
+import { FYProvider } from "@/context/FYContext";
 import MenuAccessControl from "@/pages/MenuAccessControl";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
@@ -81,6 +82,7 @@ function App() {
     <LangProvider>
       <AuthProvider>
         <PermissionProvider>
+        <FYProvider>
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
@@ -136,6 +138,7 @@ function App() {
           </Routes>
         </BrowserRouter>
         <Toaster position="top-right" />
+        </FYProvider>
         </PermissionProvider>
       </AuthProvider>
     </LangProvider>

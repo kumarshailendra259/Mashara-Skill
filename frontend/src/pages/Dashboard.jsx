@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { useLang } from "@/context/LangContext";
 import { useAuth } from "@/context/AuthContext";
+import { useFY } from "@/context/FYContext";
 import { inr } from "@/lib/i18n";
 import KpiCard from "@/components/KpiCard";
 import PrintButton from "@/components/PrintButton";
+import FYSwitcher from "@/components/FYSwitcher";
 import { BGExpiryAlert } from "@/pages/BankGuarantees";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -46,11 +48,13 @@ export default function Dashboard() {
     }).catch(() => {});
   }, []);
 
+  const { fy } = useFY();
   const query = useMemo(() => {
     const p = {};
     Object.entries(filters).forEach(([k, v]) => { if (v) p[k] = v; });
+    if (fy && fy !== "all") p.fy = fy;
     return p;
-  }, [filters]);
+  }, [filters, fy]);
 
   useEffect(() => {
     // Phase 34 — Consolidated call. One HTTP round-trip fetches summary +
@@ -98,7 +102,10 @@ export default function Dashboard() {
           <div className="overline">{t("dashboard")}</div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("dashboard")}</h1>
         </div>
-        <PrintButton />
+        <div className="flex items-center gap-3">
+          <FYSwitcher variant="inline" />
+          <PrintButton />
+        </div>
       </div>
 
       {/* Role-specific personalised widgets (Center Manager, Accountant, HR, Senior Mgr, RA, Center Partner) */}

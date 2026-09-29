@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/sheet";
 import AnnouncementBanner from "@/components/AnnouncementBanner";
 import CompanySwitcher from "@/components/CompanySwitcher";
+import FYSwitcher from "@/components/FYSwitcher";
 import TrialBanner from "@/components/TrialBanner";
 
 // Grouped sidebar structure (exact order per product spec).
@@ -491,6 +492,8 @@ export default function Layout({ children }) {
             </div>
           </div>
           <div className="flex items-center gap-1.5 md:gap-2">
+            {/* Global Financial Year selector — applies across all finance pages */}
+            <FYSwitcher />
             {/* Multi-company switcher (only for 2+ company users) */}
             <CompanySwitcher />
             {/* Pending Requests pill — quick access to approvals queue */}

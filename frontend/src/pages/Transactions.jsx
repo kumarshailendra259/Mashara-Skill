@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatError } from "@/lib/api";
+import { useFY } from "@/context/FYContext";
 import { useLang } from "@/context/LangContext";
 import { inr } from "@/lib/i18n";
 import { useAuth } from "@/context/AuthContext";
@@ -24,6 +25,7 @@ import {
   Wallet, CircleCheck, CircleX, Hourglass, ListChecks, ArrowRightLeft,
 } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import FYSwitcher from "@/components/FYSwitcher";
 import BulkDeleteDialog from "@/components/BulkDeleteDialog";
 import SubmitButton from "@/components/SubmitButton";
 
@@ -106,11 +108,13 @@ export default function Transactions() {
     });
 
   const [pendingMyApproval, setPendingMyApproval] = useState(false);
+  const { fy } = useFY();
   const params = useMemo(() => {
     const p = {}; Object.entries(filters).forEach(([k, v]) => v && (p[k] = v));
     if (pendingMyApproval) p.status = "pending";
+    if (fy && fy !== "all") p.fy = fy;
     return p;
-  }, [filters, pendingMyApproval]);
+  }, [filters, pendingMyApproval, fy]);
 
   const load = () => api.get("/transactions", { params }).then((r) => {
     const list = r.data || [];
@@ -291,10 +295,10 @@ export default function Transactions() {
   };
 
   const exportCsv = () => {
-    const header = ["type", "amount", "date", "description", "company", "partner", "center", "project"];
+    const header = ["type", "amount", "date", "financial_year", "description", "company", "partner", "center", "project"];
     const src = selected.size > 0 ? filtered.filter((i) => selected.has(i.id)) : filtered;
     const rows = src.map((it) => [
-      it.type, it.amount, it.date, (it.description || "").replace(/"/g, '""'),
+      it.type, it.amount, it.date, it.financial_year || "", (it.description || "").replace(/"/g, '""'),
       nameOf("company", it.company_id), nameOf("partner", it.partner_id),
       nameOf("center", it.center_id), nameOf("project", it.project_id),
     ]);
@@ -440,6 +444,7 @@ export default function Transactions() {
           <p className="text-sm text-slate-500 mt-1 max-w-2xl">Manage all financial transactions, expenses and payments across your organization.</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <FYSwitcher variant="inline" />
           <PrintButton />
           <Button variant="outline" onClick={exportCsv} className="rounded-lg gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
           {canEdit && (

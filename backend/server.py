@@ -848,6 +848,8 @@ class TransactionOut(TransactionIn):
     # Dynamic "Pending at <approver>" label — who the transaction is currently
     # waiting on. Computed on read (not stored). None for non-pending txns.
     pending_at: Optional[str] = None
+    # Financial Year the txn belongs to (derived from `date`, e.g. "2025-26").
+    financial_year: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -3607,6 +3609,122 @@ async def delete_project_type(ptid: str, _=Depends(require_role("admin"))):
 
 
 
+# ============================================================================
+# Financial Year (FY) — centralized config + helpers
+# ----------------------------------------------------------------------------
+# Single source of truth for the FY range used across ALL payment/finance
+# endpoints. Indian FY convention: 1-Apr YYYY → 31-Mar (YYYY+1).
+# To add FY 2030-31 in future, bump FY_MAX_START_YEAR to 2030 — nothing else.
+# ============================================================================
+FY_MIN_START_YEAR = 2023   # first selectable FY starts Apr-2023 → "2023-24"
+FY_MAX_START_YEAR = 2029   # last selectable FY starts Apr-2029 → "2029-30"
+
+
+def _fy_label(start_year: int) -> str:
+    return f"FY {start_year}-{str(start_year + 1)[2:]}"
+
+
+def _fy_value(start_year: int) -> str:
+    return f"{start_year}-{str(start_year + 1)[2:]}"
+
+
+def _fy_options() -> list:
+    """All selectable FY options (incl. the 'all' sentinel), for the frontend."""
+    opts = [{"value": "all", "label": "All Financial Years", "start": None, "end": None}]
+    for y in range(FY_MIN_START_YEAR, FY_MAX_START_YEAR + 1):
+        opts.append({
+            "value": _fy_value(y),
+            "label": _fy_label(y),
+            "start": f"{y}-04-01",
+            "end": f"{y + 1}-03-31",
+        })
+    return opts
+
+
+def _current_fy_value() -> str:
+    today = datetime.now(timezone.utc).date()
+    sy = today.year if today.month >= 4 else today.year - 1
+    sy = max(FY_MIN_START_YEAR, min(FY_MAX_START_YEAR, sy))
+    return _fy_value(sy)
+
+
+def _finyr_bounds(fy: Optional[str]) -> Optional[tuple]:
+    """('YYYY-04-01','(YYYY+1)-03-31') for a valid FY value, else None.
+    Returns None for '', None, 'all' or out-of-range → callers treat as no filter."""
+    if not fy or str(fy).strip().lower() == "all":
+        return None
+    m = re.match(r"^(\d{4})-(\d{2})$", str(fy).strip())
+    if not m:
+        return None
+    y = int(m.group(1))
+    if y < FY_MIN_START_YEAR or y > FY_MAX_START_YEAR:
+        return None
+    return (f"{y}-04-01", f"{y + 1}-03-31")
+
+
+def _fy_clamp(start: Optional[str], end: Optional[str], fy: Optional[str]) -> tuple:
+    """Intersect an explicit (start,end) window with the selected FY window.
+    When fy is 'all'/None/invalid the original (start,end) is returned unchanged
+    so existing behaviour is preserved. FY never widens a user-supplied range —
+    it only narrows, so security/scope date bounds are respected."""
+    b = _finyr_bounds(fy)
+    if not b:
+        return start, end
+    fs, fe = b
+    ns = max(start, fs) if start else fs
+    ne = min(end, fe) if end else fe
+    return ns, ne
+
+
+def _fy_for_date(date_str: Optional[str]) -> Optional[str]:
+    """Map a YYYY-MM-DD (already-normalized) date → FY value 'YYYY-YY'."""
+    if not date_str or len(str(date_str)) < 7:
+        return None
+    try:
+        y = int(str(date_str)[:4])
+        mo = int(str(date_str)[5:7])
+    except Exception:
+        return None
+    sy = y if mo >= 4 else y - 1
+    return _fy_value(sy)
+
+
+@api.get("/financial-years")
+async def list_financial_years(_=Depends(get_current_user)):
+    """Centralized FY option list + current FY, consumed by the global FY selector."""
+    return {"options": _fy_options(), "current": _current_fy_value()}
+
+
+@api.post("/admin/backfill-financial-year")
+async def backfill_financial_year(user=Depends(require_role("admin")), dry_run: bool = True):
+    """One-time (idempotent) migration: stamp `financial_year` on every existing
+    transaction from its (normalized) date. Non-destructive — only sets a new
+    field, never deletes/duplicates. Pass dry_run=false to actually write."""
+    scanned = 0
+    to_update = 0
+    updated = 0
+    samples: list = []
+    cursor = db.transactions.find({}, {"_id": 0, "id": 1, "date": 1, "financial_year": 1})
+    async for d in cursor:
+        scanned += 1
+        raw = d.get("date")
+        try:
+            nd = _normalize_date(raw)
+        except Exception:
+            nd = raw
+        fyv = _fy_for_date(nd)
+        if fyv and d.get("financial_year") != fyv:
+            to_update += 1
+            if len(samples) < 10:
+                samples.append({"id": d["id"], "date": raw, "fy": fyv})
+            if not dry_run:
+                await db.transactions.update_one({"id": d["id"]}, {"$set": {"financial_year": fyv}})
+                updated += 1
+    return {"dry_run": dry_run, "scanned": scanned, "to_update": to_update, "updated": updated, "samples": samples}
+
+
+# ---------- Transactions ----------
+
 # ---------- Transactions ----------
 @api.get("/transactions", response_model=List[TransactionOut])
 async def list_transactions(
@@ -3619,6 +3737,7 @@ async def list_transactions(
     project_id: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    fy: Optional[str] = None,
 ):
     q: dict = {}
     await _enrich_user_with_associations(user)
@@ -3635,6 +3754,8 @@ async def list_transactions(
         q["center_id"] = center_id
     if project_id:
         q["project_id"] = project_id
+    # FY narrows the date window (backend-level filter — cannot be bypassed by UI).
+    start, end = _fy_clamp(start, end, fy)
     if start or end:
         rng: dict = {}
         if start:
@@ -3662,6 +3783,9 @@ async def create_transaction(
     doc["id"] = str(uuid.uuid4())
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # Stamp the Financial Year from the (normalized) transaction date so it is
+    # permanently saved with the record (used by FY reports / exports).
+    doc["financial_year"] = _fy_for_date(doc.get("date"))
     # Auto-derive company_id / partner_id from the center when caller left them blank
     # (e.g. Stock quick-add, income entries where the operator only picked a center).
     # Ensures the transaction row shows the correct Company + Partner in the ledger UI.
@@ -3753,6 +3877,8 @@ async def update_transaction(tid: str, body: TransactionIn, user=Depends(get_cur
     if not (is_admin or (is_owner and role in ("manager", "center_manager", "partner", "accountant"))):
         raise HTTPException(403, "Forbidden")
     update = body.model_dump()
+    # Re-stamp Financial Year when the date changes on edit.
+    update["financial_year"] = _fy_for_date(update.get("date"))
     # Editing an approved entry sets it back to pending (unless admin)
     if not is_admin and existing.get("status") == "approved":
         update["status"] = "pending"
@@ -4118,6 +4244,7 @@ async def dashboard_all(
     end: Optional[str] = None,
     include_pending: bool = False,
     include_settlement_history: bool = False,
+    fy: Optional[str] = None,
 ):
     """Phase 34 — Consolidated dashboard endpoint.
 
@@ -4142,19 +4269,19 @@ async def dashboard_all(
         _safe("summary", dashboard_summary(
             user=user, company_id=company_id, partner_id=partner_id,
             center_id=center_id, project_id=project_id,
-            start=start, end=end, include_pending=include_pending,
+            start=start, end=end, include_pending=include_pending, fy=fy,
         )),
         _safe("milestone_income", milestone_income_summary(
             user=user, start=start, end=end,
-            project_id=project_id, center_id=center_id,
+            project_id=project_id, center_id=center_id, fy=fy,
         )),
         _safe("fooding_income", fooding_income_summary(
             user=user, start=start, end=end,
-            project_id=project_id, center_id=center_id,
+            project_id=project_id, center_id=center_id, fy=fy,
         )),
         _safe("settlement", settlement_view(
             user=user, center_id=center_id, partner_id=partner_id,
-            start=start, end=end, include_history=include_settlement_history,
+            start=start, end=end, include_history=include_settlement_history, fy=fy,
         )),
     ]
     results = await asyncio.gather(*tasks)
@@ -4176,6 +4303,7 @@ async def dashboard_summary(
     start: Optional[str] = None,
     end: Optional[str] = None,
     include_pending: bool = False,
+    fy: Optional[str] = None,
 ):
     match: dict = {}
     await _enrich_user_with_associations(user)
@@ -4193,6 +4321,7 @@ async def dashboard_summary(
                  ("center_id", center_id), ("project_id", project_id)]:
         if v:
             match[k] = v
+    start, end = _fy_clamp(start, end, fy)
     if start or end:
         rng: dict = {}
         if start:
@@ -4295,6 +4424,7 @@ async def milestone_income_summary(
     end: Optional[str] = None,
     project_id: Optional[str] = None,
     center_id: Optional[str] = None,
+    fy: Optional[str] = None,
 ):
     """Aggregate milestone-source income across approved transactions.
 
@@ -4306,6 +4436,7 @@ async def milestone_income_summary(
       - rows: full list of milestone transactions (for drill-down / print)
     """
     q: dict = {"source": "milestone", "status": "approved"}
+    start, end = _fy_clamp(start, end, fy)
     if start or end:
         rng: dict = {}
         if start:
@@ -4372,12 +4503,14 @@ async def fooding_income_summary(
     end: Optional[str] = None,
     project_id: Optional[str] = None,
     center_id: Optional[str] = None,
+    fy: Optional[str] = None,
 ):
     """Aggregate source='fooding' approved transactions.
 
     Returns total, monthly trend, company-vs-partner split, and per-partner breakdown.
     """
     q: dict = {"source": "fooding", "status": "approved"}
+    start, end = _fy_clamp(start, end, fy)
     if start or end:
         rng: dict = {}
         if start:
@@ -4506,6 +4639,7 @@ async def settlement_view(
     end: Optional[str] = None,
     after_date: Optional[str] = None,
     include_history: Optional[bool] = False,
+    fy: Optional[str] = None,
 ):
     """Co-partner settlement view for a center.
 
@@ -4528,6 +4662,9 @@ async def settlement_view(
     role = user.get("role")
     await _enrich_user_with_associations(user)
     own_partner_id = user.get("assigned_partner_id") if role == "partner" else partner_id
+    # FY narrows the settlement window (applied via start/end used in the
+    # in-window checks below). 'all'/None leaves the window unchanged.
+    start, end = _fy_clamp(start, end, fy)
 
     # SECURITY (center isolation): the user's authorized centers are the source
     # of truth. `None` = head-level (admin/senior_manager/company-admin org-wide),
@@ -4711,6 +4848,7 @@ async def payment_dashboard_summary(
     project_id: Optional[str] = None,
     start: Optional[str] = None,   # YYYY-MM-DD (inclusive)
     end: Optional[str] = None,     # YYYY-MM-DD (inclusive)
+    fy: Optional[str] = None,
 ):
     """One-shot rollup for the Payment Dashboard. Returns:
       - kpis: daily / weekly / monthly / upcoming totals (₹)
@@ -4727,6 +4865,9 @@ async def payment_dashboard_summary(
     """
     role = user.get("role")
     today = datetime.now(timezone.utc).date()
+    # FY (when a specific year is chosen) sets the overall window for the
+    # series + breakdowns below. 'all'/None keeps the default last-365-days view.
+    start, end = _fy_clamp(start, end, fy)
     e = today.isoformat() if not end else end
     s = (today - timedelta(days=365)).isoformat() if not start else start
 
@@ -4939,6 +5080,7 @@ async def record_settlement(
 async def settlement_history(
     center_id: Optional[str] = None,
     user=Depends(require_finance_visible),
+    fy: Optional[str] = None,
 ):
     """List previously-recorded partner settlements.
 
@@ -4951,6 +5093,15 @@ async def settlement_history(
     q: dict = {}
     if center_id:
         q["center_id"] = center_id
+    # FY narrows the settlement-record date window when a specific FY is chosen.
+    _fs, _fe = _fy_clamp(None, None, fy)
+    if _fs or _fe:
+        rng: dict = {}
+        if _fs:
+            rng["$gte"] = _fs
+        if _fe:
+            rng["$lte"] = _fe
+        q["date"] = rng
     # SECURITY (center isolation) — enforce authorized centers for all scoped roles.
     allowed_centers = _scoped_center_ids(user)
     if allowed_centers is not None:

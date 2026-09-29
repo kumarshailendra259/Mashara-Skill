@@ -1,21 +1,25 @@
 import React, { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useLang } from "@/context/LangContext";
+import { useFY } from "@/context/FYContext";
 import { inr } from "@/lib/i18n";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Download } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
+import FYSwitcher from "@/components/FYSwitcher";
 
 const DIMS = ["company", "partner", "center", "project", "item"];
 
 export default function Reports() {
   const { t } = useLang();
+  const { fy } = useFY();
   const [summary, setSummary] = useState(null);
 
   useEffect(() => {
-    api.get("/dashboard/summary").then((r) => setSummary(r.data)).catch(() => {});
-  }, []);
+    const params = (fy && fy !== "all") ? { fy } : {};
+    api.get("/dashboard/summary", { params }).then((r) => setSummary(r.data)).catch(() => {});
+  }, [fy]);
 
   const exportTable = (key) => {
     if (!summary) return;
@@ -38,7 +42,10 @@ export default function Reports() {
           <div className="overline">{t("reports")}</div>
           <h1 className="font-heading font-black tracking-tight text-3xl mt-1">{t("reports")}</h1>
         </div>
-        <PrintButton />
+        <div className="flex items-center gap-3">
+          <FYSwitcher variant="inline" />
+          <PrintButton />
+        </div>
       </div>
 
       <Tabs defaultValue="company">

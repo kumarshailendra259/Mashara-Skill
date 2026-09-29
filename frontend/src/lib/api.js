@@ -8,6 +8,21 @@ export const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
+// --- Global Financial Year (FY) selection --------------------------------
+// Kept as a module-level variable so the request interceptor can attach it to
+// every GET without each page wiring it manually. Updated by FYContext.
+let _fy = "all";
+try {
+  if (typeof localStorage !== "undefined") _fy = localStorage.getItem("mashara_fy") || "all";
+} catch { /* ignore */ }
+
+export function setApiFy(v) {
+  _fy = v || "all";
+}
+export function getApiFy() {
+  return _fy;
+}
+
 /**
  * Read a cookie value from document.cookie by name. Returns null if missing.
  */
@@ -31,6 +46,13 @@ function readCookie(name) {
  */
 api.interceptors.request.use((config) => {
   const method = (config.method || "get").toLowerCase();
+  // Attach the globally-selected Financial Year to every GET so finance
+  // endpoints filter server-side. Unknown to non-finance endpoints → ignored
+  // by FastAPI. Skipped when 'all' (no filter) or when caller set fy explicitly.
+  if (method === "get" && _fy && _fy !== "all") {
+    config.params = config.params || {};
+    if (config.params.fy === undefined) config.params.fy = _fy;
+  }
   if (["post", "put", "patch", "delete"].includes(method)) {
     config.headers = config.headers || {};
     if (!config.headers["Idempotency-Key"] && method !== "delete") {
