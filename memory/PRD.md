@@ -2530,3 +2530,15 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **Fix/UX (user chose option d):** Added a direct **"Process Payment"** button on each batch row in `PayrollBatchesSection` (visible to admin/accountant when status=pending_payment, data-testid `pb-pay-<id>`) that opens the batch dialog and auto-jumps to the pay form (new `autoPay` prop on `PayrollBatchDialog` + `autoPayBatchId` state in HRMS). Pay form already captures method, payment date, Bank Account (debit), UTR, remarks. No backend change — pay endpoint unchanged.
 
 **Verified (curl, preview + cleanup):** finalize→pending_payment (net ₹8,658) → pay with UTR/bank → batch `paid`, transaction created (source=payroll_batch, UTR captured, status approved). partner_id/bank_account_id populate when the center has a partner mapping + a bank account is selected (empty in the preview test center only). Test data fully cleaned. Frontend compiles clean.
+
+## Phase 98 (Jun 2026) — EMERGENCY FIX: "Bank account not found or inactive" on payroll payment
+
+**Root cause:** `pay_payroll_batch` (POST /api/payroll-batches/{id}/pay, ~L12280) looked up the debit account with `{"id": bank_account_id, "active": True}`, but the `bank_accounts` collection uses field **`is_active`** (there is no `active` field). So EVERY selected account failed → "Bank account not found or inactive", blocking all payroll payments. The list endpoint + vendor-payment validation already correctly use `is_active`.
+
+**Fix (1 line):** changed the query to `{"id": bank_account_id, "is_active": True}`. No schema/data change, no parallel system.
+
+**Verified (curl, preview + cleanup):** paid a batch with the exact account "Mashara Utkarsh Current A/C- 1140" (id 0575cb60, is_active:true) → HTTP 200, batch status=paid, transaction created (source=payroll_batch, bank_account_id + UTR stored, status approved). Error gone.
+
+**Already working (confirmed, no change needed):** pay modal captures method/date/bank-account/UTR/remarks; pay creates the linked transaction, marks each employee paid, stamps partner (auto-derived from center) + bank account + UTR, writes audit_log; batch→paid; duplicate-pay blocked (requires status=pending_payment); transaction appears in Transactions.
+
+**Still NOT built (larger spec items for a follow-up, needs scope confirmation):** merge final-approval + payment into ONE "Approve & Record Payment" action on the approvals screen; explicit mandatory Partner dropdown + "Paid By" dropdown in the pay modal; employee-level partial PAID/FAILED/PENDING with "Partially Paid" batch status + Retry Payment.

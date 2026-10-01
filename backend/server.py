@@ -12277,7 +12277,10 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
     # Optionally require a configured bank account for the debit. Same behaviour as vendor payments.
     acct = None
     if body.bank_account_id:
-        acct = await db.bank_accounts.find_one({"id": body.bank_account_id, "active": True}, {"_id": 0})
+        # NOTE: bank_accounts uses `is_active` (not `active`) — matching the list
+        # endpoint & vendor-payment validation. Using the wrong field caused
+        # "Bank account not found or inactive" for valid, selectable accounts.
+        acct = await db.bank_accounts.find_one({"id": body.bank_account_id, "is_active": True}, {"_id": 0})
         if not acct:
             raise HTTPException(400, "Bank account not found or inactive")
 
