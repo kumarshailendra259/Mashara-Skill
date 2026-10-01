@@ -3027,7 +3027,7 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
                         <td className="p-2 text-right num text-red-600">-{inr(r.deductions)}</td>
                         <td className="p-2 text-right num font-semibold">{inr(r.net)}</td>
                         <td className="p-2 text-center">
-                          <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 border ${ps === "paid" ? "bg-emerald-100 text-emerald-700 border-emerald-300" : "bg-amber-100 text-amber-700 border-amber-300"}`} data-testid={`batch-row-paystatus-${r.id}`}>{ps === "paid" ? "Paid" : "Pending"}</span>
+                          <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 border ${ps === "paid" ? "bg-emerald-100 text-emerald-700 border-emerald-300" : "bg-amber-100 text-amber-700 border-amber-300"}`} data-testid={`batch-row-paystatus-${r.staff_id}`}>{ps === "paid" ? "Paid" : "Pending"}</span>
                         </td>
                       </tr>
                       );

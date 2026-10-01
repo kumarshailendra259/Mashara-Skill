@@ -1,0 +1,31 @@
+{
+  "summary": "End-to-end frontend verification of the new Payroll Batch 'One-screen Approve+Pay' and 'HRMS Process Payment + Partial + Retry' flows. All critical UX gates work. One-screen approval dialog correctly pre-selects Partner, enforces Partner/Paid-By/Bank/Remarks mandatory validation (toast on each missing field), submits approval + payment in a single click, and the queue goes empty. HRMS Payroll Batches section lists ZZ Pay Test Center 12/2099 batch; Process Payment opens the batch dialog + auto-opens pay sub-dialog with partner pre-selected; unchecking one employee flips Submit label from 'Record Payment' to 'Pay Selected'; submitting marks the batch as PARTIALLY PAID with the paid staff row showing PAID and remaining showing PENDING; list action switches to 'Retry Payment'; retry dialog pre-selects remaining employee only, already-paid employee is disabled with PAID chip, and partner stays pre-selected; final submit transitions batch to PAID with approval timeline recording pending_payment → partially_paid → paid.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "PayrollBatchDialog (batch detail header)", "issue": "Spec/test-plan asked for data-testid='batch-status-chip' but DOM only exposes 'batch-detail-status'. Both work and show the chip text ('PARTIALLY PAID' / 'PAID') but the testid name differs from the request.", "selector": "[data-testid=\"batch-status-chip\"]", "priority": "LOW"},
+      {"component": "PayrollBatchDialog (staff-wise breakdown rows)", "issue": "Spec expected data-testid='batch-row-paystatus-<staff_id>' per row (e.g. batch-row-paystatus-ZZPAYTEST-staff1). These test ids are NOT present in the DOM — the PAID/PENDING badges are rendered without a per-row testid, making automated per-row paystatus assertions impossible.", "selector": "[data-testid^=\"batch-row-paystatus-\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "HRMS → Payroll period picker", "issues": ["Year picker shows only [year-3 .. year+1] — to reach the test batch at 12/2099 the automation had to click +1-year 73 times. Not a shipping bug (end-users won't need year 2099), but it blocks easy future-dated test data. Consider a 'jump to year' text input."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Add data-testid='batch-row-paystatus-<staff_id>' to each staff-wise breakdown row in PayrollBatchDialog so partial-pay regression can assert PAID vs PENDING per row.",
+    "(Optional) Also expose data-testid='batch-status-chip' alias on the status chip to match the spec, OR update the spec/doc to use 'batch-detail-status'."
+  ],
+  "critical_code_review_comments": [
+    "PayrollPeriodPicker (HRMS.jsx L3225) hard-caps year window at ±1/-3. Fine for prod but inconvenient for future-dated seed data.",
+    "Confirmation toasts on pay sub-dialog successful submit are not consistently rendered via [role=status]/.toast selectors — business flow still works (batch transitions correctly), but automated post-success toast assertion is flaky; consider standardizing on the shared toast system used by Approve&Pay ('Approved & payment recorded')."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped per request)", "frontend": "100% of critical flows"},
+  "test_credentials": "admin@finance.app / Admin@123",
+  "seed_data_creation": "No new seed created. Both seeded batches CONSUMED by this test run: ZZPAYTEST-batch-approval → approved + paid in one shot; ZZPAYTEST-batch → partially paid then retried to full PAID. Re-seed via /app/backend/tests/seed_payroll_test.py if re-running.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Seeded batches ZZPAYTEST-batch and ZZPAYTEST-batch-approval are now fully paid/approved. If re-testing, re-seed first. ZZ Pay Test Center is at 12/2099 — PayrollPeriodPicker only lets you jump +1 year per open, so automation needs ~73 clicks to reach 2099 (handled in script via loop). All data-testids documented in the review request were found EXCEPT batch-status-chip (use batch-detail-status instead) and batch-row-paystatus-* (not implemented).",
+  "rca of the issue": "n/a — feature works. The two missing data-testids are documentation/testability gaps in HRMS.jsx PayrollBatchDialog, not functional bugs."
+}
