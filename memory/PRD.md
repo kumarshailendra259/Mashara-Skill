@@ -2474,3 +2474,23 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **Verified:** backend curl (advances fy=2026-27=160/fy=2023-24=0; invoices dashboard ALL=5/fy=2026-27=5; BG summary FY filter; BG isolation fix) + testing_agent iter80 (frontend FY flows 100% across all 4 pages: global→inline propagation, TDS/BG sync-to-global, invoice CSV FY column, center-scope preserved with fy).
 
 **FY feature — remaining/backlog:** MIS payment views, Bank Reconciliation, vendor-payment reports, and FY-aware exports on Advances/TDS if desired; a shared Python FY module mirroring frontend fy.js (currently helpers live inline in server.py).
+
+## Phase 94 (Jun 2026) — HRMS: Simplified Attendance→Payroll Workflow
+
+**Goal:** Replace confusing payroll statuses (Draft/Awaiting Accounts/Issue/Resolve) with a clean 5-status flow. NO change to payroll/salary calculation formulas or existing data.
+
+**New status flow (UI relabel only; backend statuses unchanged):**
+🟡 HR Review → 🔵 HR Finalized → 🟠 Approval Pending → 🟣 Ready for Payment → 🟢 Paid. Attendance problems show as ACTION ALERTS ("N Unmarked Days"), never as a status.
+
+**Backend (server.py):**
+- NEW attendance-lock mechanism (collection `attendance_locks`, keyed by center_id+month+year, non-destructive). Helpers `_attendance_lock_doc`/`_is_attendance_locked`/`_assert_attendance_editable`. Guards added to `POST /attendance` and `PATCH /attendance/{aid}` → return **HTTP 423** when the staff's center+month is finalized.
+- `GET /api/payroll/attendance-lock?month&year[&center_id]` — which centers are locked.
+- `POST /api/payroll/finalize-attendance` (admin/hr) — ONE action: runs payroll (fresh draft rows) → **blocks (400, code=attendance_issues + blockers list)** if any employee has unmarked days → locks attendance for the center(s) → finalises into batch + approval workflow. Returns locked_centers.
+- `POST /api/attendance/unlock` (admin/hr) — unlocks attendance; reopens the NON-paid payroll batch back to HR Review (rows→draft); paid batches flagged `paid_batch_blocked` (must be reversed via admin batch-reopen).
+- payroll_run / payroll_finalise / _compute_payroll_for_staff and all calculations **UNCHANGED**; legacy endpoints still mounted.
+
+**Frontend (HRMS.jsx):** Rewrote `_payrollStage` (5 statuses) + `_hasAttendanceIssue`, `_countPayroll`, `QuickFilterChips` (5 chips = dashboard counters), `PayrollStatusPill` (colour-coded), `AttendanceCell` (unmarked alert), `PayrollTableRow` primary actions (role-based: HR→Review Attendance, Approver→View/Approve, Accountant/Admin→Process Payment). Toolbar: replaced Run+Finalise with a secondary **Refresh** (populate review list) + hero **Finalize Attendance** (confirm dialog) + **Reopen Attendance** (when locked). Blue "Attendance Finalized & Locked" banner. lockInfo state + loadLockStatus/finalizeAttendance/reopenAttendance.
+
+**Verified (testing_agent iter81, backend 11/11):** lock status, finalize role-gate (accountant 403), finalize blocks on unmarked (400), 423 enforcement on POST+PATCH attendance, unlock clears lock + edit succeeds, unlock role gate, legacy endpoints regression. Frontend: 5-status chips + Finalize button + no old labels + issue-as-alert confirmed. Row-level pills/banner code-reviewed (test month had 0 rows). Main agent curl-verified lock 423→unlock→200 + finalize blocking.
+
+**Optional polish (not done):** swap native confirm()/prompt() for styled Shadcn AlertDialog.
