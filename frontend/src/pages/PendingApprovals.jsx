@@ -53,7 +53,7 @@ export default function PendingApprovals() {
   // Center + Partner attribution — captured at final approval so the auto-
   // created transaction reflects the correct dashboard dimensions.
   const [centers, setCenters] = useState([]);
-  const [partners, setPartners] = useState([]);
+  const [attrPartners, setAttrPartners] = useState([]);   // partners mapped to the selected center only
   const [txnCenterId, setTxnCenterId] = useState("");
   const [txnPartnerId, setTxnPartnerId] = useState("");
   // Phase 29 — Bank/Cash account for final-step debit of Payment / Reimbursement.
@@ -79,10 +79,9 @@ export default function PendingApprovals() {
   };
   useEffect(() => {
     load();
-    // Pre-fetch centers/partners/payers so the final-approval dialog opens
+    // Pre-fetch centers/payers so the final-approval dialog opens
     // with dropdowns already populated (no perceived lag when Accountant clicks Approve).
     api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
-    api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
     api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
     // Bank/cash accounts for final-approval debit (empty for non-accountant/admin — API will 403).
     api.get("/bank-accounts", { params: { active_only: true } })
@@ -129,6 +128,7 @@ export default function PendingApprovals() {
     setPaidByUserId("");
     setTxnCenterId(item?.summary?.center_id || "");
     setTxnPartnerId("");
+    setAttrPartners([]);
     setBankAccountId("");
     // One-screen Approve+Pay: an Accounts/Admin user finalising a payroll batch
     // records the payment inside the same dialog.
@@ -169,10 +169,21 @@ export default function PendingApprovals() {
       if (centers.length === 0) {
         api.get("/entities/center").then((r) => setCenters(r.data || [])).catch(() => {});
       }
-      if (partners.length === 0) {
-        api.get("/entities/partner").then((r) => setPartners(r.data || [])).catch(() => {});
-      }
+      // Partner dropdown must list ONLY the request-center's active mapped partners
+      // (not every partner). Auto-select when the center maps to exactly one.
+      loadCenterPartners(item?.summary?.center_id || "");
     }
+  };
+
+  // Fetch the active partners mapped to a center → used to restrict the attribution
+  // Partner dropdown. Auto-selects when there is exactly one mapped partner.
+  const loadCenterPartners = (cid) => {
+    if (!cid) { setAttrPartners([]); setTxnPartnerId(""); return; }
+    api.get(`/centers/${cid}/mapped-partners`).then((r) => {
+      const act = (r.data || []).filter((p) => p.active !== false);
+      setAttrPartners(act);
+      setTxnPartnerId(act.length === 1 ? act[0].partner_id : "");
+    }).catch(() => { setAttrPartners([]); setTxnPartnerId(""); });
   };
 
   // Payment attribution (Center / Partner / Paid By) is captured at final approval
@@ -690,7 +701,7 @@ export default function PendingApprovals() {
                       <div className="text-[10px] uppercase text-emerald-900 mb-1">Center {paidByOptional ? "" : "*"}</div>
                       <select
                         value={txnCenterId}
-                        onChange={(e) => setTxnCenterId(e.target.value)}
+                        onChange={(e) => { setTxnCenterId(e.target.value); loadCenterPartners(e.target.value); }}
                         className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
                         data-testid="txn-center-select"
                       >
@@ -705,14 +716,18 @@ export default function PendingApprovals() {
                       <select
                         value={txnPartnerId}
                         onChange={(e) => setTxnPartnerId(e.target.value)}
-                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        disabled={!txnCenterId}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2 disabled:opacity-60"
                         data-testid="txn-partner-select"
                       >
                         <option value="">— Auto-derive from center —</option>
-                        {partners.map((p) => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
+                        {attrPartners.map((p) => (
+                          <option key={p.partner_id} value={p.partner_id}>{p.name}{p.role ? ` (${p.role})` : ""}</option>
                         ))}
                       </select>
+                      {txnCenterId && attrPartners.length === 0 && (
+                        <div className="text-[9px] text-amber-700 mt-0.5">Is center ke liye koi mapped partner nahi — auto-derive hoga.</div>
+                      )}
                     </div>
                   </div>
 
