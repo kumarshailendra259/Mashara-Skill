@@ -120,6 +120,8 @@ export default function HRMS() {
   // Phase 60 — center scoping for payroll run/finalise.
   // Empty string == "All Centers" (org-wide split into per-center batches).
   const [pCenterId, setPCenterId] = useState("");
+  // HRMS simplified workflow — attendance finalization lock state for the period.
+  const [lockInfo, setLockInfo] = useState({ locked: false, locked_centers: [] });
 
   // Approval timeline modal state
   const [trackTimeline, setTrackTimeline] = useState({ type: null, id: null });
@@ -907,31 +909,71 @@ export default function HRMS() {
   useEffect(() => { if (isAdmin || isAccountant || user?.role === "hr" || user?.role === "manager" || user?.role === "senior_manager") { loadBatches(); } }, [loadBatches, isAdmin, isAccountant, user?.role]);
   const currentBatch = batches[0] || null;
 
-  const finalisePayroll = async () => {
+  const loadLockStatus = useCallback(async () => {
+    try {
+      const params = { month: pMonth, year: pYear };
+      if (pCenterId) params.center_id = pCenterId;
+      const { data } = await api.get("/payroll/attendance-lock", { params });
+      if (pCenterId) setLockInfo({ locked: !!data.locked, locked_centers: data.locked ? [pCenterId] : [] });
+      else setLockInfo({ locked: (data.locked_centers || []).length > 0, locked_centers: data.locked_centers || [] });
+    } catch { setLockInfo({ locked: false, locked_centers: [] }); }
+  }, [pMonth, pYear, pCenterId]);
+  useEffect(() => { loadLockStatus(); }, [loadLockStatus]);
+
+  // HRMS simplified workflow — ONE action: lock attendance + auto payroll + approval.
+  const finalizeAttendance = async () => {
     const centerLabel = pCenterId
       ? centers.find((x) => x.id === pCenterId)?.name || "selected center"
       : "ALL centers (one batch per center)";
     if (!window.confirm(
-      `Finalise payroll for ${pMonth}/${pYear}?\n\n` +
+      `Finalize Attendance for ${pMonth}/${pYear}?\n\n` +
       `Scope: ${centerLabel}\n\n` +
-      `After finalisation, payroll cannot be edited unless it is reopened by an authorised user.\n\nContinue?`,
+      `After finalization, attendance will be LOCKED for editing and payroll will be ` +
+      `auto-generated and sent for approval.\n\nAre you sure?`,
     )) return;
     try {
       const remarks = window.prompt("Optional remarks for the approver:", "") || "";
-      const { data } = await api.post("/payroll/finalise", {
-        month: pMonth, year: pYear, remarks,
-        center_id: pCenterId || null,
+      const { data } = await api.post("/payroll/finalize-attendance", {
+        month: pMonth, year: pYear, remarks, center_id: pCenterId || null,
       });
       const batches = data.batches || [];
-      const dupes = data.skipped_duplicates || [];
       const staffTotal = batches.reduce((s, b) => s + (b.staff_count || 0), 0);
       const netTotal = batches.reduce((s, b) => s + (b.net_payable || 0), 0);
       toast.success(
-        `Finalised ${batches.length} batch${batches.length > 1 ? "es" : ""} · ${staffTotal} staff · ₹${netTotal.toLocaleString("en-IN")}` +
-        (dupes.length ? ` — ${dupes.length} skipped (already exist)` : ""),
+        `Attendance finalized · ${batches.length} batch${batches.length > 1 ? "es" : ""} · ${staffTotal} staff · ₹${netTotal.toLocaleString("en-IN")} sent for approval`,
       );
-      loadBatches();
-      loadAll();
+      loadBatches(); loadAll(); loadLockStatus();
+    } catch (e) {
+      // Surface attendance-issue blockers clearly as an action alert.
+      const detail = e?.response?.data?.detail;
+      if (detail && detail.code === "attendance_issues") {
+        const names = (detail.blockers || []).slice(0, 6).map((b) => `• ${b.staff_name} — ${b.unmarked} unmarked`).join("\n");
+        toast.error(`${detail.message}`, { duration: 8000 });
+        window.alert(`${detail.message}\n\n${names}${(detail.blockers || []).length > 6 ? `\n…and ${detail.blockers.length - 6} more` : ""}\n\nResolve attendance before finalizing.`);
+      } else {
+        toast.error(formatError(e));
+      }
+    }
+  };
+
+  const reopenAttendance = async () => {
+    const cid = pCenterId || (lockInfo.locked_centers || [])[0];
+    if (!cid) { toast.error("Select the specific center to reopen."); return; }
+    const centerLabel = centers.find((x) => x.id === cid)?.name || "this center";
+    if (!window.confirm(
+      `Reopen attendance for ${centerLabel} — ${pMonth}/${pYear}?\n\n` +
+      `This unlocks attendance for editing and (if the payroll is not yet paid) ` +
+      `reopens the payroll batch back to HR Review.\n\nContinue?`,
+    )) return;
+    try {
+      const reason = window.prompt("Reason for reopening (audit):", "") || "";
+      const { data } = await api.post("/attendance/unlock", { month: pMonth, year: pYear, center_id: cid, reason });
+      toast.success(
+        data.paid_batch_blocked
+          ? "Attendance unlocked. Note: payroll is already PAID — reverse it from the batch view if needed."
+          : (data.reopened_batch ? "Attendance unlocked & payroll reopened to HR Review." : "Attendance unlocked."),
+      );
+      loadBatches(); loadAll(); loadLockStatus();
     } catch (e) { toast.error(formatError(e)); }
   };
 
@@ -1986,17 +2028,36 @@ export default function HRMS() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <Button onClick={runPayroll} className="rounded-md bg-blue-600 hover:bg-blue-700 text-white h-9 px-4 gap-1.5" data-testid="run-payroll">
-                    <TrendingUp size={14} /> Run Payroll
-                  </Button>
-                  {(isAdmin || user?.role === "hr") && !currentBatch && (
+                  {(isAdmin || user?.role === "hr" || isAccountant) && !lockInfo.locked && (
                     <Button
-                      onClick={finalisePayroll}
-                      className="rounded-md bg-white border border-purple-500 text-purple-700 hover:bg-purple-50 h-9 px-4 gap-1.5"
-                      data-testid="finalise-payroll"
-                      title="Locks payroll & sends to Approval workflow"
+                      onClick={runPayroll}
+                      variant="outline"
+                      className="rounded-md h-9 px-4 gap-1.5"
+                      data-testid="run-payroll"
+                      title="Generate / refresh draft payroll from latest attendance (for HR review)"
                     >
-                      <ShieldCheck size={14} /> Finalise Payroll
+                      <TrendingUp size={14} /> Refresh
+                    </Button>
+                  )}
+                  {(isAdmin || user?.role === "hr") && !lockInfo.locked && !currentBatch && (
+                    <Button
+                      onClick={finalizeAttendance}
+                      className="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white h-9 px-4 gap-1.5"
+                      data-testid="finalize-attendance"
+                      title="Locks attendance, auto-generates payroll & sends to Approval"
+                    >
+                      <ShieldCheck size={14} /> Finalize Attendance
+                    </Button>
+                  )}
+                  {(isAdmin || user?.role === "hr") && lockInfo.locked && (
+                    <Button
+                      onClick={reopenAttendance}
+                      variant="outline"
+                      className="rounded-md border-orange-300 text-orange-700 hover:bg-orange-50 h-9 px-4 gap-1.5"
+                      data-testid="reopen-attendance"
+                      title="Unlock attendance & reopen payroll (HR/Admin only)"
+                    >
+                      <AlertCircle size={14} /> Reopen Attendance
                     </Button>
                   )}
                   <DropdownMenu>
@@ -2030,6 +2091,22 @@ export default function HRMS() {
             />
           )}
 
+          {/* HRMS workflow — attendance finalized/locked banner */}
+          {lockInfo.locked && (
+            <div className="flex items-center justify-between gap-3 flex-wrap bg-blue-50 border border-blue-200 rounded-lg px-4 py-3" data-testid="attendance-locked-banner">
+              <div className="flex items-center gap-2 text-sm text-blue-900">
+                <ShieldCheck size={16} className="text-blue-600" />
+                <span className="font-semibold">Attendance Finalized &amp; Locked</span>
+                <span className="text-blue-700">— {pMonth}/{pYear}{pCenterId ? "" : ` · ${lockInfo.locked_centers.length} center(s)`}. Editing is locked; payroll is in the approval/payment workflow.</span>
+              </div>
+              {(isAdmin || user?.role === "hr") && (
+                <Button onClick={reopenAttendance} variant="outline" size="sm" className="rounded-md border-orange-300 text-orange-700 hover:bg-orange-50 gap-1.5" data-testid="reopen-attendance-banner">
+                  <AlertCircle size={14} /> Reopen Attendance
+                </Button>
+              )}
+            </div>
+          )}
+
           {/* --- Filter bar with quick chips + search + status --- */}
           <div className="bg-white border border-slate-200 rounded-lg p-3 flex flex-wrap items-center gap-3" data-testid="payroll-filterbar">
             <Input
@@ -2044,7 +2121,7 @@ export default function HRMS() {
               <SelectTrigger className="rounded-md w-36 h-9 text-sm" data-testid="payroll-status-filter"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All statuses</SelectItem>
-                <SelectItem value="draft">Draft</SelectItem>
+                <SelectItem value="draft">HR Review</SelectItem>
                 <SelectItem value="paid">Paid</SelectItem>
               </SelectContent>
             </Select>
@@ -2091,7 +2168,7 @@ export default function HRMS() {
                           <td colSpan={8} className="text-center py-10 text-slate-500">
                             {hideZero && payroll.length > 0
                               ? `${payroll.length} zero-attendance rows hidden — toggle "Hide zero-attendance" off to view them.`
-                              : "No payroll rows for this period. Click Run Payroll to generate."}
+                              : "No payroll rows for this period. Click Refresh to generate from attendance, then Finalize Attendance."}
                           </td>
                         </tr>
                       );
@@ -3074,28 +3151,32 @@ function _inrCompact(n) {
 }
 
 function _payrollStage(p) {
-  // Derive a UI stage from raw payroll fields + attendance signals.
-  if (p.status === "paid") return "paid";
+  // Simplified HRMS workflow — 5 statuses derived from backend batch/row state.
+  //   hr_review → approval_pending → ready_for_payment → paid
+  // (hr_finalized is a brief transient; finalize auto-moves rows to approval.)
+  const bs = p.batch_status;
+  if (p.status === "paid" || bs === "paid") return "paid";
+  if (bs === "pending_payment" || bs === "approved" || bs === "processing") return "ready_for_payment";
+  if (bs === "pending_approval") return "approval_pending";
+  return "hr_review"; // draft / reopened / not yet finalized
+}
+
+// Attendance problems are shown as ACTION ALERTS, never as a payroll status.
+function _hasAttendanceIssue(p) {
   const present = (p.present_days ?? p.days_present) || 0;
   const paidLv = p.paid_leave_days || 0;
   const half = p.half_days || 0;
-  const workedFraction = present + paidLv + half;
-  if (workedFraction === 0) return "issue"; // zero-attendance draft
-  if (p.unmarked_absent_days > 0) return "issue"; // missing punches
-  if ((p.deductions || 0) > (p.gross || 0)) return "issue"; // deductions > gross
-  if (p.slip_released_at) return "ready";
-  if (p.locked || p.batch_status === "pending_approval") return "review";
-  return "pending"; // draft, still editable
+  if ((p.unmarked_absent_days || 0) > 0) return true;
+  if (present + paidLv + half === 0 && (p.status === "draft" || !p.batch_id)) return true;
+  return false;
 }
 
 function _countPayroll(rows) {
-  const c = { all: rows.length, issues: 0, pending: 0, ready: 0, paid: 0 };
+  const c = { all: rows.length, hr_review: 0, approval_pending: 0, ready_for_payment: 0, paid: 0, issues: 0 };
   for (const p of rows) {
     const s = _payrollStage(p);
-    if (s === "issue") c.issues++;
-    else if (s === "pending" || s === "review") c.pending++;
-    else if (s === "ready") c.ready++;
-    else if (s === "paid") c.paid++;
+    if (c[s] !== undefined) c[s]++;
+    if (s === "hr_review" && _hasAttendanceIssue(p)) c.issues++;
   }
   return c;
 }
@@ -3113,11 +3194,8 @@ function _applyPayrollFilters(rows, hideZero, quick) {
   if (quick && quick !== "all") {
     out = out.filter((p) => {
       const s = _payrollStage(p);
-      if (quick === "issues") return s === "issue";
-      if (quick === "pending") return s === "pending" || s === "review";
-      if (quick === "ready") return s === "ready";
-      if (quick === "paid") return s === "paid";
-      return true;
+      if (quick === "issues") return s === "hr_review" && _hasAttendanceIssue(p);
+      return s === quick;
     });
   }
   return out;
@@ -3125,11 +3203,11 @@ function _applyPayrollFilters(rows, hideZero, quick) {
 
 function QuickFilterChips({ value, onChange, counts }) {
   const chips = [
-    { key: "all",     label: "All",         count: counts.all,     tone: "bg-slate-100 text-slate-700" },
-    { key: "issues",  label: "Issues",      count: counts.issues,  tone: "bg-red-50 text-red-700" },
-    { key: "pending", label: "Pending",     count: counts.pending, tone: "bg-amber-50 text-amber-800" },
-    { key: "ready",   label: "Ready to Pay",count: counts.ready,   tone: "bg-blue-50 text-blue-700" },
-    { key: "paid",    label: "Paid",        count: counts.paid,    tone: "bg-emerald-50 text-emerald-700" },
+    { key: "all",               label: "All",               count: counts.all,               tone: "bg-slate-100 text-slate-700" },
+    { key: "hr_review",         label: "🟡 HR Review",       count: counts.hr_review,         tone: "bg-amber-50 text-amber-800" },
+    { key: "approval_pending",  label: "🟠 Approval Pending", count: counts.approval_pending,  tone: "bg-orange-50 text-orange-700" },
+    { key: "ready_for_payment", label: "🟣 Ready for Payment",count: counts.ready_for_payment, tone: "bg-purple-50 text-purple-700" },
+    { key: "paid",              label: "🟢 Paid",            count: counts.paid,              tone: "bg-emerald-50 text-emerald-700" },
   ];
   return (
     <div className="flex items-center gap-1.5 flex-wrap" data-testid="payroll-quick-chips">
@@ -3202,17 +3280,17 @@ function SummaryTile({ label, value, tone, ring, testid, hint }) {
   );
 }
 
-// Status pill mapped to enterprise-grade labels.
+// Status pill — simplified 5-status HRMS workflow.
 function PayrollStatusPill({ p }) {
   const s = _payrollStage(p);
   const map = {
-    paid:    { cls: "bg-emerald-100 text-emerald-800 border-emerald-200", label: "Paid" },
-    ready:   { cls: "bg-blue-100 text-blue-800 border-blue-200",         label: "Ready to Pay" },
-    issue:   { cls: "bg-red-100 text-red-800 border-red-200",             label: "Issue" },
-    review:  { cls: "bg-indigo-100 text-indigo-800 border-indigo-200",   label: "Pending Review" },
-    pending: { cls: "bg-amber-100 text-amber-800 border-amber-200",       label: "Draft" },
+    paid:              { cls: "bg-emerald-100 text-emerald-800 border-emerald-200", label: "🟢 Paid" },
+    ready_for_payment: { cls: "bg-purple-100 text-purple-800 border-purple-200",    label: "🟣 Ready for Payment" },
+    approval_pending:  { cls: "bg-orange-100 text-orange-800 border-orange-200",    label: "🟠 Approval Pending" },
+    hr_finalized:      { cls: "bg-blue-100 text-blue-800 border-blue-200",          label: "🔵 HR Finalized" },
+    hr_review:         { cls: "bg-amber-100 text-amber-800 border-amber-200",        label: "🟡 HR Review" },
   };
-  const e = map[s] || map.pending;
+  const e = map[s] || map.hr_review;
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider rounded-full border ${e.cls}`} data-testid={`status-pill-${p.id}`}>
       {e.label}
@@ -3228,14 +3306,14 @@ function AttendanceCell({ p }) {
   const paidLv = p.paid_leave_days || 0;
   const unpaidLv = p.unpaid_leave_days || 0;
   const late = p.late_days || 0;
-  const hasIssue = unmarked > 0 || (present + paidLv + (p.half_days || 0) === 0 && p.status === "draft");
+  const hasIssue = _hasAttendanceIssue(p);
   return (
     <div>
       <div className="flex items-center gap-2">
         <span className="text-sm font-semibold text-slate-900 num">{present} / {working} <span className="text-slate-500 font-normal">days</span></span>
         {hasIssue ? (
-          <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-red-700 bg-red-50 px-1.5 py-0.5 rounded" title="Missing attendance / zero-day">
-            <AlertCircle size={10} /> {unmarked > 0 ? `${unmarked} Unmarked` : "Zero attendance"}
+          <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-red-700 bg-red-50 px-1.5 py-0.5 rounded" title="Resolve attendance before finalization">
+            <AlertCircle size={10} /> {unmarked > 0 ? `${unmarked} Unmarked Days` : "Zero attendance"}
           </span>
         ) : (
           <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-700" title="All days accounted for">
@@ -3261,8 +3339,8 @@ function PayrollTableRow(props) {
     onEdit, onPay, onEditPaid, onDelete,
   } = props;
   const stage = _payrollStage(p);
-  const isPaid = p.status === "paid";
-  const isIssue = stage === "issue";
+  const isPaid = stage === "paid";
+  const isIssue = _hasAttendanceIssue(p);
   return (
     <>
       <tr className="border-b border-slate-100 hover:bg-slate-50 transition-colors" data-testid={`payroll-row-${p.id}`}>
@@ -3287,42 +3365,43 @@ function PayrollTableRow(props) {
         <td className="p-3"><PayrollStatusPill p={p} /></td>
         <td className="p-3 text-right no-print">
           <div className="flex items-center justify-end gap-1.5">
-            {isPaid ? (
+            {stage === "paid" ? (
               <Button size="sm" variant="outline" onClick={onSalary} className="rounded-md h-8 px-3 text-xs" data-testid={`view-detail-${p.id}`}>
                 View Payroll
               </Button>
-            ) : isIssue ? (
-              <Button
-                size="sm"
-                onClick={onSalary}
-                className="rounded-md h-8 px-3 text-xs bg-red-50 border border-red-300 text-red-700 hover:bg-red-100"
-                data-testid={`resolve-issues-${p.id}`}
-                title="Attendance or salary issue — resolve before submitting"
-              >
-                <AlertCircle size={12} className="mr-1" /> Resolve Issues
+            ) : stage === "ready_for_payment" ? (
+              (isAdmin || isAccountant) ? (
+                <Button size="sm" onClick={onPay} className="rounded-md h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" data-testid={`process-payment-${p.id}`}>
+                  Process Payment
+                </Button>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-purple-50 text-purple-700 border border-purple-200" data-testid={`ready-${p.id}`}>
+                  <Clock size={11} /> Ready for Payment
+                </span>
+              )
+            ) : stage === "approval_pending" ? (
+              <Button size="sm" variant="outline" onClick={onSalary} className="rounded-md h-8 px-3 text-xs border-orange-300 text-orange-700 hover:bg-orange-50" data-testid={`view-approval-${p.id}`}>
+                View / Approve
               </Button>
-            ) : p.batch_id ? (
-              // Row already inside an active/paid batch — show contextual "Awaiting" chip.
-              <span
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200"
-                data-testid={`awaiting-${p.id}`}
-              >
-                <Clock size={11} /> Awaiting Accounts
-              </span>
-            ) : userRole === "hr" ? (
-              // Phase 59 — HR CANNOT pay directly. Route them to the batch-finalise flow.
-              <span
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-slate-100 text-slate-700 border border-slate-200"
-                data-testid={`hr-submit-${p.id}`}
-                title="HR: click Finalise Payroll at the top to submit this row for approval"
-              >
-                <ShieldCheck size={11} /> Submit via Finalise
-              </span>
-            ) : (isAdmin || isAccountant) && (
-              // Admin emergency fallback + Accountant per-row pay path
-              <Button size="sm" onClick={onPay} className="rounded-md h-8 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white" data-testid={`pay-payroll-${p.id}`}>
-                Pay
-              </Button>
+            ) : (
+              // hr_review — HR/Admin review & resolve attendance before finalization
+              canManageStaff ? (
+                <Button
+                  size="sm"
+                  onClick={onSalary}
+                  className={isIssue
+                    ? "rounded-md h-8 px-3 text-xs bg-red-50 border border-red-300 text-red-700 hover:bg-red-100"
+                    : "rounded-md h-8 px-3 text-xs bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100"}
+                  data-testid={`review-attendance-${p.id}`}
+                  title={isIssue ? "Resolve attendance before finalization" : "Review attendance"}
+                >
+                  {isIssue ? <><AlertCircle size={12} className="mr-1" /> Review Attendance</> : "Review"}
+                </Button>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider rounded-md bg-amber-50 text-amber-800 border border-amber-200" data-testid={`hr-review-${p.id}`}>
+                  <Clock size={11} /> HR Review
+                </span>
+              )
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

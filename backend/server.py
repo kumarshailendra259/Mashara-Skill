@@ -6565,6 +6565,48 @@ async def delete_staff_document(did: str, user=Depends(get_current_user)):
 
 
 # -------- Attendance --------
+# ============================================================================
+# Attendance Finalization Lock (HRMS simplified payroll workflow)
+# ----------------------------------------------------------------------------
+# When HR "Finalizes Attendance" for a center+month, a lock doc is written so
+# the month's attendance becomes read-only for everyone. Only HR/Admin can
+# reopen it (which also reopens the related payroll batch). Non-destructive —
+# the lock never touches attendance rows themselves.
+# ============================================================================
+async def _attendance_lock_doc(center_id: Optional[str], month: int, year: int):
+    if not center_id:
+        return None
+    return await db.attendance_locks.find_one(
+        {"center_id": center_id, "month": int(month), "year": int(year), "active": {"$ne": False}},
+        {"_id": 0},
+    )
+
+
+async def _is_attendance_locked(center_id: Optional[str], month: int, year: int) -> bool:
+    return bool(await _attendance_lock_doc(center_id, month, year))
+
+
+async def _assert_attendance_editable(staff_id: Optional[str], date_str: Optional[str]):
+    """Raise 423 if the staff's center+month attendance has been finalized."""
+    if not staff_id or not date_str or len(str(date_str)) < 7:
+        return
+    staff = await db.staff.find_one({"id": staff_id}, {"_id": 0, "center_id": 1})
+    cid = (staff or {}).get("center_id")
+    if not cid:
+        return
+    try:
+        y = int(str(date_str)[:4])
+        mo = int(str(date_str)[5:7])
+    except Exception:
+        return
+    if await _is_attendance_locked(cid, mo, y):
+        raise HTTPException(
+            status_code=423,
+            detail="Attendance for this center & month is finalized (locked). Ask HR/Admin to reopen before editing.",
+        )
+
+
+
 @api.post("/attendance")
 async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin", "manager", "center_manager", "hr"))):
     """Admin/HR path to create or edit an attendance row for a staff.
@@ -6588,6 +6630,8 @@ async def mark_attendance(body: AttendanceIn, user=Depends(require_role("admin",
             raise HTTPException(404, "Staff not found")
         if staff_row.get("center_id") not in allowed_centers:
             raise HTTPException(403, "You can only mark attendance for staff at your assigned centers")
+    # HRMS workflow — block edits on a finalized (locked) center+month.
+    await _assert_attendance_editable(doc["staff_id"], doc["date"])
     if not doc.get("marked_at"):
         doc["marked_at"] = datetime.now(timezone.utc).isoformat()
     # PHASE 37 — reject absent/half on weekly-off + holiday dates so a mistake
@@ -6639,6 +6683,8 @@ async def edit_attendance(aid: str, body: AttendanceEditIn, user=Depends(require
         staff_row = await db.staff.find_one({"id": row.get("staff_id")}, {"_id": 0, "center_id": 1})
         if not staff_row or staff_row.get("center_id") not in allowed_centers:
             raise HTTPException(403, "You can only edit attendance for staff at your assigned centers")
+    # HRMS workflow — block edits on a finalized (locked) center+month.
+    await _assert_attendance_editable(row.get("staff_id"), row.get("date"))
     update = body.model_dump(exclude_none=True)
     if not update:
         return row
@@ -11642,6 +11688,22 @@ class PayrollFinaliseIn(BaseModel):
     center_id: Optional[str] = None
 
 
+class AttendanceFinalizeIn(BaseModel):
+    """HRMS one-click: lock attendance + auto-run payroll + submit to approval."""
+    month: int = Field(ge=1, le=12)
+    year: int = Field(ge=2020, le=2100)
+    center_id: Optional[str] = None  # specific center, or None/'all' for every center
+    remarks: Optional[str] = None
+
+
+class AttendanceUnlockIn(BaseModel):
+    """HR/Admin reopen a finalized center+month (unlock attendance + reopen batch)."""
+    month: int = Field(ge=1, le=12)
+    year: int = Field(ge=2020, le=2100)
+    center_id: str
+    reason: Optional[str] = None
+
+
 class PayrollBatchPayIn(BaseModel):
     method: Literal["bank_transfer", "neft", "rtgs", "imps", "cheque", "cash", "upi", "other"] = "bank_transfer"
     bank_account_id: Optional[str] = None
@@ -11837,6 +11899,141 @@ async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("a
         created_batches.append(await _payroll_batch_out(batch_id))
 
     return {"batches": created_batches, "skipped_duplicates": skipped_dupes}
+
+
+@api.get("/payroll/attendance-lock")
+async def attendance_lock_status(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    center_id: Optional[str] = None,
+    _=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff")),
+):
+    """Which centers' attendance is finalized (locked) for the given month."""
+    if center_id and center_id not in ("all", ""):
+        d = await _attendance_lock_doc(center_id, month, year)
+        return {"locked": bool(d), "lock": d}
+    docs = await db.attendance_locks.find(
+        {"month": month, "year": year, "active": {"$ne": False}}, {"_id": 0},
+    ).to_list(3000)
+    return {"locked_centers": [x["center_id"] for x in docs], "locks": docs}
+
+
+@api.post("/payroll/finalize-attendance")
+async def finalize_attendance(body: AttendanceFinalizeIn, user=Depends(require_role("admin", "hr"))):
+    """HRMS simplified workflow — one click does EVERYTHING:
+      1. (re)runs payroll for the scope → fresh Draft rows (existing rules unchanged)
+      2. blocks if any employee still has UNMARKED attendance days (returns the list)
+      3. locks attendance for the center(s)+month (read-only until reopened)
+      4. finalises into batch(es) + pushes into the approval workflow
+    """
+    m, y = body.month, body.year
+    cid = body.center_id if (body.center_id and body.center_id != "all") else None
+
+    # 1) Generate / refresh draft payroll rows for the scope.
+    await payroll_run(month=m, year=y, center_id=body.center_id or "all", _=user)
+
+    # 2) Load draft rows in scope and check for blocking unmarked attendance.
+    draft = await db.payroll.find(
+        {"month": m, "year": y, "status": {"$in": [None, "draft", "reopened"]}}, {"_id": 0},
+    ).to_list(5000)
+    sids = [r["staff_id"] for r in draft if r.get("staff_id")]
+    staff_by_id = {}
+    if sids:
+        for s in await db.staff.find({"id": {"$in": sids}}, {"_id": 0, "id": 1, "center_id": 1, "name": 1}).to_list(5000):
+            staff_by_id[s["id"]] = s
+
+    def _in_scope(r):
+        if cid is None:
+            return True
+        return (staff_by_id.get(r.get("staff_id")) or {}).get("center_id") == cid
+
+    scoped = [r for r in draft if _in_scope(r)]
+    if not scoped:
+        raise HTTPException(400, f"No draft payroll rows to finalize for {m:02d}/{y}. Already finalized or nothing to run.")
+
+    blockers = [
+        {
+            "staff_id": r.get("staff_id"),
+            "staff_name": r.get("staff_name") or (staff_by_id.get(r.get("staff_id")) or {}).get("name"),
+            "unmarked": round(float(r.get("unmarked_absent_days") or 0), 1),
+        }
+        for r in scoped if float(r.get("unmarked_absent_days") or 0) > 0
+    ]
+    if blockers:
+        blockers.sort(key=lambda x: -x["unmarked"])
+        raise HTTPException(status_code=400, detail={
+            "code": "attendance_issues",
+            "message": f"{len(blockers)} employee(s) have unmarked attendance days. Resolve before finalization.",
+            "blockers": blockers[:100],
+        })
+
+    # 3) Lock attendance for each center in scope (non-destructive).
+    centers_to_lock = {cid} if cid else {
+        (staff_by_id.get(r.get("staff_id")) or {}).get("center_id") for r in scoped
+    }
+    now = datetime.now(timezone.utc).isoformat()
+    locked: list = []
+    for c in centers_to_lock:
+        if not c:
+            continue
+        await db.attendance_locks.update_one(
+            {"center_id": c, "month": m, "year": y},
+            {"$set": {"center_id": c, "month": m, "year": y, "active": True,
+                      "locked_at": now, "locked_by": user["id"],
+                      "locked_by_name": user.get("name") or user.get("email")}},
+            upsert=True,
+        )
+        locked.append(c)
+
+    # 4) Finalise → batch + approval workflow.
+    res = await payroll_finalise(PayrollFinaliseIn(month=m, year=y, center_id=body.center_id, remarks=body.remarks), user)
+    res["locked_centers"] = locked
+    return res
+
+
+@api.post("/attendance/unlock")
+async def unlock_attendance(body: AttendanceUnlockIn, user=Depends(require_role("admin", "hr"))):
+    """HR/Admin reopen a finalized center+month — unlocks attendance for editing
+    and, when a NON-paid payroll batch exists, reopens it (rows → Draft).
+    Paid batches must be reversed via the admin batch-reopen flow separately."""
+    m, y, cid = body.month, body.year, body.center_id
+    now = datetime.now(timezone.utc).isoformat()
+    lock = await _attendance_lock_doc(cid, m, y)
+    await db.attendance_locks.update_many(
+        {"center_id": cid, "month": m, "year": y},
+        {"$set": {"active": False, "reopened_at": now, "reopened_by": user["id"],
+                  "reopened_by_name": user.get("name") or user.get("email"),
+                  "reopen_reason": body.reason or ""}},
+    )
+
+    reopened_batch = None
+    paid_batch_blocked = False
+    batch = await db.payroll_batches.find_one(
+        {"center_id": cid, "month": m, "year": y,
+         "status": {"$in": ["pending_approval", "approved", "pending_payment", "processing", "reopened"]}},
+        {"_id": 0}, sort=[("created_at", -1)],
+    )
+    if batch and batch.get("status") != "paid":
+        await db.payroll.update_many(
+            {"batch_id": batch["id"]},
+            {"$set": {"status": "draft", "locked": False, "batch_status": "reopened", "reopened_at": now},
+             "$unset": {"paid_at": "", "txn_id": ""}},
+        )
+        audit_log = list(batch.get("audit_log") or [])
+        audit_log.append({"action": "reopened", "at": now, "by": user["id"],
+                          "by_name": user.get("name") or user.get("email"), "by_role": user.get("role"),
+                          "old_status": batch.get("status"), "new_status": "reopened",
+                          "remarks": body.reason or "Reopened via attendance unlock"})
+        await db.payroll_batches.update_one(
+            {"id": batch["id"]},
+            {"$set": {"status": "reopened", "reopened_at": now, "reopened_by": user["id"], "audit_log": audit_log}},
+        )
+        reopened_batch = batch["id"]
+    elif batch and batch.get("status") == "paid":
+        paid_batch_blocked = True
+
+    return {"unlocked": True, "was_locked": bool(lock), "reopened_batch": reopened_batch,
+            "paid_batch_blocked": paid_batch_blocked}
 
 
 async def _payroll_batch_out(batch_id: str) -> dict:
