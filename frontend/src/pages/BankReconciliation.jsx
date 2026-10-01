@@ -20,6 +20,8 @@ import {
   Building2, Wallet, Smartphone, Plus, ArrowDown, Settings, RefreshCw,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { useFY } from "@/context/FYContext";
+import FYSwitcher from "@/components/FYSwitcher";
 
 const TYPE_META = {
   bank: { label: "Bank", icon: Building2, tone: "bg-blue-50 text-blue-700 border-blue-200" },
@@ -39,6 +41,7 @@ const EMPTY_ACCT = {
 
 export default function BankReconciliation() {
   const { user } = useAuth();
+  const { fy } = useFY();
   const isAdmin = user?.role === "admin";
 
   const [accounts, setAccounts] = useState([]);
@@ -81,7 +84,7 @@ export default function BankReconciliation() {
   };
 
   useEffect(() => { loadAccounts(); }, []);
-  useEffect(() => { loadTxns(); }, [filter]);
+  useEffect(() => { loadTxns(); }, [filter, fy]);
 
   const totalBalance = useMemo(
     () => accounts.filter((a) => a.is_active).reduce((s, a) => s + Number(a.current_balance || 0), 0),
@@ -157,6 +160,7 @@ export default function BankReconciliation() {
           <p className="text-sm text-[var(--muted)] mt-1">Live balances across all accounts, wallets and cash — every outflow debits automatically.</p>
         </div>
         <div className="flex items-center gap-2">
+          <FYSwitcher variant="inline" />
           <Button variant="outline" size="sm" onClick={() => { loadAccounts(); loadTxns(); }} className="rounded-none" data-testid="br-refresh">
             <RefreshCw className="w-4 h-4 mr-1" /> Refresh
           </Button>

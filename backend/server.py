@@ -10914,15 +10914,21 @@ async def delete_vendor(vid: str, _=Depends(require_role("admin"))):
 async def top_vendors(
     limit: int = 10,
     days: Optional[int] = None,
+    fy: Optional[str] = None,
     user=Depends(require_finance_visible),
 ):
     """Aggregate spend per vendor from approved payments (which represent
     real procurement outflows). Returns list sorted by total_spend desc.
 
     ``days`` filters payments where created_at is within the last N days.
+    ``fy`` restricts to a Financial Year (by payment created_at); FY takes
+    precedence over ``days`` when both are supplied.
     """
     q: dict = {"status": "paid"}
-    if days and days > 0:
+    _fyr = _finyr_dt_range(fy)
+    if _fyr:
+        q["created_at"] = _fyr
+    elif days and days > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         q["created_at"] = {"$gte": cutoff}
     pipe = [
@@ -18742,6 +18748,7 @@ async def list_bank_transactions(
     center_id: Optional[str] = None,
     from_date: Optional[str] = Query(default=None, alias="from"),
     to_date: Optional[str] = Query(default=None, alias="to"),
+    fy: Optional[str] = None,
     q: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
@@ -18754,6 +18761,8 @@ async def list_bank_transactions(
         query["source"] = source
     if center_id:
         query["center_id"] = center_id
+    # FY narrows the statement date window (intersects with any from/to).
+    from_date, to_date = _fy_clamp(from_date, to_date, fy)
     if from_date or to_date:
         drange: dict = {}
         if from_date:

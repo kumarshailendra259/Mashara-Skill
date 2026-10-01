@@ -2507,3 +2507,16 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **Frontend (HRMS.jsx):** `finalizeAttendance` confirm text now mentions auto-LOP; removed the unmarked-blocker alert branch; success shows an extra toast "Auto-converted N unmarked day(s) → Absent (LOP) for M employee(s)".
 
 **Verified (curl, real scenario + cleanup):** center 10751714 / May-2026, 3 staff, 0 attendance → finalize converted 78 unmarked days (26 working days × 3, weekly-offs correctly excluded) to auto_lop Absent rows, net ₹0 (correct LOP), batch created (pending_payment → Ready for Payment), lock set with auto_lop_note, unmarked=0. Test data cleaned up afterwards. Workflow: Attendance → HR Review/Edit → Unmarked auto→Absent → Finalized → Approval → Payment → Paid.
+
+## Phase 96 (Jun 2026) — FY System Phase 3 (Bank Reconciliation + Vendor spend)
+
+**Backend (server.py):**
+- `GET /api/bank-transactions` — added `fy` param; clamps from/to via `_fy_clamp` on the `date` field (statement date window).
+- `GET /api/reports/top-vendors` — added `fy` param; filters payment `created_at` via `_finyr_dt_range`; FY takes precedence over `days` when both given.
+
+**Frontend:**
+- BankReconciliation.jsx — `useFY`, refetch on FY change, inline FYSwitcher in header. (Global header FY selector also applies via interceptor.)
+
+**MIS — intentionally NOT FY-scoped:** `/mis/overview`, `/mis/live/*`, projects/centers/candidates/mobilization are OPERATIONAL/master data (center & candidate counts, BG expiry, enrolment %), not payment/transaction records with a transaction-date FY dimension. Applying FY there would be meaningless. Vendor MASTER (`/vendors`) is likewise master data (no date) — only vendor SPEND (top-vendors, from payments) is FY-relevant and now FY-aware.
+
+**Verified (curl):** bank-transactions ALL=1 / FY2025-26=0 / FY2026-27=1 (row dated 2026-08-10); top-vendors FY2025-26=0 vs FY2026-27=6 (payments sit in 2026-27). Frontend compiles clean.
