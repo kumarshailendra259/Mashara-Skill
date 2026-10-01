@@ -928,6 +928,8 @@ export default function HRMS() {
     if (!window.confirm(
       `Finalize Attendance for ${pMonth}/${pYear}?\n\n` +
       `Scope: ${centerLabel}\n\n` +
+      `Any Unmarked working days will be automatically marked ABSENT (LOP). ` +
+      `Weekly-offs, holidays and approved leaves are NOT affected.\n\n` +
       `After finalization, attendance will be LOCKED for editing and payroll will be ` +
       `auto-generated and sent for approval.\n\nAre you sure?`,
     )) return;
@@ -939,20 +941,17 @@ export default function HRMS() {
       const batches = data.batches || [];
       const staffTotal = batches.reduce((s, b) => s + (b.staff_count || 0), 0);
       const netTotal = batches.reduce((s, b) => s + (b.net_payable || 0), 0);
+      const lop = data.auto_lop || {};
       toast.success(
         `Attendance finalized · ${batches.length} batch${batches.length > 1 ? "es" : ""} · ${staffTotal} staff · ₹${netTotal.toLocaleString("en-IN")} sent for approval`,
+        { duration: 6000 },
       );
+      if (lop.converted_days > 0) {
+        toast.info(`Auto-converted ${lop.converted_days} unmarked day(s) → Absent (LOP) for ${lop.affected_employees} employee(s).`, { duration: 7000 });
+      }
       loadBatches(); loadAll(); loadLockStatus();
     } catch (e) {
-      // Surface attendance-issue blockers clearly as an action alert.
-      const detail = e?.response?.data?.detail;
-      if (detail && detail.code === "attendance_issues") {
-        const names = (detail.blockers || []).slice(0, 6).map((b) => `• ${b.staff_name} — ${b.unmarked} unmarked`).join("\n");
-        toast.error(`${detail.message}`, { duration: 8000 });
-        window.alert(`${detail.message}\n\n${names}${(detail.blockers || []).length > 6 ? `\n…and ${detail.blockers.length - 6} more` : ""}\n\nResolve attendance before finalizing.`);
-      } else {
-        toast.error(formatError(e));
-      }
+      toast.error(formatError(e));
     }
   };
 

@@ -9225,6 +9225,94 @@ async def _compute_payroll_for_staff(s: dict, month: int, year: int,
     }
 
 
+async def _auto_lop_unmarked_for_staff(s: dict, month: int, year: int,
+                                        paid_off_dates: set, weekly_off_weekdays: set,
+                                        now_iso: str, actor: dict) -> List[str]:
+    """HRMS finalization rule — convert UNMARKED working days to Absent (LOP).
+
+    A day is converted only when it is a genuine working day with NO record:
+    not a weekly-off, not a holiday, not an approved leave, and within the
+    employee's joining/exit window. Weekly-off / holiday / approved-leave /
+    pre-joining / post-exit days are never touched. Creates an attendance row
+    with status='absent' tagged auto_lop for a clear audit trail. Idempotent:
+    days that already have any attendance row are skipped.
+    """
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+
+    def _parse(d):
+        try:
+            return datetime.strptime(d, "%Y-%m-%d").date() if d else None
+        except (ValueError, TypeError):
+            return None
+
+    month_start_d = datetime.strptime(f"{year:04d}-{month:02d}-01", "%Y-%m-%d").date()
+    month_end_d = datetime.strptime(f"{year:04d}-{month:02d}-{last_day:02d}", "%Y-%m-%d").date()
+    joining = _parse(s.get("joining_date"))
+    exit_dt = _parse(s.get("exit_date"))
+    if joining and joining > month_end_d:
+        return []
+    if exit_dt and exit_dt < month_start_d:
+        return []
+    eff_start = max(joining, month_start_d) if joining else month_start_d
+    eff_end = min(exit_dt, month_end_d) if exit_dt else month_end_d
+    if (eff_end - eff_start).days < 0:
+        return []
+
+    att_start, att_end = eff_start.isoformat(), eff_end.isoformat()
+    window_off_dates = {d for d in paid_off_dates if att_start <= d <= att_end}
+
+    rows = await db.attendance.find(
+        {"staff_id": s["id"], "date": {"$gte": att_start, "$lte": att_end}}, {"_id": 0, "date": 1},
+    ).to_list(1000)
+    marked = {r.get("date") for r in rows if r.get("date")}
+
+    # Approved-leave dates (never converted)
+    leave_docs = await db.leaves.find({
+        "staff_id": s["id"], "status": "approved",
+        "start_date": {"$lte": att_end}, "end_date": {"$gte": att_start},
+    }, {"_id": 0, "start_date": 1, "end_date": 1}).to_list(200)
+    leave_dates = set()
+    for lv in leave_docs:
+        try:
+            d = max(datetime.strptime(lv["start_date"], "%Y-%m-%d").date(), eff_start)
+            stop = min(datetime.strptime(lv["end_date"], "%Y-%m-%d").date(), eff_end)
+        except (KeyError, ValueError, TypeError):
+            continue
+        while d <= stop:
+            leave_dates.add(d.isoformat())
+            d = d + timedelta(days=1)
+
+    converted: List[str] = []
+    cur = eff_start
+    while cur <= eff_end:
+        iso = cur.isoformat()
+        is_off = iso in window_off_dates or cur.strftime("%A").lower() in weekly_off_weekdays
+        if not is_off and iso not in marked and iso not in leave_dates:
+            converted.append(iso)
+        cur = cur + timedelta(days=1)
+
+    if converted:
+        docs = [{
+            "id": str(uuid.uuid4()),
+            "staff_id": s["id"],
+            "center_id": s.get("center_id"),
+            "date": iso,
+            "status": "absent",
+            "marked_via": "auto_lop",
+            "auto_lop": True,
+            "auto_lop_at": now_iso,
+            "auto_lop_by": actor.get("id"),
+            "auto_lop_by_name": actor.get("name") or actor.get("email"),
+            "remarks": "System converted Unmarked → Absent (LOP) during attendance finalization.",
+            "marked_at": now_iso,
+            "created_at": now_iso,
+        } for iso in converted]
+        await db.attendance.insert_many(docs)
+    return converted
+
+
+
 def _compute_late_buckets(rows: List[dict], shift: Optional[dict]) -> dict:
     """Walk attendance rows; for each present day compute late_minutes vs shift start+grace.
     Returns {minor: N, half_day: N, full_day: N, total_late_minutes: M} per user-defined rules:
@@ -11922,57 +12010,56 @@ async def attendance_lock_status(
 async def finalize_attendance(body: AttendanceFinalizeIn, user=Depends(require_role("admin", "hr"))):
     """HRMS simplified workflow — one click does EVERYTHING:
       1. (re)runs payroll for the scope → fresh Draft rows (existing rules unchanged)
-      2. blocks if any employee still has UNMARKED attendance days (returns the list)
-      3. locks attendance for the center(s)+month (read-only until reopened)
-      4. finalises into batch(es) + pushes into the approval workflow
+      2. AUTO-CONVERTS every Unmarked working day → Absent (LOP) with an audit
+         trail (weekly-off / holiday / approved-leave / pre-join / post-exit days
+         are never touched). HR is never blocked by unmarked days.
+      3. re-runs payroll so Unmarked becomes 0 and LOP deductions are applied
+      4. locks attendance for the center(s)+month (read-only until reopened)
+      5. finalises into batch(es) + pushes into the approval workflow
     """
     m, y = body.month, body.year
     cid = body.center_id if (body.center_id and body.center_id != "all") else None
+    now = datetime.now(timezone.utc).isoformat()
 
     # 1) Generate / refresh draft payroll rows for the scope.
     await payroll_run(month=m, year=y, center_id=body.center_id or "all", _=user)
 
-    # 2) Load draft rows in scope and check for blocking unmarked attendance.
+    # 2) AUTO-CONVERT unmarked working days → Absent (LOP) for staff in scope.
+    import calendar as _cal
+    _ld = _cal.monthrange(y, m)[1]
+    paid_off_dates, weekly_off_weekdays = await _paid_off_dates_in(
+        f"{y:04d}-{m:02d}-01", f"{y:04d}-{m:02d}-{_ld:02d}")
+    staff_query: dict = {"active": {"$ne": False}}
+    if cid:
+        staff_query["center_id"] = cid
+    staff_docs = await db.staff.find(staff_query, {"_id": 0}).to_list(5000)
+    total_converted_days = 0
+    affected_employees = 0
+    for s in staff_docs:
+        conv = await _auto_lop_unmarked_for_staff(s, m, y, paid_off_dates, weekly_off_weekdays, now, user)
+        if conv:
+            total_converted_days += len(conv)
+            affected_employees += 1
+
+    # 3) Re-run payroll so Unmarked → 0 and LOP deductions are reflected.
+    if total_converted_days:
+        await payroll_run(month=m, year=y, center_id=body.center_id or "all", _=user)
+
+    # Confirm there is something to finalize.
     draft = await db.payroll.find(
-        {"month": m, "year": y, "status": {"$in": [None, "draft", "reopened"]}}, {"_id": 0},
+        {"month": m, "year": y, "status": {"$in": [None, "draft", "reopened"]}}, {"_id": 0, "staff_id": 1},
     ).to_list(5000)
-    sids = [r["staff_id"] for r in draft if r.get("staff_id")]
-    staff_by_id = {}
-    if sids:
-        for s in await db.staff.find({"id": {"$in": sids}}, {"_id": 0, "id": 1, "center_id": 1, "name": 1}).to_list(5000):
-            staff_by_id[s["id"]] = s
-
-    def _in_scope(r):
-        if cid is None:
-            return True
-        return (staff_by_id.get(r.get("staff_id")) or {}).get("center_id") == cid
-
-    scoped = [r for r in draft if _in_scope(r)]
-    if not scoped:
+    if cid:
+        sids_scope = {s["id"] for s in staff_docs}
+        draft = [r for r in draft if r.get("staff_id") in sids_scope]
+    if not draft:
         raise HTTPException(400, f"No draft payroll rows to finalize for {m:02d}/{y}. Already finalized or nothing to run.")
 
-    blockers = [
-        {
-            "staff_id": r.get("staff_id"),
-            "staff_name": r.get("staff_name") or (staff_by_id.get(r.get("staff_id")) or {}).get("name"),
-            "unmarked": round(float(r.get("unmarked_absent_days") or 0), 1),
-        }
-        for r in scoped if float(r.get("unmarked_absent_days") or 0) > 0
-    ]
-    if blockers:
-        blockers.sort(key=lambda x: -x["unmarked"])
-        raise HTTPException(status_code=400, detail={
-            "code": "attendance_issues",
-            "message": f"{len(blockers)} employee(s) have unmarked attendance days. Resolve before finalization.",
-            "blockers": blockers[:100],
-        })
-
-    # 3) Lock attendance for each center in scope (non-destructive).
-    centers_to_lock = {cid} if cid else {
-        (staff_by_id.get(r.get("staff_id")) or {}).get("center_id") for r in scoped
-    }
-    now = datetime.now(timezone.utc).isoformat()
+    # 4) Lock attendance for each center in scope (non-destructive).
+    centers_to_lock = {cid} if cid else {s.get("center_id") for s in staff_docs}
     locked: list = []
+    lop_note = (f"System converted Unmarked → Absent (LOP) during finalization: "
+                f"{total_converted_days} day(s) across {affected_employees} employee(s).")
     for c in centers_to_lock:
         if not c:
             continue
@@ -11980,14 +12067,30 @@ async def finalize_attendance(body: AttendanceFinalizeIn, user=Depends(require_r
             {"center_id": c, "month": m, "year": y},
             {"$set": {"center_id": c, "month": m, "year": y, "active": True,
                       "locked_at": now, "locked_by": user["id"],
-                      "locked_by_name": user.get("name") or user.get("email")}},
+                      "locked_by_name": user.get("name") or user.get("email"),
+                      "auto_lop_days": total_converted_days,
+                      "auto_lop_employees": affected_employees,
+                      "auto_lop_note": lop_note}},
             upsert=True,
         )
         locked.append(c)
 
-    # 4) Finalise → batch + approval workflow.
+    # 5) Finalise → batch + approval workflow.
     res = await payroll_finalise(PayrollFinaliseIn(month=m, year=y, center_id=body.center_id, remarks=body.remarks), user)
+
+    # Record the LOP conversion in each created batch's audit log.
+    if total_converted_days:
+        for b in (res.get("batches") or []):
+            await db.payroll_batches.update_one(
+                {"id": b.get("id")},
+                {"$push": {"audit_log": {"action": "auto_lop_conversion", "at": now,
+                                         "by": user["id"], "by_name": user.get("name") or user.get("email"),
+                                         "by_role": user.get("role"), "remarks": lop_note}}},
+            )
+
     res["locked_centers"] = locked
+    res["auto_lop"] = {"converted_days": total_converted_days,
+                       "affected_employees": affected_employees, "note": lop_note}
     return res
 
 

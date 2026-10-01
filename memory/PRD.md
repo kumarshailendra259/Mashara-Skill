@@ -2494,3 +2494,16 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **Verified (testing_agent iter81, backend 11/11):** lock status, finalize role-gate (accountant 403), finalize blocks on unmarked (400), 423 enforcement on POST+PATCH attendance, unlock clears lock + edit succeeds, unlock role gate, legacy endpoints regression. Frontend: 5-status chips + Finalize button + no old labels + issue-as-alert confirmed. Row-level pills/banner code-reviewed (test month had 0 rows). Main agent curl-verified lock 423→unlock→200 + finalize blocking.
 
 **Optional polish (not done):** swap native confirm()/prompt() for styled Shadcn AlertDialog.
+
+## Phase 95 (Jun 2026) — HRMS: Auto-convert Unmarked → Absent (LOP) at Finalization
+
+**Business rule change:** "Finalize Attendance" no longer BLOCKS on unmarked working days. Instead it auto-converts them to Absent (LOP), recalculates, sets unmarked to 0, keeps an audit trail, and proceeds.
+
+**Backend (server.py):**
+- NEW helper `_auto_lop_unmarked_for_staff(s, month, year, paid_off_dates, weekly_off_weekdays, now, actor)` — finds genuine Unmarked working days (NOT weekly-off, NOT holiday, NOT approved leave, within joining/exit window, no existing attendance row) and inserts attendance rows with `status="absent", marked_via="auto_lop", auto_lop=True` + audit fields. Idempotent.
+- Rewrote `POST /api/payroll/finalize-attendance`: run payroll → auto-LOP convert for all scoped staff → RE-run payroll (unmarked→0, LOP deductions applied) → lock attendance (lock doc stores auto_lop_days/employees/note) → finalise into batch(es) → each batch audit_log gets an `auto_lop_conversion` entry. Response includes `auto_lop: {converted_days, affected_employees, note}`. NO longer returns 400 attendance_issues.
+- Payroll calculations, weekly-off/holiday/leave/joining/exit handling all UNCHANGED (reuses `_paid_off_dates_in` + same date classification as `_compute_payroll_for_staff`).
+
+**Frontend (HRMS.jsx):** `finalizeAttendance` confirm text now mentions auto-LOP; removed the unmarked-blocker alert branch; success shows an extra toast "Auto-converted N unmarked day(s) → Absent (LOP) for M employee(s)".
+
+**Verified (curl, real scenario + cleanup):** center 10751714 / May-2026, 3 staff, 0 attendance → finalize converted 78 unmarked days (26 working days × 3, weekly-offs correctly excluded) to auto_lop Absent rows, net ₹0 (correct LOP), batch created (pending_payment → Ready for Payment), lock set with auto_lop_note, unmarked=0. Test data cleaned up afterwards. Workflow: Attendance → HR Review/Edit → Unmarked auto→Absent → Finalized → Approval → Payment → Paid.
