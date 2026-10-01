@@ -11,6 +11,7 @@ import {
   Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet, Users, User as UserIcon,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { useAuth } from "@/context/AuthContext";
 
 // Unified inbox showing every request awaiting MY action across:
 // - Transactions (chain approver OR partner cross-approval eligible)
@@ -37,6 +38,8 @@ const FALLBACK_META = { icon: Inbox, label: "Approval", color: "bg-gray-100 text
 
 export default function PendingApprovals() {
   const nav = useNavigate();
+  const { user } = useAuth();
+  const roleIsAccounts = ["admin", "accountant"].includes(user?.role);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState("all");
@@ -56,6 +59,15 @@ export default function PendingApprovals() {
   // Phase 29 — Bank/Cash account for final-step debit of Payment / Reimbursement.
   const [bankAccounts, setBankAccounts] = useState([]);
   const [bankAccountId, setBankAccountId] = useState("");
+  // One-screen Approve+Pay (payroll) — captured when an Accounts/Admin user is the
+  // FINAL approver of a payroll batch, so they approve + record payment in one shot.
+  const [payBatch, setPayBatch] = useState(null);
+  const [payPartners, setPayPartners] = useState([]);
+  const [paySel, setPaySel] = useState({});   // staff_id -> bool (who to pay now)
+  const [payForm, setPayForm] = useState({
+    method: "neft", payment_date: new Date().toISOString().slice(0, 10),
+    utr: "", partner_id: "", bank_account_id: "",
+  });
 
   const load = async () => {
     setLoading(true);
@@ -118,6 +130,31 @@ export default function PendingApprovals() {
     setTxnCenterId(item?.summary?.center_id || "");
     setTxnPartnerId("");
     setBankAccountId("");
+    // One-screen Approve+Pay: an Accounts/Admin user finalising a payroll batch
+    // records the payment inside the same dialog.
+    setPayBatch(null);
+    setPayPartners([]);
+    setPaySel({});
+    setPayForm({ method: "neft", payment_date: new Date().toISOString().slice(0, 10), utr: "", partner_id: "", bank_account_id: "" });
+    if (action === "approve" && item.request_type === "payroll" && item.is_final_step && roleIsAccounts) {
+      api.get(`/payroll-batches/${item.request_id}`).then((r) => {
+        const b = r.data || {};
+        setPayBatch(b);
+        const sel = {};
+        (b.rows || []).forEach((row) => { if ((row.pay_status || "pending") !== "paid") sel[row.staff_id] = true; });
+        setPaySel(sel);
+      }).catch(() => {});
+      const cid = item?.summary?.center_id;
+      if (cid) {
+        api.get(`/centers/${cid}/mapped-partners`).then((r) => {
+          const act = (r.data || []).filter((p) => p.active !== false);
+          setPayPartners(act);
+          if (act.length === 1) setPayForm((f) => ({ ...f, partner_id: act[0].partner_id }));
+        }).catch(() => {});
+      }
+      if (payers.length === 0) api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
+      api.get("/bank-accounts", { params: { active_only: true } }).then((r) => setBankAccounts(r.data || [])).catch(() => {});
+    }
     // Ask "Paid By" on the FINAL step of a payment, reimbursement, or advance approval.
     // For advance_request the block is optional but the dropdowns still need populated data.
     if (action === "approve" && item.is_final_step && (
@@ -150,6 +187,19 @@ export default function PendingApprovals() {
   );
   const paidByOptional = acting?.item?.request_type === "advance_request";
 
+  // One-screen Approve+Pay flag — true when an Accounts/Admin user is finalising
+  // a payroll batch (payment form shown + "Approve & Record Payment").
+  const isPayrollPay = !!(
+    acting && acting.action === "approve" &&
+    acting.item.request_type === "payroll" &&
+    acting.item.is_final_step && roleIsAccounts
+  );
+  const paySelCount = Object.values(paySel).filter(Boolean).length;
+  const paySelAmount = (payBatch?.rows || [])
+    .filter((r) => paySel[r.staff_id])
+    .reduce((s, r) => s + Number(r.net || 0), 0);
+  const payableRows = (payBatch?.rows || []).filter((r) => (r.pay_status || "pending") !== "paid");
+
   const confirmAct = async () => {
     if (!acting) return;
     if (confirmBusy) return;  // guard: rapid double-click won't fire twice
@@ -157,6 +207,44 @@ export default function PendingApprovals() {
       toast.error("Remarks required (min 3 chars)");
       return;
     }
+
+    // ---- One-screen Approve + Record Payment (payroll) ----
+    if (isPayrollPay) {
+      if (!payForm.partner_id) { toast.error("Please select the Partner for this payroll payment"); return; }
+      if (!paidByUserId) { toast.error("Please select 'Paid By' (who is releasing the money)"); return; }
+      if (!payForm.bank_account_id) { toast.error("Please select the Bank/Debit account"); return; }
+      if (!payForm.payment_date) { toast.error("Payment date is required"); return; }
+      const selectedIds = payableRows.filter((r) => paySel[r.staff_id]).map((r) => r.staff_id);
+      if (selectedIds.length === 0) { toast.error("Select at least one employee to pay"); return; }
+      const payer = payers.find((p) => p.id === paidByUserId);
+      const payingAll = selectedIds.length === payableRows.length;
+      setConfirmBusy(true);
+      try {
+        // 1) finalise the approval (moves batch to pending_payment)
+        await api.post(`/approvals/act`, {
+          request_type: "payroll", request_id: acting.item.request_id,
+          action: "approve", remarks,
+        });
+        // 2) record the payment for the selected employees
+        await api.post(`/payroll-batches/${acting.item.request_id}/pay`, {
+          method: payForm.method,
+          payment_date: payForm.payment_date,
+          utr: payForm.utr || null,
+          remarks,
+          bank_account_id: payForm.bank_account_id,
+          partner_id: payForm.partner_id,
+          paid_by_user_id: paidByUserId,
+          paid_by_name: payer?.name || null,
+          staff_ids: payingAll ? null : selectedIds,
+        });
+        toast.success(payingAll ? "Approved & payment recorded" : `Approved & ${selectedIds.length} employee(s) paid — batch Partially Paid`);
+        setActing(null);
+        load();
+      } catch (e) { toast.error(formatError(e)); }
+      finally { setConfirmBusy(false); }
+      return;
+    }
+
     // For advance_request the attribution is OPTIONAL — approver can skip it and
     // let the Release dialog capture it later. For payment/reimbursement it stays mandatory.
     if (needsPaidBy && !paidByUserId && !paidByOptional) {
@@ -469,7 +557,9 @@ export default function PendingApprovals() {
         <DialogContent className="rounded-none">
           <DialogHeader>
             <DialogTitle className="font-heading">
-              {acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")} {(TYPE_META[acting?.item?.request_type] || FALLBACK_META).label}
+              {isPayrollPay
+                ? "Approve & Pay Payroll Batch"
+                : `${acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")} ${(TYPE_META[acting?.item?.request_type] || FALLBACK_META).label}`}
             </DialogTitle>
           </DialogHeader>
           {acting && (
@@ -664,6 +754,159 @@ export default function PendingApprovals() {
                 </div>
               )}
 
+              {/* One-screen Approve + Record Payment — payroll final step for Accounts/Admin */}
+              {isPayrollPay && (
+                <div className="border border-emerald-300 bg-emerald-50/60 p-3 space-y-3" data-testid="payroll-pay-block">
+                  <div className="overline font-bold text-emerald-900">
+                    Record Payment (same screen — no separate step)
+                  </div>
+
+                  {/* Employee selection — partial payment */}
+                  <div className="bg-white border border-emerald-200">
+                    <div className="flex items-center justify-between px-2 py-1.5 border-b border-emerald-200 text-[11px]">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="text-[10px] uppercase font-bold text-emerald-800 hover:underline"
+                          onClick={() => { const n = {}; payableRows.forEach((r) => { n[r.staff_id] = true; }); setPaySel(n); }}
+                          data-testid="pay-select-all"
+                        >Select all</button>
+                        <span className="text-slate-300">|</span>
+                        <button
+                          type="button"
+                          className="text-[10px] uppercase font-bold text-slate-600 hover:underline"
+                          onClick={() => setPaySel({})}
+                          data-testid="pay-clear-all"
+                        >Clear</button>
+                      </div>
+                      <div className="num font-bold text-emerald-900" data-testid="pay-selected-summary">
+                        {paySelCount}/{payableRows.length} · {inr(paySelAmount)}
+                      </div>
+                    </div>
+                    <div className="max-h-44 overflow-y-auto divide-y divide-emerald-100">
+                      {(payBatch?.rows || []).map((r) => {
+                        const isPaid = (r.pay_status || "pending") === "paid";
+                        return (
+                          <label
+                            key={r.staff_id}
+                            className={`flex items-center gap-2 px-2 py-1.5 text-[12px] ${isPaid ? "bg-slate-50 opacity-70" : "hover:bg-emerald-50 cursor-pointer"}`}
+                            data-testid={`pay-row-${r.staff_id}`}
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={isPaid}
+                              checked={isPaid ? true : !!paySel[r.staff_id]}
+                              onChange={(e) => setPaySel((s) => ({ ...s, [r.staff_id]: e.target.checked }))}
+                              data-testid={`pay-check-${r.staff_id}`}
+                            />
+                            <span className="flex-1 truncate">
+                              <b>{r.staff_name || r.staff_id?.slice(0, 8)}</b>
+                              <span className="text-slate-500 ml-1">{r.employee_code || ""}</span>
+                            </span>
+                            <span className="num font-semibold text-slate-800">{inr(r.net)}</span>
+                            {isPaid && <span className="text-[9px] uppercase font-bold text-emerald-700 bg-emerald-100 border border-emerald-300 px-1">Paid</span>}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Partner *</div>
+                      <select
+                        value={payForm.partner_id}
+                        onChange={(e) => setPayForm((f) => ({ ...f, partner_id: e.target.value }))}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="payroll-partner-select"
+                      >
+                        <option value="">— Select partner —</option>
+                        {payPartners.map((p) => (
+                          <option key={p.partner_id} value={p.partner_id}>{p.name}{p.role ? ` (${p.role})` : ""}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Paid By *</div>
+                      <select
+                        value={paidByUserId}
+                        onChange={(e) => setPaidByUserId(e.target.value)}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="payroll-paidby-select"
+                      >
+                        <option value="">— Select payer —</option>
+                        {payers.map((p) => (
+                          <option key={p.id} value={p.id}>{p.name} ({p.role})</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Bank / Debit Account *</div>
+                      <select
+                        value={payForm.bank_account_id}
+                        onChange={(e) => setPayForm((f) => ({ ...f, bank_account_id: e.target.value }))}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="payroll-bank-select"
+                      >
+                        <option value="">— Select account —</option>
+                        {bankAccounts.map((a) => (
+                          <option key={a.id} value={a.id}>{a.name} — ₹{Number(a.current_balance || 0).toLocaleString("en-IN")}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Payment Mode *</div>
+                      <select
+                        value={payForm.method}
+                        onChange={(e) => setPayForm((f) => ({ ...f, method: e.target.value }))}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="payroll-method-select"
+                      >
+                        <option value="neft">NEFT</option>
+                        <option value="rtgs">RTGS</option>
+                        <option value="imps">IMPS</option>
+                        <option value="bank_transfer">Bank Transfer</option>
+                        <option value="upi">UPI</option>
+                        <option value="cheque">Cheque</option>
+                        <option value="cash">Cash</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Payment Date *</div>
+                      <input
+                        type="date"
+                        value={payForm.payment_date}
+                        onChange={(e) => setPayForm((f) => ({ ...f, payment_date: e.target.value }))}
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2"
+                        data-testid="payroll-date"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">UTR / Ref</div>
+                      <input
+                        value={payForm.utr}
+                        onChange={(e) => setPayForm((f) => ({ ...f, utr: e.target.value }))}
+                        placeholder="e.g. UTR12345678"
+                        className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2 font-mono"
+                        data-testid="payroll-utr"
+                      />
+                    </div>
+                  </div>
+                  <div className="text-[10px] text-emerald-900/80">
+                    {paySelCount < payableRows.length
+                      ? "Sirf selected employees ko ab pay kiya jaayega — baaki PENDING rahenge aur batch 'Partially Paid' ho jaayega (baad me Retry se pay kar sakte hain)."
+                      : "Approve karte hi payment transaction create hoga aur saare employees PAID ho jaayenge."}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <div className="overline text-xs mb-1">
                   Remarks <span className="text-[var(--danger)]">*</span>
@@ -708,7 +951,9 @@ export default function PendingApprovals() {
                   {acting?.action === "approve" && <Check size={14} />}
                   {acting?.action === "reject" && <X size={14} />}
                   {acting?.action === "send_back" && <Undo2 size={14} />}
-                  Confirm {acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")}
+                  {isPayrollPay
+                    ? "Approve & Record Payment"
+                    : `Confirm ${acting?.action === "approve" ? "Approve" : (acting?.action === "reject" ? "Reject" : "Send Back")}`}
                 </>
               )}
             </Button>

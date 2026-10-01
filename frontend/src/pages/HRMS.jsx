@@ -2592,6 +2592,7 @@ const BATCH_STATUS_TONE = {
   pending_approval: { cls: "bg-amber-100 text-amber-700 border-amber-300", label: "Pending Approval" },
   approved:        { cls: "bg-blue-100 text-blue-700 border-blue-300",   label: "Approved" },
   pending_payment: { cls: "bg-indigo-100 text-indigo-700 border-indigo-300", label: "Accounts Pending Payment" },
+  partially_paid:  { cls: "bg-fuchsia-100 text-fuchsia-700 border-fuchsia-300", label: "Partially Paid" },
   processing:      { cls: "bg-cyan-100 text-cyan-700 border-cyan-300",   label: "Processing" },
   paid:            { cls: "bg-emerald-100 text-emerald-700 border-emerald-300", label: "Paid" },
   rejected:        { cls: "bg-red-100 text-red-700 border-red-300",       label: "Rejected" },
@@ -2671,7 +2672,7 @@ function PayrollBatchesSection({ batches, centers, onOpen, onProcessPayment, cur
             className="h-9 w-full border border-slate-300 rounded-md px-2 text-sm bg-white"
           >
             <option value="all">All statuses</option>
-            {["pending_approval", "pending_payment", "paid", "reopened", "rejected"].map((s) => (
+            {["pending_approval", "pending_payment", "partially_paid", "paid", "reopened", "rejected"].map((s) => (
               <option key={s} value={s}>{BATCH_STATUS_TONE[s]?.label || s}</option>
             ))}
           </select>
@@ -2740,20 +2741,20 @@ function PayrollBatchesSection({ batches, centers, onOpen, onProcessPayment, cur
                     </td>
                     <td className="py-2 pr-3 text-right">
                       <div className="flex items-center justify-end gap-1.5">
-                        {canPay && b.status === "pending_payment" && (
+                        {canPay && (b.status === "pending_payment" || b.status === "partially_paid") && (
                           <Button
                             size="sm" onClick={() => onProcessPayment(b.id)}
                             className="rounded-md h-7 px-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white gap-1"
                             data-testid={`pb-pay-${b.id}`}
                             title="Record payment — creates the transaction & captures bank account / UTR"
                           >
-                            <Receipt size={11} /> Process Payment
+                            <Receipt size={11} /> {b.status === "partially_paid" ? "Retry Payment" : "Process Payment"}
                           </Button>
                         )}
                         <Button
-                          size="sm" variant={canPay && b.status === "pending_payment" ? "outline" : "default"}
+                          size="sm" variant={canPay && (b.status === "pending_payment" || b.status === "partially_paid") ? "outline" : "default"}
                           onClick={() => onOpen(b.id)}
-                          className={canPay && b.status === "pending_payment"
+                          className={canPay && (b.status === "pending_payment" || b.status === "partially_paid")
                             ? "rounded-md h-7 px-2 text-xs gap-1"
                             : "rounded-md h-7 px-2 text-xs bg-blue-600 hover:bg-blue-700 text-white gap-1"}
                           data-testid={`pb-open-${b.id}`}
@@ -2829,26 +2830,42 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
   const [batch, setBatch] = useState(null);
   const [busy, setBusy] = useState(false);
   const [payOpen, setPayOpen] = useState(false);
-  const [payForm, setPayForm] = useState({ method: "neft", payment_date: new Date().toISOString().slice(0, 10), utr: "", remarks: "" });
+  const [payForm, setPayForm] = useState({ method: "neft", payment_date: new Date().toISOString().slice(0, 10), utr: "", remarks: "", bank_account_id: "", partner_id: "", paid_by_user_id: "" });
   const [bankAccounts, setBankAccounts] = useState([]);
+  const [payers, setPayers] = useState([]);
+  const [partners, setPartners] = useState([]);
+  const [paySel, setPaySel] = useState({});   // staff_id -> bool (who to pay now)
 
   const load = React.useCallback(async () => {
     if (!batchId) { setBatch(null); return; }
     try {
       const { data } = await api.get(`/payroll-batches/${batchId}`);
       setBatch(data);
+      // Default-select every still-unpaid employee for the next payment run.
+      const sel = {};
+      (data.rows || []).forEach((row) => { if ((row.pay_status || "pending") !== "paid") sel[row.staff_id] = true; });
+      setPaySel(sel);
+      // Auto-select the partner when the batch's center has exactly one mapped partner.
+      if (data.center_id) {
+        api.get(`/centers/${data.center_id}/mapped-partners`).then((r) => {
+          const act = (r.data || []).filter((p) => p.active !== false);
+          setPartners(act);
+          if (act.length === 1) setPayForm((f) => ({ ...f, partner_id: f.partner_id || act[0].partner_id }));
+        }).catch(() => {});
+      }
     } catch (e) { toast.error(formatError(e)); }
   }, [batchId]);
 
   useEffect(() => {
     if (!batchId) return;
     load();
-    api.get("/bank-accounts").then((r) => setBankAccounts(r.data || [])).catch(() => {});
+    api.get("/bank-accounts", { params: { active_only: true } }).then((r) => setBankAccounts(r.data || [])).catch(() => {});
+    api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
   }, [batchId, load]);
 
-  // Shortcut from the batch row: jump straight to the Process Payment form.
+  // Shortcut from the batch row: jump straight to the Process/Retry Payment form.
   useEffect(() => {
-    if (autoPay && batch && batch.status === "pending_payment") setPayOpen(true);
+    if (autoPay && batch && (batch.status === "pending_payment" || batch.status === "partially_paid")) setPayOpen(true);
   }, [autoPay, batch]);
 
   if (!batchId) return null;
@@ -2856,15 +2873,35 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
   const tone = batch ? (BATCH_STATUS_TONE[batch.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: batch.status }) : null;
   const isAdmin = currentUser?.role === "admin";
   const isAccountant = currentUser?.role === "accountant";
-  const canPay = (isAdmin || isAccountant) && batch?.status === "pending_payment";
-  const canReopen = isAdmin && ["paid", "pending_payment", "approved", "rejected", "processing"].includes(batch?.status);
+  const canPay = (isAdmin || isAccountant) && (batch?.status === "pending_payment" || batch?.status === "partially_paid");
+  const canReopen = isAdmin && ["paid", "partially_paid", "pending_payment", "approved", "rejected", "processing"].includes(batch?.status);
+  const payableRows = (batch?.rows || []).filter((r) => (r.pay_status || "pending") !== "paid");
+  const paySelCount = payableRows.filter((r) => paySel[r.staff_id]).length;
+  const paySelAmount = payableRows.filter((r) => paySel[r.staff_id]).reduce((s, r) => s + Number(r.net || 0), 0);
 
   const submitPay = async () => {
+    if (!payForm.partner_id) { toast.error("Please select the Partner"); return; }
+    if (!payForm.paid_by_user_id) { toast.error("Please select 'Paid By' (who is releasing the money)"); return; }
+    if (!payForm.bank_account_id) { toast.error("Please select the Bank/Debit account"); return; }
     if (!payForm.payment_date) { toast.error("Payment date is required"); return; }
+    const selectedIds = payableRows.filter((r) => paySel[r.staff_id]).map((r) => r.staff_id);
+    if (selectedIds.length === 0) { toast.error("Select at least one employee to pay"); return; }
+    const payingAll = selectedIds.length === payableRows.length;
+    const payer = payers.find((p) => p.id === payForm.paid_by_user_id);
     setBusy(true);
     try {
-      await api.post(`/payroll-batches/${batchId}/pay`, payForm);
-      toast.success("Payment recorded — transaction created");
+      await api.post(`/payroll-batches/${batchId}/pay`, {
+        method: payForm.method,
+        payment_date: payForm.payment_date,
+        utr: payForm.utr || null,
+        remarks: payForm.remarks || null,
+        bank_account_id: payForm.bank_account_id,
+        partner_id: payForm.partner_id,
+        paid_by_user_id: payForm.paid_by_user_id,
+        paid_by_name: payer?.name || null,
+        staff_ids: payingAll ? null : selectedIds,
+      });
+      toast.success(payingAll ? "Payment recorded — transaction created" : `${selectedIds.length} employee(s) paid — batch Partially Paid`);
       setPayOpen(false);
       load();
     } catch (e) { toast.error(formatError(e)); }
@@ -2975,10 +3012,13 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
                       <th className="text-right p-2">Gross</th>
                       <th className="text-right p-2">Deduct</th>
                       <th className="text-right p-2">Net</th>
+                      <th className="text-center p-2">Pay Status</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(batch.rows || []).map((r) => (
+                    {(batch.rows || []).map((r) => {
+                      const ps = (r.pay_status || "pending");
+                      return (
                       <tr key={r.id} className="border-b border-[var(--border)]" data-testid={`batch-row-${r.id}`}>
                         <td className="p-2 font-mono text-[10px]">{r.employee_code || "—"}</td>
                         <td className="p-2">{r.staff_name || r.staff_id?.slice(0, 8)}</td>
@@ -2986,8 +3026,12 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
                         <td className="p-2 text-right num">{inr(r.gross)}</td>
                         <td className="p-2 text-right num text-red-600">-{inr(r.deductions)}</td>
                         <td className="p-2 text-right num font-semibold">{inr(r.net)}</td>
+                        <td className="p-2 text-center">
+                          <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 border ${ps === "paid" ? "bg-emerald-100 text-emerald-700 border-emerald-300" : "bg-amber-100 text-amber-700 border-amber-300"}`} data-testid={`batch-row-paystatus-${r.id}`}>{ps === "paid" ? "Paid" : "Pending"}</span>
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -3040,21 +3084,71 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
           )}
           {canPay && (
             <Button onClick={() => setPayOpen(true)} disabled={busy} className="rounded-none bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="batch-pay-open">
-              <Wallet size={13} className="mr-1" /> Process Payment
+              <Wallet size={13} className="mr-1" /> {batch?.status === "partially_paid" ? "Retry Payment" : "Process Payment"}
             </Button>
           )}
         </DialogFooter>
 
         {/* Payment sub-dialog */}
         <Dialog open={payOpen} onOpenChange={setPayOpen}>
-          <DialogContent className="rounded-none max-w-md" data-testid="batch-pay-dialog">
+          <DialogContent className="rounded-none max-w-lg" data-testid="batch-pay-dialog">
             <DialogHeader>
-              <DialogTitle className="font-heading">Record Payroll Payment</DialogTitle>
+              <DialogTitle className="font-heading">{batch?.status === "partially_paid" ? "Retry Payroll Payment" : "Record Payroll Payment"}</DialogTitle>
               <DialogDescription className="text-xs text-[var(--muted)]">
-                {batch ? `Net payable ${inr(batch.net_payable)} for ${batch.staff_count} staff.` : ""} This creates a Transaction entry linked to this batch and marks each employee as paid.
+                {batch ? `${payableRows.length} employee(s) pending · Pending ₹${Number(batch.pending_amount != null ? batch.pending_amount : batch.net_payable).toLocaleString("en-IN")}.` : ""} This creates a Transaction entry linked to this batch and marks the selected employees as paid.
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-3">
+            <div className="space-y-3 max-h-[66vh] overflow-y-auto pr-1">
+              {/* Employee selection — partial payment */}
+              <div className="border border-emerald-200">
+                <div className="flex items-center justify-between px-2 py-1.5 border-b border-emerald-200 text-[11px] bg-emerald-50/60">
+                  <div className="flex items-center gap-2">
+                    <button type="button" className="text-[10px] uppercase font-bold text-emerald-800 hover:underline" onClick={() => { const n = {}; payableRows.forEach((r) => { n[r.staff_id] = true; }); setPaySel(n); }} data-testid="pay-select-all">Select all</button>
+                    <span className="text-slate-300">|</span>
+                    <button type="button" className="text-[10px] uppercase font-bold text-slate-600 hover:underline" onClick={() => setPaySel({})} data-testid="pay-clear-all">Clear</button>
+                  </div>
+                  <div className="num font-bold text-emerald-900" data-testid="pay-selected-summary">{paySelCount}/{payableRows.length} · {inr(paySelAmount)}</div>
+                </div>
+                <div className="max-h-40 overflow-y-auto divide-y divide-emerald-100">
+                  {(batch?.rows || []).map((r) => {
+                    const isPaid = (r.pay_status || "pending") === "paid";
+                    return (
+                      <label key={r.staff_id} className={`flex items-center gap-2 px-2 py-1.5 text-[12px] ${isPaid ? "bg-slate-50 opacity-70" : "hover:bg-emerald-50 cursor-pointer"}`} data-testid={`pay-row-${r.staff_id}`}>
+                        <input type="checkbox" disabled={isPaid} checked={isPaid ? true : !!paySel[r.staff_id]} onChange={(e) => setPaySel((s) => ({ ...s, [r.staff_id]: e.target.checked }))} data-testid={`pay-check-${r.staff_id}`} />
+                        <span className="flex-1 truncate"><b>{r.staff_name || r.staff_id?.slice(0, 8)}</b> <span className="text-slate-500 ml-1">{r.employee_code || ""}</span></span>
+                        <span className="num font-semibold text-slate-800">{inr(r.net)}</span>
+                        {isPaid && <span className="text-[9px] uppercase font-bold text-emerald-700 bg-emerald-100 border border-emerald-300 px-1">Paid</span>}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="overline">Partner *</Label>
+                  <Select value={payForm.partner_id || undefined} onValueChange={(v) => setPayForm({ ...payForm, partner_id: v })}>
+                    <SelectTrigger className="rounded-none h-10" data-testid="pay-partner"><SelectValue placeholder="Select partner" /></SelectTrigger>
+                    <SelectContent>
+                      {partners.map((p) => (
+                        <SelectItem key={p.partner_id} value={p.partner_id}>{p.name}{p.role ? ` (${p.role})` : ""}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="overline">Paid By *</Label>
+                  <Select value={payForm.paid_by_user_id || undefined} onValueChange={(v) => setPayForm({ ...payForm, paid_by_user_id: v })}>
+                    <SelectTrigger className="rounded-none h-10" data-testid="pay-paidby"><SelectValue placeholder="Select payer" /></SelectTrigger>
+                    <SelectContent>
+                      {payers.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>{p.name} ({p.role})</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <Label className="overline">Payment Method</Label>
@@ -3073,18 +3167,17 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
                   </Select>
                 </div>
                 <div>
-                  <Label className="overline">Payment Date</Label>
+                  <Label className="overline">Payment Date *</Label>
                   <Input type="date" value={payForm.payment_date} onChange={(e) => setPayForm({ ...payForm, payment_date: e.target.value })} className="rounded-none h-10" data-testid="pay-date" />
                 </div>
               </div>
               <div>
-                <Label className="overline">Bank Account (debit)</Label>
-                <Select value={payForm.bank_account_id || "__none"} onValueChange={(v) => setPayForm({ ...payForm, bank_account_id: v === "__none" ? "" : v })}>
-                  <SelectTrigger className="rounded-none h-10" data-testid="pay-bank"><SelectValue placeholder="Optional — select bank/cash account" /></SelectTrigger>
+                <Label className="overline">Bank / Debit Account *</Label>
+                <Select value={payForm.bank_account_id || undefined} onValueChange={(v) => setPayForm({ ...payForm, bank_account_id: v })}>
+                  <SelectTrigger className="rounded-none h-10" data-testid="pay-bank"><SelectValue placeholder="Select bank/cash account" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__none">— None —</SelectItem>
                     {bankAccounts.map((b) => (
-                      <SelectItem key={b.id} value={b.id}>{b.name} · {b.account_number ? `****${b.account_number.slice(-4)}` : ""}</SelectItem>
+                      <SelectItem key={b.id} value={b.id}>{b.name}{b.current_balance != null ? ` — ₹${Number(b.current_balance).toLocaleString("en-IN")}` : (b.account_number ? ` · ****${b.account_number.slice(-4)}` : "")}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -3097,10 +3190,15 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
                 <Label className="overline">Remarks</Label>
                 <Textarea value={payForm.remarks} onChange={(e) => setPayForm({ ...payForm, remarks: e.target.value })} rows={2} className="rounded-none" data-testid="pay-remarks" />
               </div>
+              {paySelCount < payableRows.length && (
+                <div className="text-[11px] text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-200 p-2">
+                  Sirf {paySelCount} selected employee ab pay honge — baaki PENDING rahenge aur batch "Partially Paid" ho jaayega (baad me Retry se complete kar sakte hain).
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setPayOpen(false)} className="rounded-none">Cancel</Button>
-              <Button onClick={submitPay} disabled={busy} className="rounded-none bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="pay-submit">Record Payment</Button>
+              <Button onClick={submitPay} disabled={busy} className="rounded-none bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="pay-submit">{paySelCount < payableRows.length ? "Pay Selected" : "Record Payment"}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

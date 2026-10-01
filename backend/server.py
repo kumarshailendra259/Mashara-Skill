@@ -11806,6 +11806,11 @@ class PayrollBatchPayIn(BaseModel):
     remarks: Optional[str] = None
     attachment_path: Optional[str] = None
     attachment_filename: Optional[str] = None
+    # One-screen Approve+Pay — explicit payment attribution captured at disbursement.
+    paid_by_user_id: Optional[str] = None   # authorised Accounts user physically releasing the money (mandatory)
+    paid_by_name: Optional[str] = None
+    partner_id: Optional[str] = None         # explicit partner for the auto-created expense txn (mandatory in UI)
+    staff_ids: Optional[List[str]] = None    # subset of staff to pay now (partial payment / retry); None = all unpaid
 
 
 class PayrollBatchReopenIn(BaseModel):
@@ -11858,6 +11863,12 @@ async def _derive_pending_at(batch: dict) -> dict:
         # configured chain (payment is out-of-band by design), so this label
         # is deterministic across every deployment.
         return {"pending_at_label": "Pending at Accounts (Final Payment)",
+                "pending_at_role": "accountant", "pending_at_names": [],
+                "is_terminal": False}
+
+    if status == "partially_paid":
+        # Some employees paid, some still pending — Accounts must retry the rest.
+        return {"pending_at_label": "Partially Paid — Accounts to pay remaining",
                 "pending_at_role": "accountant", "pending_at_names": [],
                 "is_terminal": False}
 
@@ -12170,6 +12181,25 @@ async def _payroll_batch_out(batch_id: str) -> dict:
                 r["bank_account_no_masked"] = ("****" + (s.get("bank_account_no") or "")[-4:]) if s.get("bank_account_no") else None
                 r["ifsc"] = s.get("ifsc")
     b["rows"] = rows
+    # Per-row payment status + batch-level paid/pending aggregates (partial payment).
+    paid_amount = 0.0
+    pending_amount = 0.0
+    paid_cnt = 0
+    pending_cnt = 0
+    for r in rows:
+        ps = r.get("pay_status") or ("paid" if r.get("status") == "paid" else "pending")
+        r["pay_status"] = ps
+        net_v = float(r.get("net") or 0)
+        if ps == "paid":
+            paid_amount += net_v
+            paid_cnt += 1
+        else:
+            pending_amount += net_v
+            pending_cnt += 1
+    b["paid_count"] = paid_cnt
+    b["pending_count"] = pending_cnt
+    b["paid_amount"] = round(paid_amount, 2)
+    b["pending_amount"] = round(pending_amount, 2)
     # Backfill center_name for legacy batches created before Phase 60.
     if b.get("center_id") and not b.get("center_name"):
         c = await db.centers.find_one({"id": b["center_id"]}, {"_id": 0, "name": 1})
@@ -12261,47 +12291,72 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
         raise HTTPException(404, "Batch not found")
     if batch.get("status") == "paid":
         raise HTTPException(400, "Batch already paid — cannot pay twice")
-    if batch.get("status") != "pending_payment":
+    # Payment allowed from approved (pending_payment) OR from partially_paid (retry
+    # the still-pending employees). Any other state must finish approval first.
+    if batch.get("status") not in ("pending_payment", "partially_paid"):
         raise HTTPException(400, f"Batch is in status '{batch.get('status')}' — payment requires 'pending_payment' (approved) state")
-    # Guard: refuse to pay a batch whose net is <= 0. Negative nets mean advance recoveries
-    # exceed gross — that scenario is a bookkeeping adjustment, not a payment. HR must
-    # correct the underlying rows (or exclude those staff via reopen) first. Zero-net
-    # batches would create a ₹0 transaction which is noise; also refuse.
-    net_pay = float(batch.get("net_payable") or 0)
+
+    # One-screen Approve+Pay mandates: an explicit payer (Paid By) and a debit account.
+    if not body.paid_by_user_id:
+        raise HTTPException(400, "Paid By is required — select the authorised Accounts user releasing the payment")
+    if not body.bank_account_id:
+        raise HTTPException(400, "Bank/Debit account is required")
+
+    # Validate the selected payer against the authorised roster.
+    payer_doc = await db.users.find_one(
+        {"id": body.paid_by_user_id, "role": {"$in": ["admin", "hr", "accountant", "senior_manager", "manager", "center_manager"]}},
+        {"_id": 0, "id": 1, "name": 1, "email": 1},
+    )
+    if not payer_doc:
+        raise HTTPException(400, "Selected 'Paid By' user is not an authorised payer")
+    paid_by_user_id = payer_doc["id"]
+    paid_by_name = body.paid_by_name or payer_doc.get("name") or payer_doc.get("email")
+
+    # bank_accounts uses `is_active` (not `active`) — matching the list endpoint.
+    acct = await db.bank_accounts.find_one({"id": body.bank_account_id, "is_active": True}, {"_id": 0})
+    if not acct:
+        raise HTTPException(400, "Bank account not found or inactive")
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    payroll_rows = await db.payroll.find({"batch_id": batch_id}, {"_id": 0}).to_list(2000)
+
+    def _row_paid(r: dict) -> bool:
+        return (r.get("pay_status") == "paid") or (r.get("status") == "paid")
+
+    unpaid_rows = [r for r in payroll_rows if not _row_paid(r)]
+    # Partial payment: if a subset of staff is given, pay only those (and only if unpaid).
+    if body.staff_ids:
+        sel = set(body.staff_ids)
+        target_rows = [r for r in unpaid_rows if r.get("staff_id") in sel]
+    else:
+        target_rows = unpaid_rows
+    if not target_rows:
+        raise HTTPException(400, "No unpaid employees selected for payment")
+
+    net_pay = sum(float(r.get("net") or 0) for r in target_rows)
     if net_pay <= 0:
         raise HTTPException(
             400,
-            f"Cannot pay a batch with non-positive net (₹{net_pay:,.2f}). Reopen the batch and correct payroll rows first — negative nets usually mean advance recoveries exceed gross for some staff.",
+            f"Cannot pay a non-positive net (₹{net_pay:,.2f}) for the selected employees. Reopen the batch and correct payroll rows first — negative nets usually mean advance recoveries exceed gross for some staff.",
         )
 
-    # Optionally require a configured bank account for the debit. Same behaviour as vendor payments.
-    acct = None
-    if body.bank_account_id:
-        # NOTE: bank_accounts uses `is_active` (not `active`) — matching the list
-        # endpoint & vendor-payment validation. Using the wrong field caused
-        # "Bank account not found or inactive" for valid, selectable accounts.
-        acct = await db.bank_accounts.find_one({"id": body.bank_account_id, "is_active": True}, {"_id": 0})
-        if not acct:
-            raise HTTPException(400, "Bank account not found or inactive")
-
-    now = datetime.now(timezone.utc).isoformat()
-    # Set processing early so the UI can show intermediate state (idempotency window).
-    await db.payroll_batches.update_one({"id": batch_id}, {"$set": {"status": "processing"}})
-
-    payroll_rows = await db.payroll.find({"batch_id": batch_id}, {"_id": 0}).to_list(2000)
-    # Derive company / partner context from first staff's center for the txn attribution.
-    first_sid = payroll_rows[0]["staff_id"] if payroll_rows else None
-    first_staff = await db.staff.find_one({"id": first_sid}, {"_id": 0, "center_id": 1}) if first_sid else None
+    # Derive company context from first target staff's center; partner is explicit (fallback auto-derive).
+    first_sid = target_rows[0]["staff_id"]
+    first_staff = await db.staff.find_one({"id": first_sid}, {"_id": 0, "center_id": 1})
     ctx = await _derive_context_for_center((first_staff or {}).get("center_id"))
-    txn_amount = float(batch.get("net_payable") or 0)
+    partner_id = body.partner_id or ctx["partner_id"]
+
+    txn_amount = float(net_pay)
+    paid_count = len(target_rows)
     txn = {
         "id": str(uuid.uuid4()),
         "type": "expense",
         "amount": txn_amount,
         "date": body.payment_date or now[:10],
-        "description": f"Payroll {batch['month']:02d}/{batch['year']} · {batch['staff_count']} staff · Net ₹{txn_amount:,.0f}",
+        "description": f"Payroll {batch['month']:02d}/{batch['year']} · {paid_count} staff · Net ₹{txn_amount:,.0f}",
         "company_id": ctx["company_id"],
-        "partner_id": ctx["partner_id"],
+        "partner_id": partner_id,
         "center_id": (first_staff or {}).get("center_id"),
         "project_id": None,
         "items": [], "attachments": [{"path": body.attachment_path, "filename": body.attachment_filename}] if body.attachment_path else [],
@@ -12311,29 +12366,38 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
         "utr": body.utr,
         "bank_account_id": body.bank_account_id,
         "remarks": body.remarks,
+        "paid_by_user_id": paid_by_user_id,
+        "paid_by_name": paid_by_name,
+        "paid_by_at": now,
         "created_by": user["id"], "created_at": now,
         "status": "approved", "approved_by": user["id"], "approved_at": now,
         "rejected_reason": None,
     }
     await db.transactions.insert_one(txn)
-    # Also debit the bank account ledger if configured.
+    # Debit the bank account ledger.
     if acct and txn_amount > 0:
         await _post_bank_ledger(
             account_id=acct["id"], direction="debit", amount=txn_amount,
             source="payroll_batch", source_id=batch_id,
-            remarks=f"Payroll {batch['month']:02d}/{batch['year']} · {batch['staff_count']} staff" + (f" · UTR {body.utr}" if body.utr else ""),
+            remarks=f"Payroll {batch['month']:02d}/{batch['year']} · {paid_count} staff" + (f" · UTR {body.utr}" if body.utr else ""),
             vendor_name=None, center_id=(first_staff or {}).get("center_id"),
             center_name=None, date=body.payment_date or now[:10], user=user,
         )
 
-    # Mark each payroll row as paid + link to the transaction (kept per-row for legacy queries).
+    # Determine the new batch status BEFORE stamping rows so each row carries it.
+    remaining_after = [r for r in unpaid_rows if r["id"] not in {t["id"] for t in target_rows}]
+    all_paid = len(remaining_after) == 0
+    new_status = "paid" if all_paid else "partially_paid"
+
+    # Mark ONLY the target payroll rows as paid + link to the transaction.
+    target_ids = [r["id"] for r in target_rows]
     await db.payroll.update_many(
-        {"batch_id": batch_id},
-        {"$set": {"status": "paid", "paid_at": now, "txn_id": txn["id"], "batch_status": "paid"}},
+        {"id": {"$in": target_ids}},
+        {"$set": {"status": "paid", "pay_status": "paid", "paid_at": now, "txn_id": txn["id"], "batch_status": new_status}},
     )
 
-    # Also emit a staff_payments row per employee so Staff Financial History aggregator picks them up.
-    for r in payroll_rows:
+    # Emit a staff_payments row per paid employee so Staff Financial History picks them up.
+    for r in target_rows:
         sp = {
             "id": str(uuid.uuid4()),
             "employee_id": r["staff_id"],
@@ -12350,41 +12414,52 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
             "txn_id": txn["id"],
             "month": batch["month"],
             "year": batch["year"],
+            "paid_by_user_id": paid_by_user_id,
+            "paid_by_name": paid_by_name,
             "created_by": user["id"],
             "created_at": now,
         }
         await db.staff_payments.insert_one(sp)
-        # Notify staff (best-effort).
         _u = await db.staff.find_one({"id": r["staff_id"]}, {"_id": 0, "user_id": 1, "name": 1})
         if _u and _u.get("user_id"):
             await _notify(_u["user_id"],
                           f"Salary ₹{float(r.get('net') or 0):,.0f} paid for {batch['month']:02d}/{batch['year']}",
                           ntype="salary_paid", ref_id=r["id"], link="/check-in")
 
+    txn_ids = list(batch.get("transaction_ids") or [])
+    if batch.get("transaction_id") and batch["transaction_id"] not in txn_ids:
+        txn_ids.append(batch["transaction_id"])
+    txn_ids.append(txn["id"])
+
     audit_log = list(batch.get("audit_log") or [])
     audit_log.append({
         "action": "paid", "at": now, "by": user["id"],
         "by_name": user.get("name") or user.get("email"),
-        "old_status": "pending_payment", "new_status": "paid",
+        "old_status": batch.get("status"), "new_status": new_status,
         "remarks": body.remarks or "",
+        "paid_by_user_id": paid_by_user_id, "paid_by_name": paid_by_name,
+        "staff_paid": paid_count, "amount": txn_amount,
         "payment": {"method": body.method, "utr": body.utr, "date": body.payment_date, "bank_account_id": body.bank_account_id},
     })
-    await db.payroll_batches.update_one(
-        {"id": batch_id},
-        {"$set": {
-            "status": "paid",
-            "paid_at": now, "paid_by": user["id"],
-            "paid_by_name": user.get("name") or user.get("email"),
-            "transaction_id": txn["id"],
-            "payment": {
-                "method": body.method, "bank_account_id": body.bank_account_id,
-                "payment_date": body.payment_date, "utr": body.utr,
-                "remarks": body.remarks, "attachment_path": body.attachment_path,
-                "attachment_filename": body.attachment_filename,
-            },
-            "audit_log": audit_log,
-        }},
-    )
+    set_doc = {
+        "status": new_status,
+        "transaction_id": txn["id"],
+        "transaction_ids": txn_ids,
+        "partner_id": partner_id,
+        "paid_by": paid_by_user_id,
+        "paid_by_name": paid_by_name,
+        "payment": {
+            "method": body.method, "bank_account_id": body.bank_account_id,
+            "payment_date": body.payment_date, "utr": body.utr,
+            "remarks": body.remarks, "attachment_path": body.attachment_path,
+            "attachment_filename": body.attachment_filename,
+            "paid_by_user_id": paid_by_user_id, "paid_by_name": paid_by_name,
+        },
+        "audit_log": audit_log,
+    }
+    if all_paid:
+        set_doc["paid_at"] = now
+    await db.payroll_batches.update_one({"id": batch_id}, {"$set": set_doc})
     return await _payroll_batch_out(batch_id)
 
 
