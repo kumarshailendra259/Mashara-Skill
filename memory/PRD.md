@@ -2520,3 +2520,13 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **MIS — intentionally NOT FY-scoped:** `/mis/overview`, `/mis/live/*`, projects/centers/candidates/mobilization are OPERATIONAL/master data (center & candidate counts, BG expiry, enrolment %), not payment/transaction records with a transaction-date FY dimension. Applying FY there would be meaningless. Vendor MASTER (`/vendors`) is likewise master data (no date) — only vendor SPEND (top-vendors, from payments) is FY-relevant and now FY-aware.
 
 **Verified (curl):** bank-transactions ALL=1 / FY2025-26=0 / FY2026-27=1 (row dated 2026-08-10); top-vendors FY2025-26=0 vs FY2026-27=6 (payments sit in 2026-27). Frontend compiles clean.
+
+## Phase 97 (Jun 2026) — HRMS: "Process Payment" shortcut on batch row (BOCWW Garhwa report)
+
+**Report (deployed app):** BOCWW Garhwa batch showed "Accounts Pending Payment" after the accountant APPROVED; no transaction created, no partner/account shown.
+
+**Diagnosis (NOT a bug):** Approval and disbursement are two separate accountant actions. The approval chain moving the batch to `pending_payment` ("Accounts Pending Payment" / "Pending at Accounts (Final Payment)") is correct. The TRANSACTION (type=expense, source=payroll_batch) plus partner_id (derived from center), bank_account_id, UTR and payment_date are created only when the accountant runs **Process Payment / Mark as Paid** (`POST /api/payroll-batches/{id}/pay`). User confirmed the accountant had only approved, not disbursed.
+
+**Fix/UX (user chose option d):** Added a direct **"Process Payment"** button on each batch row in `PayrollBatchesSection` (visible to admin/accountant when status=pending_payment, data-testid `pb-pay-<id>`) that opens the batch dialog and auto-jumps to the pay form (new `autoPay` prop on `PayrollBatchDialog` + `autoPayBatchId` state in HRMS). Pay form already captures method, payment date, Bank Account (debit), UTR, remarks. No backend change — pay endpoint unchanged.
+
+**Verified (curl, preview + cleanup):** finalize→pending_payment (net ₹8,658) → pay with UTR/bank → batch `paid`, transaction created (source=payroll_batch, UTR captured, status approved). partner_id/bank_account_id populate when the center has a partner mapping + a bank account is selected (empty in the preview test center only). Test data fully cleaned. Frontend compiles clean.

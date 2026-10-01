@@ -897,6 +897,7 @@ export default function HRMS() {
   // Phase 55 — Payroll batch workflow state
   const [batches, setBatches] = useState([]);
   const [openBatchId, setOpenBatchId] = useState(null);
+  const [autoPayBatchId, setAutoPayBatchId] = useState(null);
   // Phase 56 — Redesign state: quick filter chip + expandable row
   const [payrollQuickFilter, setPayrollQuickFilter] = useState("all"); // all | issues | pending | ready | paid
   const [expandedPayrollId, setExpandedPayrollId] = useState(null);
@@ -2086,7 +2087,9 @@ export default function HRMS() {
             <PayrollBatchesSection
               batches={batches}
               centers={centers}
-              onOpen={(id) => setOpenBatchId(id)}
+              currentUser={user}
+              onOpen={(id) => { setAutoPayBatchId(null); setOpenBatchId(id); }}
+              onProcessPayment={(id) => { setAutoPayBatchId(id); setOpenBatchId(id); }}
             />
           )}
 
@@ -2373,7 +2376,8 @@ export default function HRMS() {
       {/* Phase 55 — Payroll batch detail dialog (approve/pay/reopen depending on role + status) */}
       <PayrollBatchDialog
         batchId={openBatchId}
-        onClose={() => { setOpenBatchId(null); loadBatches(); loadAll(); }}
+        autoPay={autoPayBatchId === openBatchId && !!openBatchId}
+        onClose={() => { setOpenBatchId(null); setAutoPayBatchId(null); loadBatches(); loadAll(); }}
         currentUser={user}
       />
     </div>
@@ -2597,7 +2601,8 @@ const BATCH_STATUS_TONE = {
 /* ============================================================
    PAYROLL BATCHES SECTION (Phase 60) — center-scoped list with filters
    ============================================================ */
-function PayrollBatchesSection({ batches, centers, onOpen }) {
+function PayrollBatchesSection({ batches, centers, onOpen, onProcessPayment, currentUser }) {
+  const canPay = ["admin", "accountant"].includes(currentUser?.role);
   const [fCenter, setFCenter] = useState("all");
   const [fStatus, setFStatus] = useState("all");
   const [fPendingAt, setFPendingAt] = useState("all");
@@ -2734,13 +2739,28 @@ function PayrollBatchesSection({ batches, centers, onOpen }) {
                         : <span className="text-slate-400">—</span>}
                     </td>
                     <td className="py-2 pr-3 text-right">
-                      <Button
-                        size="sm" onClick={() => onOpen(b.id)}
-                        className="rounded-md h-7 px-2 text-xs bg-blue-600 hover:bg-blue-700 text-white gap-1"
-                        data-testid={`pb-open-${b.id}`}
-                      >
-                        <Receipt size={11} /> Open
-                      </Button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {canPay && b.status === "pending_payment" && (
+                          <Button
+                            size="sm" onClick={() => onProcessPayment(b.id)}
+                            className="rounded-md h-7 px-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white gap-1"
+                            data-testid={`pb-pay-${b.id}`}
+                            title="Record payment — creates the transaction & captures bank account / UTR"
+                          >
+                            <Receipt size={11} /> Process Payment
+                          </Button>
+                        )}
+                        <Button
+                          size="sm" variant={canPay && b.status === "pending_payment" ? "outline" : "default"}
+                          onClick={() => onOpen(b.id)}
+                          className={canPay && b.status === "pending_payment"
+                            ? "rounded-md h-7 px-2 text-xs gap-1"
+                            : "rounded-md h-7 px-2 text-xs bg-blue-600 hover:bg-blue-700 text-white gap-1"}
+                          data-testid={`pb-open-${b.id}`}
+                        >
+                          <Receipt size={11} /> Open
+                        </Button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -2805,7 +2825,7 @@ function PayrollBatchStatusCard({ batch, onOpen }) {
   );
 }
 
-function PayrollBatchDialog({ batchId, onClose, currentUser }) {
+function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) {
   const [batch, setBatch] = useState(null);
   const [busy, setBusy] = useState(false);
   const [payOpen, setPayOpen] = useState(false);
@@ -2825,6 +2845,11 @@ function PayrollBatchDialog({ batchId, onClose, currentUser }) {
     load();
     api.get("/bank-accounts").then((r) => setBankAccounts(r.data || [])).catch(() => {});
   }, [batchId, load]);
+
+  // Shortcut from the batch row: jump straight to the Process Payment form.
+  useEffect(() => {
+    if (autoPay && batch && batch.status === "pending_payment") setPayOpen(true);
+  }, [autoPay, batch]);
 
   if (!batchId) return null;
   const inr = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
