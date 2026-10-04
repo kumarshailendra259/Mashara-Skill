@@ -106,7 +106,8 @@ export default function Candidates() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [options, setOptions] = useState({ batches: [], dbBatches: [], generatedBatches: [], districts: [], courses: [], fys: [] });
+  const [options, setOptions] = useState({ batches: [], dbBatches: [], generatedBatches: [], districts: [], courses: [], fys: [], centers: [] });
+  const [unmapped, setUnmapped] = useState(false);
   const [centers, setCenters] = useState([]);
   // Load center master list once so we can (a) populate the Center dropdowns and
   // (b) map center_id → readable center name in the table.
@@ -143,6 +144,7 @@ export default function Candidates() {
       if (course !== "all") params.set("course", course);
       if (fy !== "all") params.set("fy", fy);
       if (centerFilter !== "all") params.set("center_id", centerFilter);
+      if (unmapped) params.set("unmapped", "true");
       if (search) params.set("search", search);
       if (dateFrom) params.set("date_from", dateFrom);
       if (dateTo) params.set("date_to", dateTo);
@@ -151,7 +153,7 @@ export default function Candidates() {
       setTotal(data.total || 0);
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
-  }, [project, batch, district, course, fy, centerFilter, search, dateFrom, dateTo, includeDeleted, page, pageSize]);
+  }, [project, batch, district, course, fy, centerFilter, unmapped, search, dateFrom, dateTo, includeDeleted, page, pageSize]);
 
   const loadOptions = useCallback(async () => {
     try {
@@ -161,6 +163,7 @@ export default function Candidates() {
         dbBatches: data.db_batches || [],
         generatedBatches: data.generated_batches || [],
         districts: data.districts || [], courses: data.courses || [], fys: data.fys || [],
+        centers: data.centers || [],
       });
     } catch { /* soft-fail */ }
   }, [project]);
@@ -381,7 +384,11 @@ export default function Candidates() {
               <SelectTrigger className="rounded-none" data-testid="filter-center"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Centers</SelectItem>
-                {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}</SelectItem>)}
+                {(options.centers || []).map((c) => (
+                  <SelectItem key={c.id} value={c.id} data-testid={`center-opt-${c.id}`}>
+                    {c.name || c.id}{c.center_code ? ` · ${c.center_code}` : ""}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
@@ -440,10 +447,14 @@ export default function Candidates() {
             <Label className="overline">Created To</Label>
             <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-none" />
           </div>
-          <div className="flex items-end col-span-1 md:col-span-2 lg:col-span-4">
+          <div className="flex items-end col-span-1 md:col-span-2 lg:col-span-4 gap-4">
             <label className="text-xs flex items-center gap-2 text-[var(--muted)]">
               <input type="checkbox" checked={includeDeleted} onChange={(e) => setIncludeDeleted(e.target.checked)} data-testid="filter-include-deleted" />
               Include archived (soft-deleted)
+            </label>
+            <label className="text-xs flex items-center gap-2 text-red-700 font-medium">
+              <input type="checkbox" checked={unmapped} onChange={(e) => { setUnmapped(e.target.checked); setPage(1); }} data-testid="filter-unmapped" />
+              Show only Unmapped Centers
             </label>
           </div>
         </div>
@@ -500,7 +511,12 @@ export default function Candidates() {
                     title={f.multi ? (r[f.key] || "") : undefined}
                   >
                     {f.key === "center_id"
-                      ? (r.center_id ? (centerNameById.get(r.center_id) || r.center_id) : "—")
+                      ? (
+                          r.center_name || r.center_ref_id
+                            ? <span data-testid={`cand-center-${r.id}`}>{r.center_name || centerNameById.get(r.center_id) || r.center_id}{(r.center_code || r.center_id) ? <span className="text-[var(--muted)]"> · {r.center_code || r.center_id}</span> : null}</span>
+                            : (r.center_id
+                                ? <span className="inline-flex items-center gap-1" data-testid={`cand-center-${r.id}`}>{centerNameById.get(r.center_id) || r.center_id}<span className="text-[9px] font-bold uppercase bg-red-100 text-red-700 border border-red-300 px-1" title="Center code not found in Center Management">Unmapped</span></span>
+                                : "—"))
                       : (r[f.key] || "—")}
                   </td>
                 ))}
@@ -536,14 +552,14 @@ export default function Candidates() {
                   <div className="overline mb-2">Batch / Course Meta</div>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                     {activeFields.filter((f) => f.section === "course").map((f) => (
-                      <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} centers={centers} />
+                      <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} centers={options.centers} />
                     ))}
                   </div>
                 </div>
               )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {activeFields.filter((f) => f.section !== "course").map((f) => (
-                  <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} centers={centers} />
+                  <FieldRenderer key={f.key} f={f} value={editing[f.key] || ""} onChange={(v) => setEditing((e) => ({ ...e, [f.key]: v }))} centers={options.centers} />
                 ))}
               </div>
             </div>
@@ -615,6 +631,8 @@ export default function Candidates() {
                   <SummaryBlock label="Uploaded" value={bulkResult.uploaded} color="text-emerald-700" />
                   <SummaryBlock label="Duplicate" value={bulkResult.duplicate} color="text-amber-700" />
                   <SummaryBlock label="Failed" value={bulkResult.failed} color="text-red-700" />
+                  <SummaryBlock label="Center Mapped" value={bulkResult.center_mapped ?? 0} color="text-blue-700" />
+                  <SummaryBlock label="Center Errors" value={bulkResult.center_errors ?? 0} color="text-red-700" />
                 </div>
                 {(bulkResult.errors || []).length > 0 && (
                   <div>
@@ -662,7 +680,7 @@ function FieldRenderer({ f, value, onChange, centers }) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__none__">— Not selected —</SelectItem>
-            {(centers || []).map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}</SelectItem>)}
+            {(centers || []).map((c) => <SelectItem key={c.id} value={c.id}>{c.name || c.id}{c.center_code ? ` · ${c.center_code}` : ""}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>

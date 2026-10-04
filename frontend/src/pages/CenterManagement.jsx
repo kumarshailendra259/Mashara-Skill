@@ -24,7 +24,7 @@ const fmtINR = (n) =>
 const EMPTY_CENTER = {
   name: "", address: "", city: "", state: "", pincode: "",
   contact_name: "", contact_mobile: "", contact_email: "",
-  center_status: "active",
+  center_status: "active", schemes: [],
 };
 
 function Kpi({ label, value, tone = "slate", testid }) {
@@ -130,6 +130,7 @@ export default function CenterManagement() {
       state: c.state || "", pincode: c.pincode || "",
       contact_name: c.contact_name || "", contact_mobile: c.contact_mobile || "",
       contact_email: c.contact_email || "", center_status: c.center_status || "active",
+      schemes: Array.isArray(c.schemes) ? c.schemes : [],
     });
     setDlgOpen(true);
   };
@@ -458,6 +459,29 @@ export default function CenterManagement() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div>
+              <Label className="text-xs">Candidate Schemes <span className="text-[var(--muted)] font-normal">(controls Candidate Management center dropdown)</span></Label>
+              <div className="flex flex-wrap gap-2 mt-1" data-testid="center-schemes">
+                {["BOCWW", "JSDMS"].map((s) => {
+                  const on = (form.schemes || []).includes(s);
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setForm((f) => ({
+                        ...f,
+                        schemes: on ? (f.schemes || []).filter((x) => x !== s) : [...(f.schemes || []), s],
+                      }))}
+                      className={`px-3 py-1.5 text-xs font-bold uppercase border rounded-none transition-colors ${on ? "bg-[var(--brand)] text-white border-[var(--brand)]" : "bg-white text-slate-600 border-[var(--border)] hover:border-[var(--brand)]"}`}
+                      data-testid={`center-scheme-${s}`}
+                    >
+                      {on ? "✓ " : ""}{s}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="text-[10px] text-[var(--muted)] mt-1">Koi scheme select na ho to center sabhi projects me dikhega (legacy behaviour).</div>
             </div>
           </div>
           <DialogFooter>

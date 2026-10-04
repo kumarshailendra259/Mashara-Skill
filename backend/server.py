@@ -699,6 +699,9 @@ class EntityIn(BaseModel):
     logo_url: Optional[str] = None
     # ----- Center -----
     manager_name: Optional[str] = None    # Center manager name (creates auto user)
+    # Phase 102 — which candidate schemes (BOCWW / JSDMS) this center runs. Drives
+    # the Candidate Management center dropdown + center-mapping validation.
+    schemes: Optional[List[str]] = None
     # ----- Project -----
     project_type: Optional[str] = None    # ID from project_types collection (JSDMS/SJKVY/BIRSA/...)
     project_code: Optional[str] = None
@@ -19508,6 +19511,49 @@ async def _find_duplicate(project: str, payload: dict, exclude_id: Optional[str]
     return _CandDupResult(duplicate=False)
 
 
+async def _resolve_center_ref(raw, cache=None):
+    """Resolve a candidate's center value — accepts the center UUID OR the
+    human center_code/entity_uid (e.g. 'CTR-M28M') — to the canonical center
+    master record. Returns the center doc or None."""
+    raw = str(raw or "").strip()
+    if not raw:
+        return None
+    if cache is not None and raw in cache:
+        return cache[raw]
+    proj = {"_id": 0, "id": 1, "name": 1, "center_code": 1, "entity_uid": 1, "schemes": 1}
+    c = await db.centers.find_one({"id": raw}, proj)
+    if not c:
+        c = await db.centers.find_one({"$or": [{"center_code": raw}, {"entity_uid": raw}]}, proj)
+    if not c:
+        c = await db.centers.find_one({"center_code": {"$regex": f"^{re.escape(raw)}$", "$options": "i"}}, proj)
+    if cache is not None:
+        cache[raw] = c
+    return c
+
+
+async def _apply_center_mapping(data: dict, project: str, *, require: bool = False, cache=None):
+    """Validate + auto-map a candidate's center to Center Management. Sets
+    center_ref_id / center_name / center_code on `data`. Raises HTTPException on
+    an invalid or scheme-mismatched center."""
+    raw = str(data.get("center_id") or "").strip()
+    data["center_ref_id"] = None
+    data["center_name"] = None
+    data["center_code"] = None
+    if not raw:
+        if require:
+            raise HTTPException(400, "Center ID is required")
+        return
+    c = await _resolve_center_ref(raw, cache)
+    if not c:
+        raise HTTPException(400, f"Center ID '{raw}' not found in Center Management. Add/correct the center first.")
+    schemes = c.get("schemes") or []
+    if schemes and project not in schemes:
+        raise HTTPException(400, f"Center '{c.get('name')}' ({c.get('center_code')}) is not mapped to project {project}. Tag it under Center Management → Schemes.")
+    data["center_ref_id"] = c["id"]
+    data["center_name"] = c.get("name")
+    data["center_code"] = c.get("center_code") or c.get("entity_uid")
+
+
 @api.post("/candidates", status_code=201)
 async def create_candidate(payload: dict = Body(...), user=Depends(require_role(*CANDIDATE_ROLES))):
     project = (payload.get("project") or "").upper()
@@ -19524,14 +19570,15 @@ async def create_candidate(payload: dict = Body(...), user=Depends(require_role(
         if rel_err:
             raise HTTPException(400, rel_err)
     # Center scoping — enforce that partner / center_manager can only add to
-    # their own centers.
+    # their own centers. Center is auto-mapped to Center Management first.
     await _enrich_user_with_associations(user)
+    await _apply_center_mapping(data, project)   # validates + sets center_ref_id/name/code
     scoped = _user_scoped_center_ids(user)
     if scoped:
-        cid = str(data.get("center_id") or "").strip()
-        if not cid:
+        ref = data.get("center_ref_id")
+        if not ref:
             raise HTTPException(400, "Center is required for your role")
-        if cid not in scoped:
+        if ref not in scoped:
             raise HTTPException(403, "You can only add candidates for your assigned center(s)")
     dup = await _find_duplicate(project, data)
     if dup.duplicate:
@@ -19547,6 +19594,9 @@ async def create_candidate(payload: dict = Body(...), user=Depends(require_role(
         **{k: data.get(k) for k, _ in _cand_columns(project) if data.get(k) is not None},
         "id": str(uuid.uuid4()),
         "project": project,
+        "center_ref_id": data.get("center_ref_id"),
+        "center_name": data.get("center_name"),
+        "center_code": data.get("center_code"),
         "created_by": user["id"],
         "created_at": now,
         "updated_at": now,
@@ -19564,6 +19614,8 @@ async def list_candidates(
     district: Optional[str] = Query(None),
     course: Optional[str] = Query(None),
     fy: Optional[str] = Query(None),
+    center_id: Optional[str] = Query(None),
+    unmapped: bool = Query(False),
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
@@ -19639,6 +19691,20 @@ async def list_candidates(
             q = {"$and": [{"$or": q.pop("$or")}, {"$or": s_or}], **q}
         else:
             q["$or"] = s_or
+    # Center filter (matches the resolved reference OR the raw code/UUID) and the
+    # Unmapped Records view (candidates with a center value that didn't resolve).
+    extra_and = []
+    if center_id:
+        extra_and.append({"$or": [{"center_ref_id": center_id}, {"center_id": center_id}]})
+    if unmapped:
+        extra_and.append({"center_id": {"$nin": [None, ""]}})
+        extra_and.append({"$or": [{"center_ref_id": None}, {"center_ref_id": {"$exists": False}}]})
+    if extra_and:
+        if "$and" in q:
+            q["$and"].extend(extra_and)
+        else:
+            q["$and"] = extra_and
+
     if generated_idx is not None:
         # Export-generated batch: slice the district's candidates (stable created_at
         # ascending order — same as the export) into the 30-sized window.
@@ -19678,6 +19744,22 @@ async def candidate_filter_options(
     generated = _candidate_generated_batch_names(gen_docs)
     # DB batches first, then generated names not already present.
     merged = db_batches + [g for g in generated if g not in set(db_batches)]
+    # Centers for the project's scheme: those tagged with this scheme OR (legacy)
+    # not tagged at all — so nothing disappears before centers are tagged.
+    center_docs = await db.centers.find(
+        {}, {"_id": 0, "id": 1, "name": 1, "center_code": 1, "entity_uid": 1, "schemes": 1}
+    ).to_list(5000)
+    pj = (project or "").upper()
+    centers_out = []
+    for c in center_docs:
+        sch = c.get("schemes") or []
+        if pj and sch and pj not in sch:
+            continue
+        centers_out.append({
+            "id": c["id"], "name": c.get("name"),
+            "center_code": c.get("center_code") or c.get("entity_uid"),
+        })
+    centers_out.sort(key=lambda x: (x.get("name") or "").lower())
     return {
         "batches": merged,
         "db_batches": db_batches,
@@ -19685,6 +19767,7 @@ async def candidate_filter_options(
         "districts": sorted([d for d in districts if d]),
         "courses": sorted({c for c in courses1 + courses2 if c}),
         "fys": sorted([f for f in fys if f]),
+        "centers": centers_out,
     }
 
 
@@ -19760,8 +19843,10 @@ async def candidate_bulk_upload(
         raise HTTPException(400, f"Missing columns in Excel: {', '.join(missing_headers)}")
     header_index = {h: i for i, h in enumerate(headers)}
     now = datetime.now(timezone.utc).isoformat()
-    summary = {"uploaded": 0, "failed": 0, "duplicate": 0, "total_rows": 0, "errors": []}
+    summary = {"uploaded": 0, "failed": 0, "duplicate": 0, "total_rows": 0,
+               "center_mapped": 0, "center_errors": 0, "errors": []}
     to_insert: list = []
+    center_cache: dict = {}   # raw center value -> resolved center doc (per-upload)
     # Compute the user's scoped center list ONCE — partner / center_manager
     # bulk uploads must stay within their own centers.
     await _enrich_user_with_associations(user)
@@ -19802,17 +19887,27 @@ async def candidate_bulk_upload(
                 summary["failed"] += 1
                 summary["errors"].append({"row": r_i, "reason": rel_err})
                 continue
+        # Auto-map center to Center Management (accepts center_code or UUID).
+        try:
+            await _apply_center_mapping(rec, project, cache=center_cache)
+            if rec.get("center_ref_id"):
+                summary["center_mapped"] += 1
+        except HTTPException as ce:
+            summary["failed"] += 1
+            summary["center_errors"] += 1
+            summary["errors"].append({"row": r_i, "reason": ce.detail})
+            continue
         # Center scoping enforcement — partner / center_manager can't upload
-        # rows for centers they don't own.
+        # rows for centers they don't own (compare the resolved reference).
         if scoped_center_ids:
-            row_center = str(rec.get("center_id") or "").strip()
-            if not row_center:
+            ref = rec.get("center_ref_id")
+            if not ref:
                 summary["failed"] += 1
                 summary["errors"].append({"row": r_i, "reason": "Center ID is required for your role"})
                 continue
-            if row_center not in scoped_center_ids:
+            if ref not in scoped_center_ids:
                 summary["failed"] += 1
-                summary["errors"].append({"row": r_i, "reason": f"Center ID '{row_center}' is not in your assigned centers"})
+                summary["errors"].append({"row": r_i, "reason": f"Center '{rec.get('center_name') or rec.get('center_id')}' is not in your assigned centers"})
                 continue
         aadhaar = rec.get("aadhaar") or ""
         cid = rec.get("candidate_id") or ""
@@ -19872,6 +19967,35 @@ async def candidate_bulk_upload(
     # Truncate very long error lists so response stays small
     summary["errors"] = summary["errors"][:200]
     return summary
+
+
+@api.post("/candidates/backfill-center-mapping")
+async def candidate_backfill_center_mapping(
+    project: Optional[str] = Query(None),
+    _=Depends(require_role("admin", "manager", "senior_manager")),
+):
+    """One-time (re-runnable) backfill: resolve every candidate's center_id text
+    (code or UUID) to the Center Management master → center_ref_id/name/code.
+    Unresolvable rows get center_ref_id=None (surface in the Unmapped view)."""
+    q: dict = {"is_deleted": {"$ne": True}}
+    if project:
+        q["project"] = project.upper()
+    cache: dict = {}
+    total = mapped = unmapped = 0
+    async for c in db.candidates.find(q, {"_id": 0, "id": 1, "center_id": 1}):
+        total += 1
+        raw = str(c.get("center_id") or "").strip()
+        doc = await _resolve_center_ref(raw, cache) if raw else None
+        if doc:
+            await db.candidates.update_one({"id": c["id"]}, {"$set": {
+                "center_ref_id": doc["id"], "center_name": doc.get("name"),
+                "center_code": doc.get("center_code") or doc.get("entity_uid"),
+            }})
+            mapped += 1
+        else:
+            await db.candidates.update_one({"id": c["id"]}, {"$set": {"center_ref_id": None}})
+            unmapped += 1
+    return {"total": total, "mapped": mapped, "unmapped": unmapped}
 
 
 @api.get("/candidates/export")
@@ -20017,6 +20141,12 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
         }.get(dup.on, dup.on)
         raise HTTPException(409, f"Duplicate — {friendly} in {project}")
     upd = {k: v for k, v in data.items() if k not in ("id", "project", "created_by", "created_at", "is_deleted")}
+    # Re-map center to Center Management whenever center_id is part of the edit.
+    if "center_id" in data:
+        await _apply_center_mapping(data, project)
+        upd["center_ref_id"] = data.get("center_ref_id")
+        upd["center_name"] = data.get("center_name")
+        upd["center_code"] = data.get("center_code")
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     upd["updated_by"] = user["id"]
     await db.candidates.update_one({"id": cid}, {"$set": upd})
@@ -25690,6 +25820,7 @@ async def _center_out(doc: dict) -> dict:
         "access_status": doc.get("access_status") or "enabled",
         "access_type": doc.get("access_type") or "free",
         "center_status": doc.get("center_status") or "active",
+        "schemes": doc.get("schemes") or [],
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
@@ -25708,6 +25839,7 @@ class CenterCreateIn(BaseModel):
     center_status: str = "active"
     access_status: str = "enabled"
     access_type: str = "free"
+    schemes: List[str] = Field(default_factory=list)
 
 
 class CenterPatchIn(BaseModel):
@@ -25722,6 +25854,7 @@ class CenterPatchIn(BaseModel):
     center_status: Optional[str] = None
     access_status: Optional[str] = None
     access_type: Optional[str] = None
+    schemes: Optional[List[str]] = None
 
 
 @sub_api.get("/centers")
@@ -25851,6 +25984,7 @@ async def centers_create(body: CenterCreateIn, current=Depends(require_role("adm
         "center_status": body.center_status or "active",
         "access_status": body.access_status or "enabled",
         "access_type": body.access_type or "free",
+        "schemes": body.schemes or [],
         "created_at": now_iso,
         "updated_at": now_iso,
     }
