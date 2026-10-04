@@ -18908,7 +18908,7 @@ async def _require_bank_account_if_configured(bank_account_id: Optional[str]) ->
 # Duplicate check: per project on (aadhaar) and per project on (candidate_id).
 
 from openpyxl import Workbook, load_workbook  # noqa: E402
-from openpyxl.styles import Font, PatternFill, Alignment  # noqa: E402
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side  # noqa: E402
 from io import BytesIO  # noqa: E402
 
 CANDIDATE_ROLES = ("admin", "hr", "manager", "center_manager", "partner")
@@ -18971,6 +18971,192 @@ REQUIRED_FIELDS = {
 # labour. Business rule: such candidates should NOT be enrolled — reject with a
 # human-friendly error at both the manual-add and bulk-upload paths.
 BLOCKED_RELATIONS = {"wife", "husband"}
+
+
+# ---------------------------------------------------------------------------
+# Template-based candidate export (mirrors the uploaded "BOCWW VALID DATA.xlsx").
+# Rows 1-2 = editable metadata header (merged cells), row 3 = candidate headers,
+# row 4+ = candidate data. Sheet is NOT protected so users can edit metadata.
+# ---------------------------------------------------------------------------
+
+# (field_key, exact_header) in the exact column order of the reference file (A..R).
+# field_key None → auto S.No.
+BOCWW_EXPORT_HEADERS = [
+    (None, "s.no"),
+    ("name", "Candidate Name"),
+    ("father_or_husband_name", "Father's Name/ Husband Name"),
+    ("mother_name", "Mother's Name"),
+    ("aadhaar", "Candidate Aadhar No."),
+    ("registered_labour_name", "Registered Labour Name"),
+    ("registered_labour_aadhaar", "Registered Labour Aadhar No."),
+    ("relation_with_labour", "Relation with Canidates & Registered Labour"),
+    ("labour_reg_no", "Labour Registration No."),
+    ("id_card_valid_upto", "Id-Card valid upto"),
+    ("labour_card_issue_date", "Labour Card Issue Date"),
+    ("date_of_birth", "Date of birth"),
+    ("gender", "Male/Female/Trans Gender(M/F/T)"),
+    ("category", "Category"),
+    ("address", "Address"),
+    ("mobile", "Mobile No."),
+    ("education", "Education"),
+    ("physically_handicapped", "Physically Handicapped/Differently Abled (Yes/No)"),
+]
+# Column widths A..R copied from the reference file.
+BOCWW_EXPORT_WIDTHS = [5.9, 28.5, 26.4, 4.2, 25.1, 27.6, 24.2, 15.0, 30.0, 17.4,
+                       13.1, 17.5, 10.8, 10.1, 46.2, 16.1, 7.9, 11.5]
+
+# JSDMS export columns (S.No + lean roster) — editable metadata header also applied.
+JSDMS_EXPORT_HEADERS = [
+    (None, "S.No"),
+    ("name", "Candidate Name"),
+    ("father_name", "Father's Name"),
+    ("aadhaar", "Aadhaar Number"),
+    ("mobile", "Mobile Number"),
+    ("aadhaar_linked_mobile", "Aadhaar Linked Mobile Number"),
+    ("date_of_birth", "Date of Birth"),
+    ("course_name", "Course Name"),
+    ("education", "Education"),
+    ("address", "Full Address"),
+    ("batch", "Batch"),
+    ("district", "District"),
+]
+JSDMS_EXPORT_WIDTHS = [6, 26, 24, 18, 15, 18, 14, 26, 14, 46, 16, 16]
+
+# Fields that MUST stay text so Excel never converts to scientific notation / drops leading chars.
+CAND_TEXT_FIELDS = {"aadhaar", "registered_labour_aadhaar", "labour_reg_no", "mobile", "aadhaar_linked_mobile"}
+
+_THIN = Side(style="thin")
+_BORDER_ALL = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+
+
+def _cand_export_meta(docs: list, district: Optional[str], batch: Optional[str]) -> dict:
+    """Best-effort metadata values for the editable header (first non-empty across
+    the filtered candidates; filter values win for district/batch)."""
+    def _first(key):
+        for d in docs:
+            v = d.get(key)
+            if v not in (None, ""):
+                return v
+        return ""
+    return {
+        "course_code": _first("course_code"),
+        "course_duration": _first("course_duration_hours"),
+        "end_time": _first("end_time"),
+        "state": _first("state"),
+        "district": district or _first("district") or "",
+        "batch": batch or _first("batch_id") or _first("batch") or "ALL",
+    }
+
+
+def _cand_cell_str(v) -> str:
+    """Clean string for a text cell (avoids trailing .0 from float ids)."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _build_candidate_template(docs: list, headers: list, widths: list, meta_cells: list) -> bytes:
+    """Generic builder: editable metadata header (rows 1-2, merged), candidate
+    headers (row 3), data (row 4+). Not protected. Mirrors the reference file.
+
+    `meta_cells` = list of (a1_range, value) — each range is merged and the value
+    is written to the anchor cell. Pass per-project to control the exact layout.
+    """
+    ncols = len(headers)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Candidates"
+
+    meta_font = Font(name="Arial Narrow", size=11)
+    hdr_font = Font(name="Arial Narrow", size=9)
+    center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    # --- Metadata header (rows 1-2) ---
+    for a1_range, value in meta_cells:
+        anchor = a1_range.split(":")[0]
+        if ":" in a1_range and a1_range.split(":")[0] != a1_range.split(":")[1]:
+            ws.merge_cells(a1_range)
+        ws[anchor] = value if value is not None else ""
+    # Style every cell in rows 1-2 (incl. merged members + gap cells) so borders apply fully.
+    for r in (1, 2):
+        for c in range(1, ncols + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.font = meta_font
+            cell.alignment = center_wrap
+            cell.border = _BORDER_ALL
+    ws.row_dimensions[1].height = 16.5
+    ws.row_dimensions[2].height = 16.5
+
+    # --- Candidate header row (row 3) ---
+    for idx, (_k, header) in enumerate(headers, start=1):
+        cell = ws.cell(row=3, column=idx, value=header)
+        cell.font = hdr_font
+        cell.alignment = center_wrap
+        cell.border = _BORDER_ALL
+        if idx - 1 < len(widths):
+            ws.column_dimensions[cell.column_letter].width = widths[idx - 1]
+    ws.row_dimensions[3].height = 89.5
+
+    # --- Candidate data (row 4+) ---
+    data_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for r_i, d in enumerate(docs, start=4):
+        for c_i, (key, _h) in enumerate(headers, start=1):
+            cell = ws.cell(row=r_i, column=c_i)
+            if key is None:
+                cell.value = r_i - 3           # auto S.No 1,2,3...
+            elif key in CAND_TEXT_FIELDS:
+                cell.value = _cand_cell_str(d.get(key))
+                cell.number_format = "@"       # force text → no scientific notation
+            else:
+                cell.value = _cand_cell_str(d.get(key)) if d.get(key) not in (None, "") else ""
+            cell.alignment = data_align
+            cell.border = _BORDER_ALL
+
+    last_row = max(3, 3 + len(docs))
+    ws.freeze_panes = "A4"                      # freeze metadata + header rows
+    from openpyxl.utils import get_column_letter
+    ws.auto_filter.ref = f"A3:{get_column_letter(ncols)}{last_row}"
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
+
+def _bocww_meta_cells(meta: dict) -> list:
+    """Exact metadata layout of the reference BOCWW VALID DATA.xlsx."""
+    cc = _cand_cell_str(meta.get("course_code"))
+    cd = _cand_cell_str(meta.get("course_duration"))
+    et = _cand_cell_str(meta.get("end_time"))
+    st = _cand_cell_str(meta.get("state"))
+    dist = _cand_cell_str(meta.get("district"))
+    batch = _cand_cell_str(meta.get("batch"))
+    return [
+        ("A1:C1", "Course Code  "), ("D1:H1", cc), ("I1:I1", "End Time"), ("K1:L1", et),
+        ("M1:O1", f"District - {dist}"), ("P1:R1", ""),
+        ("A2:C2", "Course Duration (Hours)"), ("D2:H2", cd), ("I2:I2", "State"), ("K2:L2", st),
+        ("M2:O2", f"Batch - {batch}"), ("P2:R2", ""),
+    ]
+
+
+def _jsdms_meta_cells(meta: dict) -> list:
+    """Editable metadata header laid out across the JSDMS (12-col) template."""
+    cc = _cand_cell_str(meta.get("course_code"))
+    cd = _cand_cell_str(meta.get("course_duration"))
+    et = _cand_cell_str(meta.get("end_time"))
+    st = _cand_cell_str(meta.get("state"))
+    dist = _cand_cell_str(meta.get("district"))
+    batch = _cand_cell_str(meta.get("batch"))
+    return [
+        ("A1:B1", "Course Code"), ("C1:D1", cc), ("E1:F1", "End Time"), ("G1:H1", et),
+        ("I1:J1", f"District - {dist}"), ("K1:L1", ""),
+        ("A2:B2", "Course Duration (Hours)"), ("C2:D2", cd), ("E2:F2", "State"), ("G2:H2", st),
+        ("I2:J2", f"Batch - {batch}"), ("K2:L2", ""),
+    ]
+
+
 
 
 def _validate_relation(payload: dict) -> Optional[str]:
@@ -19434,6 +19620,7 @@ async def candidate_export_excel(
     district: Optional[str] = Query(None),
     course: Optional[str] = Query(None),
     fy: Optional[str] = Query(None),
+    center_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
@@ -19453,6 +19640,7 @@ async def candidate_export_excel(
     if proj_key: q["project"] = proj_key
     if batch: q["batch"] = batch
     if district: q["district"] = district
+    if center_id: q["center_id"] = center_id
     if fy: q["fy"] = fy
     if course: q["$or"] = [{"course": course}, {"course_name": course}, {"course_code": course}]
     if date_from or date_to:
@@ -19473,6 +19661,24 @@ async def candidate_export_excel(
         else:
             q["$or"] = s_or
     docs = await db.candidates.find(q, {"_id": 0}).sort("created_at", -1).to_list(10000)
+
+    # Template-based export (mirrors uploaded BOCWW VALID DATA.xlsx) for BOCWW;
+    # JSDMS gets the same editable metadata header over its lean roster.
+    if proj_key == "BOCWW":
+        meta = _cand_export_meta(docs, district, batch)
+        content = _build_candidate_template(docs, BOCWW_EXPORT_HEADERS, BOCWW_EXPORT_WIDTHS, _bocww_meta_cells(meta))
+        fname = f"BOCWW_candidates_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+        return Response(content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    if proj_key == "JSDMS":
+        meta = _cand_export_meta(docs, district, batch)
+        content = _build_candidate_template(docs, JSDMS_EXPORT_HEADERS, JSDMS_EXPORT_WIDTHS, _jsdms_meta_cells(meta))
+        fname = f"JSDMS_candidates_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
+        return Response(content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Candidates"
