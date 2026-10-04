@@ -14,7 +14,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Plus, Search, Upload, Download, Trash2, Edit3, Eye, RotateCcw, FileSpreadsheet, Users2, X, ArchiveRestore,
+  Plus, Search, Upload, Download, Trash2, Edit3, Eye, RotateCcw, FileSpreadsheet, Users2, X, ArchiveRestore, Link2,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------
@@ -108,6 +108,8 @@ export default function Candidates() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [remapping, setRemapping] = useState(false);
+  const canRemap = ["admin", "manager", "senior_manager"].includes(user?.role);
   const [options, setOptions] = useState({ batches: [], dbBatches: [], generatedBatches: [], districts: [], courses: [], fys: [], centers: [] });
   const [unmapped, setUnmapped] = useState(false);
   const [centers, setCenters] = useState([]);
@@ -262,6 +264,25 @@ export default function Candidates() {
     } catch (e) { toast.error(formatError(e)); }
   };
 
+  /* ---------- Re-map centers & batches (admin/manager) ---------- */
+  const remapMappings = async () => {
+    if (!window.confirm(
+      "Saare candidates ke Center code ko Center Management se, aur Batch name ko Batch Management (Financial Batches) se auto-link kiya jayega.\n\nNote: Jo center/batch master me nahi banе honge wo Unmapped/Unlinked hi rahenge.\n\nProceed?"
+    )) return;
+    setRemapping(true);
+    try {
+      const params = new URLSearchParams();
+      if (project) params.set("project", project);
+      const { data } = await api.post(`/candidates/backfill-center-mapping?${params.toString()}`);
+      toast.success(
+        `Re-map complete — ${data.mapped}/${data.total} centers mapped, ${data.batch_mapped} batches linked` +
+        (data.unmapped ? ` · ${data.unmapped} still unmapped (center master me nahi mili)` : "")
+      );
+      loadList(); loadOptions();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setRemapping(false); }
+  };
+
   /* ---------- Export ---------- */
   const exportExcel = async () => {
     try {
@@ -332,6 +353,11 @@ export default function Candidates() {
             <Button variant="outline" onClick={() => { setBulkResult(null); setBulkFile(null); setOpenBulk(true); }} className="rounded-none gap-2" data-testid="btn-bulk-upload">
               <Upload size={14} /> Bulk Upload
             </Button>
+            {canRemap && (
+              <Button variant="outline" onClick={remapMappings} disabled={remapping} className="rounded-none gap-2 text-emerald-700 border-emerald-400" data-testid="btn-remap-mappings" title="Re-map candidate Center codes & Batch names to Center/Batch Management records">
+                <Link2 size={14} /> {remapping ? "Re-mapping…" : "Re-map Centers & Batches"}
+              </Button>
+            )}
             {user?.role === "admin" && (
               <Button variant="outline" onClick={cleanupDuplicates} className="rounded-none gap-2 text-amber-700 border-amber-400" data-testid="btn-cleanup-duplicates" title="Archive duplicate rows keeping the earliest one for each Aadhaar">
                 <RotateCcw size={14} /> Cleanup Duplicates

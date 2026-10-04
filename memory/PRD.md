@@ -2588,3 +2588,15 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **Already working (confirmed, no change needed):** pay modal captures method/date/bank-account/UTR/remarks; pay creates the linked transaction, marks each employee paid, stamps partner (auto-derived from center) + bank account + UTR, writes audit_log; batch→paid; duplicate-pay blocked (requires status=pending_payment); transaction appears in Transactions.
 
 **Still NOT built (larger spec items for a follow-up, needs scope confirmation):** merge final-approval + payment into ONE "Approve & Record Payment" action on the approvals screen; explicit mandatory Partner dropdown + "Paid By" dropdown in the pay modal; employee-level partial PAID/FAILED/PENDING with "Partially Paid" batch status + Retry Payment.
+
+## Phase 99 (Jun 2026) — Candidate "Re-map Centers & Batches" one-click backfill button
+
+**Request (Hindi):** "unmapped ko mapped kijiye" — production candidates showing UNMAPPED center (e.g. CTR-M28M) + UNLINKED batch (e.g. Pakur_09) chips.
+
+**Root cause:** Backfill endpoint `POST /api/candidates/backfill-center-mapping` existed but had NO UI trigger. Existing roster candidates stored center code / batch name as text; their `center_ref_id`/`batch_ref_id` were never resolved → Unmapped/Unlinked.
+
+**Fix (frontend only):** Added "Re-map Centers & Batches" button to Candidates page top toolbar (`Candidates.jsx`, data-testid `btn-remap-mappings`, roles admin/manager/senior_manager). Confirms, calls backfill endpoint with current `project`, toasts result (`X/Y centers mapped, Z batches linked, N still unmapped`), then reloads list + options. No backend change.
+
+**User context:** Centers DO exist in Center Management (so center mapping will resolve); financial batches (Pakur_09 etc.) NOT yet created in Batch Management — those stay UNLINKED until created. Clicking the button again after creating batches will link them.
+
+**Verified (curl, preview admin):** POST backfill → HTTP 200, {total:97, mapped:5, unmapped:92, batch_mapped:0} (preview test data). Button renders in toolbar (screenshot confirmed).
