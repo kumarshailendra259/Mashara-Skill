@@ -13185,8 +13185,10 @@ async def list_batches(project_id: Optional[str] = None, center_id: Optional[str
     enrolled_map: dict = {}
     if batch_ids:
         async for g in db.candidates.aggregate([
-            {"$match": {"batch_id": {"$in": batch_ids}, "is_deleted": {"$ne": True}}},
-            {"$group": {"_id": "$batch_id", "n": {"$sum": 1}}},
+            {"$match": {"is_deleted": {"$ne": True},
+                        "$or": [{"batch_id": {"$in": batch_ids}}, {"batch_ref_id": {"$in": batch_ids}}]}},
+            {"$addFields": {"_bk": {"$cond": [{"$in": ["$batch_ref_id", batch_ids]}, "$batch_ref_id", "$batch_id"]}}},
+            {"$group": {"_id": "$_bk", "n": {"$sum": 1}}},
         ]):
             enrolled_map[g["_id"]] = g["n"]
     for d in docs:
@@ -13256,6 +13258,8 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     await db.batches.insert_one(doc)
+    # Auto-attach existing roster candidates that match this batch's center + name/sdms id.
+    await _attach_candidates_to_batch(doc)
     # Re-sync every target this batch contributes to (explicit + key-matched).
     await _recompute_targets_for_batch(doc)
     return BatchOut(**doc)
@@ -13348,6 +13352,8 @@ async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin
     if not res:
         raise HTTPException(404, "Not found")
     res.pop("_id", None)
+    # Re-link roster candidates in case center / name / sdms id changed on this batch.
+    await _attach_candidates_to_batch(res)
     # Re-sync counters for both the OLD and NEW target linkage (capacity, target
     # or FY/centre may have changed).
     await _recompute_targets_for_batch(existing)
@@ -14943,7 +14949,7 @@ async def _batch_capacity_state(bid: str) -> dict:
     b = await db.batches.find_one({"id": bid}, {"_id": 0})
     if not b:
         raise HTTPException(404, "Batch not found")
-    enrolled = await db.candidates.count_documents({"batch_id": bid, "is_deleted": {"$ne": True}})
+    enrolled = await db.candidates.count_documents(_batch_candidate_filter(bid))
     capacity = int(b.get("total_beneficiaries") or 0)
     return {"batch": b, "enrolled": enrolled, "capacity": capacity,
             "available": max(0, capacity - enrolled)}
@@ -14957,7 +14963,7 @@ async def list_batch_candidates(bid: str, _=Depends(require_role(*ENROLL_ROLES, 
     b = await db.batches.find_one({"id": bid}, {"_id": 0, "id": 1})
     if not b: raise HTTPException(404, "Batch not found")
     cands = await db.candidates.find(
-        {"batch_id": bid, "is_deleted": {"$ne": True}},
+        _batch_candidate_filter(bid),
         {"_id": 0},
     ).sort("created_at", -1).to_list(5000)
     state = await _batch_capacity_state(bid)
@@ -19554,6 +19560,67 @@ async def _apply_center_mapping(data: dict, project: str, *, require: bool = Fal
     data["center_code"] = c.get("center_code") or c.get("entity_uid")
 
 
+def _fy_year_digits(fy) -> str:
+    m = re.search(r"(20\d{2})", str(fy or ""))
+    return m.group(1) if m else ""
+
+
+async def _resolve_batch_ref(center_ref_id, fy, batch_text, cache=None):
+    """Find the financial batch (db.batches) a roster candidate belongs to: same
+    center + batch name/sdms id; FY year used as a tiebreaker. Best-effort (None
+    if no match) — batch linking never blocks a candidate save."""
+    batch_text = str(batch_text or "").strip()
+    if not batch_text or not center_ref_id:
+        return None
+    key = (center_ref_id, batch_text)
+    if cache is not None and key in cache:
+        return cache[key]
+    cands = await db.batches.find(
+        {"center_id": center_ref_id, "$or": [{"name": batch_text}, {"sdms_batch_id": batch_text}]},
+        {"_id": 0, "id": 1, "fy_year": 1, "target_year": 1},
+    ).to_list(50)
+    chosen = None
+    if cands:
+        yr = _fy_year_digits(fy)
+        if yr:
+            for b in cands:
+                if yr in str(b.get("fy_year") or "") or yr in str(b.get("target_year") or ""):
+                    chosen = b
+                    break
+        chosen = chosen or cands[0]
+    rid = chosen["id"] if chosen else None
+    if cache is not None:
+        cache[key] = rid
+    return rid
+
+
+async def _apply_batch_mapping(data: dict, cache=None):
+    """Auto-link a candidate to a financial batch → sets batch_ref_id (best-effort)."""
+    data["batch_ref_id"] = await _resolve_batch_ref(
+        data.get("center_ref_id"), data.get("fy"),
+        data.get("batch_id") or data.get("batch"), cache,
+    )
+
+
+def _batch_candidate_filter(bid: str) -> dict:
+    """Candidates in a batch — legacy direct batch_id OR auto-linked batch_ref_id."""
+    return {"is_deleted": {"$ne": True}, "$or": [{"batch_id": bid}, {"batch_ref_id": bid}]}
+
+
+async def _attach_candidates_to_batch(b: dict) -> int:
+    """On batch create/edit, pull in existing roster candidates matching its center
+    + name/sdms id (sets batch_ref_id). Returns count attached."""
+    text_vals = [v for v in [b.get("name"), b.get("sdms_batch_id")] if v]
+    if not b.get("center_id") or not text_vals:
+        return 0
+    res = await db.candidates.update_many(
+        {"center_ref_id": b["center_id"], "is_deleted": {"$ne": True},
+         "$or": [{"batch_id": {"$in": text_vals}}, {"batch": {"$in": text_vals}}]},
+        {"$set": {"batch_ref_id": b["id"]}},
+    )
+    return res.modified_count
+
+
 @api.post("/candidates", status_code=201)
 async def create_candidate(payload: dict = Body(...), user=Depends(require_role(*CANDIDATE_ROLES))):
     project = (payload.get("project") or "").upper()
@@ -19573,6 +19640,7 @@ async def create_candidate(payload: dict = Body(...), user=Depends(require_role(
     # their own centers. Center is auto-mapped to Center Management first.
     await _enrich_user_with_associations(user)
     await _apply_center_mapping(data, project)   # validates + sets center_ref_id/name/code
+    await _apply_batch_mapping(data)             # best-effort link to financial batch
     scoped = _user_scoped_center_ids(user)
     if scoped:
         ref = data.get("center_ref_id")
@@ -19597,6 +19665,7 @@ async def create_candidate(payload: dict = Body(...), user=Depends(require_role(
         "center_ref_id": data.get("center_ref_id"),
         "center_name": data.get("center_name"),
         "center_code": data.get("center_code"),
+        "batch_ref_id": data.get("batch_ref_id"),
         "created_by": user["id"],
         "created_at": now,
         "updated_at": now,
@@ -19844,9 +19913,10 @@ async def candidate_bulk_upload(
     header_index = {h: i for i, h in enumerate(headers)}
     now = datetime.now(timezone.utc).isoformat()
     summary = {"uploaded": 0, "failed": 0, "duplicate": 0, "total_rows": 0,
-               "center_mapped": 0, "center_errors": 0, "errors": []}
+               "center_mapped": 0, "center_errors": 0, "batch_mapped": 0, "errors": []}
     to_insert: list = []
     center_cache: dict = {}   # raw center value -> resolved center doc (per-upload)
+    batch_cache: dict = {}    # (center_ref, batch_text) -> resolved financial batch id
     # Compute the user's scoped center list ONCE — partner / center_manager
     # bulk uploads must stay within their own centers.
     await _enrich_user_with_associations(user)
@@ -19909,6 +19979,10 @@ async def candidate_bulk_upload(
                 summary["failed"] += 1
                 summary["errors"].append({"row": r_i, "reason": f"Center '{rec.get('center_name') or rec.get('center_id')}' is not in your assigned centers"})
                 continue
+        # Best-effort auto-link to a financial batch (never blocks the row).
+        await _apply_batch_mapping(rec, cache=batch_cache)
+        if rec.get("batch_ref_id"):
+            summary["batch_mapped"] += 1
         aadhaar = rec.get("aadhaar") or ""
         cid = rec.get("candidate_id") or ""
         lrn = rec.get("labour_reg_no") or ""
@@ -19981,21 +20055,28 @@ async def candidate_backfill_center_mapping(
     if project:
         q["project"] = project.upper()
     cache: dict = {}
-    total = mapped = unmapped = 0
-    async for c in db.candidates.find(q, {"_id": 0, "id": 1, "center_id": 1}):
+    bcache: dict = {}
+    total = mapped = unmapped = batch_mapped = 0
+    async for c in db.candidates.find(q, {"_id": 0, "id": 1, "center_id": 1, "fy": 1, "batch_id": 1, "batch": 1}):
         total += 1
         raw = str(c.get("center_id") or "").strip()
         doc = await _resolve_center_ref(raw, cache) if raw else None
+        ref = doc["id"] if doc else None
         if doc:
             await db.candidates.update_one({"id": c["id"]}, {"$set": {
-                "center_ref_id": doc["id"], "center_name": doc.get("name"),
+                "center_ref_id": ref, "center_name": doc.get("name"),
                 "center_code": doc.get("center_code") or doc.get("entity_uid"),
             }})
             mapped += 1
         else:
             await db.candidates.update_one({"id": c["id"]}, {"$set": {"center_ref_id": None}})
             unmapped += 1
-    return {"total": total, "mapped": mapped, "unmapped": unmapped}
+        # Batch auto-link (needs the resolved center).
+        bref = await _resolve_batch_ref(ref, c.get("fy"), c.get("batch_id") or c.get("batch"), bcache)
+        await db.candidates.update_one({"id": c["id"]}, {"$set": {"batch_ref_id": bref}})
+        if bref:
+            batch_mapped += 1
+    return {"total": total, "mapped": mapped, "unmapped": unmapped, "batch_mapped": batch_mapped}
 
 
 @api.get("/candidates/export")
@@ -20147,6 +20228,15 @@ async def update_candidate(cid: str, payload: dict = Body(...), user=Depends(req
         upd["center_ref_id"] = data.get("center_ref_id")
         upd["center_name"] = data.get("center_name")
         upd["center_code"] = data.get("center_code")
+    # Re-link to a financial batch whenever center / batch id / FY changes.
+    if any(k in data for k in ("center_id", "batch_id", "batch", "fy")):
+        cur = await db.candidates.find_one({"id": cid}, {"_id": 0, "center_ref_id": 1, "fy": 1, "batch_id": 1, "batch": 1})
+        merged = {**(cur or {})}
+        for k in ("center_ref_id", "fy", "batch_id", "batch"):
+            if k in upd:
+                merged[k] = upd[k]
+        await _apply_batch_mapping(merged)
+        upd["batch_ref_id"] = merged.get("batch_ref_id")
     upd["updated_at"] = datetime.now(timezone.utc).isoformat()
     upd["updated_by"] = user["id"]
     await db.candidates.update_one({"id": cid}, {"$set": upd})

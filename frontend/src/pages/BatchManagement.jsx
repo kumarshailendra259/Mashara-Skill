@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
@@ -402,6 +403,22 @@ export default function BatchManagement() {
     setSelectedTargetForBatch(t || null);
     setBOpen(true);
   };
+  // Deep-link: /batch-management?batch=<id> (from a candidate's Batch ID) opens that batch.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkedRef = React.useRef(false);
+  useEffect(() => {
+    const bid = searchParams.get("batch");
+    if (!bid || deepLinkedRef.current || !batches.length) return;
+    const b = batches.find((x) => x.id === bid);
+    if (b) {
+      deepLinkedRef.current = true;
+      openEditBatch(b);
+      const next = new URLSearchParams(searchParams);
+      next.delete("batch");
+      setSearchParams(next, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batches, searchParams]);
   const removeBatch = async (b) => {
     if (!window.confirm(`Delete batch "${b.name}"? This releases its target allocation and cannot be undone.`)) return;
     try {

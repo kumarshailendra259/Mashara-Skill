@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api, formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
@@ -85,6 +86,7 @@ const downloadBlob = (blob, filename) => {
 
 export default function Candidates() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const canManage = ["admin", "hr", "manager", "center_manager", "partner"].includes(user?.role);
   const canDelete = ["admin", "hr"].includes(user?.role);
   const isCenterScoped = ["center_manager", "center_staff", "partner"].includes(user?.role);
@@ -517,7 +519,13 @@ export default function Candidates() {
                             : (r.center_id
                                 ? <span className="inline-flex items-center gap-1" data-testid={`cand-center-${r.id}`}>{centerNameById.get(r.center_id) || r.center_id}<span className="text-[9px] font-bold uppercase bg-red-100 text-red-700 border border-red-300 px-1" title="Center code not found in Center Management">Unmapped</span></span>
                                 : "—"))
-                      : (r[f.key] || "—")}
+                      : (f.key === "batch_id"
+                          ? (r.batch_id
+                              ? (r.batch_ref_id
+                                  ? <button type="button" onClick={() => navigate(`/batch-management?batch=${r.batch_ref_id}`)} className="text-[var(--brand)] underline underline-offset-2 hover:opacity-80 font-medium inline-flex items-center gap-1" title="Linked to Batch Management — click to open" data-testid={`cand-batch-${r.id}`}>{r.batch_id}<span className="text-[9px]">↗</span></button>
+                                  : <span className="inline-flex items-center gap-1" data-testid={`cand-batch-${r.id}`}>{r.batch_id}<span className="text-[9px] font-bold uppercase bg-amber-100 text-amber-700 border border-amber-300 px-1" title="No matching batch in Batch Management yet">Unlinked</span></span>)
+                              : "—")
+                          : (r[f.key] || "—"))}
                   </td>
                 ))}
               </tr>
