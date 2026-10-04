@@ -19186,11 +19186,9 @@ def _write_candidate_sheet(ws, headers: list, widths: list, meta: dict, rows: li
 
 def _build_candidate_workbook(docs: list, headers: list, widths: list,
                               district_filter: Optional[str], batch_filter: Optional[str]) -> bytes:
-    """District-wise master sheets + auto 30-candidate batch sheets.
-    Allocation is EXPORT-ONLY — it never writes the DB batch. Raises 404 if empty."""
+    """Batch Summary sheet + District-wise master sheets + auto 30-candidate batch
+    sheets. Allocation is EXPORT-ONLY — it never writes the DB batch. 404 if empty."""
     from collections import OrderedDict
-    wb = Workbook()
-    wb.remove(wb.active)
 
     ordered = sorted(docs, key=lambda d: d.get("created_at") or "")  # stable 1..N seq
 
@@ -19209,54 +19207,171 @@ def _build_candidate_workbook(docs: list, headers: list, widths: list,
             for i, d in enumerate(by_dist[dist])
         ]
 
-    # --- Specific batch selected → emit ONLY that one sheet ---
+    jobs = []            # (sheet_title, meta, rows)  rendered in order
+    batch_groups = []    # (district, batch_name, [docs]) → drives the summary sheet
+
     if batch_filter:
+        # --- Specific batch selected → emit ONLY that one sheet ---
         db_docs = [d for d in ordered if _cand_doc_batch_id(d) == batch_filter]
         if db_docs:  # existing DB batch id/name wins
-            sel = [(i + 1, i + 1, batch_filter, d) for i, d in enumerate(db_docs)]
             dist = (db_docs[0].get("district") or "").strip()
-            ws = wb.create_sheet(_unique_sheet_title(wb, batch_filter))
-            _write_candidate_sheet(ws, headers, widths, _district_meta(db_docs, dist, batch_filter), sel)
-            buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
-        for dist, rows in alloc.items():  # else: generated allocation name (District_NN)
-            grp = [(o, bn, d) for (o, bn, d) in rows if bn == batch_filter]
-            if grp:
-                sel = [(i + 1, o, bn, d) for i, (o, bn, d) in enumerate(grp)]
-                ws = wb.create_sheet(_unique_sheet_title(wb, batch_filter))
-                _write_candidate_sheet(ws, headers, widths,
-                                       _district_meta([d for (_o, _bn, d) in grp], dist, batch_filter), sel)
-                buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
-        raise HTTPException(404, "No candidates found for the selected District/Batch.")
+            jobs.append((batch_filter, _district_meta(db_docs, dist, batch_filter),
+                         [(i + 1, i + 1, batch_filter, d) for i, d in enumerate(db_docs)]))
+            batch_groups.append((dist or "—", batch_filter, db_docs))
+        else:  # else: generated allocation name (District_NN)
+            found = False
+            for dist, rows in alloc.items():
+                grp = [(o, bn, d) for (o, bn, d) in rows if bn == batch_filter]
+                if grp:
+                    found = True
+                    gdocs = [d for (_o, _bn, d) in grp]
+                    jobs.append((batch_filter, _district_meta(gdocs, dist, batch_filter),
+                                 [(i + 1, o, bn, d) for i, (o, bn, d) in enumerate(grp)]))
+                    batch_groups.append((dist, batch_filter, gdocs))
+                    break
+            if not found:
+                raise HTTPException(404, "No candidates found for the selected District/Batch.")
+    else:
+        # --- District master + 30-candidate batch sheets ---
+        districts = list(alloc.keys())
+        if district_filter:
+            districts = [d for d in districts if d == district_filter] or districts
+        for dist in districts:
+            rows = alloc[dist]
+            if not rows:
+                continue
+            dlist = [d for (_o, _b, d) in rows]
+            jobs.append((f"{dist}_All_Candidate", _district_meta(dlist, dist, "ALL"),
+                         [(o, o, bn, d) for (o, bn, d) in rows]))
+            groups = OrderedDict()
+            for (o, bn, d) in rows:
+                groups.setdefault(bn, []).append((o, d))
+            for bn, items in groups.items():
+                jobs.append((bn, _district_meta([d for (_o, d) in items], dist, bn),
+                             [(i + 1, o, bn, d) for i, (o, d) in enumerate(items)]))
+                batch_groups.append((dist, bn, [d for (_o, d) in items]))
+        if not jobs:
+            raise HTTPException(404, "No candidates found for the selected District/Batch.")
 
-    # --- District master + 30-candidate batch sheets ---
-    districts = list(alloc.keys())
-    if district_filter:
-        districts = [d for d in districts if d == district_filter] or districts
-    produced = False
-    for dist in districts:
-        rows = alloc[dist]
-        if not rows:
-            continue
-        produced = True
-        dlist = [d for (_o, _b, d) in rows]
-        # Master sheet (entire district).
-        ws_m = wb.create_sheet(_unique_sheet_title(wb, f"{dist}_All_Candidate"))
-        _write_candidate_sheet(ws_m, headers, widths, _district_meta(dlist, dist, "ALL"),
-                               [(o, o, bn, d) for (o, bn, d) in rows])
-        # 30-candidate batch sheets.
-        groups = OrderedDict()
-        for (o, bn, d) in rows:
-            groups.setdefault(bn, []).append((o, d))
-        for bn, items in groups.items():
-            sel = [(i + 1, o, bn, d) for i, (o, d) in enumerate(items)]
-            ws_b = wb.create_sheet(_unique_sheet_title(wb, bn))
-            _write_candidate_sheet(ws_b, headers, widths,
-                                   _district_meta([d for (_o, d) in items], dist, bn), sel)
-
-    if not produced:
-        raise HTTPException(404, "No candidates found for the selected District/Batch.")
+    wb = Workbook()
+    wb.remove(wb.active)
+    # Batch Summary first (sheet index 0).
+    if batch_groups:
+        _write_batch_summary_sheet(wb, batch_groups)
+    for title, meta, rows in jobs:
+        ws = wb.create_sheet(_unique_sheet_title(wb, title))
+        _write_candidate_sheet(ws, headers, widths, meta, rows)
 
     buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
+
+
+def _norm_gender_bucket(v) -> str:
+    g = (str(v or "").strip() or "").upper()
+    if g.startswith("M"):
+        return "Male"
+    if g.startswith("F"):
+        return "Female"
+    if g.startswith("T"):
+        return "Trans"
+    return "Other"
+
+
+def _write_batch_summary_sheet(wb, batch_groups: list):
+    """A leading overview sheet: per district→batch totals + Male/Female/Trans/Other
+    and a dynamic column per Category, with district subtotals and a grand total."""
+    from openpyxl.utils import get_column_letter
+    from collections import OrderedDict
+
+    # Distinct categories (stable, sorted) across all exported candidates.
+    cats = sorted({(str(d.get("category") or "").strip() or "—")
+                   for (_dist, _bn, docs) in batch_groups for d in docs})
+    base_headers = ["District", "Batch Name", "Total", "Male", "Female", "Trans", "Other"]
+    headers = base_headers + [f"Cat: {c}" for c in cats]
+    ncols = len(headers)
+
+    ws = wb.create_sheet(_unique_sheet_title(wb, "Batch Summary"), 0)
+    title_font = Font(name="Arial Narrow", bold=True, size=13)
+    hdr_font = Font(name="Arial Narrow", bold=True, size=10, color="FFFFFF")
+    hdr_fill = PatternFill(start_color="1E4EAB", end_color="1E4EAB", fill_type="solid")
+    sub_fill = PatternFill(start_color="DCE6F7", end_color="DCE6F7", fill_type="solid")
+    tot_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    tcell = ws.cell(row=1, column=1, value="BATCH SUMMARY — District & Batch wise")
+    tcell.font = title_font
+    tcell.alignment = center
+    ws.row_dimensions[1].height = 22
+
+    def _counts(docs):
+        row = {"Male": 0, "Female": 0, "Trans": 0, "Other": 0}
+        cat = {c: 0 for c in cats}
+        for d in docs:
+            row[_norm_gender_bucket(d.get("gender"))] += 1
+            cat[(str(d.get("category") or "").strip() or "—")] += 1
+        return row, cat
+
+    def _write_row(r, district, batch_name, docs, fill=None, bold=False):
+        g, cat = _counts(docs)
+        vals = [district, batch_name, len(docs), g["Male"], g["Female"], g["Trans"], g["Other"]] + [cat[c] for c in cats]
+        for c_i, v in enumerate(vals, start=1):
+            cell = ws.cell(row=r, column=c_i, value=v)
+            cell.alignment = left if c_i <= 2 else center
+            cell.border = _BORDER_ALL
+            cell.font = Font(name="Arial Narrow", bold=bold, size=10)
+            if fill:
+                cell.fill = fill
+
+    # Header row (row 2).
+    for c_i, h in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=c_i, value=h)
+        cell.font = hdr_font
+        cell.fill = hdr_fill
+        cell.alignment = center
+        cell.border = _BORDER_ALL
+        ws.column_dimensions[get_column_letter(c_i)].width = (
+            20 if c_i == 1 else 16 if c_i == 2 else 8 if c_i <= 7 else 11
+        )
+
+    # Group batch_groups by district (preserve encounter order, districts sorted).
+    by_dist = OrderedDict()
+    for (dist, bn, docs) in batch_groups:
+        by_dist.setdefault(dist, []).append((bn, docs))
+
+    r = 3
+    grand = []
+    for dist in sorted(by_dist.keys()):
+        dist_docs = []
+        for (bn, docs) in by_dist[dist]:
+            _write_row(r, dist, bn, docs)
+            r += 1
+            dist_docs += docs
+            grand += docs
+        if len(by_dist[dist]) > 1:
+            _write_row(r, dist, "— District Total —", dist_docs, fill=sub_fill, bold=True)
+            r += 1
+    _write_row(r, "ALL DISTRICTS", "— Grand Total —", grand, fill=tot_fill, bold=True)
+
+    ws.freeze_panes = "A3"
+    ws.auto_filter.ref = f"A2:{get_column_letter(ncols)}{r}"
+
+
+def _candidate_generated_batch_names(docs: list) -> list:
+    """Generated allocation names (District_01, District_02…) the export would
+    produce for the given candidate set — so the Batch filter can offer them."""
+    from collections import OrderedDict
+    ordered = sorted(docs, key=lambda d: d.get("created_at") or "")
+    counts = OrderedDict()
+    for d in ordered:
+        dist = (d.get("district") or "").strip() or "No_District"
+        counts[dist] = counts.get(dist, 0) + 1
+    names = []
+    for dist in sorted(counts.keys()):
+        nb = (counts[dist] + _CAND_BATCH_SIZE - 1) // _CAND_BATCH_SIZE
+        prefix = _safe_sheet_token(dist)
+        names += [f"{prefix}_{i:02d}" for i in range(1, nb + 1)]
+    return names
 
 
 
@@ -19466,8 +19581,34 @@ async def list_candidates(
         q["is_deleted"] = {"$ne": True}
     if project:
         q["project"] = project.upper()
+    # Batch may be an existing DB batch OR an export-generated allocation name
+    # (District_NN). Resolve generated names to the same 30-candidate slice the
+    # export produces, so the table matches the Excel.
+    generated_idx = None
     if batch:
-        q["batch"] = batch
+        probe = {**scope, "batch": batch}
+        if project:
+            probe["project"] = project.upper()
+        if not include_deleted:
+            probe["is_deleted"] = {"$ne": True}
+        if await db.candidates.count_documents(probe) > 0:
+            q["batch"] = batch
+        else:
+            m = re.match(r"^(.*)_(\d{2,})$", batch)
+            if m:
+                prefix, idx_part = m.group(1), m.group(2)
+                base_probe = {**scope}
+                if project:
+                    base_probe["project"] = project.upper()
+                if not include_deleted:
+                    base_probe["is_deleted"] = {"$ne": True}
+                for dcand in await db.candidates.distinct("district", base_probe):
+                    if _safe_sheet_token((dcand or "").strip() or "No_District") == prefix:
+                        q["district"] = dcand
+                        generated_idx = int(idx_part)
+                        break
+            if generated_idx is None:
+                q["batch"] = batch   # no match → fall through (likely empty)
     if district:
         q["district"] = district
     if fy:
@@ -19498,6 +19639,15 @@ async def list_candidates(
             q = {"$and": [{"$or": q.pop("$or")}, {"$or": s_or}], **q}
         else:
             q["$or"] = s_or
+    if generated_idx is not None:
+        # Export-generated batch: slice the district's candidates (stable created_at
+        # ascending order — same as the export) into the 30-sized window.
+        all_docs = await db.candidates.find(q, {"_id": 0}).sort("created_at", 1).to_list(100000)
+        start = (generated_idx - 1) * _CAND_BATCH_SIZE
+        sliced = all_docs[start:start + _CAND_BATCH_SIZE]
+        total = len(sliced)
+        page_items = sliced[(page - 1) * page_size:(page - 1) * page_size + page_size]
+        return {"total": total, "page": page, "page_size": page_size, "items": page_items}
     total = await db.candidates.count_documents(q)
     docs = await db.candidates.find(q, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size).to_list(page_size)
     return {"total": total, "page": page, "page_size": page_size, "items": docs}
@@ -19521,8 +19671,17 @@ async def candidate_filter_options(
     courses1 = await db.candidates.distinct("course", q)
     courses2 = await db.candidates.distinct("course_name", q)
     fys = await db.candidates.distinct("fy", q)
+    db_batches = sorted([b for b in batches if b])
+    # Generated allocation names (District_01, District_02…) the export would
+    # create — exposed so the user can pick a specific 30-candidate batch directly.
+    gen_docs = await db.candidates.find(q, {"_id": 0, "district": 1, "created_at": 1}).to_list(50000)
+    generated = _candidate_generated_batch_names(gen_docs)
+    # DB batches first, then generated names not already present.
+    merged = db_batches + [g for g in generated if g not in set(db_batches)]
     return {
-        "batches": sorted([b for b in batches if b]),
+        "batches": merged,
+        "db_batches": db_batches,
+        "generated_batches": generated,
         "districts": sorted([d for d in districts if d]),
         "courses": sorted({c for c in courses1 + courses2 if c}),
         "fys": sorted([f for f in fys if f]),

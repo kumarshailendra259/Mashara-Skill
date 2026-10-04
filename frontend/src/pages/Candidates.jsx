@@ -106,7 +106,7 @@ export default function Candidates() {
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [options, setOptions] = useState({ batches: [], districts: [], courses: [], fys: [] });
+  const [options, setOptions] = useState({ batches: [], dbBatches: [], generatedBatches: [], districts: [], courses: [], fys: [] });
   const [centers, setCenters] = useState([]);
   // Load center master list once so we can (a) populate the Center dropdowns and
   // (b) map center_id → readable center name in the table.
@@ -156,7 +156,12 @@ export default function Candidates() {
   const loadOptions = useCallback(async () => {
     try {
       const { data } = await api.get(`/candidates/filter-options?project=${project}`);
-      setOptions({ batches: data.batches || [], districts: data.districts || [], courses: data.courses || [], fys: data.fys || [] });
+      setOptions({
+        batches: data.batches || [],
+        dbBatches: data.db_batches || [],
+        generatedBatches: data.generated_batches || [],
+        districts: data.districts || [], courses: data.courses || [], fys: data.fys || [],
+      });
     } catch { /* soft-fail */ }
   }, [project]);
 
@@ -386,7 +391,14 @@ export default function Candidates() {
               <SelectTrigger className="rounded-none" data-testid="filter-batch"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Batches</SelectItem>
-                {options.batches.map((b) => <SelectItem key={b} value={b}>{b}</SelectItem>)}
+                {(options.dbBatches || []).length > 0 && (
+                  <div className="px-2 py-1 text-[10px] font-bold uppercase text-[var(--muted)]">Existing Batches</div>
+                )}
+                {(options.dbBatches || []).map((b) => <SelectItem key={`db-${b}`} value={b}>{b}</SelectItem>)}
+                {(options.generatedBatches || []).length > 0 && (
+                  <div className="px-2 py-1 mt-1 text-[10px] font-bold uppercase text-[var(--muted)] border-t border-[var(--border)]">Auto 30-Candidate Batches</div>
+                )}
+                {(options.generatedBatches || []).map((b) => <SelectItem key={`gen-${b}`} value={b} data-testid={`batch-opt-${b}`}>{b}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
