@@ -18979,10 +18979,14 @@ BLOCKED_RELATIONS = {"wife", "husband"}
 # row 4+ = candidate data. Sheet is NOT protected so users can edit metadata.
 # ---------------------------------------------------------------------------
 
-# (field_key, exact_header) in the exact column order of the reference file (A..R).
-# field_key None → auto S.No.
+# Candidate export column schema. Sentinel keys are computed per-row:
+#   __sno__  = sheet-local serial (master = district seq, batch sheet = 1..30)
+#   __orig__ = district master serial (stable across batch sheets)
+#   __batch_name__ = generated allocation name (e.g. Gumla_01) — export-only
+#   __batch_id__   = the candidate's EXISTING DB batch value (preserved, never changed)
 BOCWW_EXPORT_HEADERS = [
-    (None, "s.no"),
+    ("__sno__", "S.No"),
+    ("__orig__", "Original S.No"),
     ("name", "Candidate Name"),
     ("father_or_husband_name", "Father's Name/ Husband Name"),
     ("mother_name", "Mother's Name"),
@@ -19000,14 +19004,15 @@ BOCWW_EXPORT_HEADERS = [
     ("mobile", "Mobile No."),
     ("education", "Education"),
     ("physically_handicapped", "Physically Handicapped/Differently Abled (Yes/No)"),
+    ("__batch_name__", "Batch Name"),
+    ("__batch_id__", "Batch ID"),
 ]
-# Column widths A..R copied from the reference file.
-BOCWW_EXPORT_WIDTHS = [5.9, 28.5, 26.4, 4.2, 25.1, 27.6, 24.2, 15.0, 30.0, 17.4,
-                       13.1, 17.5, 10.8, 10.1, 46.2, 16.1, 7.9, 11.5]
+BOCWW_EXPORT_WIDTHS = [6.0, 11.0, 28.5, 26.4, 4.2, 25.1, 27.6, 24.2, 15.0, 30.0, 17.4,
+                       13.1, 17.5, 10.8, 10.1, 46.2, 16.1, 7.9, 11.5, 14.0, 16.0]
 
-# JSDMS export columns (S.No + lean roster) — editable metadata header also applied.
 JSDMS_EXPORT_HEADERS = [
-    (None, "S.No"),
+    ("__sno__", "S.No"),
+    ("__orig__", "Original S.No"),
     ("name", "Candidate Name"),
     ("father_name", "Father's Name"),
     ("aadhaar", "Aadhaar Number"),
@@ -19017,35 +19022,18 @@ JSDMS_EXPORT_HEADERS = [
     ("course_name", "Course Name"),
     ("education", "Education"),
     ("address", "Full Address"),
-    ("batch", "Batch"),
     ("district", "District"),
+    ("__batch_name__", "Batch Name"),
+    ("__batch_id__", "Batch ID"),
 ]
-JSDMS_EXPORT_WIDTHS = [6, 26, 24, 18, 15, 18, 14, 26, 14, 46, 16, 16]
+JSDMS_EXPORT_WIDTHS = [6.0, 11.0, 26, 24, 18, 15, 18, 14, 26, 14, 46, 16, 14, 16]
 
 # Fields that MUST stay text so Excel never converts to scientific notation / drops leading chars.
 CAND_TEXT_FIELDS = {"aadhaar", "registered_labour_aadhaar", "labour_reg_no", "mobile", "aadhaar_linked_mobile"}
 
 _THIN = Side(style="thin")
 _BORDER_ALL = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-
-
-def _cand_export_meta(docs: list, district: Optional[str], batch: Optional[str]) -> dict:
-    """Best-effort metadata values for the editable header (first non-empty across
-    the filtered candidates; filter values win for district/batch)."""
-    def _first(key):
-        for d in docs:
-            v = d.get(key)
-            if v not in (None, ""):
-                return v
-        return ""
-    return {
-        "course_code": _first("course_code"),
-        "course_duration": _first("course_duration_hours"),
-        "end_time": _first("end_time"),
-        "state": _first("state"),
-        "district": district or _first("district") or "",
-        "batch": batch or _first("batch_id") or _first("batch") or "ALL",
-    }
+_CAND_BATCH_SIZE = 30
 
 
 def _cand_cell_str(v) -> str:
@@ -19057,29 +19045,99 @@ def _cand_cell_str(v) -> str:
     return str(v)
 
 
-def _build_candidate_template(docs: list, headers: list, widths: list, meta_cells: list) -> bytes:
-    """Generic builder: editable metadata header (rows 1-2, merged), candidate
-    headers (row 3), data (row 4+). Not protected. Mirrors the reference file.
+def _cand_doc_batch_id(d: dict) -> str:
+    """The candidate's existing DB batch value (never modified by export)."""
+    return _cand_cell_str(d.get("batch") or d.get("batch_id") or "")
 
-    `meta_cells` = list of (a1_range, value) — each range is merged and the value
-    is written to the anchor cell. Pass per-project to control the exact layout.
-    """
+
+def _safe_sheet_token(name: str) -> str:
+    """Strip Excel-illegal sheet-name chars."""
+    bad = set('\\/?*[]:')
+    out = "".join("_" if ch in bad else ch for ch in str(name or "").strip())
+    return out or "NA"
+
+
+def _unique_sheet_title(wb, base: str) -> str:
+    """31-char-safe, de-duplicated worksheet title."""
+    base = _safe_sheet_token(base)[:31] or "Sheet"
+    title = base
+    i = 1
+    existing = set(wb.sheetnames)
+    while title in existing:
+        suf = f"_{i:02d}"
+        title = base[:31 - len(suf)] + suf
+        i += 1
+    return title
+
+
+def _district_meta(dlist: list, district: str, batch_label: str) -> dict:
+    """Editable-header metadata values derived from a district's candidates."""
+    def _first(key):
+        for d in dlist:
+            v = d.get(key)
+            if v not in (None, ""):
+                return v
+        return ""
+    return {
+        "course_code": _first("course_code"),
+        "course_duration": _first("course_duration_hours"),
+        "end_time": _first("end_time"),
+        "state": _first("state"),
+        "district": district or "",
+        "batch": batch_label,
+    }
+
+
+def _meta_cells_for(meta: dict, ncols: int) -> list:
+    """Adaptive 3-pair editable metadata header spanning `ncols` columns
+    (Course Code/Duration · End Time/State · District/Batch)."""
+    from openpyxl.utils import get_column_letter
+    cc = _cand_cell_str(meta.get("course_code"))
+    cd = _cand_cell_str(meta.get("course_duration"))
+    et = _cand_cell_str(meta.get("end_time"))
+    st = _cand_cell_str(meta.get("state"))
+    dist = _cand_cell_str(meta.get("district"))
+    batch = _cand_cell_str(meta.get("batch"))
+
+    def _rng(c1, c2, row):
+        return f"{get_column_letter(c1)}{row}:{get_column_letter(c2)}{row}"
+
+    def _pair(c1, c2, row, label, value):
+        lw = max(1, (c2 - c1 + 1) // 2)
+        le = c1 + lw - 1
+        if le < c2:
+            return [(_rng(c1, le, row), label), (_rng(le + 1, c2, row), value)]
+        return [(_rng(c1, c2, row), f"{label} {value}".strip())]
+
+    third = max(1, ncols // 3)
+    r1 = (1, third)
+    r2 = (third + 1, 2 * third)
+    r3 = (2 * third + 1, ncols)
+    cells = []
+    cells += _pair(r1[0], r1[1], 1, "Course Code", cc)
+    cells += _pair(r2[0], r2[1], 1, "End Time", et)
+    cells += [(_rng(r3[0], r3[1], 1), f"District - {dist}")]
+    cells += _pair(r1[0], r1[1], 2, "Course Duration (Hours)", cd)
+    cells += _pair(r2[0], r2[1], 2, "State", st)
+    cells += [(_rng(r3[0], r3[1], 2), f"Batch - {batch}")]
+    return cells
+
+
+def _write_candidate_sheet(ws, headers: list, widths: list, meta: dict, rows: list):
+    """Write a single worksheet in the reference template format.
+    rows = list of (sheet_sno, orig_sno, batch_name, doc)."""
+    from openpyxl.utils import get_column_letter
     ncols = len(headers)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Candidates"
-
     meta_font = Font(name="Arial Narrow", size=11)
     hdr_font = Font(name="Arial Narrow", size=9)
     center_wrap = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    # --- Metadata header (rows 1-2) ---
-    for a1_range, value in meta_cells:
-        anchor = a1_range.split(":")[0]
-        if ":" in a1_range and a1_range.split(":")[0] != a1_range.split(":")[1]:
+    # Metadata header (rows 1-2).
+    for a1_range, value in _meta_cells_for(meta, ncols):
+        c1, c2 = a1_range.split(":")
+        if c1 != c2:
             ws.merge_cells(a1_range)
-        ws[anchor] = value if value is not None else ""
-    # Style every cell in rows 1-2 (incl. merged members + gap cells) so borders apply fully.
+        ws[c1] = value if value is not None else ""
     for r in (1, 2):
         for c in range(1, ncols + 1):
             cell = ws.cell(row=r, column=c)
@@ -19089,72 +19147,116 @@ def _build_candidate_template(docs: list, headers: list, widths: list, meta_cell
     ws.row_dimensions[1].height = 16.5
     ws.row_dimensions[2].height = 16.5
 
-    # --- Candidate header row (row 3) ---
+    # Candidate header row (row 3).
     for idx, (_k, header) in enumerate(headers, start=1):
         cell = ws.cell(row=3, column=idx, value=header)
         cell.font = hdr_font
         cell.alignment = center_wrap
         cell.border = _BORDER_ALL
         if idx - 1 < len(widths):
-            ws.column_dimensions[cell.column_letter].width = widths[idx - 1]
+            ws.column_dimensions[get_column_letter(idx)].width = widths[idx - 1]
     ws.row_dimensions[3].height = 89.5
 
-    # --- Candidate data (row 4+) ---
+    # Candidate data (row 4+).
     data_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for r_i, d in enumerate(docs, start=4):
+    for r_i, (sno, orig, bname, d) in enumerate(rows, start=4):
         for c_i, (key, _h) in enumerate(headers, start=1):
             cell = ws.cell(row=r_i, column=c_i)
-            if key is None:
-                cell.value = r_i - 3           # auto S.No 1,2,3...
+            if key == "__sno__":
+                cell.value = sno
+            elif key == "__orig__":
+                cell.value = orig
+            elif key == "__batch_name__":
+                cell.value = bname
+            elif key == "__batch_id__":
+                cell.value = _cand_doc_batch_id(d)
+                cell.number_format = "@"
             elif key in CAND_TEXT_FIELDS:
                 cell.value = _cand_cell_str(d.get(key))
-                cell.number_format = "@"       # force text → no scientific notation
+                cell.number_format = "@"
             else:
                 cell.value = _cand_cell_str(d.get(key)) if d.get(key) not in (None, "") else ""
             cell.alignment = data_align
             cell.border = _BORDER_ALL
 
-    last_row = max(3, 3 + len(docs))
-    ws.freeze_panes = "A4"                      # freeze metadata + header rows
-    from openpyxl.utils import get_column_letter
+    last_row = max(3, 3 + len(rows))
+    ws.freeze_panes = "A4"
     ws.auto_filter.ref = f"A3:{get_column_letter(ncols)}{last_row}"
 
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    return buf.read()
 
+def _build_candidate_workbook(docs: list, headers: list, widths: list,
+                              district_filter: Optional[str], batch_filter: Optional[str]) -> bytes:
+    """District-wise master sheets + auto 30-candidate batch sheets.
+    Allocation is EXPORT-ONLY — it never writes the DB batch. Raises 404 if empty."""
+    from collections import OrderedDict
+    wb = Workbook()
+    wb.remove(wb.active)
 
-def _bocww_meta_cells(meta: dict) -> list:
-    """Exact metadata layout of the reference BOCWW VALID DATA.xlsx."""
-    cc = _cand_cell_str(meta.get("course_code"))
-    cd = _cand_cell_str(meta.get("course_duration"))
-    et = _cand_cell_str(meta.get("end_time"))
-    st = _cand_cell_str(meta.get("state"))
-    dist = _cand_cell_str(meta.get("district"))
-    batch = _cand_cell_str(meta.get("batch"))
-    return [
-        ("A1:C1", "Course Code  "), ("D1:H1", cc), ("I1:I1", "End Time"), ("K1:L1", et),
-        ("M1:O1", f"District - {dist}"), ("P1:R1", ""),
-        ("A2:C2", "Course Duration (Hours)"), ("D2:H2", cd), ("I2:I2", "State"), ("K2:L2", st),
-        ("M2:O2", f"Batch - {batch}"), ("P2:R2", ""),
-    ]
+    ordered = sorted(docs, key=lambda d: d.get("created_at") or "")  # stable 1..N seq
 
+    # Group by district (candidates stay within their own district's batches).
+    by_dist = OrderedDict()
+    for d in ordered:
+        dist = (d.get("district") or "").strip() or "No_District"
+        by_dist.setdefault(dist, []).append(d)
 
-def _jsdms_meta_cells(meta: dict) -> list:
-    """Editable metadata header laid out across the JSDMS (12-col) template."""
-    cc = _cand_cell_str(meta.get("course_code"))
-    cd = _cand_cell_str(meta.get("course_duration"))
-    et = _cand_cell_str(meta.get("end_time"))
-    st = _cand_cell_str(meta.get("state"))
-    dist = _cand_cell_str(meta.get("district"))
-    batch = _cand_cell_str(meta.get("batch"))
-    return [
-        ("A1:B1", "Course Code"), ("C1:D1", cc), ("E1:F1", "End Time"), ("G1:H1", et),
-        ("I1:J1", f"District - {dist}"), ("K1:L1", ""),
-        ("A2:B2", "Course Duration (Hours)"), ("C2:D2", cd), ("E2:F2", "State"), ("G2:H2", st),
-        ("I2:J2", f"Batch - {batch}"), ("K2:L2", ""),
-    ]
+    # Per-district allocation: dist -> [(orig_sno, batch_name, doc)].
+    alloc = OrderedDict()
+    for dist in sorted(by_dist.keys()):
+        prefix = _safe_sheet_token(dist)
+        alloc[dist] = [
+            (i + 1, f"{prefix}_{i // _CAND_BATCH_SIZE + 1:02d}", d)
+            for i, d in enumerate(by_dist[dist])
+        ]
+
+    # --- Specific batch selected → emit ONLY that one sheet ---
+    if batch_filter:
+        db_docs = [d for d in ordered if _cand_doc_batch_id(d) == batch_filter]
+        if db_docs:  # existing DB batch id/name wins
+            sel = [(i + 1, i + 1, batch_filter, d) for i, d in enumerate(db_docs)]
+            dist = (db_docs[0].get("district") or "").strip()
+            ws = wb.create_sheet(_unique_sheet_title(wb, batch_filter))
+            _write_candidate_sheet(ws, headers, widths, _district_meta(db_docs, dist, batch_filter), sel)
+            buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
+        for dist, rows in alloc.items():  # else: generated allocation name (District_NN)
+            grp = [(o, bn, d) for (o, bn, d) in rows if bn == batch_filter]
+            if grp:
+                sel = [(i + 1, o, bn, d) for i, (o, bn, d) in enumerate(grp)]
+                ws = wb.create_sheet(_unique_sheet_title(wb, batch_filter))
+                _write_candidate_sheet(ws, headers, widths,
+                                       _district_meta([d for (_o, _bn, d) in grp], dist, batch_filter), sel)
+                buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
+        raise HTTPException(404, "No candidates found for the selected District/Batch.")
+
+    # --- District master + 30-candidate batch sheets ---
+    districts = list(alloc.keys())
+    if district_filter:
+        districts = [d for d in districts if d == district_filter] or districts
+    produced = False
+    for dist in districts:
+        rows = alloc[dist]
+        if not rows:
+            continue
+        produced = True
+        dlist = [d for (_o, _b, d) in rows]
+        # Master sheet (entire district).
+        ws_m = wb.create_sheet(_unique_sheet_title(wb, f"{dist}_All_Candidate"))
+        _write_candidate_sheet(ws_m, headers, widths, _district_meta(dlist, dist, "ALL"),
+                               [(o, o, bn, d) for (o, bn, d) in rows])
+        # 30-candidate batch sheets.
+        groups = OrderedDict()
+        for (o, bn, d) in rows:
+            groups.setdefault(bn, []).append((o, d))
+        for bn, items in groups.items():
+            sel = [(i + 1, o, bn, d) for i, (o, d) in enumerate(items)]
+            ws_b = wb.create_sheet(_unique_sheet_title(wb, bn))
+            _write_candidate_sheet(ws_b, headers, widths,
+                                   _district_meta([d for (_o, d) in items], dist, bn), sel)
+
+    if not produced:
+        raise HTTPException(404, "No candidates found for the selected District/Batch.")
+
+    buf = BytesIO(); wb.save(buf); buf.seek(0); return buf.read()
 
 
 
@@ -19638,7 +19740,6 @@ async def candidate_export_excel(
     q: dict = {**scope, "is_deleted": {"$ne": True}}
     proj_key = (project or "").upper() if project else None
     if proj_key: q["project"] = proj_key
-    if batch: q["batch"] = batch
     if district: q["district"] = district
     if center_id: q["center_id"] = center_id
     if fy: q["fy"] = fy
@@ -19662,23 +19763,27 @@ async def candidate_export_excel(
             q["$or"] = s_or
     docs = await db.candidates.find(q, {"_id": 0}).sort("created_at", -1).to_list(10000)
 
-    # Template-based export (mirrors uploaded BOCWW VALID DATA.xlsx) for BOCWW;
-    # JSDMS gets the same editable metadata header over its lean roster.
+    # Multi-sheet template export (mirrors uploaded BOCWW VALID DATA.xlsx): one
+    # District master sheet + auto 30-candidate batch sheets per district. The
+    # batch dropdown value (DB batch id/name OR generated allocation name) is
+    # honoured by the builder; district grouping is strict. Allocation is
+    # export-only and never mutates the DB batch assignment.
     if proj_key == "BOCWW":
-        meta = _cand_export_meta(docs, district, batch)
-        content = _build_candidate_template(docs, BOCWW_EXPORT_HEADERS, BOCWW_EXPORT_WIDTHS, _bocww_meta_cells(meta))
+        content = _build_candidate_workbook(docs, BOCWW_EXPORT_HEADERS, BOCWW_EXPORT_WIDTHS, district, batch)
         fname = f"BOCWW_candidates_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
         return Response(content=content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
     if proj_key == "JSDMS":
-        meta = _cand_export_meta(docs, district, batch)
-        content = _build_candidate_template(docs, JSDMS_EXPORT_HEADERS, JSDMS_EXPORT_WIDTHS, _jsdms_meta_cells(meta))
+        content = _build_candidate_workbook(docs, JSDMS_EXPORT_HEADERS, JSDMS_EXPORT_WIDTHS, district, batch)
         fname = f"JSDMS_candidates_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.xlsx"
         return Response(content=content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
+    # Union / ALL view — single flat sheet (batch filter applied in Python).
+    if batch:
+        docs = [d for d in docs if _cand_doc_batch_id(d) == batch]
     wb = Workbook()
     ws = wb.active
     ws.title = "Candidates"
