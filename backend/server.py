@@ -16921,6 +16921,21 @@ async def tds_register(
     if project_id:
         q["project_id"] = project_id
 
+    # Center/company isolation — partner (and any scoped role) sees TDS ONLY for
+    # the centers they are mapped to. Head-level users (admin/senior_manager) are
+    # unrestricted. A scoped user with no centers gets an empty register.
+    await _enrich_user_with_associations(user)
+    scope = _center_scope_query(user, field="center_id")
+    if scope.get("_never_"):
+        return {
+            "fy": fy, "quarter": quarter.upper() if quarter else "ALL",
+            "range": {"start": start, "end": end}, "rows": [],
+            "by_quarter": {"Q1": 0.0, "Q2": 0.0, "Q3": 0.0, "Q4": 0.0},
+            "by_project": [], "totals": {"tds_amount": 0.0, "count": 0},
+        }
+    if scope:
+        q.update(scope)
+
     txns = await db.transactions.find(q, {"_id": 0}).sort("date", 1).to_list(5000)
 
     # Resolve project / center names in bulk
@@ -21819,10 +21834,13 @@ async def mis_overview(_=Depends(require_role(*MIS_READ_ROLES))):
 # NOTE: Original /api/mis/* endpoints stay untouched for backward compatibility;
 # frontend will simply prefer /api/mis/live/* wherever available.
 
-async def _mis_live_batch_rows() -> list:
+async def _mis_live_batch_rows(scoped=None) -> list:
     """Return a list of batch-level rows built by joining batches + projects
     + centers + companies + candidates (grouped). Each row has the same keys
-    used by the existing MIS Project Summary UI so the same table renders."""
+    used by the existing MIS Project Summary UI so the same table renders.
+
+    `scoped` — None = all centers (head-level); a list = restrict to those
+    center_ids (partner/company-scoped); [] = nothing."""
     # 1) Pre-load lookup maps (small collections — cheap).
     projects = {p["id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(2000)}
     centers  = {c["id"]: c for c in await db.centers.find({}, {"_id": 0}).to_list(2000)}
@@ -21836,8 +21854,9 @@ async def _mis_live_batch_rows() -> list:
     ]):
         if r.get("_id"): cand_by_batch[str(r["_id"])] = int(r["n"] or 0)
 
-    # 3) Batches — the base rows.
-    batches = await db.batches.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    # 3) Batches — the base rows (center-scoped when applicable).
+    bq = {} if scoped is None else {"center_id": {"$in": scoped}}
+    batches = await db.batches.find(bq, {"_id": 0}).sort("created_at", -1).to_list(5000)
 
     rows = []
     for b in batches:
@@ -21893,26 +21912,52 @@ async def _mis_live_batch_rows() -> list:
     return rows
 
 
-@api.get("/mis/live/overview")
-async def mis_live_overview(_=Depends(require_role(*MIS_READ_ROLES))):
-    """Live KPIs derived entirely from Core ERP (projects, centers, batches,
-    candidates). No dependency on mis_project_summary overlay."""
+async def _resolve_mis_scope(user) -> Optional[List[str]]:
+    """Resolve the caller's MIS center scope. None = head-level (all companies);
+    a list = restrict to those center_ids; [] = scoped user with no centers."""
+    await _enrich_user_with_associations(user)
+    return _scoped_center_ids(user)
+
+
+async def _compute_mis_overview(scoped: Optional[List[str]]) -> dict:
+    """Core-ERP live KPIs for the given center scope (None = unrestricted)."""
     from datetime import date as _date, timedelta as _td
     today = _date.today()
     tstr = today.isoformat()
     plus_30 = (today + _td(days=30)).isoformat()
 
-    # Core entity counts
-    total_projects  = await db.projects.count_documents({})
-    total_centers   = await db.centers.count_documents({})
-    total_companies = await db.companies.count_documents({})
-    total_partners  = await db.partners.count_documents({})
-    total_batches   = await db.batches.count_documents({})
-    active_batches  = await db.batches.count_documents({"closed": {"$ne": True}})
-    closed_batches  = await db.batches.count_documents({"closed": True})
+    scoped_empty = scoped is not None and len(scoped) == 0
+    cf = {} if scoped is None else {"center_id": {"$in": scoped}}
+    if scoped_empty:
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(), "today": tstr,
+            "source": "core-erp-live",
+            "entities": {"projects": 0, "centers": 0, "companies": 0, "partners": 0},
+            "batches": {"total": 0, "active": 0, "closed": 0},
+            "training": {"total_target": 0, "total_enrolled": 0, "total_certified": 0,
+                         "total_placement": 0, "total_dropout": 0, "achievement_pct": 0,
+                         "certification_pct": 0, "placement_pct": 0, "dropout_pct": 0},
+            "bg": {"expiring_30d": 0, "expired": 0},
+            "mobilization": {"today_total": 0, "today_distance_km": 0.0},
+        }
 
-    # Batch aggregates — target + outcomes
-    pipe = [{"$group": {"_id": None,
+    # Core entity counts (scoped where a center linkage exists).
+    total_centers = (await db.centers.count_documents({}) if scoped is None
+                     else len(scoped))
+    total_batches  = await db.batches.count_documents(cf)
+    active_batches = await db.batches.count_documents({**cf, "closed": {"$ne": True}})
+    closed_batches = await db.batches.count_documents({**cf, "closed": True})
+    if scoped is None:
+        total_projects = await db.projects.count_documents({})
+    else:
+        pj_ids = await db.batches.distinct("project_id", cf)
+        total_projects = len([p for p in pj_ids if p])
+    total_companies = await db.companies.count_documents({}) if scoped is None else 0
+    total_partners  = await db.partners.count_documents({}) if scoped is None else 0
+
+    # Batch aggregates — target + outcomes (scoped).
+    pipe = [{"$match": cf}] if cf else []
+    pipe += [{"$group": {"_id": None,
         "target": {"$sum": {"$ifNull": ["$total_beneficiaries", 0]}},
         "passed": {"$sum": {"$ifNull": ["$passed_candidates", 0]}},
         "placed": {"$sum": {"$ifNull": ["$placed_candidates", 0]}}}}]
@@ -21921,23 +21966,29 @@ async def mis_live_overview(_=Depends(require_role(*MIS_READ_ROLES))):
     total_certified = int(r[0]["passed"] or 0) if r else 0
     total_placement = int(r[0]["placed"] or 0) if r else 0
 
-    # Candidate count (live enrollment)
-    total_enrolled = await db.candidates.count_documents({"is_deleted": {"$ne": True}})
+    # Candidate count (live enrollment) — scoped via center_ref_id/center_id.
+    cand_q: dict = {"is_deleted": {"$ne": True}}
+    if scoped is not None:
+        cand_q["$or"] = [{"center_ref_id": {"$in": scoped}}, {"center_id": {"$in": scoped}}]
+    total_enrolled = await db.candidates.count_documents(cand_q)
     total_dropout  = max(0, total_enrolled - total_certified - total_placement)
 
-    # BG expiry (from bank_guarantees — live) — supplements mis_sip_centers.
+    # BG expiry (from bank_guarantees — live) — scoped by center.
     bg_expiring_30d = await db.bank_guarantees.count_documents({
-        "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
+        **cf, "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
         "bg_claim_expiry_date": {"$gte": tstr, "$lte": plus_30},
     })
     bg_expired = await db.bank_guarantees.count_documents({
-        "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
+        **cf, "is_deleted": {"$ne": True}, "is_renewed": {"$ne": True},
         "bg_claim_expiry_date": {"$lt": tstr, "$ne": ""},
     })
 
-    # Mobilization for today from mis_mobilization overlay (this stays MIS-specific)
+    # Mobilization for today from mis_mobilization overlay (scoped by center).
+    mob_match = {"is_deleted": {"$ne": True}, "report_date": tstr}
+    if scoped is not None:
+        mob_match["center_id"] = {"$in": scoped}
     mob = await db.mis_mobilization.aggregate([
-        {"$match": {"is_deleted": {"$ne": True}, "report_date": tstr}},
+        {"$match": mob_match},
         {"$group": {"_id": None, "mob": {"$sum": {"$ifNull": ["$total_mobilisation", 0]}},
                                  "km":  {"$sum": {"$ifNull": ["$total_distance_km", 0]}}}},
     ]).to_list(1)
@@ -21978,6 +22029,16 @@ async def mis_live_overview(_=Depends(require_role(*MIS_READ_ROLES))):
     }
 
 
+@api.get("/mis/live/overview")
+async def mis_live_overview(user=Depends(require_role(*MIS_READ_ROLES))):
+    """Live KPIs derived entirely from Core ERP (projects, centers, batches,
+    candidates). Center/company isolation: head-level users (admin/senior_manager)
+    see every company; scoped users (partner/company_admin/center_manager/
+    center_staff) see ONLY the centers they are mapped to."""
+    scoped = await _resolve_mis_scope(user)
+    return await _compute_mis_overview(scoped)
+
+
 @api.get("/mis/live/project-summary")
 async def mis_live_project_summary(
     project: Optional[str] = Query(None),
@@ -21985,11 +22046,14 @@ async def mis_live_project_summary(
     state: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
-    _=Depends(require_role(*MIS_READ_ROLES)),
+    user=Depends(require_role(*MIS_READ_ROLES)),
 ):
     """Batch-level live summary from Core ERP. Each row = 1 batch enriched
-    with live candidate counts + project/center/company metadata."""
-    rows = await _mis_live_batch_rows()
+    with live candidate counts + project/center/company metadata. Center-scoped."""
+    scoped = await _resolve_mis_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return []
+    rows = await _mis_live_batch_rows(scoped)
     # Filters (in-memory; dataset is small enough — up to few thousand rows).
     def _match(r):
         if project and project != "all" and r["project"].lower() != project.lower(): return False
@@ -22007,8 +22071,11 @@ async def mis_live_project_summary(
 
 
 @api.get("/mis/live/project-summary/filter-options")
-async def mis_live_project_summary_filters(_=Depends(require_role(*MIS_READ_ROLES))):
-    rows = await _mis_live_batch_rows()
+async def mis_live_project_summary_filters(user=Depends(require_role(*MIS_READ_ROLES))):
+    scoped = await _resolve_mis_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return {"projects": [], "centers": [], "states": [], "statuses": []}
+    rows = await _mis_live_batch_rows(scoped)
     return {
         "projects": sorted({r["project"] for r in rows if r["project"] and r["project"] != "—"}),
         "centers":  sorted({r["center_name"] for r in rows if r["center_name"] and r["center_name"] != "—"}),
@@ -22017,10 +22084,9 @@ async def mis_live_project_summary_filters(_=Depends(require_role(*MIS_READ_ROLE
     }
 
 
-@api.get("/mis/live/rollups")
-async def mis_live_rollups(_=Depends(require_role(*MIS_READ_ROLES))):
-    """Live project-wise / center-wise / state-wise rollups for chart tabs."""
-    rows = await _mis_live_batch_rows()
+async def _compute_mis_rollups(scoped: Optional[List[str]]) -> dict:
+    """Live project/center/state rollups for the given center scope."""
+    rows = [] if (scoped is not None and len(scoped) == 0) else await _mis_live_batch_rows(scoped)
     def _bucket(key):
         agg: dict = {}
         for r in rows:
@@ -22050,14 +22116,22 @@ async def mis_live_rollups(_=Depends(require_role(*MIS_READ_ROLES))):
     }
 
 
+@api.get("/mis/live/rollups")
+async def mis_live_rollups(user=Depends(require_role(*MIS_READ_ROLES))):
+    """Live project-wise / center-wise / state-wise rollups for chart tabs."""
+    scoped = await _resolve_mis_scope(user)
+    return await _compute_mis_rollups(scoped)
+
+
 @api.get("/mis/live/reports/daily")
-async def mis_live_reports_daily(_=Depends(require_role(*MIS_READ_ROLES))):
+async def mis_live_reports_daily(user=Depends(require_role(*MIS_READ_ROLES))):
     """Live daily report — Core ERP driven executive summary + rollups."""
     from datetime import date as _date
     today = _date.today()
     tstr = today.isoformat()
-    ov = await mis_live_overview()  # noqa: reuse
-    roll = await mis_live_rollups()  # noqa: reuse
+    scoped = await _resolve_mis_scope(user)
+    ov = await _compute_mis_overview(scoped)
+    roll = await _compute_mis_rollups(scoped)
     ent = ov["entities"]; tr = ov["training"]; ba = ov["batches"]; bg = ov["bg"]; mo = ov["mobilization"]
     executive = {
         "total_projects": ent["projects"],
@@ -22093,16 +22167,24 @@ async def mis_live_reports_daily(_=Depends(require_role(*MIS_READ_ROLES))):
 
 @api.get("/mis/live/reports/drilldown/{kpi}")
 async def mis_live_drilldown(kpi: str, limit: int = 100,
-                              _=Depends(require_role(*MIS_READ_ROLES))):
+                              user=Depends(require_role(*MIS_READ_ROLES))):
     """Live drill-down. kpi ∈ {enrolled, certified, placement, dropout,
-    active_batches, centers, projects}."""
+    active_batches, centers, projects}. Center-scoped per caller."""
+    scoped = await _resolve_mis_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return {"kind": kpi, "count": 0, "rows": []}
     if kpi == "centers":
-        docs = await db.centers.find({}, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
+        cq = {} if scoped is None else {"id": {"$in": scoped}}
+        docs = await db.centers.find(cq, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
         return {"kind": "centers", "count": len(docs), "rows": docs}
     if kpi == "projects":
-        docs = await db.projects.find({}, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
+        if scoped is None:
+            docs = await db.projects.find({}, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
+        else:
+            pj_ids = [p for p in await db.batches.distinct("project_id", {"center_id": {"$in": scoped}}) if p]
+            docs = await db.projects.find({"id": {"$in": pj_ids}}, {"_id": 0}).sort("name", 1).limit(limit).to_list(limit)
         return {"kind": "projects", "count": len(docs), "rows": docs}
-    rows = await _mis_live_batch_rows()
+    rows = await _mis_live_batch_rows(scoped)
     if kpi == "enrolled":      rows = [r for r in rows if r["total_enrolled"]  > 0]; rows.sort(key=lambda r: r["total_enrolled"],  reverse=True)
     elif kpi == "certified":   rows = [r for r in rows if r["total_certified"] > 0]; rows.sort(key=lambda r: r["total_certified"], reverse=True)
     elif kpi == "placement":   rows = [r for r in rows if r["num_placement"]   > 0]; rows.sort(key=lambda r: r["num_placement"],   reverse=True)

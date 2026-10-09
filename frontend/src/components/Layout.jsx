@@ -345,7 +345,7 @@ export default function Layout({ children }) {
     if (it.adminAccountantOnly && !["admin", "company_admin", "accountant"].includes(user?.role)) return false;
     if (it.programsAccess && ![...FINANCE_VISIBLE_ROLES, "center_manager"].includes(user?.role)) return false;
     if (it.invoiceAccess && !["admin", "company_admin", "accountant", "hr", "senior_manager", "manager", "partner", "center_manager", "reporting_authority"].includes(user?.role)) return false;
-    if (it.batchMgmtAccess && !["admin", "company_admin", "manager", "senior_manager", "accountant", "hr", "center_manager"].includes(user?.role)) return false;
+    if (it.batchMgmtAccess && !["admin", "company_admin", "manager", "senior_manager", "accountant", "hr", "center_manager", "partner"].includes(user?.role)) return false;
     if (it.nonPartner && user?.role === "partner") return false;
     if (it.staffOnly && !["center_staff", "center_manager", "hr", "manager", "senior_manager"].includes(user?.role)) return false;
     if (it.dashboardRoles && !DASHBOARD_ROLES.includes(user?.role)) return false;

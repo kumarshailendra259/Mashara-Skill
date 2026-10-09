@@ -2611,3 +2611,16 @@ Fix (`PendingApprovals.jsx`): `openAct` now fetches `/payroll-batches/{id}` for 
 Root cause: `GET /api/files/view` (server.py ~L1852) had no carrier for template files. Reimbursement/salary-slip/offer-letter templates are blank non-sensitive forms whose LIST endpoints are open to all authenticated users, but the file-stream auth blocked non-privileged roles (center_manager/center_staff/partner) → 403.
 Fix (server.py): before the final 403, allow any authenticated user to stream a file whose `file_path` exists in `reimbursement_templates`, `salary_slip_templates`, or `offer_letter_templates`. 
 Verified (curl): admin uploaded reimbursement template → center_manager (`cmtest_salary@x.com`) GET /files/view → HTTP 200 (was 403). Test template cleaned up.
+
+## Phase 101 (Jun 2026) — Partner Batch Management menu + MIS/TDS cross-company data leak fix
+
+**Issue 1 — Partner cannot see Batch Management menu (FIXED):**
+`Layout.jsx` `canSee()` — `batchMgmtAccess` role list was missing `partner`. Added `partner`. Backend `/api/batches` already scopes partners to their mapped centers. Verified: partner login now shows BATCH MANAGEMENT group in sidebar.
+
+**Issue 2 — MIS Dashboard showed ALL companies' data to a partner (SECURITY, FIXED):**
+`/api/mis/live/*` endpoints counted everything globally (`count_documents({})`, `_mis_live_batch_rows()` over all batches) with NO center scope → a partner saw every company's projects/centers/batches/enrolled/certified.
+Fix (server.py): added `_resolve_mis_scope(user)` (enrich + `_scoped_center_ids`), refactored overview/rollups into `_compute_mis_overview(scoped)` / `_compute_mis_rollups(scoped)`, added `scoped` param to `_mis_live_batch_rows()`. Scoped every endpoint: overview, project-summary, filter-options, rollups, reports/daily, drilldown. Head-level (admin/senior_manager) = unrestricted (scoped=None); scoped roles restricted to mapped center_ids; no centers → zeros/empty.
+Verified (curl): admin overview centers=213/batches=353/enrolled=97; partner centers=2/batches=0/enrolled=0. project-summary admin 353 vs partner 0. rollups by_center admin 58 vs partner 0. drilldown centers admin 100 vs partner 2.
+
+**Issue 3 — TDS Register showed cross-company TDS (SECURITY, FIXED):**
+`/api/reports/tds-register` queried all `source=tds_deduction` transactions with no scope. Fix: enrich user + apply `_center_scope_query(user, field="center_id")`; `_never_` → empty register. Head-level unrestricted. (No TDS txns in preview, so both admin/partner returned 0 — logic mirrors established center-scope pattern.)
