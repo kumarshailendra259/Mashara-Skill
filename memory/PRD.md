@@ -2624,3 +2624,18 @@ Verified (curl): admin overview centers=213/batches=353/enrolled=97; partner cen
 
 **Issue 3 — TDS Register showed cross-company TDS (SECURITY, FIXED):**
 `/api/reports/tds-register` queried all `source=tds_deduction` transactions with no scope. Fix: enrich user + apply `_center_scope_query(user, field="center_id")`; `_never_` → empty register. Head-level unrestricted. (No TDS txns in preview, so both admin/partner returned 0 — logic mirrors established center-scope pattern.)
+
+## Phase 102 (Jun 2026) — Pending Approvals premium SaaS redesign
+
+**Request:** Redesign /pending-approvals into a modern premium enterprise dashboard (design reference provided), preserving ALL approval logic + RBAC.
+
+**Delivered (frontend only — `PendingApprovals.jsx`):**
+- Premium gradient header (navy→indigo→blue) with illustration; refreshed scrollable tab bar with active-pill + count badges; 4 pastel KPI cards (Total Awaiting / Total Amount / Oldest days / Updated) with icon tiles; refreshed purple payroll highlight card.
+- Toolbar: live search (requester/purpose/vendor), Filter popover (Priority/Center/Amount range/Date range) with active-filter badge + Clear, List⇄Grid view toggle persisted in localStorage (`pa_view`).
+- Request cards (rounded-xl, soft shadow, hover) with bulk-select checkbox, type/PARTNER-CROSS/FINAL-STEP chips, age-derived Priority chip (0-2d Low · 3-6d Medium · 7d+ High — NO DB field), requester box, vendor/payee chip, description, amount + dates, View/Approve/Reject/Send-Back.
+- Bulk selection + bulk Approve/Reject with confirmation dialog, shared remarks (min 3 chars). SAFE rule: bulk approve SKIPS payment/reimbursement/advance/payroll FINAL-STEP items (needsAttribution) with a warning; reject allowed on all. Selection clears on tab change.
+- Client-side pagination (10/page), loading skeletons, Inbox-Zero empty state.
+- **PRESERVED unchanged:** single approve/reject/send-back dialog, payment attribution (Paid By/Center/Partner/Bank), payee details, attachments, chain history, payroll Approve+Pay one-screen flow, salary breakdown. All backend endpoints untouched (/approvals/pending, /approvals/act, partner-approve/reject, payroll-batches).
+
+**Design:** blueprint in /app/design_guidelines.json (by design_agent).
+**Tested:** testing_agent iteration_83.json — 13/13 frontend scenarios PASS (100%), no bugs. Individual approve + bulk approve/reject verified persisting to backend; skip-rule, filters, search, view-toggle, pagination, empty-state all pass.

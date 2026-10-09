@@ -157,6 +157,9 @@ export default function PendingApprovals() {
 
   // Reset to first page whenever the result set changes.
   useEffect(() => { setPage(1); }, [filterType, search, filters]);
+  // Clear bulk selection when switching tabs so the selected-count is never
+  // misleading across different request-type views.
+  useEffect(() => { setSelected({}); }, [filterType]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pageItems = useMemo(

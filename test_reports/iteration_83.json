@@ -1,0 +1,52 @@
+{
+  "summary": "Frontend-only end-to-end UI verification of the redesigned /pending-approvals page (Mashara Finance) with admin@finance.app. Verified page shell (premium header, 4 KPI cards, 10 tabs with counts, toolbar, cards, pagination), tab filtering, live search, Filter popover (Priority/Center/Amount/Date), active-filter badge, Clear filters, List/Grid toggle with localStorage persistence (pa_view), pagination page-prev/page-next and page reset on tab switch, priority chips derived from age, individual Approve (success toast + list count decremented, backend persisted), bulk SKIP rule for payment/advance/payroll final-step items (eligible excludes final-step, bulk-skipped-warning visible with correct count & text), bulk Approve happy-path (2 leaves -> approved, count 30 -> 28 + both cards gone), bulk Reject dialog (2 items, 0 skipped), select-all-checkbox (10 selected on current page), bulk-clear-btn hides bar, and Inbox-Zero empty state on Quotations tab. All data-testid selectors match spec. No console errors beyond the expected unauthenticated 401 on initial csrf fetch before login.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Pending Approvals", "issues": [
+        "Skipped-warning dialog copy mixes English + Hindi (Hinglish) e.g. 'inhe individually Approve karein (Paid By / Partner / Bank chahiye)'. Also toast when 0-eligible: 'Pehle kuch requests select karein' and 'Selected requests me payment/payroll final-step hain — inhe individually Approve karein'. Consider English-only strings for a premium SaaS UI.",
+        "Priority filter dropdown is a native <select> (not shadcn Select). Works, but visually inconsistent with rest of the shadcn-based UI inside the popover."
+      ]}
+    ],
+    "ux_observations": [
+      "Bulk selections are tab/filter-scoped: `selectedItems = filtered.filter(selected[key])`. Selecting items on the Leaves tab then switching to Advances tab makes the earlier selection invisible to the bulk bar (counter resets to the newly-visible selected). Within the SAME filter view (e.g. All tab) both items remain selected and the skip-warning works perfectly. This is defensible (bulk operates on the current view) but may surprise users — consider either showing total selected across all tabs or clearing selection on tab change to make it explicit."
+    ]
+  },
+  "test_matrix": {
+    "page_load_header_kpi": "PASS (4 KPI cards: kpi-awaiting / kpi-amount / kpi-oldest / kpi-updated)",
+    "tabs_filter_and_counts": "PASS (Leaves 31 -> Showing 1–10 of 31, KPI Total Awaiting = 31)",
+    "search_live_filter": "PASS (search 'TEST_AttachStaff' narrowed 219 -> 107)",
+    "filter_popover_priority_and_badge": "PASS (Filter button shows numeric badge '1'; Clear filters resets)",
+    "view_mode_toggle_persistence": "PASS (localStorage pa_view=grid persists across reload)",
+    "pagination_and_tab_reset": "PASS (Showing 1–10 -> 11–20 -> reset to 1–10 on tab change)",
+    "priority_chip_render": "PASS (priority-{id} chip on each card, 10/10 on page)",
+    "individual_approve": "PASS (btn-approve-{id} -> approval-remarks -> confirm-act -> toast 'Approved successfully', count 31 -> 30, card gone, backend persisted)",
+    "bulk_skip_rule": "PASS (1 TRANSACTION + 1 FINAL-STEP ADVANCE selected on All tab -> dialog 'Approve 1 request(s)' with bulk-skipped-warning: '1 payment/payroll final-step request(s) skipped')",
+    "bulk_approve_happy_path": "PASS (2 leaves selected -> bulk-remarks -> confirm-bulk -> count 30 -> 28, both cards gone)",
+    "bulk_reject_dialog": "PASS (1 selected -> Reject dialog shows amount and remarks field)",
+    "select_all_and_clear": "PASS (select-all-checkbox -> '10 selected'; bulk-clear-btn hides bulk bar)",
+    "empty_state_inbox_zero": "PASS (empty-approvals 'Inbox Zero! Nothing awaits your action right now.' on Quotations tab)"
+  },
+  "test_report_links": [],
+  "action_items": [
+    "(Optional, polish) Replace Hinglish copy ('inhe individually Approve karein', 'Pehle kuch requests select karein', 'chahiye') in bulk toasts/warnings with pure English for consistency with the rest of the premium UI.",
+    "(Optional, UX) Make tab-scoped bulk selection behavior explicit: either carry selection across tabs or auto-clear selection on tab change so the counter is never misleading."
+  ],
+  "critical_code_review_comments": [
+    "File size: PendingApprovals.jsx is 1249 lines — recommend splitting into subcomponents (RequestCard, BulkDialog, PayrollPayBlock, AttributionBlock, Toolbar) for maintainability (guideline: >700 lines).",
+    "Priority is correctly DERIVED client-side via priorityOf() (not a DB field) — matches spec.",
+    "needsAttribution() correctly whitelists only final-step payment/reimbursement/advance_request/payroll — matches spec.",
+    "Bulk flow partitions eligible vs skipped before confirmation — spec compliant; reject bypasses skip (eligible = selectedItems) — spec compliant.",
+    "Minor: openBulk toast when eligible=0 is informative but could instead open the dialog in a '0 eligible, N skipped' explain-mode so users understand why nothing can be bulk-approved."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "n/a (skipped per request)", "frontend": "100% (13/13 scenarios pass)"},
+  "test_credentials": "admin@finance.app / Admin@123 (used)",
+  "seed_data_creation": "Approved 1 leave + bulk-approved 2 leaves during testing (3 pending approvals consumed; count 219 -> 216). No seed data created.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Admin preview has 216 pending approvals remaining after this run. ADVANCE final-step card id used: d867fbbf-5c3e-4968-8e27-e37a0b62aafb. All data-testids documented in spec are present and functional. Dialog has `role=dialog`; bulk-skipped-warning renders only when action==approve and >=1 selected needs attribution AND >=1 eligible remains. If zero-eligible, UI falls back to a toast error instead of opening the dialog.",
+  "rca_of_the_issue": "N/A — no bugs found. All redesign interactions (search/filter/view/pagination/bulk/priority/empty-state) and preserved individual approve flow work end-to-end against the live backend."
+}
