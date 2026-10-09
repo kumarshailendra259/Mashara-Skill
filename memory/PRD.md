@@ -2600,3 +2600,14 @@ uraane records ka backfill, FY range only FY 2023-24 → FY 2029-30, default cur
 **User context:** Centers DO exist in Center Management (so center mapping will resolve); financial batches (Pakur_09 etc.) NOT yet created in Batch Management — those stay UNLINKED until created. Clicking the button again after creating batches will link them.
 
 **Verified (curl, preview admin):** POST backfill → HTTP 200, {total:97, mapped:5, unmapped:92, batch_mapped:0} (preview test data). Button renders in toolbar (screenshot confirmed).
+
+## Phase 100 (Jun 2026) — Payroll approve salary breakdown + reimbursement template download fix
+
+**Issue 1 — Employee-wise salary breakdown on payroll approval (FIXED):**
+Previously per-employee salary detail loaded ONLY for Accounts/Admin (isPayrollPay one-screen approve+pay). Senior Manager / HR / Manager approvers saw only "N staff · Net payable ₹X". 
+Fix (`PendingApprovals.jsx`): `openAct` now fetches `/payroll-batches/{id}` for ANY payroll approve/view (not just accounts). Added a read-only Salary Breakdown table (data-testid `payroll-salary-breakdown`) in the act dialog showing per-employee Name, Emp Code, Gross, Deductions, Net + net total — visible to every approver. Backend `_payroll_batch_out` already returns gross/deductions/net per row (confirmed via curl, 204-row batch).
+
+**Issue 2 — "Not authorised to view this file" on reimbursement template download (FIXED):**
+Root cause: `GET /api/files/view` (server.py ~L1852) had no carrier for template files. Reimbursement/salary-slip/offer-letter templates are blank non-sensitive forms whose LIST endpoints are open to all authenticated users, but the file-stream auth blocked non-privileged roles (center_manager/center_staff/partner) → 403.
+Fix (server.py): before the final 403, allow any authenticated user to stream a file whose `file_path` exists in `reimbursement_templates`, `salary_slip_templates`, or `offer_letter_templates`. 
+Verified (curl): admin uploaded reimbursement template → center_manager (`cmtest_salary@x.com`) GET /files/view → HTTP 200 (was 403). Test template cleaned up.

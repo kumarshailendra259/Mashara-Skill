@@ -1962,6 +1962,16 @@ async def view_file(
             if hit:
                 allowed = True
 
+    # Blank, non-sensitive forms/templates (reimbursement claim forms etc.) are
+    # meant for EVERY authenticated user to download — the list endpoints already
+    # expose them to all roles, so the file stream must match that access level.
+    if not allowed:
+        for coll in ("reimbursement_templates", "salary_slip_templates", "offer_letter_templates"):
+            tpl = await db[coll].find_one({"file_path": path}, {"_id": 0, "id": 1})
+            if tpl:
+                allowed = True
+                break
+
     if not allowed:
         raise HTTPException(403, "Not authorised to view this file")
 

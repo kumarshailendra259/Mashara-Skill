@@ -154,6 +154,10 @@ export default function PendingApprovals() {
       }
       if (payers.length === 0) api.get("/users/payers").then((r) => setPayers(r.data || [])).catch(() => {});
       api.get("/bank-accounts", { params: { active_only: true } }).then((r) => setBankAccounts(r.data || [])).catch(() => {});
+    } else if ((action === "approve" || action === "view") && item.request_type === "payroll") {
+      // Non-accounts approver (senior_manager/hr/manager) — load the batch so the
+      // dialog can show a read-only employee-wise salary breakdown.
+      api.get(`/payroll-batches/${item.request_id}`).then((r) => setPayBatch(r.data || null)).catch(() => {});
     }
     // Ask "Paid By" on the FINAL step of a payment, reimbursement, or advance approval.
     // For advance_request the block is optional but the dropdowns still need populated data.
@@ -765,6 +769,46 @@ export default function PendingApprovals() {
                     {paidByOptional
                       ? "Advance approval hai — abhi Center/Partner/Paid-By skip kar sakte hain, Release step par bhi enter kar sakte hain. Enter karne pe automatically release txn me stamp ho jayega."
                       : "Center, Partner aur Paid By — teenon auto-created transaction pe stamp ho jayenge, jisse Dashboard mein sahi center/partner filter ke saath update dikhega."}
+                  </div>
+                </div>
+              )}
+
+              {/* Employee-wise salary breakdown — shown to EVERY payroll approver
+                  (read-only) so they see exactly who is paid how much before approving. */}
+              {acting.item.request_type === "payroll" && (payBatch?.rows || []).length > 0 && (
+                <div className="border border-slate-300 bg-white" data-testid="payroll-salary-breakdown">
+                  <div className="flex items-center justify-between px-2 py-1.5 border-b border-slate-200 bg-slate-50">
+                    <div className="overline font-bold text-slate-700 flex items-center gap-1">
+                      <Users size={12} /> Salary Breakdown · {payBatch.rows.length} employee{payBatch.rows.length > 1 ? "s" : ""}
+                    </div>
+                    <div className="num font-bold text-slate-900 text-sm" data-testid="breakdown-net-total">
+                      Net {inr(payBatch.rows.reduce((s, r) => s + Number(r.net || 0), 0))}
+                    </div>
+                  </div>
+                  <div className="max-h-56 overflow-y-auto overflow-x-auto">
+                    <table className="w-full text-[11px]">
+                      <thead className="sticky top-0 bg-slate-100 text-slate-600 uppercase text-[9px]">
+                        <tr>
+                          <th className="text-left px-2 py-1 font-bold">Employee</th>
+                          <th className="text-right px-2 py-1 font-bold">Gross</th>
+                          <th className="text-right px-2 py-1 font-bold">Deductions</th>
+                          <th className="text-right px-2 py-1 font-bold">Net</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {payBatch.rows.map((r) => (
+                          <tr key={r.staff_id} className="hover:bg-slate-50" data-testid={`breakdown-row-${r.staff_id}`}>
+                            <td className="px-2 py-1">
+                              <b className="text-slate-800">{r.staff_name || r.staff_id?.slice(0, 8)}</b>
+                              {r.employee_code && <span className="text-slate-400 ml-1">{r.employee_code}</span>}
+                            </td>
+                            <td className="px-2 py-1 text-right num text-slate-700">{inr(r.gross)}</td>
+                            <td className="px-2 py-1 text-right num text-rose-600">{inr(r.deductions)}</td>
+                            <td className="px-2 py-1 text-right num font-semibold text-slate-900">{inr(r.net)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
