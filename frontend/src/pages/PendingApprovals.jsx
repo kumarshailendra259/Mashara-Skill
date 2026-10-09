@@ -9,9 +9,27 @@ import {
 import { toast } from "sonner";
 import {
   Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet, Users, User as UserIcon,
+  Search, SlidersHorizontal, LayoutGrid, List as ListIcon, Hourglass, Clock, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, ClipboardCheck, MapPin, BadgeAlert,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+
+// Priority is DERIVED (no DB field) — based purely on how long a request has
+// been pending. Approved business rule: 0–2d Low · 3–6d Medium · 7d+ High.
+const priorityOf = (item) => {
+  const d = Math.floor((Date.now() - new Date(item.created_at || Date.now()).getTime()) / 86400000);
+  if (d >= 7) return { key: "high", label: "High Priority", cls: "bg-rose-50 text-rose-700 border-rose-200", days: d };
+  if (d >= 3) return { key: "medium", label: "Medium Priority", cls: "bg-amber-50 text-amber-700 border-amber-200", days: d };
+  return { key: "low", label: "Low Priority", cls: "bg-emerald-50 text-emerald-700 border-emerald-200", days: d };
+};
+// Final-step payment-type requests need per-request attribution (Paid By / Partner
+// / Bank / salary split) and CANNOT be bulk-approved safely.
+const needsAttribution = (item) => item.is_final_step && [
+  "payment", "reimbursement", "advance_request", "payroll",
+].includes(item.request_type);
 
 // Unified inbox showing every request awaiting MY action across:
 // - Transactions (chain approver OR partner cross-approval eligible)
@@ -69,6 +87,19 @@ export default function PendingApprovals() {
     utr: "", partner_id: "", bank_account_id: "",
   });
 
+  // ---- Redesign UI state (view / search / filters / bulk / pagination) ----
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem("pa_view") || "list");
+  const [search, setSearch] = useState("");
+  const [filters, setFilters] = useState({ priority: "all", center: "all", amtMin: "", amtMax: "", from: "", to: "" });
+  const [selected, setSelected] = useState({});   // `${type}-${id}` -> bool
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 10;
+  // Bulk action modal: { action: "approve"|"reject", eligible:[], skipped:[] }
+  const [bulkActing, setBulkActing] = useState(null);
+  const [bulkRemarks, setBulkRemarks] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const setView = (m) => { setViewMode(m); localStorage.setItem("pa_view", m); };
+
   const load = async () => {
     setLoading(true);
     try {
@@ -89,10 +120,104 @@ export default function PendingApprovals() {
       .catch(() => setBankAccounts([]));
   }, []);
 
-  const filtered = useMemo(
-    () => filterType === "all" ? items : items.filter((i) => i.request_type === filterType),
-    [items, filterType],
+  const filtered = useMemo(() => {
+    let list = filterType === "all" ? items : items.filter((i) => i.request_type === filterType);
+    const q = search.trim().toLowerCase();
+    if (q) {
+      list = list.filter((i) => {
+        const hay = [
+          i.requester_name, i.requester?.name, i.requester?.employee_code,
+          i.summary?.purpose, i.summary?.description, i.summary?.vendor_name,
+          i.center_name_of_request, (TYPE_META[i.request_type] || {}).label,
+        ].filter(Boolean).join(" ").toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    if (filters.priority !== "all") list = list.filter((i) => priorityOf(i).key === filters.priority);
+    if (filters.center !== "all") list = list.filter((i) => (i.center_name_of_request || "—") === filters.center);
+    if (filters.amtMin !== "") list = list.filter((i) => Number(i.summary?.amount || 0) >= Number(filters.amtMin));
+    if (filters.amtMax !== "") list = list.filter((i) => Number(i.summary?.amount || 0) <= Number(filters.amtMax));
+    if (filters.from) list = list.filter((i) => i.created_at && new Date(i.created_at) >= new Date(filters.from));
+    if (filters.to) list = list.filter((i) => i.created_at && new Date(i.created_at) <= new Date(filters.to + "T23:59:59"));
+    return list;
+  }, [items, filterType, search, filters]);
+
+  const centerOptions = useMemo(
+    () => Array.from(new Set(items.map((i) => i.center_name_of_request).filter(Boolean))).sort(),
+    [items],
   );
+  const activeFilterCount = useMemo(() => {
+    let n = 0;
+    if (filters.priority !== "all") n++;
+    if (filters.center !== "all") n++;
+    if (filters.amtMin !== "" || filters.amtMax !== "") n++;
+    if (filters.from || filters.to) n++;
+    return n;
+  }, [filters]);
+
+  // Reset to first page whenever the result set changes.
+  useEffect(() => { setPage(1); }, [filterType, search, filters]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageItems = useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page],
+  );
+
+  const keyOf = (i) => `${i.request_type}-${i.request_id}`;
+  const selectedItems = useMemo(
+    () => filtered.filter((i) => selected[keyOf(i)]),
+    [filtered, selected],
+  );
+  const pageAllSelected = pageItems.length > 0 && pageItems.every((i) => selected[keyOf(i)]);
+  const toggleOne = (i) => setSelected((s) => ({ ...s, [keyOf(i)]: !s[keyOf(i)] }));
+  const togglePageAll = () => {
+    setSelected((s) => {
+      const n = { ...s };
+      const target = !pageAllSelected;
+      pageItems.forEach((i) => { n[keyOf(i)] = target; });
+      return n;
+    });
+  };
+  const clearSelection = () => setSelected({});
+
+  // Open the bulk confirm modal — partition selection into bulk-eligible vs
+  // skipped (payment-type finals that need per-request attribution).
+  const openBulk = (action) => {
+    if (selectedItems.length === 0) { toast.error("Pehle kuch requests select karein"); return; }
+    const eligible = action === "reject" ? selectedItems : selectedItems.filter((i) => !needsAttribution(i));
+    const skipped  = action === "reject" ? [] : selectedItems.filter((i) => needsAttribution(i));
+    if (eligible.length === 0) {
+      toast.error("Selected requests me payment/payroll final-step hain — inhe individually Approve karein");
+      return;
+    }
+    setBulkRemarks("");
+    setBulkActing({ action, eligible, skipped });
+  };
+
+  const runBulk = async () => {
+    if (!bulkActing || bulkBusy) return;
+    if (!bulkRemarks.trim() || bulkRemarks.trim().length < 3) { toast.error("Remarks required (min 3 chars)"); return; }
+    setBulkBusy(true);
+    const { action, eligible } = bulkActing;
+    let ok = 0; let fail = 0;
+    for (const item of eligible) {
+      try {
+        if (item.request_type === "transaction" && item.via === "partner_cross") {
+          await api.post(`/transactions/${item.request_id}/${action === "approve" ? "partner-approve" : "partner-reject"}`, { remarks: bulkRemarks });
+        } else {
+          await api.post(`/approvals/act`, { request_type: item.request_type, request_id: item.request_id, action, remarks: bulkRemarks });
+        }
+        ok++;
+      } catch (e) { fail++; }
+    }
+    setBulkBusy(false);
+    setBulkActing(null);
+    clearSelection();
+    if (ok) toast.success(`${action === "approve" ? "Approved" : "Rejected"} ${ok} request(s)${fail ? ` · ${fail} failed` : ""}`);
+    if (!ok && fail) toast.error(`All ${fail} action(s) failed`);
+    load();
+  };
 
   const counts = useMemo(() => {
     const c = {
@@ -326,112 +451,195 @@ export default function PendingApprovals() {
     else nav("/hrms");
   };
 
-  return (
-    <div className="space-y-6 p-6 max-w-6xl mx-auto" data-testid="pending-approvals-page">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <div className="overline">Inbox</div>
-          <h1 className="font-heading font-black tracking-tight text-3xl flex items-center gap-2">
-            <Inbox size={28} className="text-[var(--brand)]" />
-            Pending Approvals
-          </h1>
-          <div className="text-sm text-[var(--muted)] mt-1">
-            All requests awaiting <span className="font-medium">your</span> action across transactions, leaves and reimbursements.
+  // ---- Request card (shared by list + grid views) ----
+  const RequestCard = (item) => {
+    const meta = TYPE_META[item.request_type] || FALLBACK_META;
+    const Icon = meta.icon;
+    const pr = priorityOf(item);
+    const r = item.requester || {};
+    const rname = r.name || item.requester_name;
+    const na = (v) => (v == null || v === "" ? "N/A" : v);
+    const checked = !!selected[keyOf(item)];
+    return (
+      <div
+        key={keyOf(item)}
+        className={`bg-white border rounded-xl p-4 sm:p-5 shadow-sm transition-all duration-200 hover:shadow-md hover:border-blue-300 ${checked ? "border-[var(--brand)] ring-1 ring-[var(--brand)]/30" : "border-slate-200"}`}
+        data-testid={`approval-card-${item.request_id}`}
+      >
+        <div className="flex items-start gap-3">
+          <Checkbox
+            checked={checked}
+            onCheckedChange={() => toggleOne(item)}
+            className="mt-1 rounded-md data-[state=checked]:bg-[var(--brand)] data-[state=checked]:border-[var(--brand)]"
+            data-testid={`select-${item.request_id}`}
+          />
+          <div className={`${meta.color} p-2.5 rounded-lg shrink-0`}><Icon size={18} /></div>
+          <div className="flex-1 min-w-0">
+            {/* badges row */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">{meta.label}</span>
+              {item.via === "partner_cross" && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-[var(--brand)] text-white">PARTNER CROSS-APPROVAL</span>
+              )}
+              {item.is_final_step && (
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">FINAL STEP</span>
+              )}
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${pr.cls}`} data-testid={`priority-${item.request_id}`}>{pr.label}</span>
+            </div>
+
+            {/* requester */}
+            {(rname || r.employee_code || r.department || r.designation || item.center_name_of_request) && (
+              <div className="mt-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[12px]">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="inline-flex items-center gap-1 text-[13px]"><UserIcon size={13} className="text-[var(--brand)]" /> <b>{na(rname)}</b></span>
+                  <span className="text-[var(--muted)]">Emp ID: <b className="text-slate-800">{na(r.employee_code)}</b></span>
+                  <span className="text-[var(--muted)]">Dept: <b className="text-slate-800">{na(r.department)}</b></span>
+                  <span className="text-[var(--muted)]">Desig: <b className="text-slate-800">{na(r.designation)}</b></span>
+                </div>
+                {item.center_name_of_request && (
+                  <div className="mt-1">
+                    <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 rounded-md px-1.5 py-0.5 text-[11px] font-medium"><MapPin size={11} /> {item.center_name_of_request}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {item.summary?.purpose && (
+              <div className="mt-2 text-[14px] font-bold text-slate-900" data-testid={`row-purpose-${item.request_id}`}>{item.summary.purpose}</div>
+            )}
+            {item.summary?.vendor_name && (
+              <div className="mt-1.5">
+                <span className="inline-flex items-center gap-1 px-2 py-1 text-[12px] font-bold text-amber-900 bg-amber-100 border border-amber-300 rounded-md">
+                  {(item.request_type === "advance_request" ? "Payee: " : "Vendor: ")}{item.summary.vendor_name}
+                </span>
+              </div>
+            )}
+            {item.summary?.description && item.summary.description !== item.summary.purpose && (
+              <div className="mt-2 text-[13px] font-semibold text-indigo-900 bg-indigo-50/60 border-l-4 border-indigo-400 rounded-r-md pl-3 py-2 whitespace-pre-wrap break-words leading-relaxed">
+                {item.summary.description}
+              </div>
+            )}
+
+            <div className="flex items-center gap-4 mt-2.5 text-xs text-[var(--muted)] flex-wrap">
+              {item.summary?.amount != null && (
+                <span className="num font-black text-[16px] text-emerald-700" data-testid={`row-amount-${item.request_id}`}>{inr(item.summary.amount)}</span>
+              )}
+              {item.summary?.date && <span className="inline-flex items-center gap-1"><CalendarDays size={12} /> {item.summary.date}</span>}
+              {item.created_at && <span className="inline-flex items-center gap-1"><Clock size={12} /> Raised {new Date(item.created_at).toLocaleDateString("en-IN")}</span>}
+            </div>
+
+            {/* actions */}
+            <div className="flex items-center gap-2 mt-3 flex-wrap">
+              <Button variant="outline" size="sm" onClick={() => openDetail(item)} className="rounded-lg h-8 gap-1" data-testid={`btn-detail-${item.request_id}`}>
+                <ExternalLink size={12} /> View
+              </Button>
+              <Button size="sm" onClick={() => openAct(item, "approve")} className="brand-btn rounded-lg h-8 gap-1" data-testid={`btn-approve-${item.request_id}`}>
+                <Check size={12} /> Approve
+              </Button>
+              {(item.request_type === "quotation" || item.request_type === "payment") && (
+                <Button variant="outline" size="sm" onClick={() => openAct(item, "send_back")} className="rounded-lg h-8 gap-1 text-amber-800 border-amber-300 hover:bg-amber-50" data-testid={`btn-sendback-${item.request_id}`}>
+                  <Undo2 size={12} /> Send Back
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => openAct(item, "reject")} className="rounded-lg h-8 gap-1 hover:text-[var(--danger)] hover:border-[var(--danger)]" data-testid={`btn-reject-${item.request_id}`}>
+                <X size={12} /> Reject
+              </Button>
+            </div>
           </div>
         </div>
-        <Button variant="outline" onClick={load} className="rounded-none gap-1" data-testid="btn-refresh-approvals">
-          <RefreshCw size={14} /> Refresh
-        </Button>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-5 p-4 md:p-6 max-w-7xl mx-auto" data-testid="pending-approvals-page">
+      {/* Premium header */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-[var(--brand)] via-indigo-700 to-blue-700 text-white p-6 md:p-8 shadow-lg">
+        <div className="absolute -right-10 -top-10 w-56 h-56 bg-white/10 rounded-full blur-2xl" />
+        <div className="absolute right-20 bottom-0 opacity-10"><ClipboardCheck size={160} /></div>
+        <div className="relative flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex items-start gap-4">
+            <div className="bg-white/15 backdrop-blur p-3 rounded-xl"><ClipboardCheck size={30} /></div>
+            <div>
+              <h1 className="font-heading font-black tracking-tight text-2xl md:text-3xl">Pending Approvals</h1>
+              <p className="text-white/80 text-sm mt-1 max-w-xl">All requests awaiting your action across transactions, leaves, reimbursements, assets and payrolls.</p>
+            </div>
+          </div>
+          <Button variant="outline" onClick={load} className="rounded-lg gap-1.5 bg-white/10 border-white/30 text-white hover:bg-white/20" data-testid="btn-refresh-approvals">
+            <RefreshCw size={14} /> Refresh
+          </Button>
+        </div>
       </div>
 
-      {/* Type tabs */}
-      <div className="flex gap-1 border-b border-[var(--border)] flex-wrap">
+      {/* Tabs */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b border-slate-200" style={{ scrollbarWidth: "none" }}>
         {[
-          { key: "all",               label: "All" },
-          { key: "transaction",       label: "Transactions" },
-          { key: "leave",             label: "Leaves" },
-          { key: "reimbursement",     label: "Reimbursements" },
-          { key: "asset_purchase",    label: "Assets" },
-          { key: "employee_transfer", label: "Transfers" },
-          { key: "regularisation",    label: "Regularisations" },
-          { key: "quotation",         label: "Quotations" },
-          { key: "payment",           label: "Payments" },
-          { key: "advance_request",   label: "Advances" },
-          { key: "payroll",           label: "Payrolls" },
-        ].map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setFilterType(t.key)}
-            data-testid={`tab-${t.key}`}
-            className={`px-4 py-2 text-sm border-b-2 transition-colors -mb-px ${
-              filterType === t.key
-                ? "border-[var(--brand)] text-[var(--brand)] font-semibold"
-                : "border-transparent hover:text-[var(--brand)]"
-            }`}
-          >
-            {t.label}
-            {(counts[t.key] || 0) > 0 && (
-              <span className="ml-2 bg-[var(--brand)] text-white text-[10px] px-1.5 py-0.5 rounded-none num font-bold">
-                {counts[t.key]}
-              </span>
-            )}
-          </button>
+          { key: "all", label: "All" }, { key: "transaction", label: "Transactions" },
+          { key: "leave", label: "Leaves" }, { key: "reimbursement", label: "Reimbursements" },
+          { key: "asset_purchase", label: "Assets" }, { key: "employee_transfer", label: "Transfers" },
+          { key: "regularisation", label: "Regularisations" }, { key: "quotation", label: "Quotations" },
+          { key: "payment", label: "Payments" }, { key: "advance_request", label: "Advances" },
+          { key: "payroll", label: "Payrolls" },
+        ].map((t) => {
+          const active = filterType === t.key;
+          return (
+            <button
+              key={t.key} onClick={() => setFilterType(t.key)} data-testid={`tab-${t.key}`}
+              className={`shrink-0 inline-flex items-center rounded-lg px-3 py-1.5 text-xs transition-colors ${active ? "bg-[var(--brand)] text-white font-semibold shadow-sm" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100 font-medium"}`}
+            >
+              {t.label}
+              {(counts[t.key] || 0) > 0 && (
+                <span className={`ml-1.5 px-1.5 py-0.5 text-[10px] font-bold rounded-full num ${active ? "bg-white/25 text-white" : "bg-slate-200 text-slate-700"}`}>{counts[t.key]}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* KPI cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {[
+          { id: "awaiting", label: "Total Awaiting", value: filtered.length, sub: "Action required", Icon: Hourglass, bg: "bg-blue-50", bd: "border-blue-100", tc: "text-blue-700", ic: "bg-blue-500" },
+          { id: "amount", label: "Total Amount", value: inr(totalAmount), sub: `Across ${filtered.length} request${filtered.length === 1 ? "" : "s"}`, Icon: IndianRupee, bg: "bg-emerald-50", bd: "border-emerald-100", tc: "text-emerald-700", ic: "bg-emerald-500" },
+          { id: "oldest", label: "Oldest (days)", value: oldestDays(filtered), sub: oldestDays(filtered) > 0 ? `${oldestDays(filtered)} day(s) ago` : "None pending", Icon: CalendarDays, bg: "bg-amber-50", bd: "border-amber-100", tc: "text-amber-700", ic: "bg-amber-500" },
+          { id: "updated", label: "Updated", value: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }), sub: "Today", Icon: Clock, bg: "bg-purple-50", bd: "border-purple-100", tc: "text-purple-700", ic: "bg-purple-500" },
+        ].map((k) => (
+          <div key={k.id} className={`${k.bg} ${k.bd} border rounded-xl p-4 flex items-start justify-between`} data-testid={`kpi-${k.id}`}>
+            <div>
+              <div className={`text-[10px] font-semibold uppercase tracking-wider ${k.tc}`}>{k.label}</div>
+              <div className="num font-black text-2xl text-slate-900 mt-1">{k.value}</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">{k.sub}</div>
+            </div>
+            <div className={`${k.ic} text-white p-2 rounded-lg shadow-sm`}><k.Icon size={18} /></div>
+          </div>
         ))}
       </div>
 
-      {/* KPI summary */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="swiss-card p-3"><div className="overline">Total Awaiting</div><div className="num font-bold text-2xl">{filtered.length}</div></div>
-        <div className="swiss-card p-3"><div className="overline">Total Amount</div><div className="num font-bold text-xl value-positive">{inr(totalAmount)}</div></div>
-        <div className="swiss-card p-3"><div className="overline">Oldest (days)</div><div className="num font-bold text-2xl">{oldestDays(filtered)}</div></div>
-        <div className="swiss-card p-3"><div className="overline">Updated</div><div className="text-xs num font-medium pt-2">{new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</div></div>
-      </div>
-
-      {/* Payroll Approvals — dedicated queue card for HR Approvers so batches
-          (which carry the largest amounts) don't drown in the mixed inbox. */}
+      {/* Payroll highlight (unchanged logic, refreshed style) */}
       {payrollItems.length > 0 && (
-        <div
-          className="swiss-card p-5 border-l-4 border-purple-600 bg-gradient-to-r from-purple-50 to-white"
-          data-testid="payroll-approvals-card"
-        >
+        <div className="rounded-xl p-5 bg-gradient-to-r from-purple-900 via-indigo-900 to-purple-950 text-white shadow-md" data-testid="payroll-approvals-card">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div className="flex items-center gap-3">
-              <div className="bg-purple-600 text-white p-2.5">
-                <Users size={22} />
-              </div>
+              <div className="bg-white/15 p-2.5 rounded-lg"><Users size={22} /></div>
               <div>
-                <div className="overline text-purple-800">Payroll Approvals</div>
-                <div className="font-heading font-black text-2xl text-purple-900 mt-0.5">
-                  {payrollItems.length} <span className="text-sm font-medium text-purple-700">batch{payrollItems.length > 1 ? "es" : ""} awaiting</span>
-                </div>
-                <div className="text-xs text-purple-800 num font-bold mt-0.5">
-                  Net Payable: {inr(payrollTotal)}
-                </div>
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-purple-200">Payroll Approvals</div>
+                <div className="font-heading font-black text-2xl mt-0.5">{payrollItems.length} <span className="text-sm font-medium text-purple-200">batch{payrollItems.length > 1 ? "es" : ""} awaiting</span></div>
+                <div className="text-xs num font-bold mt-0.5 text-emerald-300">Net Payable: {inr(payrollTotal)}</div>
               </div>
             </div>
-            <Button
-              size="sm"
-              onClick={() => setFilterType("payroll")}
-              className="bg-purple-600 text-white hover:bg-purple-700 rounded-none gap-1"
-              data-testid="view-payroll-queue-btn"
-            >
+            <Button size="sm" onClick={() => setFilterType("payroll")} className="bg-white text-purple-900 hover:bg-purple-50 rounded-lg gap-1" data-testid="view-payroll-queue-btn">
               <Users size={12} /> Review Payroll Queue
             </Button>
           </div>
           {payrollItems.slice(0, 3).map((p) => (
-            <div
-              key={p.request_id}
-              className="mt-3 flex items-center justify-between gap-3 flex-wrap text-xs border-t border-purple-200 pt-2"
-              data-testid={`payroll-queue-preview-${p.request_id}`}
-            >
+            <div key={p.request_id} className="mt-3 flex items-center justify-between gap-3 flex-wrap text-xs border-t border-white/15 pt-2" data-testid={`payroll-queue-preview-${p.request_id}`}>
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-bold text-purple-900">{p.summary?.purpose}</span>
-                {p.requester_name && <span className="text-purple-700">· Finalised by <b>{p.requester_name}</b></span>}
-                {p.step_label && <span className="text-[10px] px-1.5 py-0.5 bg-purple-100 text-purple-800 border border-purple-300">{p.step_label}</span>}
+                <span className="font-bold">{p.summary?.purpose}</span>
+                {p.requester_name && <span className="text-purple-200">· Finalised by <b className="text-white">{p.requester_name}</b></span>}
               </div>
               <div className="flex items-center gap-2">
-                <span className="num font-black text-emerald-800">{inr(p.summary?.amount)}</span>
-                <Button size="sm" onClick={() => openAct(p, "approve")} className="brand-btn rounded-none h-7 gap-1" data-testid={`payroll-quick-approve-${p.request_id}`}>
+                <span className="num font-black text-emerald-300">{inr(p.summary?.amount)}</span>
+                <Button size="sm" onClick={() => openAct(p, "approve")} className="bg-white text-purple-900 hover:bg-purple-50 rounded-lg h-7 gap-1" data-testid={`payroll-quick-approve-${p.request_id}`}>
                   <Check size={12} /> Approve
                 </Button>
               </div>
@@ -440,132 +648,141 @@ export default function PendingApprovals() {
         </div>
       )}
 
-      {/* List */}
-      {loading ? (
-        <div className="swiss-card p-12 text-center overline">Loading…</div>
-      ) : filtered.length === 0 ? (
-        <div className="swiss-card p-12 text-center" data-testid="empty-approvals">
-          <Inbox size={48} className="text-[var(--muted)] mx-auto mb-3" />
-          <div className="font-heading font-bold text-lg">Inbox Zero! 🎉</div>
-          <div className="overline text-sm mt-1">Nothing awaits your action right now.</div>
+      {/* Toolbar: search + filter + view toggle */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
+          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search requester, purpose, vendor…" className="pl-9 rounded-lg text-sm" data-testid="search-approvals-input" />
         </div>
-      ) : (
-        <div className="space-y-2">
-          {filtered.map((item) => {
-            const meta = TYPE_META[item.request_type] || FALLBACK_META;
-            const Icon = meta.icon;
-            return (
-              <div
-                key={`${item.request_type}-${item.request_id}`}
-                className="swiss-card p-4 flex items-start gap-4 flex-wrap hover:border-[var(--brand)] transition-colors"
-                data-testid={`approval-row-${item.request_id}`}
-              >
-                <div className={`${meta.color} p-2.5 rounded-none shrink-0`}><Icon size={18} /></div>
-                <div className="flex-1 min-w-[240px]">
-                  {/* Meta strip: type · step */}
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="overline text-xs">{meta.label}</span>
-                    {item.via === "partner_cross" && (
-                      <span className="bg-[var(--brand)] text-white text-[10px] px-1.5 py-0.5 num font-bold">PARTNER CROSS-APPROVAL</span>
-                    )}
-                    {item.step_label && <span className="text-xs text-[var(--muted)]">· {item.step_label}</span>}
-                    {item.is_final_step && (
-                      <span className="text-[10px] px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-200 font-bold">FINAL STEP</span>
-                    )}
-                  </div>
-
-                  {/* Requester Details — who raised this request (all approval types) */}
-                  {(() => {
-                    const r = item.requester || {};
-                    const rname = r.name || item.requester_name;
-                    if (!rname && !r.employee_code && !r.department && !r.designation) return null;
-                    const na = (v) => (v == null || v === "" ? "N/A" : v);
-                    return (
-                      <div
-                        className="mt-2 bg-slate-50 border border-slate-200 px-3 py-2 text-[12px]"
-                        data-testid={`requester-details-${item.request_id}`}
-                      >
-                        <div className="overline text-[10px] text-[var(--muted)] mb-1">Requester Details</div>
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                          <span className="inline-flex items-center gap-1 text-[13px] text-[var(--foreground)]" data-testid={`row-requester-${item.request_id}`}>
-                            <UserIcon size={13} className="text-[var(--brand)]" /> <b>{na(rname)}</b>
-                          </span>
-                          <span className="text-[var(--muted)]">Employee ID: <b className="text-[var(--foreground)]">{na(r.employee_code)}</b></span>
-                          <span className="text-[var(--muted)]">Department: <b className="text-[var(--foreground)]">{na(r.department)}</b></span>
-                          <span className="text-[var(--muted)]">Designation: <b className="text-[var(--foreground)]">{na(r.designation)}</b></span>
-                        </div>
-                        {item.center_name_of_request && (
-                          <div className="mt-1">
-                            <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 px-1.5 py-0.5 text-[11px] font-medium" data-testid={`row-center-${item.request_id}`}>
-                              🏢 {item.center_name_of_request}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {/* Purpose (short header — e.g. QRN, advance purpose) */}
-                  {item.summary?.purpose && (
-                    <div className="mt-2 text-[14px] font-bold text-slate-900" data-testid={`row-purpose-${item.request_id}`}>
-                      {item.summary.purpose}
-                    </div>
-                  )}
-
-                  {/* Vendor / Payee chip — visible for payment / quotation / advance rows */}
-                  {item.summary?.vendor_name && (
-                    <div className="mt-1.5">
-                      <span
-                        className="inline-flex items-center gap-1 px-2 py-1 text-[12px] font-bold text-amber-900 bg-amber-100 border border-amber-300"
-                        data-testid={`row-vendor-${item.request_id}`}
-                      >
-                        🏷 {(item.request_type === "advance_request" ? "Payee: " : "Vendor: ")}{item.summary.vendor_name}
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Full description — no truncation, bold indigo for readability */}
-                  {item.summary?.description && item.summary.description !== item.summary.purpose && (
-                    <div
-                      className="mt-2 text-[14px] font-bold text-indigo-900 bg-indigo-50/60 border-l-4 border-indigo-400 pl-3 py-2 whitespace-pre-wrap break-words leading-relaxed"
-                      data-testid={`row-desc-${item.request_id}`}
-                    >
-                      {item.summary.description}
-                    </div>
-                  )}
-
-                  {/* Amount + dates — amount in emerald + bold */}
-                  <div className="flex items-center gap-4 mt-2 text-xs text-[var(--muted)] flex-wrap">
-                    {item.summary?.amount != null && (
-                      <span className="num font-black text-[15px] text-emerald-800" data-testid={`row-amount-${item.request_id}`}>
-                        {inr(item.summary.amount)}
-                      </span>
-                    )}
-                    {item.summary?.date && <span>📅 <b>{item.summary.date}</b></span>}
-                    {item.created_at && <span>⏱ Raised {new Date(item.created_at).toLocaleDateString("en-IN")}</span>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={() => openDetail(item)} className="rounded-none h-8 gap-1" data-testid={`btn-detail-${item.request_id}`}>
-                    <ExternalLink size={12} /> View
-                  </Button>
-                  <Button size="sm" onClick={() => openAct(item, "approve")} className="brand-btn rounded-none h-8 gap-1" data-testid={`btn-approve-${item.request_id}`}>
-                    <Check size={12} /> Approve
-                  </Button>
-                  {(item.request_type === "quotation" || item.request_type === "payment") && (
-                    <Button variant="outline" size="sm" onClick={() => openAct(item, "send_back")} className="rounded-none h-8 gap-1 text-amber-800 border-amber-300 hover:bg-amber-50" data-testid={`btn-sendback-${item.request_id}`}>
-                      <Undo2 size={12} /> Send Back
-                    </Button>
-                  )}
-                  <Button variant="outline" size="sm" onClick={() => openAct(item, "reject")} className="rounded-none h-8 gap-1 hover:text-[var(--danger)] hover:border-[var(--danger)]" data-testid={`btn-reject-${item.request_id}`}>
-                    <X size={12} /> Reject
-                  </Button>
-                </div>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" className="rounded-lg gap-1.5" data-testid="filter-popover-trigger">
+              <SlidersHorizontal size={14} /> Filter
+              {activeFilterCount > 0 && <span className="ml-1 bg-[var(--brand)] text-white text-[10px] font-bold px-1.5 rounded-full num">{activeFilterCount}</span>}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-80 rounded-xl p-4 space-y-3">
+            <div className="font-bold text-sm">Filters</div>
+            <div>
+              <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Priority (by age)</div>
+              <select value={filters.priority} onChange={(e) => setFilters((f) => ({ ...f, priority: e.target.value }))} className="w-full text-sm border border-slate-200 rounded-lg p-2" data-testid="filter-priority">
+                <option value="all">All</option><option value="low">Low (0–2d)</option><option value="medium">Medium (3–6d)</option><option value="high">High (7d+)</option>
+              </select>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Center</div>
+              <select value={filters.center} onChange={(e) => setFilters((f) => ({ ...f, center: e.target.value }))} className="w-full text-sm border border-slate-200 rounded-lg p-2" data-testid="filter-center">
+                <option value="all">All centers</option>
+                {centerOptions.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Amount range (₹)</div>
+              <div className="flex items-center gap-2">
+                <Input type="number" value={filters.amtMin} onChange={(e) => setFilters((f) => ({ ...f, amtMin: e.target.value }))} placeholder="Min" className="rounded-lg text-sm" data-testid="filter-amt-min" />
+                <Input type="number" value={filters.amtMax} onChange={(e) => setFilters((f) => ({ ...f, amtMax: e.target.value }))} placeholder="Max" className="rounded-lg text-sm" data-testid="filter-amt-max" />
               </div>
-            );
-          })}
+            </div>
+            <div>
+              <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Raised date</div>
+              <div className="flex items-center gap-2">
+                <Input type="date" value={filters.from} onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))} className="rounded-lg text-sm" data-testid="filter-from" />
+                <Input type="date" value={filters.to} onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))} className="rounded-lg text-sm" data-testid="filter-to" />
+              </div>
+            </div>
+            <Button variant="outline" className="w-full rounded-lg" onClick={() => setFilters({ priority: "all", center: "all", amtMin: "", amtMax: "", from: "", to: "" })} data-testid="filter-clear">Clear filters</Button>
+          </PopoverContent>
+        </Popover>
+        <div className="flex items-center border border-slate-200 rounded-lg overflow-hidden">
+          <button onClick={() => setView("list")} className={`p-2 ${viewMode === "list" ? "bg-[var(--brand)] text-white" : "text-slate-600 hover:bg-slate-100"}`} data-testid="view-mode-list" title="List view"><ListIcon size={16} /></button>
+          <button onClick={() => setView("grid")} className={`p-2 ${viewMode === "grid" ? "bg-[var(--brand)] text-white" : "text-slate-600 hover:bg-slate-100"}`} data-testid="view-mode-grid" title="Grid view"><LayoutGrid size={16} /></button>
+        </div>
+      </div>
+
+      {/* Bulk action bar */}
+      {selectedItems.length > 0 && (
+        <div className="flex items-center justify-between gap-3 flex-wrap bg-[var(--brand)]/5 border border-[var(--brand)]/30 rounded-xl px-4 py-2.5" data-testid="bulk-action-bar">
+          <div className="text-sm font-semibold text-[var(--brand)]">{selectedItems.length} selected</div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={() => openBulk("approve")} className="brand-btn rounded-lg gap-1" data-testid="bulk-approve-btn"><Check size={14} /> Approve Selected</Button>
+            <Button size="sm" onClick={() => openBulk("reject")} className="bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90 rounded-lg gap-1" data-testid="bulk-reject-btn"><X size={14} /> Reject Selected</Button>
+            <Button size="sm" variant="outline" onClick={clearSelection} className="rounded-lg" data-testid="bulk-clear-btn">Clear</Button>
+          </div>
         </div>
       )}
+
+      {/* List / Grid */}
+      {loading ? (
+        <div className={viewMode === "grid" ? "grid grid-cols-1 lg:grid-cols-2 gap-4" : "space-y-3"}>
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="bg-white border border-slate-200 rounded-xl p-5 animate-pulse">
+              <div className="flex gap-3"><div className="w-10 h-10 bg-slate-200 rounded-lg" /><div className="flex-1 space-y-2"><div className="h-3 bg-slate-200 rounded w-1/3" /><div className="h-3 bg-slate-100 rounded w-2/3" /><div className="h-3 bg-slate-100 rounded w-1/2" /></div></div>
+            </div>
+          ))}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="bg-white border border-slate-200 rounded-xl p-12 text-center" data-testid="empty-approvals">
+          <div className="inline-flex p-4 rounded-full bg-emerald-50 mb-3"><Inbox size={40} className="text-emerald-600" /></div>
+          <div className="font-heading font-bold text-lg">Inbox Zero! 🎉</div>
+          <div className="text-sm text-slate-500 mt-1">{search || activeFilterCount ? "No requests match your search/filters." : "Nothing awaits your action right now."}</div>
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Checkbox checked={pageAllSelected} onCheckedChange={togglePageAll} className="rounded-md data-[state=checked]:bg-[var(--brand)] data-[state=checked]:border-[var(--brand)]" data-testid="select-all-checkbox" />
+              <span className="text-xs text-slate-500">Select page</span>
+            </div>
+            <div className="text-xs text-slate-500">Pending Approval Requests ({filtered.length})</div>
+          </div>
+          <div className={viewMode === "grid" ? "grid grid-cols-1 lg:grid-cols-2 gap-4" : "space-y-3"}>
+            {pageItems.map((item) => RequestCard(item))}
+          </div>
+          {/* Pagination */}
+          <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
+            <div className="text-xs text-slate-500">Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}</div>
+            <div className="flex items-center gap-1">
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))} className="rounded-lg h-8 w-8 p-0" data-testid="page-prev"><ChevronLeft size={16} /></Button>
+              <span className="text-xs font-semibold px-2 num">{page} / {totalPages}</span>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))} className="rounded-lg h-8 w-8 p-0" data-testid="page-next"><ChevronRight size={16} /></Button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Bulk confirm dialog */}
+      <Dialog open={!!bulkActing} onOpenChange={(v) => !v && setBulkActing(null)}>
+        <DialogContent className="rounded-xl">
+          <DialogHeader>
+            <DialogTitle className="font-heading">{bulkActing?.action === "approve" ? "Approve" : "Reject"} {bulkActing?.eligible?.length} request(s)</DialogTitle>
+          </DialogHeader>
+          {bulkActing && (
+            <div className="space-y-3">
+              <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm">
+                <div><b>{bulkActing.eligible.length}</b> request(s) will be {bulkActing.action === "approve" ? "approved" : "rejected"}.</div>
+                <div className="num text-xs mt-1 text-slate-600">Total amount: <b className="text-emerald-700">{inr(bulkActing.eligible.reduce((s, i) => s + Number(i.summary?.amount || 0), 0))}</b></div>
+              </div>
+              {bulkActing.skipped?.length > 0 && (
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-900" data-testid="bulk-skipped-warning">
+                  <BadgeAlert size={16} className="shrink-0 mt-0.5" />
+                  <div><b>{bulkActing.skipped.length}</b> payment/payroll final-step request(s) skipped — inhe individually Approve karein (Paid By / Partner / Bank chahiye).</div>
+                </div>
+              )}
+              <div>
+                <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Remarks <span className="text-[var(--danger)]">*</span> <span className="normal-case text-slate-400">(min 3 chars — applied to all)</span></div>
+                <Textarea rows={3} value={bulkRemarks} onChange={(e) => setBulkRemarks(e.target.value)} placeholder="e.g. Verified & approved in bulk" className="rounded-lg" data-testid="bulk-remarks" />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkActing(null)} className="rounded-lg">Cancel</Button>
+            <Button onClick={runBulk} disabled={bulkBusy} className={`rounded-lg gap-1 ${bulkActing?.action === "approve" ? "brand-btn" : "bg-[var(--danger)] text-white hover:bg-[var(--danger)]/90"} ${bulkBusy ? "opacity-60 cursor-not-allowed" : ""}`} data-testid="confirm-bulk">
+              {bulkBusy ? "⏳ Processing…" : <>{bulkActing?.action === "approve" ? <Check size={14} /> : <X size={14} />} Confirm {bulkActing?.action === "approve" ? "Approve" : "Reject"}</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
 
       {/* Act dialog (approve / reject with remarks) */}
       <Dialog open={!!acting} onOpenChange={(v) => !v && setActing(null)}>
