@@ -12298,9 +12298,10 @@ async def list_payroll_batches(
 
 
 @api.get("/payroll-batches/{batch_id}")
-async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff"))):
+async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff", "partner"))):
     b = await _payroll_batch_out(batch_id)
     # Phase 65 — IDOR guard. Scoped users MUST be mapped to the batch's center.
+    await _enrich_user_with_associations(user)
     allowed = _scoped_center_ids(user)
     if allowed is not None:
         if b.get("center_id") and b["center_id"] not in allowed:

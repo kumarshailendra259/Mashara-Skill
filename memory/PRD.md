@@ -2675,3 +2675,16 @@ Logic unchanged (handlers identical) → no re-test needed; verified via screens
 
 Frontend unchanged (Transactions.jsx already resolves project_id→name via nameOf).
 **Verified:** _derive + backfill logic test — a payment txn at a center with batches resolved project_id → correct project name; backend startup clean (no errors). Preview test-data centers lack batch projects so their 16 payment txns stay — (expected); production centers (e.g. BOCWW Garhwa) have batches so will resolve on deploy.
+
+## Phase 106 (Jun 2026) — Partner payroll approver: employee salary breakdown not showing (403 fix)
+
+**Issue:** When a PARTNER approves a Payroll Batch, the "Approve Payroll Batch" dialog showed only "N staff · Net payable ₹X" — the per-employee salary breakdown (added Phase 100) was missing.
+
+**Root cause (backend):** `GET /api/payroll-batches/{batch_id}` role list did NOT include `partner`. The frontend loads the batch for any payroll approver (openAct else-if) but a partner got 403, which `.catch(()=>{})` silently swallowed → `payBatch` stayed null → breakdown never rendered. Additionally the endpoint's IDOR guard called `_scoped_center_ids(user)` WITHOUT `_enrich_user_with_associations(user)`, so even after adding partner it would 403 (empty `_associated_center_ids`).
+
+**Fix (server.py, backend only):**
+1. Added `"partner"` to `get_payroll_batch` allowed roles.
+2. Added `await _enrich_user_with_associations(user)` before the IDOR scope check so a partner's mapped centers resolve.
+
+Frontend unchanged (Phase 100 breakdown table already renders when payBatch.rows present).
+**Verified (curl):** partner mapped to batch center → HTTP 200 + 252 rows (name/emp code/gross/deductions/net); partner at out-of-scope center → 403 (IDOR intact); admin → 200. Test mutation reverted.
