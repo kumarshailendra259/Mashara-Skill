@@ -9,7 +9,7 @@ import {
 import { toast } from "sonner";
 import {
   Inbox, ArrowLeftRight, Plane, Receipt, Check, X, ExternalLink, RefreshCw, Box, UserCog, AlertCircle, FileSignature, IndianRupee, Undo2, Wallet, Users, User as UserIcon,
-  Search, SlidersHorizontal, LayoutGrid, List as ListIcon, Hourglass, Clock, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, ClipboardCheck, MapPin, BadgeAlert,
+  Search, SlidersHorizontal, LayoutGrid, List as ListIcon, Hourglass, Clock, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, ClipboardCheck, MapPin, BadgeAlert, MoreVertical,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
@@ -463,93 +463,131 @@ export default function PendingApprovals() {
     const rname = r.name || item.requester_name;
     const na = (v) => (v == null || v === "" ? "N/A" : v);
     const checked = !!selected[keyOf(item)];
+
+    // ---- Shared blocks (arranged differently for list vs grid) ----
+    const badges = (
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">{meta.label}</span>
+        {item.via === "partner_cross" && (
+          <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-[var(--brand)] text-white">PARTNER CROSS-APPROVAL</span>
+        )}
+        {item.is_final_step && (
+          <span className="text-[9px] font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">FINAL STEP</span>
+        )}
+      </div>
+    );
+
+    const requesterBlock = (
+      <div className="space-y-2">
+        {badges}
+        <div className="inline-flex items-center gap-1.5 text-[13px] font-bold text-slate-900">
+          <UserIcon size={14} className="text-[var(--brand)]" /> {na(rname)}
+        </div>
+        <div className="space-y-0.5 text-[11px] text-[var(--muted)]">
+          <div>Employee ID: <b className="text-slate-700">{na(r.employee_code)}</b></div>
+          <div>Department: <b className="text-slate-700">{na(r.department)}</b></div>
+          <div>Designation: <b className="text-slate-700">{na(r.designation)}</b></div>
+        </div>
+        {item.center_name_of_request && (
+          <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 rounded-md px-1.5 py-0.5 text-[11px] font-medium"><MapPin size={11} /> {item.center_name_of_request}</span>
+        )}
+      </div>
+    );
+
+    const paymentBlock = (
+      <div className="space-y-1.5">
+        {item.summary?.purpose && (
+          <div className="text-[13px] font-semibold text-slate-800" data-testid={`row-purpose-${item.request_id}`}>{item.summary.purpose}</div>
+        )}
+        {item.summary?.vendor_name && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold text-amber-900 bg-amber-100 border border-amber-300 rounded-md">
+            {(item.request_type === "advance_request" ? "Payee: " : "Vendor: ")}{item.summary.vendor_name}
+          </span>
+        )}
+        {item.summary?.amount != null && (
+          <div className="num font-black text-[20px] text-emerald-700" data-testid={`row-amount-${item.request_id}`}>{inr(item.summary.amount)}</div>
+        )}
+        {item.summary?.description && item.summary.description !== item.summary.purpose && (
+          <div className="text-[12px] text-indigo-900 bg-indigo-50/60 border-l-4 border-indigo-400 rounded-r-md pl-2.5 py-1.5 whitespace-pre-wrap break-words leading-relaxed">
+            {item.summary.description}
+          </div>
+        )}
+        <div className="flex items-center gap-4 text-[11px] text-[var(--muted)] flex-wrap pt-0.5">
+          {item.summary?.date && <span className="inline-flex items-center gap-1"><CalendarDays size={12} /> {item.summary.date}</span>}
+          {item.created_at && <span className="inline-flex items-center gap-1"><Clock size={12} /> Raised {new Date(item.created_at).toLocaleDateString("en-IN")}</span>}
+        </div>
+      </div>
+    );
+
+    const priorityKebab = (
+      <div className="flex items-center gap-2">
+        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${pr.cls}`} data-testid={`priority-${item.request_id}`}>{pr.label}</span>
+        <button type="button" onClick={() => openDetail(item)} title="View details" className="text-slate-400 hover:text-slate-700 p-0.5 rounded hover:bg-slate-100" data-testid={`kebab-${item.request_id}`}>
+          <MoreVertical size={16} />
+        </button>
+      </div>
+    );
+
+    const actionButtons = (
+      <div className="flex items-center gap-2 flex-wrap justify-end">
+        <Button variant="outline" size="sm" onClick={() => openDetail(item)} className="rounded-lg h-8 gap-1" data-testid={`btn-detail-${item.request_id}`}>
+          <ExternalLink size={12} /> View
+        </Button>
+        <Button size="sm" onClick={() => openAct(item, "approve")} className="brand-btn rounded-lg h-8 gap-1" data-testid={`btn-approve-${item.request_id}`}>
+          <Check size={12} /> Approve
+        </Button>
+        {(item.request_type === "quotation" || item.request_type === "payment") && (
+          <Button variant="outline" size="sm" onClick={() => openAct(item, "send_back")} className="rounded-lg h-8 gap-1 text-amber-800 border-amber-300 hover:bg-amber-50" data-testid={`btn-sendback-${item.request_id}`}>
+            <Undo2 size={12} /> Send Back
+          </Button>
+        )}
+        <Button variant="outline" size="sm" onClick={() => openAct(item, "reject")} className="rounded-lg h-8 gap-1 hover:text-[var(--danger)] hover:border-[var(--danger)]" data-testid={`btn-reject-${item.request_id}`}>
+          <X size={12} /> Reject
+        </Button>
+      </div>
+    );
+
     return (
       <div
         key={keyOf(item)}
-        className={`bg-white border rounded-xl p-4 sm:p-5 shadow-sm transition-all duration-200 hover:shadow-md hover:border-blue-300 ${checked ? "border-[var(--brand)] ring-1 ring-[var(--brand)]/30" : "border-slate-200"}`}
+        className={`bg-white border rounded-xl shadow-sm transition-all duration-200 hover:shadow-md hover:border-blue-300 ${checked ? "border-[var(--brand)] ring-1 ring-[var(--brand)]/30" : "border-slate-200"}`}
         data-testid={`approval-card-${item.request_id}`}
       >
-        <div className="flex items-start gap-3">
-          <Checkbox
-            checked={checked}
-            onCheckedChange={() => toggleOne(item)}
-            className="mt-1 rounded-md data-[state=checked]:bg-[var(--brand)] data-[state=checked]:border-[var(--brand)]"
-            data-testid={`select-${item.request_id}`}
-          />
-          <div className={`${meta.color} p-2.5 rounded-lg shrink-0`}><Icon size={18} /></div>
-          <div className="flex-1 min-w-0">
-            {/* badges row */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">{meta.label}</span>
-              {item.via === "partner_cross" && (
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-[var(--brand)] text-white">PARTNER CROSS-APPROVAL</span>
-              )}
-              {item.is_final_step && (
-                <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200">FINAL STEP</span>
-              )}
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${pr.cls}`} data-testid={`priority-${item.request_id}`}>{pr.label}</span>
-            </div>
-
-            {/* requester */}
-            {(rname || r.employee_code || r.department || r.designation || item.center_name_of_request) && (
-              <div className="mt-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-[12px]">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className="inline-flex items-center gap-1 text-[13px]"><UserIcon size={13} className="text-[var(--brand)]" /> <b>{na(rname)}</b></span>
-                  <span className="text-[var(--muted)]">Emp ID: <b className="text-slate-800">{na(r.employee_code)}</b></span>
-                  <span className="text-[var(--muted)]">Dept: <b className="text-slate-800">{na(r.department)}</b></span>
-                  <span className="text-[var(--muted)]">Desig: <b className="text-slate-800">{na(r.designation)}</b></span>
-                </div>
-                {item.center_name_of_request && (
-                  <div className="mt-1">
-                    <span className="inline-flex items-center gap-1 text-cyan-800 bg-cyan-50 border border-cyan-200 rounded-md px-1.5 py-0.5 text-[11px] font-medium"><MapPin size={11} /> {item.center_name_of_request}</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {item.summary?.purpose && (
-              <div className="mt-2 text-[14px] font-bold text-slate-900" data-testid={`row-purpose-${item.request_id}`}>{item.summary.purpose}</div>
-            )}
-            {item.summary?.vendor_name && (
-              <div className="mt-1.5">
-                <span className="inline-flex items-center gap-1 px-2 py-1 text-[12px] font-bold text-amber-900 bg-amber-100 border border-amber-300 rounded-md">
-                  {(item.request_type === "advance_request" ? "Payee: " : "Vendor: ")}{item.summary.vendor_name}
-                </span>
-              </div>
-            )}
-            {item.summary?.description && item.summary.description !== item.summary.purpose && (
-              <div className="mt-2 text-[13px] font-semibold text-indigo-900 bg-indigo-50/60 border-l-4 border-indigo-400 rounded-r-md pl-3 py-2 whitespace-pre-wrap break-words leading-relaxed">
-                {item.summary.description}
-              </div>
-            )}
-
-            <div className="flex items-center gap-4 mt-2.5 text-xs text-[var(--muted)] flex-wrap">
-              {item.summary?.amount != null && (
-                <span className="num font-black text-[16px] text-emerald-700" data-testid={`row-amount-${item.request_id}`}>{inr(item.summary.amount)}</span>
-              )}
-              {item.summary?.date && <span className="inline-flex items-center gap-1"><CalendarDays size={12} /> {item.summary.date}</span>}
-              {item.created_at && <span className="inline-flex items-center gap-1"><Clock size={12} /> Raised {new Date(item.created_at).toLocaleDateString("en-IN")}</span>}
-            </div>
-
-            {/* actions */}
-            <div className="flex items-center gap-2 mt-3 flex-wrap">
-              <Button variant="outline" size="sm" onClick={() => openDetail(item)} className="rounded-lg h-8 gap-1" data-testid={`btn-detail-${item.request_id}`}>
-                <ExternalLink size={12} /> View
-              </Button>
-              <Button size="sm" onClick={() => openAct(item, "approve")} className="brand-btn rounded-lg h-8 gap-1" data-testid={`btn-approve-${item.request_id}`}>
-                <Check size={12} /> Approve
-              </Button>
-              {(item.request_type === "quotation" || item.request_type === "payment") && (
-                <Button variant="outline" size="sm" onClick={() => openAct(item, "send_back")} className="rounded-lg h-8 gap-1 text-amber-800 border-amber-300 hover:bg-amber-50" data-testid={`btn-sendback-${item.request_id}`}>
-                  <Undo2 size={12} /> Send Back
-                </Button>
-              )}
-              <Button variant="outline" size="sm" onClick={() => openAct(item, "reject")} className="rounded-lg h-8 gap-1 hover:text-[var(--danger)] hover:border-[var(--danger)]" data-testid={`btn-reject-${item.request_id}`}>
-                <X size={12} /> Reject
-              </Button>
+        {viewMode === "grid" ? (
+          /* Grid: stacked compact */
+          <div className="p-4 flex items-start gap-3">
+            <Checkbox checked={checked} onCheckedChange={() => toggleOne(item)} className="mt-1 rounded-md data-[state=checked]:bg-[var(--brand)] data-[state=checked]:border-[var(--brand)]" data-testid={`select-${item.request_id}`} />
+            <div className={`${meta.color} p-2.5 rounded-lg shrink-0`}><Icon size={18} /></div>
+            <div className="flex-1 min-w-0 space-y-3">
+              <div className="flex items-start justify-between gap-2">{requesterBlock}{priorityKebab}</div>
+              <div className="border-t border-slate-100 pt-2.5">{paymentBlock}</div>
+              <div className="border-t border-slate-100 pt-2.5">{actionButtons}</div>
             </div>
           </div>
-        </div>
+        ) : (
+          /* List: 3-section horizontal (Requester | Payment | Approval) */
+          <div className="p-4 sm:p-5 flex items-stretch gap-3">
+            <div className="flex items-start gap-3 shrink-0">
+              <Checkbox checked={checked} onCheckedChange={() => toggleOne(item)} className="mt-1 rounded-md data-[state=checked]:bg-[var(--brand)] data-[state=checked]:border-[var(--brand)]" data-testid={`select-${item.request_id}`} />
+              <div className={`${meta.color} p-2.5 rounded-lg`}><Icon size={18} /></div>
+            </div>
+            <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-0 min-w-0">
+              {/* Section 1 — Requester details */}
+              <div className="lg:col-span-4 lg:pr-5 lg:border-r lg:border-slate-100 min-w-0" data-testid={`sec-requester-${item.request_id}`}>
+                {requesterBlock}
+              </div>
+              {/* Section 2 — Payment details */}
+              <div className="lg:col-span-5 lg:px-5 lg:border-r lg:border-slate-100 min-w-0" data-testid={`sec-payment-${item.request_id}`}>
+                {paymentBlock}
+              </div>
+              {/* Section 3 — Approval details */}
+              <div className="lg:col-span-3 lg:pl-5 flex flex-col justify-between items-stretch gap-3" data-testid={`sec-approval-${item.request_id}`}>
+                <div className="flex justify-end">{priorityKebab}</div>
+                {actionButtons}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -1254,5 +1292,5 @@ function oldestDays(items) {
   if (!items.length) return 0;
   const dates = items.map((i) => new Date(i.created_at || Date.now()).getTime());
   const oldest = Math.min(...dates);
-  return Math.floor((Date.now() - oldest) / (1000 * 60 * 60 * 24));
+  return Math.max(0, Math.floor((Date.now() - oldest) / (1000 * 60 * 60 * 24)));
 }

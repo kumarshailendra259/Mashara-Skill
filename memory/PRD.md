@@ -2653,3 +2653,13 @@ Verified (curl): admin overview centers=213/batches=353/enrolled=97; partner cen
 **Pending Approvals header:** added breadcrumb "Approvals & Workflow → Pending Approvals" inside the gradient header (data-testid pa-breadcrumb).
 
 **Verified (screenshots):** 1920×1080 + 1440×900 — page full-width, sidebar navy with correct active states on /pending-approvals and /transactions; no module broken; compile clean (1 benign warning). Approval interactions unchanged from Phase 102 (tested 100% in iteration_83).
+
+## Phase 104 (Jun 2026) — Pending Approvals request card: 3-section layout (per reference)
+
+User wanted each request card split into 3 side-by-side sections (ref image). Rebuilt `RequestCard` in `PendingApprovals.jsx`:
+- **Section 1 — Requester details** (lg:col-span-4, right divider): type + PARTNER-CROSS/FINAL-STEP badges, requester name (user icon), Employee ID / Department / Designation (stacked), center chip.
+- **Section 2 — Payment details** (lg:col-span-5, right divider): purpose, Payee/Vendor chip, big green amount ₹, description, date + raised date.
+- **Section 3 — Approval details** (lg:col-span-3): Priority chip (age-derived) + kebab (⋮ → opens details) top-right, View/Approve/Reject (+Send Back) buttons bottom-right.
+- Grid view keeps a stacked compact variant of the same 3 blocks. All button/select/priority data-testids preserved (btn-approve/btn-reject/btn-detail/btn-sendback/select-/priority-) + new sec-requester/sec-payment/sec-approval/kebab- testids.
+- Fixed `oldestDays()` to clamp at 0 (was showing "-1" for future-dated test records).
+Logic unchanged (handlers identical) → no re-test needed; verified via screenshot at 1920×1080 (3 sections render on all cards).
