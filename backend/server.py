@@ -1188,17 +1188,21 @@ async def _derive_context_for_center(center_id: Optional[str]) -> dict:
     partner_id = None
     from collections import Counter
     companies: Counter = Counter()
+    projects: Counter = Counter()
     partners: set = set()
     async for b in db.batches.find(
         {"center_id": center_id},
-        {"_id": 0, "company_id": 1, "partner_ids": 1},
+        {"_id": 0, "company_id": 1, "partner_ids": 1, "project_id": 1},
     ):
         if b.get("company_id"):
             companies[b["company_id"]] += 1
+        if b.get("project_id"):
+            projects[b["project_id"]] += 1
         for pid in (b.get("partner_ids") or []):
             partners.add(pid)
     if companies:
         company_id = companies.most_common(1)[0][0]
+    project_id = projects.most_common(1)[0][0] if projects else None
     if len(partners) == 1:
         partner_id = next(iter(partners))
     else:
@@ -1229,7 +1233,18 @@ async def _derive_context_for_center(center_id: Optional[str]) -> dict:
         if rows:
             partner_id = rows[0]["_id"]
 
-    return {"company_id": company_id, "partner_id": partner_id, "project_id": None}
+    # Bootstrap project from existing txn history when still unresolved
+    if not project_id:
+        rows = await db.transactions.aggregate([
+            {"$match": {"center_id": center_id, "project_id": {"$ne": None}}},
+            {"$group": {"_id": "$project_id", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+            {"$limit": 1},
+        ]).to_list(1)
+        if rows:
+            project_id = rows[0]["_id"]
+
+    return {"company_id": company_id, "partner_id": partner_id, "project_id": project_id}
 
 
 async def _enrich_user_with_associations(user: dict) -> dict:
@@ -8051,12 +8066,15 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             eff_center_id = body.txn_center_id or rec.get("center_id")
             eff_partner_id = body.txn_partner_id
             eff_company_id = (_sel_center or {}).get("company_id") if body.txn_center_id else None
-            if eff_partner_id is None or eff_company_id is None:
+            eff_project_id = rec.get("project_id")
+            if eff_partner_id is None or eff_company_id is None or eff_project_id is None:
                 ctx = await _derive_context_for_center(eff_center_id)
                 if eff_partner_id is None:
                     eff_partner_id = ctx["partner_id"]
                 if eff_company_id is None:
                     eff_company_id = ctx["company_id"]
+                if eff_project_id is None:
+                    eff_project_id = ctx["project_id"]
             # Also refresh center_name if the approver switched centers
             eff_center_name = (_sel_center or {}).get("name") if body.txn_center_id else rec.get("center_name")
             txn_type = rec.get("category") or "expense"
@@ -8071,7 +8089,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "company_id": eff_company_id,
                 "partner_id": eff_partner_id,
                 "center_id": eff_center_id,
-                "project_id": None,
+                "project_id": eff_project_id,
                 "items": [], "attachments": rec.get("attachments") or [],
                 "source": "quotation_payment",
                 "quotation_id": rec.get("quotation_id"),
@@ -24976,6 +24994,40 @@ async def _migrate_role_names():
             logger.info("Normalized %d 'super_admin' → 'admin' user(s) (internal canonical)", res.modified_count)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Role normalization migration failed: %s", exc)
+
+
+@app.on_event("startup")
+async def _backfill_txn_project_ids():
+    """Fill `project_id` on auto-created payment/quotation transactions that were
+    saved before the project was derived from the center (showed 'Project: —').
+    Project = most-common batch project at the transaction's center (best-effort).
+    Idempotent — only touches rows where project_id is still null."""
+    try:
+        center_ids = await db.transactions.distinct("center_id", {
+            "project_id": None,
+            "center_id": {"$ne": None},
+            "source": {"$in": ["quotation_payment", "payment"]},
+        })
+        total = 0
+        for cid in center_ids:
+            rows = await db.batches.aggregate([
+                {"$match": {"center_id": cid, "project_id": {"$ne": None}}},
+                {"$group": {"_id": "$project_id", "n": {"$sum": 1}}},
+                {"$sort": {"n": -1}}, {"$limit": 1},
+            ]).to_list(1)
+            pj = rows[0]["_id"] if rows else None
+            if not pj:
+                continue
+            res = await db.transactions.update_many(
+                {"center_id": cid, "project_id": None,
+                 "source": {"$in": ["quotation_payment", "payment"]}},
+                {"$set": {"project_id": pj}},
+            )
+            total += res.modified_count
+        if total:
+            logger.info("Backfilled project_id on %d payment transaction(s)", total)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Txn project backfill failed: %s", exc)
 
 
 @app.on_event("startup")

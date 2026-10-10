@@ -2663,3 +2663,15 @@ User wanted each request card split into 3 side-by-side sections (ref image). Re
 - Grid view keeps a stacked compact variant of the same 3 blocks. All button/select/priority data-testids preserved (btn-approve/btn-reject/btn-detail/btn-sendback/select-/priority-) + new sec-requester/sec-payment/sec-approval/kebab- testids.
 - Fixed `oldestDays()` to clamp at 0 (was showing "-1" for future-dated test records).
 Logic unchanged (handlers identical) → no re-test needed; verified via screenshot at 1920×1080 (3 sections render on all cards).
+
+## Phase 105 (Jun 2026) — Payment approval: project name now populated (was "Project: —")
+
+**Issue:** Approving a Payment Request created an expense transaction with `project_id: None` (hardcoded) → Transactions list Allocation showed "Project: —". Payment & quotation records don't store a project; it must be derived from the center.
+
+**Fix (backend only, server.py):**
+1. `_derive_context_for_center()` now also resolves `project_id` = most-common `project_id` among the center's batches (fallback: most-common project across existing approved txns at that center). Previously always returned None.
+2. Payment final-approval block (request_type=="payment"): computes `eff_project_id` (from `rec.project_id` else derived context) and stamps it on the new transaction instead of `None`.
+3. New idempotent startup migration `_backfill_txn_project_ids()` — fills `project_id` on existing `quotation_payment`/`payment` transactions missing it, deriving per-center from batches. Auto-applies on deploy.
+
+Frontend unchanged (Transactions.jsx already resolves project_id→name via nameOf).
+**Verified:** _derive + backfill logic test — a payment txn at a center with batches resolved project_id → correct project name; backend startup clean (no errors). Preview test-data centers lack batch projects so their 16 payment txns stay — (expected); production centers (e.g. BOCWW Garhwa) have batches so will resolve on deploy.
