@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  --bg: #f8f9fa;
+  --bg: #F5F8FC;
   --surface: #ffffff;
   --border: #e5e7eb;
   --text: #0a0a0a;
@@ -21,7 +21,54 @@
   --warning: #f59e0b;
   --warning-soft: #fffbe3;
   --info: #007aff;
+
+  /* Premium sidebar palette (enterprise navy) */
+  --sb-bg: #0B1F3A;
+  --sb-bg2: #102B4E;
+  --sb-active: #155EEF;
+  --sb-active2: #2563EB;
+  --sb-text: #F8FAFC;
+  --sb-text2: #CBD5E1;
+  --sb-icon: #C7D7F2;
+  --sb-hover: #193B63;
+  --sb-divider: #294563;
+  --sb-badge: #F59E0B;
 }
+
+/* ---------- Premium sidebar ---------- */
+.sb-shell { background: var(--sb-bg); }
+.sb-scroll { scrollbar-color: #35507a transparent; }
+.sb-group {
+  color: var(--sb-text);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.sb-group:hover { background: var(--sb-hover); }
+.sb-group-active { background: var(--sb-hover); color: #fff; }
+.sb-link {
+  position: relative;
+  color: var(--sb-text2);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.sb-link:hover { background: var(--sb-hover); color: var(--sb-text); }
+.sb-link-active {
+  background: linear-gradient(90deg, var(--sb-active), var(--sb-active2));
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(21, 94, 239, 0.35);
+}
+.sb-link-active::before {
+  content: "";
+  position: absolute;
+  left: 2px; top: 50%;
+  transform: translateY(-50%);
+  height: 60%; width: 3px;
+  border-radius: 9999px;
+  background: #BFDBFE;
+}
+.sb-chevron { transition: transform 200ms ease; }
+
+/* Mobile drawer (navy) close button — make the X legible on dark bg */
+[data-testid="mobile-drawer"] > button { color: var(--sb-text); opacity: 0.85; }
+[data-testid="mobile-drawer"] > button:hover { opacity: 1; }
 
 html, body, #root {
   height: 100%;

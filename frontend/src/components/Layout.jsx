@@ -161,17 +161,24 @@ const DASHBOARD_ROLES = [...FINANCE_VISIBLE_ROLES, "center_manager"];
 function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expanded, toggleGroup, currentPath, blockedModules = [] }) {
   return (
     <>
-      <div className="px-5 py-5 border-b border-[var(--border)]">
-        <div className="text-xs overline">Console</div>
-        <div className="font-heading text-xl font-bold tracking-tight mt-1 text-[var(--brand)]">{t("app_name")}</div>
-        <div className="mt-2 pt-2 border-t border-[var(--border)] text-[10px] leading-tight text-[var(--muted)]" data-testid="company-banner">
+      <div className="px-5 py-5 border-b border-[var(--sb-divider)]">
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[var(--sb-active)] to-[var(--sb-active2)] flex items-center justify-center shrink-0 shadow-md">
+            <Landmark size={18} className="text-white" />
+          </div>
+          <div className="min-w-0">
+            <div className="font-heading text-[15px] font-bold tracking-tight text-white leading-tight truncate">{t("app_name")}</div>
+            <div className="text-[9px] uppercase tracking-[0.15em] text-[var(--sb-text2)]">Finance Console</div>
+          </div>
+        </div>
+        <div className="mt-3 pt-3 border-t border-[var(--sb-divider)] text-[10px] leading-tight text-[var(--sb-text2)]" data-testid="company-banner">
           Welcome to<br />
-          <span className="font-bold text-[var(--ink)]" data-testid="company-banner-name">
+          <span className="font-bold text-white" data-testid="company-banner-name">
             {companyLine || "—"}
           </span>
         </div>
       </div>
-      <nav className="flex-1 py-2 overflow-y-auto" data-testid="sidebar-nav">
+      <nav className="flex-1 py-3 overflow-y-auto sb-scroll" data-testid="sidebar-nav">
         {visibleGroups.map((grp) => {
           const GIcon = grp.icon;
           const isOpen = expanded[grp.key];
@@ -185,25 +192,20 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                 type="button"
                 onClick={() => toggleGroup(grp.key)}
                 data-testid={`navgrp-toggle-${grp.key}`}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm text-left transition-colors rounded-md mx-2 ${
-                  hasActiveChild
-                    ? "bg-[var(--brand-soft)] text-[var(--brand)] font-semibold"
-                    : "text-[var(--ink)] hover:bg-slate-50 font-semibold"
-                }`}
+                className={`sb-group w-full flex items-center gap-3 px-3 py-2.5 text-sm text-left rounded-lg mx-2 ${hasActiveChild ? "sb-group-active" : ""}`}
+                style={{ width: "calc(100% - 1rem)" }}
               >
-                <GIcon size={17} strokeWidth={1.9} className={hasActiveChild ? "text-[var(--brand)]" : "text-[var(--muted)]"} />
-                <span className="flex-1 tracking-wide uppercase text-[11px]">{t(grp.key)}</span>
+                <GIcon size={17} strokeWidth={1.9} style={{ color: hasActiveChild ? "#fff" : "var(--sb-icon)" }} />
+                <span className="flex-1 tracking-wide uppercase text-[11px] font-semibold">{t(grp.key)}</span>
                 {groupBadge > 0 && !isOpen && (
-                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`navgrp-badge-${grp.key}`}>
+                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--sb-badge)] text-[#1f1300] rounded-full px-1.5" data-testid={`navgrp-badge-${grp.key}`}>
                     {groupBadge}
                   </span>
                 )}
-                {isOpen
-                  ? <ChevronDown size={14} strokeWidth={2} className="text-[var(--muted)]" />
-                  : <ChevronRight size={14} strokeWidth={2} className="text-[var(--muted)]" />}
+                <ChevronDown size={14} strokeWidth={2.2} className="sb-chevron text-[var(--sb-text2)]" style={{ transform: isOpen ? "rotate(0deg)" : "rotate(-90deg)" }} />
               </button>
               {isOpen && (
-                <div className="pb-1" data-testid={`navgrp-body-${grp.key}`}>
+                <div className="pb-1 pt-0.5" data-testid={`navgrp-body-${grp.key}`}>
                   {grp.items.map((it) => {
                     const Icon = it.icon;
                     const badge = badgeFor(it.key);
@@ -216,23 +218,17 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                         onClick={onNavigate}
                         data-testid={`nav-${it.key}`}
                         className={({ isActive }) =>
-                          `flex items-center gap-3 pl-9 pr-4 py-2 text-[13px] rounded-md mx-2 transition-colors ${
-                            isActive
-                              ? "bg-[var(--brand-soft)] text-[var(--brand)] font-semibold"
-                              : isLocked
-                                ? "text-slate-400 hover:text-slate-500 hover:bg-slate-50 font-medium"
-                                : "text-[var(--muted)] hover:text-[var(--text)] hover:bg-slate-50 font-medium"
-                          }`
+                          `sb-link flex items-center gap-3 pl-9 pr-3 py-2 text-[13px] rounded-lg mx-2 ${isActive ? "sb-link-active font-semibold" : "font-medium"} ${isLocked && !isActive ? "opacity-60" : ""}`
                         }
                         title={isLocked ? "Module locked — Subscribe to unlock" : undefined}
                       >
-                        <Icon size={15} strokeWidth={1.7} />
+                        <Icon size={15} strokeWidth={1.8} />
                         <span className="flex-1">{t(it.key)}</span>
                         {isLocked && (
-                          <Lock size={11} className="text-amber-500" data-testid={`nav-lock-${it.key}`} aria-label="module locked" />
+                          <Lock size={11} className="text-amber-400" data-testid={`nav-lock-${it.key}`} aria-label="module locked" />
                         )}
                         {badge > 0 && (
-                          <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--brand)] text-white px-1.5" data-testid={`badge-${it.key}`}>
+                          <span className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold bg-[var(--sb-badge)] text-[#1f1300] rounded-full px-1.5" data-testid={`badge-${it.key}`}>
                             {badge}
                           </span>
                         )}
@@ -245,7 +241,7 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
           );
         })}
       </nav>
-      <div className="p-4 text-xs overline">v1.0</div>
+      <div className="p-4 text-[10px] uppercase tracking-wider font-semibold text-[var(--sb-text2)]/60 border-t border-[var(--sb-divider)]">v1.0</div>
     </>
   );
 }
@@ -427,7 +423,7 @@ export default function Layout({ children }) {
   return (
     <div className="min-h-screen flex" data-testid="app-layout">
       {/* Desktop sidebar */}
-      <aside className="w-60 shrink-0 border-r border-[var(--border)] bg-white hidden md:flex md:flex-col">
+      <aside className="w-60 shrink-0 bg-[var(--sb-bg)] hidden md:flex md:flex-col">
         <SidebarBody
           t={t}
           visibleGroups={visibleGroups}
@@ -444,7 +440,7 @@ export default function Layout({ children }) {
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent
           side="left"
-          className="p-0 w-72 max-w-[85vw] flex flex-col md:hidden"
+          className="p-0 w-72 max-w-[85vw] flex flex-col md:hidden bg-[var(--sb-bg)] border-r-0"
           data-testid="mobile-drawer"
         >
           <SidebarBody

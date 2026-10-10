@@ -555,22 +555,29 @@ export default function PendingApprovals() {
   };
 
   return (
-    <div className="space-y-5 p-4 md:p-6 max-w-7xl mx-auto" data-testid="pending-approvals-page">
+    <div className="space-y-5 p-4 md:p-6 w-full" data-testid="pending-approvals-page">
       {/* Premium header */}
       <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-[var(--brand)] via-indigo-700 to-blue-700 text-white p-6 md:p-8 shadow-lg">
         <div className="absolute -right-10 -top-10 w-56 h-56 bg-white/10 rounded-full blur-2xl" />
         <div className="absolute right-20 bottom-0 opacity-10"><ClipboardCheck size={160} /></div>
-        <div className="relative flex items-start justify-between gap-4 flex-wrap">
-          <div className="flex items-start gap-4">
-            <div className="bg-white/15 backdrop-blur p-3 rounded-xl"><ClipboardCheck size={30} /></div>
-            <div>
-              <h1 className="font-heading font-black tracking-tight text-2xl md:text-3xl">Pending Approvals</h1>
-              <p className="text-white/80 text-sm mt-1 max-w-xl">All requests awaiting your action across transactions, leaves, reimbursements, assets and payrolls.</p>
-            </div>
+        <div className="relative">
+          <div className="flex items-center gap-1.5 text-[11px] text-white/70 font-medium mb-3" data-testid="pa-breadcrumb">
+            <span>Approvals &amp; Workflow</span>
+            <ChevronRight size={12} />
+            <span className="text-white font-semibold">Pending Approvals</span>
           </div>
-          <Button variant="outline" onClick={load} className="rounded-lg gap-1.5 bg-white/10 border-white/30 text-white hover:bg-white/20" data-testid="btn-refresh-approvals">
-            <RefreshCw size={14} /> Refresh
-          </Button>
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="flex items-start gap-4">
+              <div className="bg-white/15 backdrop-blur p-3 rounded-xl"><ClipboardCheck size={30} /></div>
+              <div>
+                <h1 className="font-heading font-black tracking-tight text-2xl md:text-3xl">Pending Approvals</h1>
+                <p className="text-white/80 text-sm mt-1 max-w-xl">All requests awaiting your action across transactions, leaves, reimbursements, assets and payrolls.</p>
+              </div>
+            </div>
+            <Button variant="outline" onClick={load} className="rounded-lg gap-1.5 bg-white/10 border-white/30 text-white hover:bg-white/20" data-testid="btn-refresh-approvals">
+              <RefreshCw size={14} /> Refresh
+            </Button>
+          </div>
         </div>
       </div>
 

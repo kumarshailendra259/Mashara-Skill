@@ -2639,3 +2639,17 @@ Verified (curl): admin overview centers=213/batches=353/enrolled=97; partner cen
 
 **Design:** blueprint in /app/design_guidelines.json (by design_agent).
 **Tested:** testing_agent iteration_83.json — 13/13 frontend scenarios PASS (100%), no bugs. Individual approve + bulk approve/reject verified persisting to backend; skip-rule, filters, search, view-toggle, pagination, empty-state all pass.
+
+## Phase 103 (Jun 2026) — Full-width layout fix + premium navy sidebar (global)
+
+**Root cause of half-width:** The app shell (`Layout.jsx`) was already full-width (sidebar w-60 + `flex-1` main). The narrow/centered look came from the PAGE: `PendingApprovals.jsx` used `max-w-7xl mx-auto`, centering content to ~1280px on wide screens. Fixed by switching the page container to `w-full` (left-aligned, uses full workspace). KPI grid is `lg:grid-cols-4` → 4 cards per row at 1366/1440/1920.
+
+**Premium sidebar (shared across ALL modules — `Layout.jsx` + `index.css`):**
+- New enterprise-navy palette as CSS vars: --sb-bg #0B1F3A, --sb-bg2 #102B4E, --sb-active #155EEF→--sb-active2 #2563EB (active gradient), --sb-text #F8FAFC, --sb-text2 #CBD5E1, --sb-icon #C7D7F2, --sb-hover #193B63, --sb-divider #294563, --sb-badge #F59E0B. Workspace --bg → #F5F8FC.
+- Helper classes `.sb-group/.sb-group-active/.sb-link/.sb-link-active` (gradient + left accent bar via ::before + shadow) + `.sb-chevron` rotate animation.
+- Brand header: gradient logo tile (Landmark icon) + "Mashara Finance / FINANCE CONSOLE". Group buttons highlight when a child route is active; active link = blue gradient pill + light-blue left accent + white text/icon; hover = --sb-hover; badges amber (#F59E0B). Chevron rotates on expand. Mobile Sheet drawer reuses same SidebarBody (navy) with light close-X.
+- **Preserved:** every menu item, group, route, RBAC gate, badge logic, auto-expand-on-route — ONLY className/colors changed, zero logic change.
+
+**Pending Approvals header:** added breadcrumb "Approvals & Workflow → Pending Approvals" inside the gradient header (data-testid pa-breadcrumb).
+
+**Verified (screenshots):** 1920×1080 + 1440×900 — page full-width, sidebar navy with correct active states on /pending-approvals and /transactions; no module broken; compile clean (1 benign warning). Approval interactions unchanged from Phase 102 (tested 100% in iteration_83).
