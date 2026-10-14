@@ -25152,6 +25152,21 @@ async def mess_units(user=Depends(require_role(*MESS_VIEW_ROLES))):
     return {"units": MESS_UNITS}
 
 
+@api.get("/mess/centers")
+async def mess_centers(user=Depends(require_role(*MESS_VIEW_ROLES))):
+    """Centers the current user may operate the Mess module in.
+    Admin / unscoped roles get every center; center_manager, mess_staff,
+    partner etc. get only their mapped centers."""
+    scoped = await _mess_scope(user)
+    q: dict = {}
+    if scoped is not None:
+        if not scoped:
+            return []
+        q["id"] = {"$in": scoped}
+    docs = await db.centers.find(q, {"_id": 0, "id": 1, "name": 1, "center_code": 1, "city": 1}).sort("name", 1).to_list(5000)
+    return [{"id": d["id"], "name": d.get("name"), "center_code": d.get("center_code"), "city": d.get("city")} for d in docs]
+
+
 @api.get("/mess/items")
 async def mess_items(active_only: bool = False, category: Optional[str] = None,
                      search: Optional[str] = None, user=Depends(require_role(*MESS_VIEW_ROLES))):

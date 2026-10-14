@@ -51,9 +51,10 @@ export default function MessManagement() {
 
   const loadCenters = async () => {
     try {
-      const { data } = await api.get("/centers");
+      const { data } = await api.get("/mess/centers");
       const list = Array.isArray(data) ? data : [];
       setCenters(list);
+      if (list.length === 1) setCenterId((prev) => prev || list[0].id);
     } catch (e) { /* ignore */ }
   };
 
