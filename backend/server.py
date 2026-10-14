@@ -924,7 +924,7 @@ class ApprovalChainOut(ApprovalChainIn):
 
 
 class ApprovalActionIn(BaseModel):
-    request_type: ApprovalType
+    request_type: Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement", "payroll", "mess_receipt"]
     request_id: str
     action: Literal["approve", "reject", "send_back"]
     remarks: str = Field(min_length=3, description="Mandatory note explaining the decision (min 3 chars)")
@@ -7737,6 +7737,15 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
     arrive after the first has flipped current_level will fail with 409 CONFLICT
     instead of creating duplicate transactions.
     """
+    # Mess goods-receipt approvals surface in the generic Pending-Approvals inbox
+    # but live in their own collection with bespoke posting logic.
+    if body.request_type == "mess_receipt":
+        if user.get("role") not in MESS_APPROVE_ROLES:
+            raise HTTPException(403, "Not authorised to approve mess receipts")
+        if body.action == "reject":
+            return await _mess_reject_core(body.request_id, user, body.remarks or "")
+        return await _mess_approve_core(body.request_id, user)
+
     coll_name = APPROVAL_TYPE_COLL[body.request_type]
     coll = db[coll_name]
     rec = await coll.find_one({"id": body.request_id}, {"_id": 0})
@@ -8512,6 +8521,35 @@ async def list_pending_approvals(user=Depends(get_current_user)):
         }
 
     # Sort newest first
+    # ---- Mess goods receipts awaiting approval (surface in the inbox) ----
+    if user_role in MESS_APPROVE_ROLES:
+        m_scoped = await _mess_scope(user)
+        if not (m_scoped is not None and len(m_scoped) == 0):
+            mq = {"status": "pending"}
+            if m_scoped is not None:
+                mq["center_id"] = {"$in": m_scoped}
+            for rc in await db.mess_receipts.find(mq, {"_id": 0}).sort("created_at", -1).to_list(2000):
+                out.append({
+                    "request_type": "mess_receipt",
+                    "request_id": rc["id"],
+                    "current_level": 1, "step_label": "Mess Receipt Approval",
+                    "is_final_step": True, "total_steps": 1,
+                    "requester_id": rc.get("created_by"),
+                    "requester_name": rc.get("created_by_name"),
+                    "center_id_of_request": rc.get("center_id"),
+                    "center_name_of_request": rc.get("center_name"),
+                    "summary": {
+                        "amount": rc.get("total_amount"),
+                        "date": rc.get("invoice_date"),
+                        "purpose": f"Mess Purchase · Inv {rc.get('invoice_no')}",
+                        "description": f"{len(rc.get('lines') or [])} item(s) from {rc.get('supplier_name') or 'supplier'}",
+                        "vendor_name": rc.get("supplier_name"),
+                        "center_id": rc.get("center_id"), "center_name": rc.get("center_name"),
+                        "attachments": rc.get("attachments") or [],
+                    },
+                    "created_at": rc.get("created_at"), "via": "mess",
+                })
+
     out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return out
 
@@ -25271,8 +25309,10 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
     return doc
 
 
-@api.post("/mess/receipts/{receipt_id}/approve")
-async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_APPROVE_ROLES))):
+async def _mess_approve_core(receipt_id: str, user: dict) -> dict:
+    """Approve a goods receipt: post weighted-average stock-in + create the
+    one-time Finance expense txn. Shared by the dedicated endpoint AND the
+    generic Pending-Approvals inbox (/approvals/act). Center scope enforced."""
     rec = await db.mess_receipts.find_one({"id": receipt_id})
     if not rec:
         raise HTTPException(404, "Receipt not found")
@@ -25282,7 +25322,6 @@ async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_
         raise HTTPException(400, f"Receipt already {rec.get('status')}")
     items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
     now = datetime.now(timezone.utc).isoformat()
-    # 1) Post stock-in for each accepted line (weighted-average).
     for ln in rec["lines"]:
         it = items.get(ln["item_id"])
         if not it or float(ln.get("accepted_qty") or 0) <= 0:
@@ -25290,13 +25329,10 @@ async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_
         qty_base = _to_base_qty(it, ln["accepted_qty"], ln["unit"])
         await _mess_apply_receipt(rec["center_id"], it, qty_base,
                                   float(ln.get("accepted_cost") or 0), rec["id"],
-                                  rec["invoice_date"], user,
-                                  notes=f"Invoice {rec['invoice_no']}")
-        # keep item avg_cost fresh
+                                  rec["invoice_date"], user, notes=f"Invoice {rec['invoice_no']}")
         st = await db.mess_stock.find_one({"center_id": rec["center_id"], "item_id": it["id"]})
         if st:
             await db.mess_items.update_one({"id": it["id"]}, {"$set": {"avg_cost": st.get("avg_cost", 0)}})
-    # 2) Create the Finance expense transaction (source=mess_purchase) — only once.
     ctx = await _derive_context_for_center(rec["center_id"])
     txn = {
         "id": str(uuid.uuid4()), "type": "expense",
@@ -25319,9 +25355,7 @@ async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_
     return {"ok": True, "expense_txn_id": txn["id"]}
 
 
-@api.post("/mess/receipts/{receipt_id}/reject")
-async def mess_reject_receipt(receipt_id: str, body: dict = Body(default={}),
-                              user=Depends(require_role(*MESS_APPROVE_ROLES))):
+async def _mess_reject_core(receipt_id: str, user: dict, remarks: str = "") -> dict:
     rec = await db.mess_receipts.find_one({"id": receipt_id})
     if not rec:
         raise HTTPException(404, "Receipt not found")
@@ -25330,9 +25364,20 @@ async def mess_reject_receipt(receipt_id: str, body: dict = Body(default={}),
     if rec.get("status") != "pending":
         raise HTTPException(400, f"Receipt already {rec.get('status')}")
     await db.mess_receipts.update_one({"id": receipt_id}, {"$set": {
-        "status": "rejected", "rejected_reason": body.get("remarks") or "",
+        "status": "rejected", "rejected_reason": remarks or "",
         "approved_by": user["id"], "approved_at": datetime.now(timezone.utc).isoformat()}})
     return {"ok": True}
+
+
+@api.post("/mess/receipts/{receipt_id}/approve")
+async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    return await _mess_approve_core(receipt_id, user)
+
+
+@api.post("/mess/receipts/{receipt_id}/reject")
+async def mess_reject_receipt(receipt_id: str, body: dict = Body(default={}),
+                              user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    return await _mess_reject_core(receipt_id, user, body.get("remarks") or "")
 
 
 # ---------- Daily Consumption / Wastage ----------
@@ -25352,6 +25397,9 @@ async def mess_list_consumption(center_id: Optional[str] = None, date: Optional[
 async def mess_post_consumption(body: MessConsumptionIn, user=Depends(require_role(*MESS_ENTRY_ROLES))):
     scoped = await _mess_scope(user)
     _mess_assert_center(scoped, body.center_id)
+    # Locked-day guard — a closed day cannot be edited without reopening.
+    if await db.mess_closings.find_one({"center_id": body.center_id, "date": body.date, "status": "closed"}):
+        raise HTTPException(400, "This day is CLOSED for this center — reopen it before editing.")
     if not body.lines:
         raise HTTPException(400, "At least one line is required")
     items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
@@ -25514,6 +25562,172 @@ async def mess_ledger_export(center_id: Optional[str] = None, item_id: Optional[
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=mess_stock_ledger.xlsx"})
+
+
+# ---------- Physical Stock Count (adjustments) ----------
+class MessStockCountLine(BaseModel):
+    item_id: str
+    counted_qty: float
+    reason: Optional[str] = None
+
+
+class MessStockCountIn(BaseModel):
+    center_id: str
+    date: str
+    lines: List[MessStockCountLine]
+    notes: Optional[str] = None
+
+
+@api.get("/mess/stock-counts")
+async def mess_list_stock_counts(center_id: Optional[str] = None,
+                                 user=Depends(require_role(*MESS_VIEW_ROLES))):
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return []
+    q = _mess_center_query(user, scoped, center_id)
+    return await db.mess_stock_counts.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+
+@api.post("/mess/stock-counts")
+async def mess_post_stock_count(body: MessStockCountIn, user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    """Physical count → auditable ADJUSTMENT ledger transactions (never overwrites
+    historical movements). Difference valued at current weighted-average cost."""
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, body.center_id)
+    if not body.lines:
+        raise HTTPException(400, "At least one line is required")
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    now = datetime.now(timezone.utc).isoformat()
+    out_lines = []
+    total_diff_value = 0.0
+    for ln in body.lines:
+        it = items.get(ln.item_id)
+        if not it:
+            raise HTTPException(400, f"Unknown item {ln.item_id}")
+        st = await db.mess_stock.find_one({"center_id": body.center_id, "item_id": it["id"]})
+        sys_qty = float(st["qty"]) if st else 0.0
+        avg = float(st["avg_cost"]) if st else float(it.get("avg_cost") or 0)
+        diff = round(float(ln.counted_qty) - sys_qty, 4)
+        diff_value = round(diff * avg, 2)
+        if diff != 0:
+            new_qty = round(sys_qty + diff, 4)
+            new_val = round((float(st["value"]) if st else 0.0) + diff_value, 2)
+            await db.mess_stock.update_one(
+                {"center_id": body.center_id, "item_id": it["id"]},
+                {"$set": {"qty": new_qty, "value": new_val, "avg_cost": avg,
+                          "item_name": it["name"], "base_unit": it["base_unit"], "updated_at": now}},
+                upsert=True)
+            await db.mess_ledger.insert_one({
+                "id": str(uuid.uuid4()), "center_id": body.center_id, "item_id": it["id"],
+                "item_name": it["name"], "type": "adjustment",
+                "qty_in": diff if diff > 0 else 0.0, "qty_out": -diff if diff < 0 else 0.0,
+                "unit_cost": avg, "value_delta": diff_value,
+                "balance_qty": new_qty, "balance_value": new_val,
+                "ref_type": "stock_count", "ref_id": None, "date": body.date,
+                "notes": ln.reason or "Physical count adjustment",
+                "created_by": user["id"], "created_by_name": user.get("name") or user.get("email"),
+                "created_at": now})
+        total_diff_value += diff_value
+        out_lines.append({"item_id": it["id"], "item_name": it["name"], "system_qty": sys_qty,
+                          "counted_qty": float(ln.counted_qty), "difference": diff,
+                          "difference_value": diff_value, "reason": ln.reason or "",
+                          "base_unit": it["base_unit"]})
+    cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
+    doc = {"id": str(uuid.uuid4()), "center_id": body.center_id, "center_name": (cen or {}).get("name"),
+           "date": body.date, "lines": out_lines, "total_diff_value": round(total_diff_value, 2),
+           "notes": body.notes, "created_by": user["id"],
+           "created_by_name": user.get("name") or user.get("email"), "created_at": now}
+    await db.mess_stock_counts.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+# ---------- Daily Mess Closing (one-click, lock, reopen) ----------
+async def _mess_closing_figures(user, scoped, center_id, date) -> dict:
+    cq = _mess_center_query(user, scoped, center_id)
+    lq = {**cq, "date": date}
+    received = consumption = wastage = 0.0
+    async for lg in db.mess_ledger.find(lq, {"_id": 0, "type": 1, "value_delta": 1}):
+        v = float(lg.get("value_delta") or 0); t = lg.get("type")
+        if t == "receipt":
+            received += v
+        elif t == "consumption":
+            consumption += -v
+        elif t == "wastage":
+            wastage += -v
+    closing_value = 0.0
+    async for s in db.mess_stock.find(cq, {"_id": 0, "value": 1}):
+        closing_value += float(s.get("value") or 0)
+    meals = 0
+    async for c in db.mess_consumption.find(lq, {"_id": 0, "meals_served": 1}):
+        meals += int(c.get("meals_served") or 0)
+    mess_exp = 0.0
+    async for tx in db.transactions.find({**cq, "source": "mess_purchase", "status": "approved", "date": date}, {"_id": 0, "amount": 1}):
+        mess_exp += float(tx.get("amount") or 0)
+    total_cost = round(consumption, 2)  # direct ingredient consumption; purchases are inventory (no double count)
+    return {
+        "opening_value": round(closing_value - received + consumption + wastage, 2),
+        "received_value": round(received, 2), "consumption_cost": round(consumption, 2),
+        "wastage_cost": round(wastage, 2), "closing_value": round(closing_value, 2),
+        "mess_expenses": round(mess_exp, 2), "meals_served": meals,
+        "total_daily_mess_cost": total_cost,
+        "cost_per_person": (round(total_cost / meals, 2) if meals > 0 else None),
+    }
+
+
+@api.get("/mess/closing")
+async def mess_get_closing(center_id: str, date: str, user=Depends(require_role(*MESS_VIEW_ROLES))):
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, center_id)
+    existing = await db.mess_closings.find_one({"center_id": center_id, "date": date}, {"_id": 0})
+    figures = await _mess_closing_figures(user, scoped, center_id, date)
+    return {"figures": figures, "closing": existing}
+
+
+@api.post("/mess/closing")
+async def mess_close_day(body: dict = Body(...), user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    center_id = body.get("center_id"); date = body.get("date")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, center_id)
+    if not date:
+        raise HTTPException(400, "date required")
+    existing = await db.mess_closings.find_one({"center_id": center_id, "date": date})
+    if existing and existing.get("status") == "closed":
+        raise HTTPException(409, "This day is already closed for this center")
+    figures = await _mess_closing_figures(user, scoped, center_id, date)
+    now = datetime.now(timezone.utc).isoformat()
+    cen = await db.centers.find_one({"id": center_id}, {"_id": 0, "name": 1})
+    doc = {
+        "id": existing["id"] if existing else str(uuid.uuid4()),
+        "center_id": center_id, "center_name": (cen or {}).get("name"), "date": date,
+        "status": "closed", "figures": figures,
+        "history": (existing.get("history") if existing else []) + [
+            {"action": "closed", "by": user["id"], "by_name": user.get("name") or user.get("email"), "at": now}],
+        "closed_by": user["id"], "closed_by_name": user.get("name") or user.get("email"), "closed_at": now,
+    }
+    await db.mess_closings.replace_one({"center_id": center_id, "date": date}, doc, upsert=True)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/mess/closing/reopen")
+async def mess_reopen_day(body: dict = Body(...), user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    center_id = body.get("center_id"); date = body.get("date")
+    remarks = body.get("remarks") or ""
+    if not remarks.strip():
+        raise HTTPException(400, "A reason is required to reopen a closed day")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, center_id)
+    existing = await db.mess_closings.find_one({"center_id": center_id, "date": date})
+    if not existing or existing.get("status") != "closed":
+        raise HTTPException(400, "This day is not closed")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.mess_closings.update_one({"center_id": center_id, "date": date}, {"$set": {
+        "status": "reopened",
+        "history": (existing.get("history") or []) + [
+            {"action": "reopened", "by": user["id"], "by_name": user.get("name") or user.get("email"),
+             "at": now, "remarks": remarks}]}})
+    return {"ok": True}
 
 
 @app.on_event("startup")

@@ -12,7 +12,7 @@ import { useAuth } from "@/context/AuthContext";
 import {
   UtensilsCrossed, RefreshCw, Package, ClipboardList, BookOpen, LayoutDashboard,
   Plus, Check, X, Trash2, Download, PackagePlus, Soup, AlertTriangle, Boxes,
-  IndianRupee, Users, TrendingDown, FileWarning, Pencil,
+  IndianRupee, Users, TrendingDown, FileWarning, Pencil, Lock, Scale, CalendarCheck, Unlock,
 } from "lucide-react";
 
 const API_ENTRY_ROLES = ["admin", "senior_manager", "manager", "center_manager", "mess_staff"];
@@ -40,6 +40,8 @@ export default function MessManagement() {
   const [consumption, setConsumption] = useState([]);
   const [ledger, setLedger] = useState([]);
   const [units, setUnits] = useState([]);
+  const [closing, setClosing] = useState(null);
+  const [stockCounts, setStockCounts] = useState([]);
 
   const [itemDlg, setItemDlg] = useState(null);      // item being created/edited
   const [receiptDlg, setReceiptDlg] = useState(false);
@@ -82,6 +84,16 @@ export default function MessManagement() {
       } else if (tab === "ledger") {
         const { data } = await api.get(`/mess/ledger${centerParam}`);
         setLedger(data);
+      } else if (tab === "closing") {
+        if (centerId) {
+          const { data } = await api.get(`/mess/closing?center_id=${centerId}&date=${date}`);
+          setClosing(data);
+        } else { setClosing(null); }
+      } else if (tab === "stockcount") {
+        const { data } = await api.get(`/mess/stock-counts${centerParam}`);
+        setStockCounts(data);
+        const { data: st } = await api.get(`/mess/stock${centerParam}`);
+        setStock(st);
       }
     } catch (e) { toast.error(formatError(e)); }
     finally { setLoading(false); }
@@ -98,6 +110,8 @@ export default function MessManagement() {
     { key: "stock", label: "Stock", icon: Boxes },
     { key: "receipts", label: "Goods Receipt", icon: ClipboardList },
     { key: "consumption", label: "Consumption", icon: Soup },
+    { key: "closing", label: "Daily Closing", icon: CalendarCheck },
+    { key: "stockcount", label: "Stock Count", icon: Scale },
     { key: "ledger", label: "Stock Ledger", icon: BookOpen },
   ];
 
@@ -161,6 +175,12 @@ export default function MessManagement() {
         onAdd={() => setConsDlg("consumption")} />}
 
       {tab === "ledger" && <LedgerTab ledger={ledger} loading={loading} centerParam={centerParam} />}
+
+      {tab === "closing" && <ClosingTab closing={closing} loading={loading} canApprove={canApprove}
+        centerId={centerId} date={date} onChanged={refresh} />}
+
+      {tab === "stockcount" && <StockCountTab counts={stockCounts} stock={stock} loading={loading}
+        canApprove={canApprove} centerId={centerId} date={date} onChanged={refresh} />}
 
       {/* Dialogs */}
       {itemDlg && <ItemDialog item={itemDlg} units={units} onClose={() => setItemDlg(null)}
@@ -543,7 +563,109 @@ function ConsumptionDialog({ mode, items, units, centers, centerId, onClose, onS
   );
 }
 
-/* ---------------- Ledger ---------------- */
+/* ---------------- Daily Closing ---------------- */
+function ClosingTab({ closing, loading, canApprove, centerId, date, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  if (!centerId) return <div className="text-center text-slate-400 py-10 bg-white border border-slate-200 rounded-xl">Select a specific center (top-right) to view / run Daily Closing.</div>;
+  if (loading || !closing) return <div className="text-sm text-slate-500 p-8 text-center">Loading…</div>;
+  const f = closing.figures || {};
+  const c = closing.closing;
+  const isClosed = c && c.status === "closed";
+  const close = async () => {
+    if (!window.confirm(`Close mess for ${date}? The day will be locked from editing.`)) return;
+    setBusy(true);
+    try { await api.post("/mess/closing", { center_id: centerId, date }); toast.success("Day closed & locked"); onChanged(); }
+    catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
+  };
+  const reopen = async () => {
+    const remarks = window.prompt("Reason to reopen this closed day? (required)");
+    if (!remarks || !remarks.trim()) { toast.error("Reason required"); return; }
+    setBusy(true);
+    try { await api.post("/mess/closing/reopen", { center_id: centerId, date, remarks }); toast.success("Day reopened"); onChanged(); }
+    catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
+  };
+  const Row = ({ label, value, strong }) => (
+    <div className="flex items-center justify-between py-1.5 border-b border-slate-50 text-sm"><span className="text-slate-600">{label}</span><span className={`num ${strong ? "font-black text-slate-900" : "font-semibold text-slate-800"}`}>{value}</span></div>
+  );
+  return (
+    <div className="space-y-4 max-w-2xl">
+      <div className={`rounded-xl p-4 border flex items-center justify-between ${isClosed ? "bg-rose-50 border-rose-200" : "bg-emerald-50 border-emerald-200"}`} data-testid="closing-status">
+        <div className="flex items-center gap-2 font-bold text-sm">{isClosed ? <Lock size={16} className="text-rose-600" /> : <Unlock size={16} className="text-emerald-600" />} {isClosed ? `CLOSED — locked by ${c.closed_by_name || "user"}` : "OPEN — not yet closed"}</div>
+        {canApprove && (isClosed
+          ? <Button onClick={reopen} disabled={busy} variant="outline" className="rounded-lg gap-1 text-amber-700 border-amber-300" data-testid="reopen-day-btn"><Unlock size={14} /> Reopen</Button>
+          : <Button onClick={close} disabled={busy} className="brand-btn rounded-lg gap-1" data-testid="close-day-btn"><CalendarCheck size={14} /> {busy ? "Closing…" : "Close Day"}</Button>)}
+      </div>
+      <div className="bg-white border border-slate-200 rounded-xl p-5">
+        <div className="font-bold text-sm mb-2">Daily Mess Summary · {date}</div>
+        <Row label="Opening Stock Value" value={inr(f.opening_value || 0)} />
+        <Row label="Goods Received" value={inr(f.received_value || 0)} />
+        <Row label="Consumption Cost" value={inr(f.consumption_cost || 0)} />
+        <Row label="Wastage Cost" value={inr(f.wastage_cost || 0)} />
+        <Row label="Closing Stock Value" value={inr(f.closing_value || 0)} />
+        <Row label="Mess Expenses (purchases)" value={inr(f.mess_expenses || 0)} />
+        <Row label="Meals Served" value={f.meals_served || 0} />
+        <Row label="Total Daily Mess Cost" value={inr(f.total_daily_mess_cost || 0)} strong />
+        <Row label="Cost / Person" value={f.cost_per_person == null ? "N/A" : inr(f.cost_per_person)} strong />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Physical Stock Count ---------------- */
+function StockCountTab({ counts, stock, loading, canApprove, centerId, date, onChanged }) {
+  const [counted, setCounted] = useState({});
+  const [busy, setBusy] = useState(false);
+  if (!centerId) return <div className="text-center text-slate-400 py-10 bg-white border border-slate-200 rounded-xl">Select a specific center (top-right) to run a physical stock count.</div>;
+  if (loading) return <div className="text-sm text-slate-500 p-8 text-center">Loading…</div>;
+  const submit = async () => {
+    const lines = stock.filter(s => counted[s.item_id] !== undefined && counted[s.item_id] !== "").map(s => ({ item_id: s.item_id, counted_qty: Number(counted[s.item_id]), reason: "Physical count" }));
+    if (lines.length === 0) { toast.error("Enter at least one counted quantity"); return; }
+    setBusy(true);
+    try { await api.post("/mess/stock-counts", { center_id: centerId, date, lines }); toast.success("Stock count posted — adjustments recorded"); setCounted({}); onChanged(); }
+    catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
+  };
+  return (
+    <div className="space-y-4">
+      {canApprove && (
+        <div className="bg-white border border-slate-200 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2"><div className="font-bold text-sm">New Physical Count · {date}</div><Button onClick={submit} disabled={busy} className="brand-btn rounded-lg gap-1" data-testid="post-count-btn"><Check size={14} /> {busy ? "Posting…" : "Post Count & Adjust"}</Button></div>
+          <div className="overflow-x-auto max-h-96 overflow-y-auto">
+            <table className="w-full text-sm"><thead className="bg-slate-50 text-slate-500 text-[11px] uppercase sticky top-0"><tr><th className="text-left px-3 py-2">Item</th><th className="text-right px-3 py-2">System Qty</th><th className="text-right px-3 py-2">Counted Qty</th><th className="text-right px-3 py-2">Diff</th></tr></thead>
+              <tbody className="divide-y divide-slate-100">
+                {stock.map(s => {
+                  const cv = counted[s.item_id];
+                  const diff = cv === undefined || cv === "" ? null : Number(cv) - s.qty;
+                  return (
+                    <tr key={s.item_id} data-testid={`count-row-${s.item_id}`}>
+                      <td className="px-3 py-1.5 font-medium text-slate-800">{s.item_name}</td>
+                      <td className="px-3 py-1.5 text-right num">{s.qty} {s.base_unit}</td>
+                      <td className="px-3 py-1.5 text-right"><Input type="number" value={cv ?? ""} onChange={e => setCounted({ ...counted, [s.item_id]: e.target.value })} className="rounded-lg h-7 w-28 text-right text-xs inline-block" data-testid={`count-input-${s.item_id}`} /></td>
+                      <td className={`px-3 py-1.5 text-right num font-bold ${diff == null ? "" : diff < 0 ? "text-rose-600" : diff > 0 ? "text-emerald-600" : "text-slate-400"}`}>{diff == null ? "—" : diff}</td>
+                    </tr>
+                  );
+                })}
+                {stock.length === 0 && <tr><td colSpan={4} className="text-center text-slate-400 py-6">No stock to count</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      <div>
+        <div className="font-bold text-sm mb-2">Past Counts</div>
+        <div className="space-y-2">
+          {counts.map(c => (
+            <div key={c.id} className="bg-white border border-slate-200 rounded-xl p-3 flex items-center justify-between" data-testid={`count-${c.id}`}>
+              <div className="text-sm"><b>{c.date}</b> · {c.center_name || "—"} · {c.lines?.length || 0} item(s) · by {c.created_by_name}</div>
+              <div className={`num font-bold ${c.total_diff_value < 0 ? "text-rose-600" : "text-emerald-700"}`}>{inr(c.total_diff_value || 0)}</div>
+            </div>
+          ))}
+          {counts.length === 0 && <div className="text-center text-slate-400 py-6 bg-white border border-slate-200 rounded-xl">No stock counts yet</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LedgerTab({ ledger, loading, centerParam }) {
   const download = async () => {
     try {

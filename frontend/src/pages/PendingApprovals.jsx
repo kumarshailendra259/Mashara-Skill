@@ -51,6 +51,7 @@ const TYPE_META = {
   payment:           { icon: IndianRupee,    label: "Payment",            color: "bg-teal-50 text-teal-700" },
   advance_request:   { icon: Wallet,         label: "Advance",            color: "bg-cyan-50 text-cyan-700" },
   payroll:           { icon: Users,          label: "Payroll Batch",      color: "bg-purple-50 text-purple-800" },
+  mess_receipt:      { icon: Receipt,        label: "Mess Receipt",       color: "bg-lime-50 text-lime-700" },
 };
 const FALLBACK_META = { icon: Inbox, label: "Approval", color: "bg-gray-100 text-gray-700" };
 

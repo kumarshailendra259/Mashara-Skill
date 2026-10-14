@@ -2708,3 +2708,23 @@ New main menu "Mess Management" (/mess). Backend-calculated, center-scoped, Fina
 **Tested:** iteration_84.json — backend 22/23 pytest pass (1 skipped: no unauthorized-role user; code verified), frontend all tabs/flows pass, no regression (transactions/payroll/approvals still 200). Fixed LOW a11y (added DialogDescription). Verified via curl: weighted-avg ₹58, insufficient→400, duplicate→409, dashboard cost/person ₹25.
 
 **Phase 2 pending (NOT built):** Recipes/Menu master, Physical Stock Count, Daily Closing lock/reopen, Purchase Requests + low-stock→PO, PDF reports, purchase returns/supplier credits, payment-status updates, generic pending-approvals inbox wiring (currently dedicated approve endpoint), new `mess_staff` role assignment in User Management dropdown.
+
+## Phase 108 (Jun 2026) — Mess Phase-2 (Daily Closing + Physical Stock Count) + Pending-Approvals inbox integration
+
+**Improvement — Mess receipts in Pending Approvals inbox:**
+- Extracted _mess_approve_core / _mess_reject_core; dedicated endpoints + generic inbox both use them.
+- /api/approvals/pending now appends pending mess_receipts (request_type="mess_receipt", is_final_step, summary w/ amount/supplier/invoice) for MESS_APPROVE_ROLES, center-scoped.
+- /api/approvals/act handles request_type="mess_receipt" (early branch before APPROVAL_TYPE_COLL lookup) → approve/reject via core. Added "mess_receipt" to ApprovalActionIn.request_type Literal. Frontend TYPE_META got mess_receipt entry (lime, Mess Receipt). Verified: receipt shows in inbox + approve via /approvals/act creates expense.
+
+**Daily Mess Closing (lock/reopen):**
+- _mess_closing_figures (opening/received/consumption/wastage/closing/mess_exp/meals/total_daily_mess_cost=consumption/cost_per_person guarded÷0).
+- GET /mess/closing (preview+existing), POST /mess/closing (close, dup→409, snapshot+lock), POST /mess/closing/reopen (reason required, audit history). mess_post_consumption blocks a 'closed' (center,date) → 400 (locked-day guard). Roles: view=MESS_VIEW, close/reopen=MESS_APPROVE. Verified: close→locked, consume→400, dup→409, reopen→200.
+- Frontend: Daily Closing tab (status banner, summary rows, Close/Reopen buttons).
+
+**Physical Stock Count (adjustments):**
+- POST /mess/stock-counts (MESS_APPROVE) → per item diff=counted-system, valued at weighted-avg, posts immutable 'adjustment' ledger rows + updates stock (never overwrites history); stores mess_stock_counts doc (system/counted/diff/diff_value/reason). GET /mess/stock-counts. Verified: count 240 vs 250 → stock=240 + adjustment ledger.
+- Frontend: Stock Count tab (system qty + counted input + live diff, Post & Adjust, Past Counts).
+
+Collections added: mess_closings, mess_stock_counts. Verified via curl + screenshots (both tabs render). No testing_agent re-run (all new endpoints curl-verified, frontend screenshot-confirmed).
+
+**Phase-2 STILL PENDING (next batch):** Recipe/Menu master (expected vs actual variance), Purchase Requests + low-stock→PO workflow, PDF report exports, purchase returns/supplier credits, receipt payment-status updates, assigning the new mess_staff role in User Management dropdown.
