@@ -2688,3 +2688,23 @@ Frontend unchanged (Transactions.jsx already resolves project_id→name via name
 
 Frontend unchanged (Phase 100 breakdown table already renders when payBatch.rows present).
 **Verified (curl):** partner mapped to batch center → HTTP 200 + 252 rows (name/emp code/gross/deductions/net); partner at out-of-scope center → 403 (IDOR intact); admin → 200. Test mutation reverted.
+
+## Phase 107 (Jun 2026) — Mess & Inventory Management Module (Phase 1 MVP)
+
+New main menu "Mess Management" (/mess). Backend-calculated, center-scoped, Finance-linked.
+
+**Backend (server.py — section 'MESS & INVENTORY MANAGEMENT MODULE'):**
+- Collections: mess_items (global catalogue), mess_stock (per center+item, weighted-avg), mess_ledger (immutable transactions), mess_receipts (goods receipt + approval), mess_consumption.
+- Weighted-average costing: _mess_apply_receipt (stock-in recomputes avg), _mess_apply_issue (atomic `{qty:{$gte}}` decrement → fail-closed, no negative stock).
+- Goods Receipt: create (pending) → approve (admin/senior_manager/manager/accountant) → stock-in ACCEPTED qty only + ONE Finance expense txn source='mess_purchase' + ledger. Re-approve blocked. Duplicate invoice (center+supplier+invoice_no) → 409.
+- Consumption/Wastage: multi-line, pre-validate + rollback-on-partial-failure, issues at weighted-avg.
+- Dashboard: opening/received/consumption/closing values, mess expenses, meals, cost/person (consumption÷meals, guarded /0, NOT purchases → no double count), low-stock, pending bills.
+- Unit conversion (_to_base_qty): base_unit / purchase_unit*conversion_factor; incompatible unit → 400.
+- Center RBAC: _mess_scope + _mess_center_query (IDOR guard — out-of-scope center → 403; no centers → empty). Roles: view=admin/senior_manager/manager/center_manager/accountant/mess_staff/partner/viewer; entry=+center_manager/mess_staff; approve=admin/sm/manager/accountant; item-master write=admin/sm/manager.
+- Excel export GET /mess/ledger/export.xlsx (openpyxl). Seed startup `_seed_mess_items` (16 default items, idempotent).
+
+**Frontend:** /app/frontend/src/pages/MessManagement.jsx — 6 tabs (Dashboard, Item Master, Stock, Goods Receipt, Consumption, Stock Ledger), center+date filters, KPI cards, multi-line receipt/consumption dialogs, item CRUD, approve/reject, Excel export. Menu group grp_mess in Layout.jsx (messAccess gate) + route in App.js + i18n (en/hi).
+
+**Tested:** iteration_84.json — backend 22/23 pytest pass (1 skipped: no unauthorized-role user; code verified), frontend all tabs/flows pass, no regression (transactions/payroll/approvals still 200). Fixed LOW a11y (added DialogDescription). Verified via curl: weighted-avg ₹58, insufficient→400, duplicate→409, dashboard cost/person ₹25.
+
+**Phase 2 pending (NOT built):** Recipes/Menu master, Physical Stock Count, Daily Closing lock/reopen, Purchase Requests + low-stock→PO, PDF reports, purchase returns/supplier credits, payment-status updates, generic pending-approvals inbox wiring (currently dedicated approve endpoint), new `mess_staff` role assignment in User Management dropdown.

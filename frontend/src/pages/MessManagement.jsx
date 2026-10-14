@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
@@ -309,7 +309,7 @@ function ItemDialog({ item, units, onClose, onSaved }) {
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="rounded-xl max-w-lg">
-        <DialogHeader><DialogTitle className="font-heading">{editing ? "Edit Item" : "Add Item"}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle className="font-heading">{editing ? "Edit Item" : "Add Item"}</DialogTitle><DialogDescription className="sr-only">Mess item master form</DialogDescription></DialogHeader>
         <div className="grid grid-cols-2 gap-3">
           <div className="col-span-2"><Field label="Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} className="rounded-lg" data-testid="item-name" /></Field></div>
           <Field label="Category"><Input value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="rounded-lg" /></Field>
@@ -456,7 +456,7 @@ function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="rounded-xl max-w-3xl">
-        <DialogHeader><DialogTitle className="font-heading">New Goods Receipt</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle className="font-heading">New Goods Receipt</DialogTitle><DialogDescription className="sr-only">Create a goods receipt with line items</DialogDescription></DialogHeader>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Center</div>
             <select value={f.center_id} onChange={(e) => setF({ ...f, center_id: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="receipt-center"><option value="">Select…</option>{centers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
@@ -520,7 +520,7 @@ function ConsumptionDialog({ mode, items, units, centers, centerId, onClose, onS
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="rounded-xl max-w-2xl">
-        <DialogHeader><DialogTitle className="font-heading">{mode === "wastage" ? "Record Wastage" : "Record Consumption"}</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle className="font-heading">{mode === "wastage" ? "Record Wastage" : "Record Consumption"}</DialogTitle><DialogDescription className="sr-only">Record daily consumption or wastage</DialogDescription></DialogHeader>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Center</div>
             <select value={f.center_id} onChange={(e) => setF({ ...f, center_id: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="cons-center"><option value="">Select…</option>{centers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
