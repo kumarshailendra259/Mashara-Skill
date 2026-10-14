@@ -124,6 +124,8 @@ export const dictionary = {
     grp_candidates: "Candidate / Student Management",
     grp_hr: "Employee / HR Management",
     grp_procurement: "Procurement & Vendors",
+    grp_mess: "Mess Management",
+    mess_management: "Mess & Inventory",
     grp_partnerships: "Partnerships",
   },
   hi: {
@@ -250,6 +252,8 @@ export const dictionary = {
     grp_candidates: "कैंडिडेट / छात्र प्रबंधन",
     grp_hr: "कर्मचारी / HR प्रबंधन",
     grp_procurement: "खरीद एवं वेंडर",
+    grp_mess: "मेस प्रबंधन",
+    mess_management: "मेस एवं इन्वेंटरी",
     grp_partnerships: "पार्टनरशिप",
   },
 };

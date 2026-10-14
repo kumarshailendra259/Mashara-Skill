@@ -24942,6 +24942,604 @@ async def twilio_status_webhook(request: Request):
         )
     return {"received": True}
 
+# ===================================================================
+# MESS & INVENTORY MANAGEMENT MODULE (Phase 1 — MVP core)
+# Weighted-average costing · center-scoped RBAC · Finance expense link.
+# ===================================================================
+MESS_UNITS = ["kg", "gram", "litre", "ml", "piece", "packet", "dozen", "cylinder", "bag", "box"]
+MESS_VIEW_ROLES = ("admin", "senior_manager", "manager", "center_manager", "accountant", "mess_staff", "partner", "viewer")
+MESS_ENTRY_ROLES = ("admin", "senior_manager", "manager", "center_manager", "mess_staff")
+MESS_APPROVE_ROLES = ("admin", "senior_manager", "manager", "accountant")
+MESS_ADMIN_ROLES = ("admin", "senior_manager", "manager")
+
+DEFAULT_MESS_ITEMS = [
+    ("Rice", "Grains", "kg", "bag", 25, 50, 100),
+    ("Wheat Flour (Atta)", "Grains", "kg", "bag", 25, 40, 80),
+    ("Toor Dal", "Pulses", "kg", "bag", 30, 20, 40),
+    ("Chana Dal", "Pulses", "kg", "bag", 30, 15, 30),
+    ("Potato", "Vegetables", "kg", "bag", 50, 30, 60),
+    ("Onion", "Vegetables", "kg", "bag", 50, 30, 60),
+    ("Mixed Vegetables", "Vegetables", "kg", "kg", 1, 20, 40),
+    ("Edible Oil", "Oil & Ghee", "litre", "box", 15, 20, 40),
+    ("Mixed Spices", "Spices", "gram", "packet", 500, 2000, 4000),
+    ("Salt", "Spices", "kg", "packet", 1, 10, 20),
+    ("Sugar", "Groceries", "kg", "bag", 25, 20, 40),
+    ("Milk", "Dairy", "litre", "litre", 1, 20, 40),
+    ("Eggs", "Protein", "piece", "dozen", 12, 100, 200),
+    ("Bread", "Bakery", "packet", "packet", 1, 20, 40),
+    ("LPG Cylinder", "Fuel", "cylinder", "cylinder", 1, 2, 4),
+    ("Cleaning Supplies", "Housekeeping", "packet", "packet", 1, 10, 20),
+]
+
+
+class MessItemIn(BaseModel):
+    name: str
+    category: str = "General"
+    base_unit: str = "kg"
+    purchase_unit: str = "kg"
+    conversion_factor: float = 1.0
+    min_stock: float = 0.0
+    reorder_level: float = 0.0
+    preferred_supplier_id: Optional[str] = None
+    avg_cost: float = 0.0
+    active: bool = True
+
+
+class MessReceiptLine(BaseModel):
+    item_id: str
+    qty: float                 # in purchase_unit
+    unit: str                  # purchase_unit or base_unit
+    unit_price: float = 0.0    # per purchase_unit
+    discount: float = 0.0      # amount
+    tax: float = 0.0           # amount
+    accepted_qty: float        # in purchase_unit
+    rejected_qty: float = 0.0
+
+
+class MessReceiptIn(BaseModel):
+    center_id: str
+    supplier_id: Optional[str] = None
+    supplier_name: Optional[str] = None
+    invoice_no: str
+    invoice_date: str
+    po_no: Optional[str] = None
+    lines: List[MessReceiptLine]
+    attachments: List[dict] = []
+    notes: Optional[str] = None
+
+
+class MessConsumptionLine(BaseModel):
+    item_id: str
+    qty: float
+    unit: str
+    kind: str = "consumption"   # consumption | wastage
+
+
+class MessConsumptionIn(BaseModel):
+    center_id: str
+    date: str
+    meal_types: List[str] = []
+    meals_served: int = 0
+    lines: List[MessConsumptionLine]
+    notes: Optional[str] = None
+
+
+async def _mess_scope(user):
+    await _enrich_user_with_associations(user)
+    return _scoped_center_ids(user)
+
+
+def _mess_center_query(user, scoped, center_id):
+    if center_id:
+        if scoped is not None and center_id not in scoped:
+            raise HTTPException(403, "Center not authorised")
+        return {"center_id": center_id}
+    if scoped is None:
+        return {}
+    return {"center_id": {"$in": scoped}}
+
+
+def _mess_assert_center(scoped, center_id):
+    if not center_id:
+        raise HTTPException(400, "center_id required")
+    if scoped is not None and center_id not in scoped:
+        raise HTTPException(403, "Center not authorised")
+
+
+def _to_base_qty(item: dict, qty: float, unit: str) -> float:
+    """Convert an entered qty+unit into the item's base unit without rounding loss."""
+    if unit == item.get("base_unit"):
+        return float(qty)
+    if unit == item.get("purchase_unit"):
+        return float(qty) * float(item.get("conversion_factor") or 1)
+    raise HTTPException(400, f"Unit '{unit}' incompatible with item {item.get('name')}")
+
+
+async def _mess_apply_receipt(center_id, item, qty_base, total_cost, ref_id, date, user, notes=""):
+    now = datetime.now(timezone.utc).isoformat()
+    st = await db.mess_stock.find_one({"center_id": center_id, "item_id": item["id"]})
+    old_qty = float(st["qty"]) if st else 0.0
+    old_val = float(st["value"]) if st else 0.0
+    new_qty = round(old_qty + qty_base, 4)
+    new_val = round(old_val + total_cost, 2)
+    new_avg = round(new_val / new_qty, 4) if new_qty > 0 else 0.0
+    unit_cost = round(total_cost / qty_base, 4) if qty_base > 0 else 0.0
+    await db.mess_stock.update_one(
+        {"center_id": center_id, "item_id": item["id"]},
+        {"$set": {"qty": new_qty, "value": new_val, "avg_cost": new_avg,
+                  "item_name": item["name"], "base_unit": item["base_unit"], "updated_at": now}},
+        upsert=True,
+    )
+    await db.mess_ledger.insert_one({
+        "id": str(uuid.uuid4()), "center_id": center_id, "item_id": item["id"],
+        "item_name": item["name"], "type": "receipt", "qty_in": qty_base, "qty_out": 0.0,
+        "unit_cost": unit_cost, "value_delta": round(total_cost, 2),
+        "balance_qty": new_qty, "balance_value": new_val, "ref_type": "receipt",
+        "ref_id": ref_id, "date": date, "notes": notes,
+        "created_by": user["id"], "created_by_name": user.get("name") or user.get("email"),
+        "created_at": now,
+    })
+    return unit_cost
+
+
+async def _mess_apply_issue(center_id, item, qty_base, kind, ref_id, date, user, notes=""):
+    """Atomic, fail-closed stock decrement (prevents negative stock & overspend)."""
+    now = datetime.now(timezone.utc).isoformat()
+    st = await db.mess_stock.find_one({"center_id": center_id, "item_id": item["id"]})
+    avg = float(st["avg_cost"]) if st else 0.0
+    value_out = round(qty_base * avg, 2)
+    res = await db.mess_stock.update_one(
+        {"center_id": center_id, "item_id": item["id"], "qty": {"$gte": qty_base}},
+        {"$inc": {"qty": -qty_base, "value": -value_out}, "$set": {"updated_at": now}},
+    )
+    if res.modified_count == 0:
+        have = float(st["qty"]) if st else 0.0
+        raise HTTPException(400, f"Insufficient stock for {item['name']} — need {qty_base} {item['base_unit']}, have {have}")
+    st2 = await db.mess_stock.find_one({"center_id": center_id, "item_id": item["id"]})
+    await db.mess_ledger.insert_one({
+        "id": str(uuid.uuid4()), "center_id": center_id, "item_id": item["id"],
+        "item_name": item["name"], "type": kind, "qty_in": 0.0, "qty_out": qty_base,
+        "unit_cost": avg, "value_delta": -value_out,
+        "balance_qty": round(float(st2["qty"]), 4), "balance_value": round(float(st2["value"]), 2),
+        "ref_type": kind, "ref_id": ref_id, "date": date, "notes": notes,
+        "created_by": user["id"], "created_by_name": user.get("name") or user.get("email"),
+        "created_at": now,
+    })
+    return value_out
+
+
+# ---------- Item Master ----------
+@api.get("/mess/units")
+async def mess_units(user=Depends(require_role(*MESS_VIEW_ROLES))):
+    return {"units": MESS_UNITS}
+
+
+@api.get("/mess/items")
+async def mess_items(active_only: bool = False, category: Optional[str] = None,
+                     search: Optional[str] = None, user=Depends(require_role(*MESS_VIEW_ROLES))):
+    q: dict = {}
+    if active_only:
+        q["active"] = True
+    if category and category != "all":
+        q["category"] = category
+    if search:
+        q["name"] = {"$regex": search.strip(), "$options": "i"}
+    rows = await db.mess_items.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
+    return rows
+
+
+@api.get("/mess/item-categories")
+async def mess_item_categories(user=Depends(require_role(*MESS_VIEW_ROLES))):
+    return await db.mess_items.distinct("category")
+
+
+@api.post("/mess/items")
+async def mess_create_item(body: MessItemIn, user=Depends(require_role(*MESS_ADMIN_ROLES))):
+    if body.conversion_factor <= 0:
+        raise HTTPException(400, "conversion_factor must be > 0")
+    dup = await db.mess_items.find_one({"name": {"$regex": f"^{body.name.strip()}$", "$options": "i"}})
+    if dup:
+        raise HTTPException(409, "Item with this name already exists")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {"id": str(uuid.uuid4()), **body.dict(), "name": body.name.strip(),
+           "created_by": user["id"], "created_at": now}
+    await db.mess_items.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.put("/mess/items/{item_id}")
+async def mess_update_item(item_id: str, body: MessItemIn, user=Depends(require_role(*MESS_ADMIN_ROLES))):
+    if body.conversion_factor <= 0:
+        raise HTTPException(400, "conversion_factor must be > 0")
+    res = await db.mess_items.update_one({"id": item_id}, {"$set": {
+        **body.dict(), "name": body.name.strip(),
+        "updated_by": user["id"], "updated_at": datetime.now(timezone.utc).isoformat()}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Item not found")
+    return await db.mess_items.find_one({"id": item_id}, {"_id": 0})
+
+
+# ---------- Stock & Ledger ----------
+@api.get("/mess/stock")
+async def mess_stock(center_id: Optional[str] = None, low_only: bool = False,
+                     user=Depends(require_role(*MESS_VIEW_ROLES))):
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return []
+    cq = _mess_center_query(user, scoped, center_id)
+    rows = await db.mess_stock.find(cq, {"_id": 0}).to_list(5000)
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    out = []
+    for r in rows:
+        it = items.get(r["item_id"], {})
+        min_s = float(it.get("min_stock") or 0)
+        reorder = float(it.get("reorder_level") or 0)
+        low = float(r.get("qty") or 0) <= max(min_s, reorder)
+        rec = {**r, "category": it.get("category"), "min_stock": min_s,
+               "reorder_level": reorder, "is_low": low}
+        if (not low_only) or low:
+            out.append(rec)
+    out.sort(key=lambda x: (not x["is_low"], x.get("item_name") or ""))
+    return out
+
+
+@api.get("/mess/ledger")
+async def mess_ledger(center_id: Optional[str] = None, item_id: Optional[str] = None,
+                      date_from: Optional[str] = None, date_to: Optional[str] = None,
+                      limit: int = 500, user=Depends(require_role(*MESS_VIEW_ROLES))):
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return []
+    q = _mess_center_query(user, scoped, center_id)
+    if item_id:
+        q["item_id"] = item_id
+    if date_from or date_to:
+        dr: dict = {}
+        if date_from:
+            dr["$gte"] = date_from
+        if date_to:
+            dr["$lte"] = date_to
+        q["date"] = dr
+    return await db.mess_ledger.find(q, {"_id": 0}).sort("created_at", -1).limit(min(limit, 2000)).to_list(min(limit, 2000))
+
+
+# ---------- Goods Receipt ----------
+async def _mess_receipt_out(doc: dict) -> dict:
+    doc = {k: v for k, v in doc.items() if k != "_id"}
+    return doc
+
+
+@api.get("/mess/receipts")
+async def mess_list_receipts(center_id: Optional[str] = None, status: Optional[str] = None,
+                             user=Depends(require_role(*MESS_VIEW_ROLES))):
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return []
+    q = _mess_center_query(user, scoped, center_id)
+    if status and status != "all":
+        q["status"] = status
+    rows = await db.mess_receipts.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return rows
+
+
+@api.post("/mess/receipts")
+async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*MESS_ENTRY_ROLES))):
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, body.center_id)
+    if not body.lines:
+        raise HTTPException(400, "At least one line is required")
+    # Duplicate invoice guard (same supplier + invoice + center, not rejected).
+    dup = await db.mess_receipts.find_one({
+        "center_id": body.center_id, "invoice_no": body.invoice_no.strip(),
+        "supplier_name": (body.supplier_name or "").strip(),
+        "status": {"$ne": "rejected"},
+    })
+    if dup:
+        raise HTTPException(409, "A receipt with this invoice number already exists for this supplier/center")
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    now = datetime.now(timezone.utc).isoformat()
+    total = 0.0
+    out_lines = []
+    for ln in body.lines:
+        it = items.get(ln.item_id)
+        if not it:
+            raise HTTPException(400, f"Unknown item {ln.item_id}")
+        if ln.accepted_qty < 0 or ln.qty < 0:
+            raise HTTPException(400, "Quantities cannot be negative")
+        line_total = round(ln.qty * ln.unit_price - ln.discount + ln.tax, 2)
+        acc_frac = (ln.accepted_qty / ln.qty) if ln.qty > 0 else 0.0
+        accepted_cost = round(line_total * acc_frac, 2)
+        total += accepted_cost
+        out_lines.append({**ln.dict(), "item_name": it["name"], "base_unit": it["base_unit"],
+                          "line_total": line_total, "accepted_cost": accepted_cost})
+    cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
+    doc = {
+        "id": str(uuid.uuid4()), "center_id": body.center_id,
+        "center_name": (cen or {}).get("name"),
+        "supplier_id": body.supplier_id, "supplier_name": body.supplier_name,
+        "invoice_no": body.invoice_no.strip(), "invoice_date": body.invoice_date,
+        "po_no": body.po_no, "lines": out_lines, "attachments": body.attachments,
+        "notes": body.notes, "total_amount": round(total, 2),
+        "status": "pending", "payment_status": "unpaid",
+        "expense_txn_id": None,
+        "created_by": user["id"], "created_by_name": user.get("name") or user.get("email"),
+        "created_at": now, "approved_by": None, "approved_at": None,
+    }
+    await db.mess_receipts.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.post("/mess/receipts/{receipt_id}/approve")
+async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    rec = await db.mess_receipts.find_one({"id": receipt_id})
+    if not rec:
+        raise HTTPException(404, "Receipt not found")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, rec["center_id"])
+    if rec.get("status") != "pending":
+        raise HTTPException(400, f"Receipt already {rec.get('status')}")
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    now = datetime.now(timezone.utc).isoformat()
+    # 1) Post stock-in for each accepted line (weighted-average).
+    for ln in rec["lines"]:
+        it = items.get(ln["item_id"])
+        if not it or float(ln.get("accepted_qty") or 0) <= 0:
+            continue
+        qty_base = _to_base_qty(it, ln["accepted_qty"], ln["unit"])
+        await _mess_apply_receipt(rec["center_id"], it, qty_base,
+                                  float(ln.get("accepted_cost") or 0), rec["id"],
+                                  rec["invoice_date"], user,
+                                  notes=f"Invoice {rec['invoice_no']}")
+        # keep item avg_cost fresh
+        st = await db.mess_stock.find_one({"center_id": rec["center_id"], "item_id": it["id"]})
+        if st:
+            await db.mess_items.update_one({"id": it["id"]}, {"$set": {"avg_cost": st.get("avg_cost", 0)}})
+    # 2) Create the Finance expense transaction (source=mess_purchase) — only once.
+    ctx = await _derive_context_for_center(rec["center_id"])
+    txn = {
+        "id": str(uuid.uuid4()), "type": "expense",
+        "amount": float(rec["total_amount"]), "date": rec["invoice_date"],
+        "description": f"Mess Purchase · {rec.get('supplier_name') or ''} · Inv {rec['invoice_no']}".strip(" ·"),
+        "company_id": ctx["company_id"], "partner_id": ctx["partner_id"],
+        "center_id": rec["center_id"], "center_name": rec.get("center_name"),
+        "project_id": ctx["project_id"], "items": [], "attachments": rec.get("attachments") or [],
+        "source": "mess_purchase", "mess_receipt_id": rec["id"],
+        "vendor_name": rec.get("supplier_name"),
+        "created_by": user["id"], "created_at": now,
+        "status": "approved", "approved_by": user["id"], "approved_at": now,
+        "rejected_reason": None,
+    }
+    await db.transactions.insert_one(txn)
+    await db.mess_receipts.update_one({"id": receipt_id}, {"$set": {
+        "status": "approved", "approved_by": user["id"],
+        "approved_by_name": user.get("name") or user.get("email"),
+        "approved_at": now, "expense_txn_id": txn["id"]}})
+    return {"ok": True, "expense_txn_id": txn["id"]}
+
+
+@api.post("/mess/receipts/{receipt_id}/reject")
+async def mess_reject_receipt(receipt_id: str, body: dict = Body(default={}),
+                              user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    rec = await db.mess_receipts.find_one({"id": receipt_id})
+    if not rec:
+        raise HTTPException(404, "Receipt not found")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, rec["center_id"])
+    if rec.get("status") != "pending":
+        raise HTTPException(400, f"Receipt already {rec.get('status')}")
+    await db.mess_receipts.update_one({"id": receipt_id}, {"$set": {
+        "status": "rejected", "rejected_reason": body.get("remarks") or "",
+        "approved_by": user["id"], "approved_at": datetime.now(timezone.utc).isoformat()}})
+    return {"ok": True}
+
+
+# ---------- Daily Consumption / Wastage ----------
+@api.get("/mess/consumption")
+async def mess_list_consumption(center_id: Optional[str] = None, date: Optional[str] = None,
+                                user=Depends(require_role(*MESS_VIEW_ROLES))):
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return []
+    q = _mess_center_query(user, scoped, center_id)
+    if date:
+        q["date"] = date
+    return await db.mess_consumption.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+
+
+@api.post("/mess/consumption")
+async def mess_post_consumption(body: MessConsumptionIn, user=Depends(require_role(*MESS_ENTRY_ROLES))):
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, body.center_id)
+    if not body.lines:
+        raise HTTPException(400, "At least one line is required")
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    # Pre-validate all lines & units BEFORE posting any (avoid partial posting).
+    prepared = []
+    for ln in body.lines:
+        it = items.get(ln.item_id)
+        if not it:
+            raise HTTPException(400, f"Unknown item {ln.item_id}")
+        if ln.qty <= 0:
+            raise HTTPException(400, f"Quantity must be > 0 for {it['name']}")
+        qty_base = _to_base_qty(it, ln.qty, ln.unit)
+        kind = "wastage" if ln.kind == "wastage" else "consumption"
+        prepared.append((it, qty_base, kind))
+    rid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    consumption_cost = 0.0
+    wastage_cost = 0.0
+    posted = []
+    try:
+        for it, qty_base, kind in prepared:
+            val = await _mess_apply_issue(body.center_id, it, qty_base, kind, rid, body.date, user)
+            posted.append((it, qty_base, kind, val))
+            if kind == "wastage":
+                wastage_cost += val
+            else:
+                consumption_cost += val
+    except HTTPException:
+        # Roll back whatever was already posted in this submission (fail-closed).
+        for it, qty_base, kind, val in posted:
+            await db.mess_stock.update_one(
+                {"center_id": body.center_id, "item_id": it["id"]},
+                {"$inc": {"qty": qty_base, "value": val}})
+        await db.mess_ledger.delete_many({"ref_id": rid})
+        raise
+    cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
+    doc = {
+        "id": rid, "center_id": body.center_id, "center_name": (cen or {}).get("name"),
+        "date": body.date, "meal_types": body.meal_types, "meals_served": int(body.meals_served or 0),
+        "lines": [{"item_id": it["id"], "item_name": it["name"], "qty": qty_base,
+                   "base_unit": it["base_unit"], "kind": kind, "value": val}
+                  for it, qty_base, kind, val in posted],
+        "consumption_cost": round(consumption_cost, 2), "wastage_cost": round(wastage_cost, 2),
+        "notes": body.notes, "created_by": user["id"],
+        "created_by_name": user.get("name") or user.get("email"), "created_at": now,
+    }
+    await db.mess_consumption.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+# ---------- Dashboard ----------
+@api.get("/mess/dashboard")
+async def mess_dashboard(center_id: Optional[str] = None, date: Optional[str] = None,
+                         user=Depends(require_role(*MESS_VIEW_ROLES))):
+    from datetime import date as _date
+    scoped = await _mess_scope(user)
+    empty = {
+        "opening_value": 0, "today_received_value": 0, "today_consumption_cost": 0,
+        "today_wastage_cost": 0, "closing_value": 0, "today_mess_expenses": 0,
+        "meals_served": 0, "cost_per_person": None, "low_stock_count": 0,
+        "pending_bills": 0, "stock_variance_value": 0, "date": date or _date.today().isoformat(),
+    }
+    if scoped is not None and len(scoped) == 0:
+        return empty
+    today = date or _date.today().isoformat()
+    cq = _mess_center_query(user, scoped, center_id)
+
+    closing_value = 0.0
+    async for s in db.mess_stock.find(cq, {"_id": 0, "value": 1}):
+        closing_value += float(s.get("value") or 0)
+
+    lq = {**cq, "date": today}
+    received = consumption = wastage = 0.0
+    async for lg in db.mess_ledger.find(lq, {"_id": 0, "type": 1, "value_delta": 1}):
+        v = float(lg.get("value_delta") or 0)
+        t = lg.get("type")
+        if t == "receipt":
+            received += v
+        elif t == "consumption":
+            consumption += -v
+        elif t == "wastage":
+            wastage += -v
+    opening_value = round(closing_value - received + consumption + wastage, 2)
+
+    meals = 0
+    async for c in db.mess_consumption.find(lq, {"_id": 0, "meals_served": 1}):
+        meals += int(c.get("meals_served") or 0)
+
+    tq = {**cq, "source": "mess_purchase", "status": "approved", "date": today}
+    mess_exp = 0.0
+    async for tx in db.transactions.find(tq, {"_id": 0, "amount": 1}):
+        mess_exp += float(tx.get("amount") or 0)
+
+    low_count = 0
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    async for s in db.mess_stock.find(cq, {"_id": 0, "item_id": 1, "qty": 1}):
+        it = items.get(s.get("item_id"), {})
+        if float(s.get("qty") or 0) <= max(float(it.get("min_stock") or 0), float(it.get("reorder_level") or 0)):
+            low_count += 1
+
+    pending_bills = await db.mess_receipts.count_documents({**cq, "status": "pending"})
+
+    cost_per_person = round(consumption / meals, 2) if meals > 0 else None
+    return {
+        "opening_value": opening_value, "today_received_value": round(received, 2),
+        "today_consumption_cost": round(consumption, 2), "today_wastage_cost": round(wastage, 2),
+        "closing_value": round(closing_value, 2), "today_mess_expenses": round(mess_exp, 2),
+        "meals_served": meals, "cost_per_person": cost_per_person,
+        "low_stock_count": low_count, "pending_bills": pending_bills,
+        "stock_variance_value": round(wastage, 2), "date": today,
+    }
+
+
+# ---------- Excel export (stock ledger) ----------
+@api.get("/mess/ledger/export.xlsx")
+async def mess_ledger_export(center_id: Optional[str] = None, item_id: Optional[str] = None,
+                             date_from: Optional[str] = None, date_to: Optional[str] = None,
+                             user=Depends(require_role(*MESS_VIEW_ROLES))):
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from fastapi.responses import StreamingResponse
+    scoped = await _mess_scope(user)
+    rows = []
+    if not (scoped is not None and len(scoped) == 0):
+        q = _mess_center_query(user, scoped, center_id)
+        if item_id:
+            q["item_id"] = item_id
+        if date_from or date_to:
+            dr: dict = {}
+            if date_from:
+                dr["$gte"] = date_from
+            if date_to:
+                dr["$lte"] = date_to
+            q["date"] = dr
+        rows = await db.mess_ledger.find(q, {"_id": 0}).sort("created_at", 1).to_list(20000)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Stock Ledger"
+    headers = ["Date", "Item", "Type", "Qty In", "Qty Out", "Unit Cost", "Value (₹)",
+               "Balance Qty", "Balance Value (₹)", "Ref", "Entered By"]
+    ws.append(headers)
+    hf = Font(bold=True, color="FFFFFF")
+    fill = PatternFill("solid", fgColor="0B1F3A")
+    for c in ws[1]:
+        c.font = hf
+        c.fill = fill
+    for r in rows:
+        ws.append([r.get("date"), r.get("item_name"), r.get("type"),
+                   r.get("qty_in"), r.get("qty_out"), r.get("unit_cost"),
+                   r.get("value_delta"), r.get("balance_qty"), r.get("balance_value"),
+                   r.get("ref_type"), r.get("created_by_name")])
+    for col in ws.columns:
+        width = max((len(str(c.value)) if c.value is not None else 0) for c in col) + 2
+        ws.column_dimensions[col[0].column_letter].width = min(width, 40)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=mess_stock_ledger.xlsx"})
+
+
+@app.on_event("startup")
+async def _seed_mess_items():
+    """Seed a default item catalogue once (idempotent)."""
+    try:
+        if await db.mess_items.count_documents({}) > 0:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        docs = []
+        for (name, cat, bu, pu, conv, mn, ro) in DEFAULT_MESS_ITEMS:
+            docs.append({
+                "id": str(uuid.uuid4()), "name": name, "category": cat,
+                "base_unit": bu, "purchase_unit": pu, "conversion_factor": float(conv),
+                "min_stock": float(mn), "reorder_level": float(ro),
+                "preferred_supplier_id": None, "avg_cost": 0.0, "active": True,
+                "created_by": "system", "created_at": now,
+            })
+        if docs:
+            await db.mess_items.insert_many(docs)
+            logger.info("Seeded %d default mess items", len(docs))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Mess item seed failed: %s", exc)
+
+
+
 
 app.include_router(api)
 
