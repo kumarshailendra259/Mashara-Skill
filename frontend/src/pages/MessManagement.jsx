@@ -13,6 +13,7 @@ import {
   UtensilsCrossed, RefreshCw, Package, ClipboardList, BookOpen, LayoutDashboard,
   Plus, Check, X, Trash2, Download, PackagePlus, Soup, AlertTriangle, Boxes,
   IndianRupee, Users, TrendingDown, FileWarning, Pencil, Lock, Scale, CalendarCheck, Unlock,
+  Wallet, Upload, FileText, Clock,
 } from "lucide-react";
 
 const API_ENTRY_ROLES = ["admin", "senior_manager", "manager", "center_manager", "mess_staff"];
@@ -380,13 +381,27 @@ function StockTab({ stock, loading }) {
 
 /* ---------------- Receipts ---------------- */
 function ReceiptsTab({ receipts, loading, canEntry, canApprove, onCreate, onChanged, centerName }) {
-  const act = async (id, action) => {
+  const [payFor, setPayFor] = useState(null);
+  const pendingWithText = (r) => {
+    const names = (r.pending_with || []).map((u) => u.name || u.email).filter(Boolean);
+    if (names.length === 0) return r.current_step_label || "Pending approval";
+    const shown = names.slice(0, 2).join(", ");
+    const extra = names.length > 2 ? ` +${names.length - 2}` : "";
+    return `${shown}${extra}`;
+  };
+  const downloadBill = async (r) => {
     try {
-      let remarks = "";
-      if (action === "reject") { remarks = window.prompt("Reason for rejection?") || ""; }
-      await api.post(`/mess/receipts/${id}/${action}`, action === "reject" ? { remarks } : {});
-      toast.success(`Receipt ${action === "approve" ? "approved — stock & expense posted" : "rejected"}`);
-      onChanged();
+      const resp = await api.get(`/mess/receipts/${r.id}/bill`, { responseType: "blob" });
+      const url = URL.createObjectURL(resp.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = `${r.bill_no || "mess-bill"}.pdf`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  const viewAttachment = async (att) => {
+    try {
+      const resp = await api.get(`/files/view?path=${encodeURIComponent(att.path)}`, { responseType: "blob" });
+      window.open(URL.createObjectURL(resp.data), "_blank");
     } catch (e) { toast.error(formatError(e)); }
   };
   if (loading) return <div className="text-sm text-slate-500 p-8 text-center">Loading…</div>;
@@ -397,21 +412,36 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, onCreate, onChan
         {receipts.map((r) => (
           <div key={r.id} className="bg-white border border-slate-200 rounded-xl p-4" data-testid={`receipt-${r.id}`}>
             <div className="flex items-start justify-between gap-3 flex-wrap">
-              <div>
+              <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-bold text-slate-900">Inv {r.invoice_no}</span>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${r.status === "approved" ? "bg-emerald-100 text-emerald-800" : r.status === "rejected" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-800"}`}>{r.status.toUpperCase()}</span>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-600">{(r.payment_status || "unpaid").toUpperCase()}</span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${r.payment_status === "paid" ? "bg-emerald-100 text-emerald-800" : r.payment_status === "payment_pending" ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-600"}`}>{(r.payment_status || "unpaid").replace("_", " ").toUpperCase()}</span>
                 </div>
                 <div className="text-xs text-slate-500 mt-1">{r.supplier_name || "—"} · {r.center_name || centerName(r.center_id)} · {r.invoice_date} · {r.lines?.length || 0} item(s)</div>
+                {r.status === "pending" && (
+                  <div className="flex items-center gap-1.5 mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 w-fit" data-testid={`pending-with-${r.id}`}>
+                    <Clock size={12} /> <span className="font-semibold">Pending with:</span> {pendingWithText(r)}
+                    {r.current_step_label && <span className="text-amber-500">· {r.current_step_label}</span>}
+                  </div>
+                )}
+                {(r.attachments || []).length > 0 && (
+                  <div className="flex items-center gap-2 mt-2 flex-wrap">
+                    {(r.attachments || []).map((att, i) => (
+                      <button key={i} onClick={() => viewAttachment(att)} className="inline-flex items-center gap-1 text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-0.5 hover:bg-blue-100" data-testid={`receipt-att-${r.id}-${i}`}>
+                        <FileText size={11} /> {att.filename || "Bill"}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap justify-end">
                 <span className="num font-black text-lg text-emerald-700">{inr(r.total_amount)}</span>
-                {canApprove && r.status === "pending" && (
-                  <>
-                    <Button size="sm" onClick={() => act(r.id, "approve")} className="brand-btn rounded-lg h-8 gap-1" data-testid={`approve-receipt-${r.id}`}><Check size={12} /> Approve</Button>
-                    <Button size="sm" variant="outline" onClick={() => act(r.id, "reject")} className="rounded-lg h-8 gap-1 text-rose-700 border-rose-300" data-testid={`reject-receipt-${r.id}`}><X size={12} /> Reject</Button>
-                  </>
+                {canEntry && r.status === "approved" && (!r.payment_status || r.payment_status === "unpaid") && (
+                  <Button size="sm" onClick={() => setPayFor(r)} className="brand-btn rounded-lg h-8 gap-1" data-testid={`raise-payment-${r.id}`}><Wallet size={12} /> Raise Payment</Button>
+                )}
+                {r.payment_status === "paid" && (
+                  <Button size="sm" variant="outline" onClick={() => downloadBill(r)} className="rounded-lg h-8 gap-1 text-emerald-700 border-emerald-300" data-testid={`download-bill-${r.id}`}><Download size={12} /> Bill {r.bill_no ? `· ${r.bill_no}` : ""}</Button>
                 )}
               </div>
             </div>
@@ -419,7 +449,56 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, onCreate, onChan
         ))}
         {receipts.length === 0 && <div className="text-center text-slate-400 py-10 bg-white border border-slate-200 rounded-xl">No goods receipts</div>}
       </div>
+      {!canApprove && receipts.some((r) => r.status === "pending") && (
+        <div className="text-[11px] text-slate-400 text-center">Approvals are actioned from the <span className="font-semibold">Pending Approvals</span> inbox by the configured approvers.</div>
+      )}
+      {payFor && <RaisePaymentDialog receipt={payFor} onClose={() => setPayFor(null)} onSaved={() => { setPayFor(null); onChanged(); }} />}
     </div>
+  );
+}
+
+function RaisePaymentDialog({ receipt, onClose, onSaved }) {
+  const [f, setF] = useState({
+    payment_mode: "bank", payment_date: todayStr(), paid_by_name: "",
+    payee_bank_name: "", payee_account_no: "", payee_ifsc: "", payee_upi_id: "", notes: "",
+  });
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.post(`/mess/receipts/${receipt.id}/raise-payment`, f);
+      toast.success("Payment raised — routed to approval workflow");
+      onSaved();
+    } catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
+  };
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="rounded-xl max-w-xl">
+        <DialogHeader><DialogTitle className="font-heading">Raise Payment · Inv {receipt.invoice_no}</DialogTitle><DialogDescription className="sr-only">Raise a payment for this approved goods receipt</DialogDescription></DialogHeader>
+        <div className="bg-slate-50 rounded-lg p-3 text-sm flex items-center justify-between">
+          <span className="text-slate-600">{receipt.supplier_name || "Supplier"}</span>
+          <span className="num font-black text-emerald-700">{inr(receipt.total_amount)}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-1">
+          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Payment Mode</div>
+            <select value={f.payment_mode} onChange={(e) => setF({ ...f, payment_mode: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="pay-mode">
+              <option value="bank">Bank Transfer</option><option value="cash">Cash</option><option value="upi">UPI</option><option value="cheque">Cheque</option>
+            </select></div>
+          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Payment Date</div><Input type="date" value={f.payment_date} onChange={(e) => setF({ ...f, payment_date: e.target.value })} className="rounded-lg" data-testid="pay-date" /></div>
+          <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Paid By (name)</div><Input value={f.paid_by_name} onChange={(e) => setF({ ...f, paid_by_name: e.target.value })} className="rounded-lg" placeholder="e.g. Accounts Dept" data-testid="pay-by" /></div>
+          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Bank Name</div><Input value={f.payee_bank_name} onChange={(e) => setF({ ...f, payee_bank_name: e.target.value })} className="rounded-lg" /></div>
+          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Account No</div><Input value={f.payee_account_no} onChange={(e) => setF({ ...f, payee_account_no: e.target.value })} className="rounded-lg" /></div>
+          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">IFSC</div><Input value={f.payee_ifsc} onChange={(e) => setF({ ...f, payee_ifsc: e.target.value })} className="rounded-lg" /></div>
+          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">UPI ID</div><Input value={f.payee_upi_id} onChange={(e) => setF({ ...f, payee_upi_id: e.target.value })} className="rounded-lg" /></div>
+          <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Notes</div><Input value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} className="rounded-lg" /></div>
+        </div>
+        <div className="text-[11px] text-slate-500 mt-1">Payment routes through the Mess Payment approval chain. On final approval, the bill PDF is auto-generated.</div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} className="rounded-lg">Cancel</Button>
+          <Button onClick={save} disabled={busy} className="brand-btn rounded-lg gap-1" data-testid="save-payment"><Check size={14} /> {busy ? "Submitting…" : "Submit for Approval"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -458,9 +537,22 @@ function LineEditor({ items, units, lines, setLines, mode }) {
 }
 
 function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
-  const [f, setF] = useState({ center_id: centerId || "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "" });
+  const [f, setF] = useState({ center_id: centerId || "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
   const [lines, setLines] = useState([{ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, accepted_qty: "", rejected_qty: 0 }]);
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const uploadBill = async (file) => {
+    if (!file) return;
+    setUploading(true);
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const { data } = await api.post("/files/upload", form, { headers: { "Content-Type": "multipart/form-data" } });
+      setF((p) => ({ ...p, attachments: [...(p.attachments || []), data] }));
+      toast.success("Bill attached");
+    } catch (e) { toast.error(formatError(e)); } finally { setUploading(false); }
+  };
+  const rmAtt = (i) => setF((p) => ({ ...p, attachments: p.attachments.filter((_, idx) => idx !== i) }));
   const save = async () => {
     if (!f.center_id) { toast.error("Select a center"); return; }
     if (!f.invoice_no.trim()) { toast.error("Invoice number required"); return; }
@@ -471,12 +563,12 @@ function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
     }));
     if (clean.length === 0) { toast.error("Add at least one valid line"); return; }
     setBusy(true);
-    try { await api.post("/mess/receipts", { ...f, lines: clean }); toast.success("Goods receipt created (pending approval)"); onSaved(); }
+    try { await api.post("/mess/receipts", { ...f, lines: clean }); toast.success("Goods receipt created — routed to approval workflow"); onSaved(); }
     catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
   };
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="rounded-xl max-w-3xl">
+      <DialogContent className="rounded-xl max-w-3xl max-h-[90vh] overflow-y-auto">
         <DialogHeader><DialogTitle className="font-heading">New Goods Receipt</DialogTitle><DialogDescription className="sr-only">Create a goods receipt with line items</DialogDescription></DialogHeader>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Center</div>
@@ -488,6 +580,21 @@ function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
         </div>
         <div className="mt-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Items</div>
           <LineEditor items={items} units={units} lines={lines} setLines={setLines} mode="receipt" />
+        </div>
+        <div className="mt-2">
+          <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Shop Bill (upload — optional)</div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="inline-flex items-center gap-1.5 text-sm cursor-pointer border border-dashed border-slate-300 rounded-lg px-3 py-1.5 hover:bg-slate-50" data-testid="receipt-bill-upload">
+              <Upload size={14} /> {uploading ? "Uploading…" : "Attach bill (PDF/Image)"}
+              <input type="file" className="hidden" accept=".pdf,image/*" disabled={uploading} onChange={(e) => uploadBill(e.target.files?.[0])} />
+            </label>
+            {(f.attachments || []).map((att, i) => (
+              <span key={i} className="inline-flex items-center gap-1 text-[11px] bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-2 py-1" data-testid={`receipt-att-chip-${i}`}>
+                <FileText size={11} /> {att.filename}
+                <button onClick={() => rmAtt(i)} className="ml-1 text-rose-500 hover:text-rose-700"><X size={11} /></button>
+              </span>
+            ))}
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} className="rounded-lg">Cancel</Button>

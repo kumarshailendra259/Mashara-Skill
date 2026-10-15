@@ -23,6 +23,8 @@ const TYPES = [
   { v: "payment", label: "Payment Request (against QRN)" },
   { v: "advance_request", label: "Advance Request" },
   { v: "payroll", label: "Payroll Approval" },
+  { v: "mess_receipt", label: "Mess Goods Receipt" },
+  { v: "mess_payment", label: "Mess Payment" },
 ];
 
 const KINDS = [

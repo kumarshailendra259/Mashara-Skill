@@ -862,7 +862,7 @@ class RejectIn(BaseModel):
 # ============================================================================
 # Approval Chains — configurable multi-level approval workflows
 # ============================================================================
-ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement", "payroll"]
+ApprovalType = Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement", "payroll", "mess_receipt", "mess_payment"]
 ApproverKind = Literal["role", "staff", "user", "reports_to"]
 
 # Central mapping from approval-type → backing collection. Used by /approvals/act, /approvals/pending,
@@ -880,6 +880,8 @@ APPROVAL_TYPE_COLL: dict = {
     "advance_request":   "advance_requests",
     "advance_settlement":"advance_settlements",
     "payroll":           "payroll_batches",
+    "mess_receipt":      "mess_receipts",
+    "mess_payment":      "mess_payments",
 }
 
 
@@ -924,7 +926,7 @@ class ApprovalChainOut(ApprovalChainIn):
 
 
 class ApprovalActionIn(BaseModel):
-    request_type: Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement", "payroll", "mess_receipt"]
+    request_type: Literal["reimbursement", "leave", "transaction", "asset_purchase", "employee_transfer", "regularisation", "quotation", "payment", "advance_request", "advance_settlement", "payroll", "mess_receipt", "mess_payment"]
     request_id: str
     action: Literal["approve", "reject", "send_back"]
     remarks: str = Field(min_length=3, description="Mandatory note explaining the decision (min 3 chars)")
@@ -1926,6 +1928,7 @@ async def view_file(
                 ("purchase_orders",    {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
                 ("candidates",         {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
                 ("batches",            {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
+                ("mess_receipts",      {"center_id": {"$in": scope_center_ids}, "attachments.path": path}),
                 # Staff documents are center-scoped via the parent staff record.
             )
             for coll, q in _CENTER_CARRIERS:
@@ -1981,7 +1984,7 @@ async def view_file(
     # meant for EVERY authenticated user to download — the list endpoints already
     # expose them to all roles, so the file stream must match that access level.
     if not allowed:
-        for coll in ("reimbursement_templates", "salary_slip_templates", "offer_letter_templates"):
+        for coll in ("reimbursement_templates", "salary_slip_templates", "offer_letter_templates", "mess_bill_templates"):
             tpl = await db[coll].find_one({"file_path": path}, {"_id": 0, "id": 1})
             if tpl:
                 allowed = True
@@ -7315,6 +7318,26 @@ DEFAULT_CHAINS: List[dict] = [
             {"level": 3, "kind": "role", "value": "accountant",     "label": "Accountant (Final)", "optional": False},
         ],
     },
+    {
+        "name": "Mess Goods Receipt — Default (3 levels)",
+        "type": "mess_receipt",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "center_manager", "label": "Center Manager (initiator)", "optional": True},
+            {"level": 2, "kind": "role", "value": "senior_manager", "label": "Senior Manager",            "optional": False},
+            {"level": 3, "kind": "role", "value": "accountant",     "label": "Accountant (Final)",        "optional": False},
+        ],
+    },
+    {
+        "name": "Mess Payment — Default (3 levels; Accountant final)",
+        "type": "mess_payment",
+        "active": True,
+        "steps": [
+            {"level": 1, "kind": "role", "value": "senior_manager", "label": "Senior Manager",     "optional": False},
+            {"level": 2, "kind": "role", "value": "admin",          "label": "Admin",              "optional": False},
+            {"level": 3, "kind": "role", "value": "accountant",     "label": "Accountant (Final)", "optional": False},
+        ],
+    },
 ]
 
 
@@ -7737,15 +7760,6 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
     arrive after the first has flipped current_level will fail with 409 CONFLICT
     instead of creating duplicate transactions.
     """
-    # Mess goods-receipt approvals surface in the generic Pending-Approvals inbox
-    # but live in their own collection with bespoke posting logic.
-    if body.request_type == "mess_receipt":
-        if user.get("role") not in MESS_APPROVE_ROLES:
-            raise HTTPException(403, "Not authorised to approve mess receipts")
-        if body.action == "reject":
-            return await _mess_reject_core(body.request_id, user, body.remarks or "")
-        return await _mess_approve_core(body.request_id, user)
-
     coll_name = APPROVAL_TYPE_COLL[body.request_type]
     coll = db[coll_name]
     rec = await coll.find_one({"id": body.request_id}, {"_id": 0})
@@ -7790,6 +7804,12 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             await db.quotations.update_one(
                 {"id": rec["quotation_id"]},
                 {"$set": {"payment_id": None, "status": "approved"}},
+            )
+        # Mess payment rejected → unlock the receipt so a fresh payment can be raised.
+        if body.request_type == "mess_payment" and rec.get("receipt_id"):
+            await db.mess_receipts.update_one(
+                {"id": rec["receipt_id"]},
+                {"$set": {"payment_status": "unpaid", "mess_payment_id": None}},
             )
         # Payroll batch rejection — unlock the underlying payroll rows so HR can edit
         # and re-finalise. Rows stay marked as belonging to this batch until re-finalise
@@ -8250,6 +8270,33 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                     f"Payroll {rec.get('month'):02d}/{rec.get('year')} approved — ₹{float(rec.get('net_payable') or 0):,.0f} ready for payment",
                     ntype="payroll_ready", ref_id=rec["id"], link="/payroll-batches",
                 )
+        elif body.request_type == "mess_receipt":
+            now = datetime.now(timezone.utc).isoformat()
+            _mess_res = await _mess_post_receipt(rec, user)
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "approved",
+                "approved_by": user["id"],
+                "approved_by_name": user.get("name") or user.get("email"),
+                "approved_at": now,
+                "expense_txn_id": _mess_res["expense_txn_id"],
+                "rejected_reason": None,
+            }
+        elif body.request_type == "mess_payment":
+            now = datetime.now(timezone.utc).isoformat()
+            _bill = await _mess_finalize_payment(rec, user)
+            update = {
+                "current_level": 0,
+                "chain_history": history,
+                "status": "paid",
+                "paid_at": now,
+                "paid_by": user["id"],
+                "paid_by_name": rec.get("paid_by_name") or user.get("name") or user.get("email"),
+                "payment_status": "paid",
+                "bill_pdf_path": (_bill or {}).get("file_path"),
+                "bill_no": (_bill or {}).get("bill_no"),
+            }
         else:  # transaction OR advance_request (both share the generic approved+audit path)
             update = {
                 "current_level": 0,
@@ -8521,35 +8568,6 @@ async def list_pending_approvals(user=Depends(get_current_user)):
         }
 
     # Sort newest first
-    # ---- Mess goods receipts awaiting approval (surface in the inbox) ----
-    if user_role in MESS_APPROVE_ROLES:
-        m_scoped = await _mess_scope(user)
-        if not (m_scoped is not None and len(m_scoped) == 0):
-            mq = {"status": "pending"}
-            if m_scoped is not None:
-                mq["center_id"] = {"$in": m_scoped}
-            for rc in await db.mess_receipts.find(mq, {"_id": 0}).sort("created_at", -1).to_list(2000):
-                out.append({
-                    "request_type": "mess_receipt",
-                    "request_id": rc["id"],
-                    "current_level": 1, "step_label": "Mess Receipt Approval",
-                    "is_final_step": True, "total_steps": 1,
-                    "requester_id": rc.get("created_by"),
-                    "requester_name": rc.get("created_by_name"),
-                    "center_id_of_request": rc.get("center_id"),
-                    "center_name_of_request": rc.get("center_name"),
-                    "summary": {
-                        "amount": rc.get("total_amount"),
-                        "date": rc.get("invoice_date"),
-                        "purpose": f"Mess Purchase · Inv {rc.get('invoice_no')}",
-                        "description": f"{len(rc.get('lines') or [])} item(s) from {rc.get('supplier_name') or 'supplier'}",
-                        "vendor_name": rc.get("supplier_name"),
-                        "center_id": rc.get("center_id"), "center_name": rc.get("center_name"),
-                        "attachments": rc.get("attachments") or [],
-                    },
-                    "created_at": rc.get("created_at"), "via": "mess",
-                })
-
     out.sort(key=lambda x: x.get("created_at") or "", reverse=True)
     return out
 
@@ -25273,6 +25291,9 @@ async def mess_list_receipts(center_id: Optional[str] = None, status: Optional[s
     if status and status != "all":
         q["status"] = status
     rows = await db.mess_receipts.find(q, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    for r in rows:
+        if r.get("status") == "pending" and r.get("current_level"):
+            await _enrich_with_approval_status(r)
     return rows
 
 
@@ -25307,6 +25328,7 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
         out_lines.append({**ln.dict(), "item_name": it["name"], "base_unit": it["base_unit"],
                           "line_total": line_total, "accepted_cost": accepted_cost})
     cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
+    n_items = len(out_lines)
     doc = {
         "id": str(uuid.uuid4()), "center_id": body.center_id,
         "center_name": (cen or {}).get("name"),
@@ -25318,23 +25340,35 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
         "expense_txn_id": None,
         "created_by": user["id"], "created_by_name": user.get("name") or user.get("email"),
         "created_at": now, "approved_by": None, "approved_at": None,
+        # Generic approval-chain shape so the receipt surfaces in the shared
+        # Pending-Approvals inbox and carries pending_with / step tracking.
+        "amount": round(total, 2),
+        "date": body.invoice_date,
+        "vendor_name": body.supplier_name,
+        "purpose": f"Mess Purchase · Inv {body.invoice_no.strip()}",
+        "description": f"{n_items} item(s) from {body.supplier_name or 'supplier'}",
     }
+    await _attach_chain_to_request("mess_receipt", doc)
     await db.mess_receipts.insert_one(doc)
     doc.pop("_id", None)
+    # Notify the first-step approvers.
+    try:
+        first_step = await _current_step(doc)
+        if first_step:
+            for uid in await _resolve_step_user_ids(first_step, doc):
+                if uid != user["id"]:
+                    await _notify(uid, f"Mess goods receipt awaiting your approval · Inv {doc['invoice_no']}",
+                                  ntype="mess_receipt_pending", ref_id=doc["id"], link="/pending-approvals")
+    except Exception:  # noqa: BLE001
+        logger.exception("mess receipt approver notify failed")
     return doc
 
 
-async def _mess_approve_core(receipt_id: str, user: dict) -> dict:
-    """Approve a goods receipt: post weighted-average stock-in + create the
-    one-time Finance expense txn. Shared by the dedicated endpoint AND the
-    generic Pending-Approvals inbox (/approvals/act). Center scope enforced."""
-    rec = await db.mess_receipts.find_one({"id": receipt_id})
-    if not rec:
-        raise HTTPException(404, "Receipt not found")
-    scoped = await _mess_scope(user)
-    _mess_assert_center(scoped, rec["center_id"])
-    if rec.get("status") != "pending":
-        raise HTTPException(400, f"Receipt already {rec.get('status')}")
+async def _mess_post_receipt(rec: dict, user: dict) -> dict:
+    """Post weighted-average stock-in + create the one-time Finance expense txn
+    for an approved goods receipt. Does NOT mutate the receipt status/level —
+    the caller (chain finaliser or legacy approve) owns that. Returns
+    {"expense_txn_id": ...}."""
     items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
     now = datetime.now(timezone.utc).isoformat()
     for ln in rec["lines"]:
@@ -25363,11 +25397,27 @@ async def _mess_approve_core(receipt_id: str, user: dict) -> dict:
         "rejected_reason": None,
     }
     await db.transactions.insert_one(txn)
+    return {"expense_txn_id": txn["id"]}
+
+
+async def _mess_approve_core(receipt_id: str, user: dict) -> dict:
+    """Legacy/admin single-step approve (bypasses the chain). Posts stock-in +
+    expense and finalises the receipt directly. The normal flow approves via the
+    shared Pending-Approvals inbox (/approvals/act) against the configured chain."""
+    rec = await db.mess_receipts.find_one({"id": receipt_id})
+    if not rec:
+        raise HTTPException(404, "Receipt not found")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, rec["center_id"])
+    if rec.get("status") != "pending":
+        raise HTTPException(400, f"Receipt already {rec.get('status')}")
+    result = await _mess_post_receipt(rec, user)
+    now = datetime.now(timezone.utc).isoformat()
     await db.mess_receipts.update_one({"id": receipt_id}, {"$set": {
-        "status": "approved", "approved_by": user["id"],
+        "status": "approved", "current_level": 0, "approved_by": user["id"],
         "approved_by_name": user.get("name") or user.get("email"),
-        "approved_at": now, "expense_txn_id": txn["id"]}})
-    return {"ok": True, "expense_txn_id": txn["id"]}
+        "approved_at": now, "expense_txn_id": result["expense_txn_id"]}})
+    return {"ok": True, "expense_txn_id": result["expense_txn_id"]}
 
 
 async def _mess_reject_core(receipt_id: str, user: dict, remarks: str = "") -> dict:
@@ -25379,7 +25429,7 @@ async def _mess_reject_core(receipt_id: str, user: dict, remarks: str = "") -> d
     if rec.get("status") != "pending":
         raise HTTPException(400, f"Receipt already {rec.get('status')}")
     await db.mess_receipts.update_one({"id": receipt_id}, {"$set": {
-        "status": "rejected", "rejected_reason": remarks or "",
+        "status": "rejected", "current_level": -1, "rejected_reason": remarks or "",
         "approved_by": user["id"], "approved_at": datetime.now(timezone.utc).isoformat()}})
     return {"ok": True}
 
@@ -25393,6 +25443,247 @@ async def mess_approve_receipt(receipt_id: str, user=Depends(require_role(*MESS_
 async def mess_reject_receipt(receipt_id: str, body: dict = Body(default={}),
                               user=Depends(require_role(*MESS_APPROVE_ROLES))):
     return await _mess_reject_core(receipt_id, user, body.get("remarks") or "")
+
+
+# ---------- Mess Payment (approval-chain driven) + Auto Bill PDF ----------
+class MessPaymentRaiseIn(BaseModel):
+    payment_mode: str = "bank"
+    payment_date: Optional[str] = None
+    paid_by_name: Optional[str] = None
+    paid_by_user_id: Optional[str] = None
+    payee_account_holder: Optional[str] = None
+    payee_bank_name: Optional[str] = None
+    payee_account_no: Optional[str] = None
+    payee_ifsc: Optional[str] = None
+    payee_upi_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+async def _resolve_mess_bill_template(company_id: Optional[str]) -> Optional[dict]:
+    if company_id:
+        tpl = await db.mess_bill_templates.find_one(
+            {"company_id": company_id, "is_active": True}, {"_id": 0})
+        if tpl:
+            return tpl
+    return await db.mess_bill_templates.find_one({"company_id": None, "is_active": True}, {"_id": 0})
+
+
+async def _next_mess_bill_no() -> str:
+    now = datetime.now(timezone.utc)
+    fy = now.year if now.month >= 4 else now.year - 1
+    prefix = f"MB-{str(fy)[-2:]}-"
+    last = await db.mess_bills.find(
+        {"bill_no": {"$regex": f"^{prefix}"}}, {"_id": 0, "bill_no": 1},
+    ).sort("bill_no", -1).limit(1).to_list(1)
+    counter = 1
+    if last:
+        try:
+            counter = int(last[0]["bill_no"].split("-")[-1]) + 1
+        except (ValueError, IndexError):
+            counter = 1
+    return f"{prefix}{counter:04d}"
+
+
+async def _generate_mess_bill(receipt: dict, payment: dict, user: dict) -> Optional[dict]:
+    """Render + store the purchase-bill PDF. Prefers an admin-uploaded DOCX
+    template (HR Settings → Mess Bill), else a professional ReportLab default."""
+    from mess_bill import build_mess_bill_pdf, build_mess_bill_context, render_mess_bill
+    center_id = receipt.get("center_id")
+    center = await db.centers.find_one({"id": center_id}, {"_id": 0}) if center_id else None
+    dctx = await _derive_context_for_center(center_id) if center_id else {}
+    company_id = (dctx or {}).get("company_id")
+    company = await db.companies.find_one({"id": company_id}, {"_id": 0}) if company_id else None
+    bill_no = await _next_mess_bill_no()
+    bill_id = str(uuid.uuid4())
+    chain = payment.get("chain_history") or []
+    pdf_bytes = None
+    content_type = "application/pdf"
+    ext = "pdf"
+    tpl = await _resolve_mess_bill_template(company_id)
+    if tpl:
+        try:
+            template_bytes, _ = _get_object(tpl["file_path"])
+            context = build_mess_bill_context(receipt, payment, company or {}, center, bill_no)
+            pdf_bytes, content_type, ext = render_mess_bill(template_bytes, context)
+        except Exception:  # noqa: BLE001
+            logger.exception("Mess bill template render failed — using default layout")
+            pdf_bytes = None
+    if pdf_bytes is None:
+        pdf_bytes = build_mess_bill_pdf(receipt, payment, company, center, bill_no, chain)
+        content_type, ext = "application/pdf", "pdf"
+    file_path = f"{APP_STORAGE_PREFIX}/mess-bills/{bill_id}.{ext}"
+    try:
+        _put_object(file_path, pdf_bytes, content_type)
+    except Exception:  # noqa: BLE001
+        logger.exception("Mess bill storage upload failed for receipt %s", receipt.get("id"))
+        return None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.files.insert_one({
+        "id": bill_id, "path": file_path, "filename": f"{bill_no}.{ext}",
+        "content_type": content_type, "size": len(pdf_bytes),
+        "uploaded_by": user["id"], "uploaded_at": now_iso, "is_deleted": False,
+    })
+    doc = {
+        "id": bill_id, "bill_no": bill_no, "receipt_id": receipt["id"],
+        "payment_id": payment.get("id"), "center_id": center_id, "company_id": company_id,
+        "file_path": file_path, "content_type": content_type,
+        "amount": float(receipt.get("total_amount") or 0),
+        "vendor_name": receipt.get("supplier_name"),
+        "generated_at": now_iso, "generated_by": user["id"],
+    }
+    await db.mess_bills.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+async def _mess_finalize_payment(payment: dict, user: dict) -> Optional[dict]:
+    """Called on final approval of a mess_payment: mark the receipt PAID and
+    auto-generate the purchase-bill PDF."""
+    receipt = await db.mess_receipts.find_one({"id": payment.get("receipt_id")}, {"_id": 0})
+    if not receipt:
+        raise HTTPException(404, "Linked receipt not found")
+    now = datetime.now(timezone.utc).isoformat()
+    bill = None
+    try:
+        bill = await _generate_mess_bill(receipt, payment, user)
+    except Exception:  # noqa: BLE001
+        logger.exception("Mess bill generation failed for receipt %s", receipt.get("id"))
+    upd = {
+        "payment_status": "paid", "paid_at": now, "mess_payment_id": payment.get("id"),
+        "payment_mode": payment.get("payment_mode"),
+        "paid_by_name": payment.get("paid_by_name"),
+    }
+    if bill:
+        upd["bill_pdf_path"] = bill["file_path"]
+        upd["bill_no"] = bill["bill_no"]
+        upd["bill_pdf_filename"] = f"{bill['bill_no']}.pdf"
+    await db.mess_receipts.update_one({"id": receipt["id"]}, {"$set": upd})
+    return bill
+
+
+@api.post("/mess/receipts/{receipt_id}/raise-payment")
+async def mess_raise_payment(receipt_id: str, body: MessPaymentRaiseIn,
+                             user=Depends(require_role(*MESS_ENTRY_ROLES))):
+    """Raise a payment against an APPROVED goods receipt. The payment routes
+    through the configurable `mess_payment` approval chain; on final approval
+    the receipt is marked paid and a purchase-bill PDF is auto-generated."""
+    rec = await db.mess_receipts.find_one({"id": receipt_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Receipt not found")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, rec["center_id"])
+    if rec.get("status") != "approved":
+        raise HTTPException(400, "Receipt must be approved before raising payment")
+    if rec.get("payment_status") == "paid":
+        raise HTTPException(400, "This receipt is already paid")
+    existing = await db.mess_payments.find_one(
+        {"receipt_id": receipt_id, "current_level": {"$gt": 0}})
+    if existing:
+        raise HTTPException(409, "A payment is already in approval for this receipt")
+    now = datetime.now(timezone.utc).isoformat()
+    pay_date = body.payment_date or now[:10]
+    amt = float(rec.get("total_amount") or 0)
+    doc = {
+        "id": str(uuid.uuid4()), "receipt_id": receipt_id,
+        "center_id": rec["center_id"], "center_name": rec.get("center_name"),
+        "invoice_no": rec.get("invoice_no"), "supplier_name": rec.get("supplier_name"),
+        "vendor_name": rec.get("supplier_name"),
+        "amount": amt, "actual_amount": amt,
+        "date": pay_date, "payment_date": pay_date,
+        "payment_mode": body.payment_mode,
+        "paid_by_name": body.paid_by_name, "paid_by_user_id": body.paid_by_user_id,
+        "payee_account_holder": body.payee_account_holder, "payee_bank_name": body.payee_bank_name,
+        "payee_account_no": body.payee_account_no, "payee_ifsc": body.payee_ifsc,
+        "payee_upi_id": body.payee_upi_id, "notes": body.notes,
+        "purpose": f"Mess Payment · Inv {rec.get('invoice_no')}",
+        "description": f"Payment to {rec.get('supplier_name') or 'supplier'} · Inv {rec.get('invoice_no')}",
+        "lines": rec.get("lines") or [],
+        "status": "pending", "payment_status": "unpaid",
+        "created_by": user["id"], "created_by_name": user.get("name") or user.get("email"),
+        "created_at": now,
+    }
+    await _attach_chain_to_request("mess_payment", doc)
+    await db.mess_payments.insert_one(doc)
+    await db.mess_receipts.update_one(
+        {"id": receipt_id},
+        {"$set": {"payment_status": "payment_pending", "mess_payment_id": doc["id"]}})
+    doc.pop("_id", None)
+    try:
+        first_step = await _current_step(doc)
+        if first_step:
+            for uid in await _resolve_step_user_ids(first_step, doc):
+                if uid != user["id"]:
+                    await _notify(uid, f"Mess payment awaiting your approval · Inv {doc['invoice_no']}",
+                                  ntype="mess_payment_pending", ref_id=doc["id"], link="/pending-approvals")
+    except Exception:  # noqa: BLE001
+        logger.exception("mess payment approver notify failed")
+    return doc
+
+
+@api.get("/mess/receipts/{receipt_id}/bill")
+async def mess_download_bill(receipt_id: str, user=Depends(require_role(*MESS_VIEW_ROLES))):
+    rec = await db.mess_receipts.find_one({"id": receipt_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Receipt not found")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, rec["center_id"])
+    path = rec.get("bill_pdf_path")
+    if not path:
+        raise HTTPException(404, "Bill not generated yet — available after payment approval")
+    try:
+        data, _ct = _get_object(path)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"Bill fetch failed: {str(e)[:120]}") from e
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{rec.get("bill_no") or "mess-bill"}.pdf"'})
+
+
+# ---------- Mess Bill Templates (HR Settings) ----------
+@api.post("/mess-bill-templates")
+async def upload_mess_bill_template(file: UploadFile = File(...),
+                                    company_id: Optional[str] = Query(None),
+                                    user=Depends(require_role("admin", "hr"))):
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(400, "Only .docx files are accepted")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Template too large (max 5MB)")
+    company_name = None
+    if company_id:
+        c = await db.companies.find_one({"id": company_id}, {"_id": 0, "name": 1})
+        if not c:
+            raise HTTPException(404, "Company not found")
+        company_name = c.get("name")
+    tid = str(uuid.uuid4())
+    path = f"{APP_STORAGE_PREFIX}/mess-bill-templates/{tid}.docx"
+    try:
+        _put_object(path, data, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    except requests.HTTPError as e:
+        raise HTTPException(502, f"Storage upload failed: {e}")
+    await db.mess_bill_templates.update_many(
+        {"company_id": company_id, "is_active": True}, {"$set": {"is_active": False}})
+    doc = {
+        "id": tid, "company_id": company_id, "company_name": company_name,
+        "filename": file.filename, "file_path": path,
+        "uploaded_by": user["id"], "uploaded_by_name": user.get("name") or user.get("email"),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(), "is_active": True,
+    }
+    await db.mess_bill_templates.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/mess-bill-templates")
+async def list_mess_bill_templates(_=Depends(require_role("admin", "hr", "manager"))):
+    return await db.mess_bill_templates.find({}, {"_id": 0}).sort("uploaded_at", -1).to_list(500)
+
+
+@api.delete("/mess-bill-templates/{tid}", status_code=204)
+async def delete_mess_bill_template(tid: str, _=Depends(require_role("admin", "hr"))):
+    r = await db.mess_bill_templates.delete_one({"id": tid})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Template not found")
+    return None
 
 
 # ---------- Daily Consumption / Wastage ----------
