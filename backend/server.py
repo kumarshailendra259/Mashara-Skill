@@ -25090,7 +25090,9 @@ class MessReceiptLine(BaseModel):
     unit: str                  # purchase_unit or base_unit
     unit_price: float = 0.0    # per purchase_unit
     discount: float = 0.0      # amount
-    tax: float = 0.0           # amount
+    tax: float = 0.0           # amount (used when gst_rate not given)
+    gst_rate: Optional[float] = None   # GST % — drives CGST/SGST/IGST split on the bill
+    hsn_sac: Optional[str] = None      # HSN/SAC code for the tax invoice
     accepted_qty: float        # in purchase_unit
     rejected_qty: float = 0.0
 
@@ -25364,11 +25366,14 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
             raise HTTPException(400, f"Unknown item {ln.item_id}")
         if ln.accepted_qty < 0 or ln.qty < 0:
             raise HTTPException(400, "Quantities cannot be negative")
-        line_total = round(ln.qty * ln.unit_price - ln.discount + ln.tax, 2)
+        taxable = round(ln.qty * ln.unit_price - ln.discount, 2)
+        tax_amt = round(taxable * ln.gst_rate / 100.0, 2) if (ln.gst_rate not in (None, 0, 0.0)) else ln.tax
+        line_total = round(taxable + tax_amt, 2)
         acc_frac = (ln.accepted_qty / ln.qty) if ln.qty > 0 else 0.0
         accepted_cost = round(line_total * acc_frac, 2)
         total += accepted_cost
         out_lines.append({**ln.dict(), "item_name": it["name"], "base_unit": it["base_unit"],
+                          "tax": tax_amt, "taxable": taxable,
                           "line_total": line_total, "accepted_cost": accepted_cost})
     cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
     n_items = len(out_lines)
@@ -25530,12 +25535,20 @@ async def _next_mess_bill_no() -> str:
 async def _generate_mess_bill(receipt: dict, payment: dict, user: dict) -> Optional[dict]:
     """Render + store the purchase-bill PDF. Prefers an admin-uploaded DOCX
     template (HR Settings → Mess Bill), else a professional ReportLab default."""
-    from mess_bill import build_mess_bill_pdf, build_mess_bill_context, render_mess_bill
+    from mess_bill import (build_mess_bill_pdf, build_mess_bill_context,
+                           render_mess_bill, compute_mess_tax)
     center_id = receipt.get("center_id")
     center = await db.centers.find_one({"id": center_id}, {"_id": 0}) if center_id else None
     dctx = await _derive_context_for_center(center_id) if center_id else {}
     company_id = (dctx or {}).get("company_id")
     company = await db.companies.find_one({"id": company_id}, {"_id": 0}) if company_id else None
+    supplier = None
+    if receipt.get("supplier_id"):
+        supplier = await db.vendors.find_one({"id": receipt["supplier_id"]}, {"_id": 0})
+    supplier = supplier or {"name": receipt.get("supplier_name")}
+    tax = compute_mess_tax(
+        receipt, (company or {}).get("gst") or (company or {}).get("gstin"),
+        supplier.get("gst_number") or receipt.get("supplier_gst"))
     bill_no = await _next_mess_bill_no()
     bill_id = str(uuid.uuid4())
     chain = payment.get("chain_history") or []
@@ -25546,13 +25559,13 @@ async def _generate_mess_bill(receipt: dict, payment: dict, user: dict) -> Optio
     if tpl:
         try:
             template_bytes, _ = _get_object(tpl["file_path"])
-            context = build_mess_bill_context(receipt, payment, company or {}, center, bill_no)
+            context = build_mess_bill_context(receipt, payment, company or {}, center, bill_no, supplier=supplier, tax=tax)
             pdf_bytes, content_type, ext = render_mess_bill(template_bytes, context)
         except Exception:  # noqa: BLE001
             logger.exception("Mess bill template render failed — using default layout")
             pdf_bytes = None
     if pdf_bytes is None:
-        pdf_bytes = build_mess_bill_pdf(receipt, payment, company, center, bill_no, chain)
+        pdf_bytes = build_mess_bill_pdf(receipt, payment, company, center, bill_no, chain, supplier=supplier, tax=tax)
         content_type, ext = "application/pdf", "pdf"
     file_path = f"{APP_STORAGE_PREFIX}/mess-bills/{bill_id}.{ext}"
     try:
@@ -25727,6 +25740,64 @@ async def delete_mess_bill_template(tid: str, _=Depends(require_role("admin", "h
     if r.deleted_count == 0:
         raise HTTPException(404, "Template not found")
     return None
+
+
+@api.get("/mess-bill-templates/sample")
+async def download_mess_bill_sample(_=Depends(require_role("admin", "hr", "manager"))):
+    """A ready-to-edit .docx with repeating headers, row integrity, the item
+    loop and continuous numbering — the recommended starting point."""
+    from mess_bill import build_sample_template_docx
+    data = build_sample_template_docx()
+    return Response(content=data,
+                    media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    headers={"Content-Disposition": 'attachment; filename="mess-bill-sample-template.docx"'})
+
+
+@api.post("/mess-bill-templates/validate")
+async def validate_mess_bill_template(file: UploadFile = File(...),
+                                      _=Depends(require_role("admin", "hr"))):
+    """Pre-upload check: valid .docx, parseable Jinja, renders with sample data,
+    and only uses supported placeholders. Returns errors + warnings."""
+    from mess_bill import validate_template_bytes
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(400, "Only .docx files are accepted")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(413, "Template too large (max 5MB)")
+    return validate_template_bytes(data)
+
+
+@api.get("/mess-bill-templates/preview")
+async def preview_mess_bill(template_id: Optional[str] = Query(None),
+                            user=Depends(require_role("admin", "hr", "manager"))):
+    """Render a sample GST bill (XPERT test invoice) using the given template,
+    else the active/global template, else the default layout — returns a PDF."""
+    from mess_bill import (sample_invoice_objects, build_mess_bill_context,
+                           build_mess_bill_pdf, render_mess_bill, compute_mess_tax)
+    receipt, payment, company, center, supplier = sample_invoice_objects()
+    tax = compute_mess_tax(receipt, company.get("gst"), supplier.get("gst_number"))
+    bill_no = "MB-PREVIEW-0001"
+    tpl = None
+    if template_id:
+        tpl = await db.mess_bill_templates.find_one({"id": template_id}, {"_id": 0})
+    else:
+        tpl = await _resolve_mess_bill_template(None)
+    pdf = None
+    if tpl:
+        try:
+            tb, _ = _get_object(tpl["file_path"])
+            ctx = build_mess_bill_context(receipt, payment, company, center, bill_no, supplier=supplier, tax=tax)
+            pdf, ct, ext = render_mess_bill(tb, ctx)
+            if ext != "pdf":
+                pdf = None
+        except Exception:  # noqa: BLE001
+            logger.exception("Mess bill preview render failed — using default")
+            pdf = None
+    if pdf is None:
+        pdf = build_mess_bill_pdf(receipt, payment, company, center, bill_no,
+                                  payment.get("chain_history"), supplier=supplier, tax=tax)
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": 'inline; filename="mess-bill-preview.pdf"'})
 
 
 # ---------- Daily Consumption / Wastage ----------

@@ -504,7 +504,7 @@ function RaisePaymentDialog({ receipt, onClose, onSaved }) {
 
 function LineEditor({ items, units, lines, setLines, mode }) {
   const addLine = () => setLines([...lines, mode === "receipt"
-    ? { item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, accepted_qty: "", rejected_qty: 0 }
+    ? { item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "", hsn_sac: "", accepted_qty: "", rejected_qty: 0 }
     : { item_id: "", qty: "", unit: "", kind: mode }]);
   const upd = (i, k, v) => { const n = [...lines]; n[i] = { ...n[i], [k]: v }; if (k === "item_id") { const it = items.find(x => x.id === v); if (it) n[i].unit = it.base_unit; } setLines(n); };
   const rm = (i) => setLines(lines.filter((_, idx) => idx !== i));
@@ -529,6 +529,14 @@ function LineEditor({ items, units, lines, setLines, mode }) {
             </>
           ) : <div className="col-span-3" />}
           <div className="col-span-1 flex justify-end"><Button size="sm" variant="outline" onClick={() => rm(i)} className="rounded-lg h-8 w-8 p-0 text-rose-600" data-testid={`line-rm-${i}`}><Trash2 size={13} /></Button></div>
+          {mode === "receipt" && (
+            <div className="col-span-12 grid grid-cols-12 gap-2 mt-1">
+              <div className="col-span-3"><div className="text-[9px] uppercase text-slate-500">HSN/SAC <span className="text-slate-300">(opt)</span></div><Input value={ln.hsn_sac || ""} onChange={(e) => upd(i, "hsn_sac", e.target.value)} className="rounded-lg h-8 text-xs" placeholder="e.g. 91069000" data-testid={`line-hsn-${i}`} /></div>
+              <div className="col-span-2"><div className="text-[9px] uppercase text-slate-500">GST % <span className="text-slate-300">(opt)</span></div><Input type="number" value={ln.gst_rate ?? ""} onChange={(e) => upd(i, "gst_rate", e.target.value)} className="rounded-lg h-8 text-xs" placeholder="18" data-testid={`line-gst-${i}`} /></div>
+              <div className="col-span-2"><div className="text-[9px] uppercase text-slate-500">Discount</div><Input type="number" value={ln.discount} onChange={(e) => upd(i, "discount", e.target.value)} className="rounded-lg h-8 text-xs" data-testid={`line-disc-${i}`} /></div>
+              <div className="col-span-2"><div className="text-[9px] uppercase text-slate-500">Tax Amt <span className="text-slate-300">(if no %)</span></div><Input type="number" value={ln.tax} onChange={(e) => upd(i, "tax", e.target.value)} className="rounded-lg h-8 text-xs" data-testid={`line-tax-${i}`} /></div>
+            </div>
+          )}
         </div>
       ))}
       <Button size="sm" variant="outline" onClick={addLine} className="rounded-lg gap-1" data-testid="add-line"><Plus size={13} /> Add Line</Button>
@@ -538,7 +546,7 @@ function LineEditor({ items, units, lines, setLines, mode }) {
 
 function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
   const [f, setF] = useState({ center_id: centerId || "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
-  const [lines, setLines] = useState([{ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, accepted_qty: "", rejected_qty: 0 }]);
+  const [lines, setLines] = useState([{ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "", hsn_sac: "", accepted_qty: "", rejected_qty: 0 }]);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const uploadBill = async (file) => {
@@ -559,6 +567,8 @@ function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
     const clean = lines.filter(l => l.item_id && Number(l.qty) > 0).map(l => ({
       item_id: l.item_id, qty: Number(l.qty), unit: l.unit, unit_price: Number(l.unit_price || 0),
       discount: Number(l.discount || 0), tax: Number(l.tax || 0),
+      gst_rate: l.gst_rate === "" || l.gst_rate == null ? null : Number(l.gst_rate),
+      hsn_sac: (l.hsn_sac || "").trim() || null,
       accepted_qty: Number(l.accepted_qty || l.qty), rejected_qty: Number(l.rejected_qty || 0),
     }));
     if (clean.length === 0) { toast.error("Add at least one valid line"); return; }
