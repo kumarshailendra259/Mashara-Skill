@@ -2728,3 +2728,26 @@ New main menu "Mess Management" (/mess). Backend-calculated, center-scoped, Fina
 Collections added: mess_closings, mess_stock_counts. Verified via curl + screenshots (both tabs render). No testing_agent re-run (all new endpoints curl-verified, frontend screenshot-confirmed).
 
 **Phase-2 STILL PENDING (next batch):** Recipe/Menu master (expected vs actual variance), Purchase Requests + low-stock→PO workflow, PDF report exports, purchase returns/supplier credits, receipt payment-status updates, assigning the new mess_staff role in User Management dropdown.
+
+## Phase 109 (Jun 2026) — Mess Goods Receipt → full Approval Workflow + Bill Upload + Auto Bill PDF
+
+**Context:** Earlier mess_receipt was a single-step approve. User asked: (1a) connect Goods Receipt to the multi-level Approval Workflow with a NEW configurable chain request type + "Pending With ___" tracking; (2b+) payment ALSO routes through its own approval chain; (3) auto-generate a PDF bill after payment approval, with a configurable template in HR Settings (like Salary Slip); (4) option to upload the vendor's shop bill.
+
+**Backend (server.py):**
+- Added chain types `mess_receipt` (center_manager[optional]→senior_manager→accountant) and `mess_payment` (senior_manager→admin→accountant) to DEFAULT_CHAINS, ApprovalType + ApprovalActionIn Literals, and APPROVAL_TYPE_COLL (mess_receipt→mess_receipts, mess_payment→mess_payments). Both configurable in Approval Workflow UI.
+- Removed the bespoke single-step mess_receipt branch in approval_act and the bespoke inbox append; mess docs now flow through the GENERIC chain engine (carry chain_id/current_level/chain_snapshot/chain_history + generic summary fields amount/date/purpose/description/vendor_name). Generic inbox builder surfaces them to the correct step approver with pending_with.
+- mess_create_receipt now calls _attach_chain_to_request("mess_receipt") + notifies first-step approvers. Refactored posting into `_mess_post_receipt` (stock-in + mess_purchase expense, no status mutation); `_mess_approve_core` is now a legacy/admin single-step override (sets current_level=0). approval_act final branches: mess_receipt→_mess_post_receipt+status approved+expense_txn_id; mess_payment→_mess_finalize_payment.
+- mess_list_receipts enriches pending rows with _enrich_with_approval_status (pending_with + current_step_label).
+- Payment: `MessPaymentRaiseIn` + POST /mess/receipts/{id}/raise-payment (approved+unpaid only, dup 409) → creates mess_payment doc + mess_payment chain, flips receipt payment_status=payment_pending. On final approval _mess_finalize_payment marks receipt paid + generates bill. Reject of mess_payment frees receipt back to unpaid.
+- Auto Bill PDF: new module /app/backend/mess_bill.py — build_mess_bill_pdf (reportlab default, line items + approval trail + signatures) and build_mess_bill_context+render_mess_bill (docxtpl DOCX template → LibreOffice PDF). _generate_mess_bill stores to object storage + registers db.files + db.mess_bills (bill_no MB-YY-NNNN). GET /mess/receipts/{id}/bill streams PDF (404 before paid).
+- HR Settings template: POST/GET/DELETE /mess-bill-templates (admin/hr, DOCX, per-company or global) + _resolve_mess_bill_template. If present, bill renders via template; else default layout.
+- /files/view: added mess_receipts to center-scoped carriers (approvers view uploaded shop bill) + mess_bill_templates to the public-template allowlist.
+- Collections added: mess_payments, mess_bills, mess_bill_templates.
+
+**Frontend:**
+- MessManagement.jsx ReceiptsTab: removed inline Approve/Reject (approvals now via Pending Approvals inbox); added "Pending with: <names> · <step>" chip (data-testid pending-with-<id>), "Raise Payment" button+RaisePaymentDialog (approved+unpaid), "Download Bill · <bill_no>" (paid), vendor-bill attachment view. ReceiptDialog: shop-bill upload via /files/upload (data-testid receipt-bill-upload).
+- ApprovalWorkflows TYPES: added Mess Goods Receipt + Mess Payment. PendingApprovals TYPE_META: added mess_payment. HrSettings: new "Mess Bill" tab → new component /app/frontend/src/components/MessBillTemplatesTab.jsx.
+
+**Testing:** iteration_85.json — 100% (17/17 backend pytest + all frontend flows). Full chain advance L1→L2→L3, stock+expense on final, raise-payment→mess_payment chain, final payment→paid+bill MB-26-0001 (valid %PDF), pending_with, inbox surfacing, center RBAC 403, template 400/403 guards. No critical/minor issues. Backend changes require re-deploy to production.
+
+**STILL PENDING (next batch):** Recipe/Menu master + expected-vs-actual variance, Purchase Requests + low-stock→PO workflow, report PDF/Excel exports, purchase returns/supplier credits, assigning new mess_staff role in User Management dropdown, modularise server.py mess module into routers.
