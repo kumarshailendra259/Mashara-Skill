@@ -2760,3 +2760,21 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 **Verified (curl):** accountant outside center → 200 with rows (staff_name, employee_code, net, bank_account_no_masked, ifsc). Regression: center_manager (non-participant) outside center → 403; own center → 200.
 **Frontend (PendingApprovals.jsx):** Added "A/C No · IFSC" column to the Salary Breakdown table (shows r.bank_account_no_masked · r.ifsc, or "No bank details"). Backend already returns masked account + ifsc per row. data-testid breakdown-acct-<staff_id>.
 **Note:** Exact in-dialog screenshot not reproducible on preview (no payroll batch currently in pending_approval); data path + RBAC confirmed via curl. Backend change requires re-deploy to production.
+
+## Phase 111 (Jun 2026) — Accountant sees FULL Account No + IFSC for EVERY payment type
+
+**Request:** "kisi bhi prakar ka payment ho Accountant ko pura Account number aur IFSC code dikhna chahiye" — full (unmasked) bank account + IFSC for all payment types.
+**Audit of flows:**
+- payment / advance_request → already showed full payee account + IFSC (entered payee details). No change.
+- payroll → was MASKED (****1234). FIXED.
+- reimbursement → paid to EMPLOYEE bank; dialog had NO payee block. FIXED.
+- mess_payment → payee fields stored at raise-payment but dialog didn't render them. FIXED (frontend only; summary already carries payee_* via generic builder).
+**Gating:** full bank is sensitive → exposed only to SALARY_VISIBLE_ROLES = {admin, hr, accountant, partner, manager, senior_manager} (same policy as salary visibility). center_manager/center_staff/viewer still get masked.
+**Backend (server.py):**
+- `_payroll_batch_out(batch_id, include_full_bank=False)`: staff projection now also pulls bank_name/account_holder_name; rows get bank_account_no_masked always, full bank_account_no ONLY when include_full_bank, plus ifsc/bank_name/account_holder_name. `get_payroll_batch` passes include_full = (role in SALARY_VISIBLE_ROLES).
+- `list_pending_approvals`: post-pass for SALARY_VISIBLE_ROLES enriches reimbursement items' summary with the EMPLOYEE's bank (payee_account_no/ifsc/bank_name/account_holder) resolved by staff_id OR by requester user_id (created_by). Batched, no N+1.
+**Frontend (PendingApprovals.jsx):**
+- Payee Details block now renders for payment, advance_request, reimbursement, mess_payment (headers: "Payee Details (Employee Bank)" / "(Supplier)").
+- Payroll Salary Breakdown "A/C No · IFSC" column shows full `bank_account_no` when present, else masked.
+**Verified:** curl — admin/accountant (salary-visible) get full `918273645012`; center_manager gets only masked `****5012`. Reimbursement payee enrichment returns full employee account to admin/accountant. UI screenshot — reimbursement approval dialog shows "PAYEE DETAILS (EMPLOYEE BANK)" with Account No 550099887766 + IFSC ICIC0004321 + Bank. Backend change requires re-deploy to production.
+**Preview test-data note:** set bank on staff 4296daf3 (payroll test) and 7566f043 (renamed "Reimb Employee", reimbursement test) — harmless preview seed.

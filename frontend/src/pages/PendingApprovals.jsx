@@ -884,11 +884,14 @@ export default function PendingApprovals() {
               {/* Payee details — shown for both PAYMENT and ADVANCE REQUEST so
                   approver sees exact bank/UPI target BEFORE signing off (and can
                   cross-verify with the attached cancelled cheque / QR / passbook). */}
-              {(acting.item.request_type === "payment" || acting.item.request_type === "advance_request") && (
+              {(acting.item.request_type === "payment" || acting.item.request_type === "advance_request" || acting.item.request_type === "reimbursement" || acting.item.request_type === "mess_payment") && (
                 (acting.item.summary?.payee_account_no || acting.item.summary?.payee_upi_id || acting.item.summary?.vendor_name || acting.item.summary?.qrn) && (
                 <div className="border border-amber-200 bg-amber-50/40 p-3 text-xs space-y-2" data-testid="approval-payee-block">
                   <div className="overline font-bold text-amber-900">
-                    {acting.item.request_type === "advance_request" ? "Payee Details (from Advance Request)" : "Payee Details"}
+                    {acting.item.request_type === "advance_request" ? "Payee Details (from Advance Request)"
+                      : acting.item.request_type === "reimbursement" ? "Payee Details (Employee Bank)"
+                      : acting.item.request_type === "mess_payment" ? "Payee Details (Supplier)"
+                      : "Payee Details"}
                   </div>
                   <div className="grid grid-cols-2 gap-y-1 gap-x-3">
                     {acting.item.summary?.qrn && (
@@ -1071,8 +1074,8 @@ export default function PendingApprovals() {
                               {r.employee_code && <span className="text-slate-400 ml-1">{r.employee_code}</span>}
                             </td>
                             <td className="px-2 py-1 whitespace-nowrap" data-testid={`breakdown-acct-${r.staff_id}`}>
-                              {r.bank_account_no_masked
-                                ? <span className="font-mono text-slate-700">{r.bank_account_no_masked}{r.ifsc ? <span className="text-slate-400"> · {r.ifsc}</span> : null}</span>
+                              {(r.bank_account_no || r.bank_account_no_masked)
+                                ? <span className="font-mono text-slate-700">{r.bank_account_no || r.bank_account_no_masked}{r.ifsc ? <span className="text-slate-400"> · {r.ifsc}</span> : null}</span>
                                 : <span className="text-amber-600">No bank details</span>}
                             </td>
                             <td className="px-2 py-1 text-right num text-slate-700">{inr(r.gross)}</td>

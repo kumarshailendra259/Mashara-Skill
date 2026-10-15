@@ -8491,6 +8491,30 @@ async def list_pending_approvals(user=Depends(get_current_user)):
             })
             if req_type == "transaction":
                 seen_txn_ids.add(rec["id"])
+    # Reimbursements pay the EMPLOYEE's registered bank. Surface the full payee
+    # account/IFSC to salary-visible roles (Accounts/HR/Admin/Partner/Managers)
+    # so they can release payment without hunting through the staff master.
+    if user_role in SALARY_VISIBLE_ROLES:
+        reimb_items = [o for o in out if o["request_type"] == "reimbursement" and not o["summary"].get("payee_account_no")]
+        if reimb_items:
+            r_sids = list({o.get("_staff_id") for o in reimb_items if o.get("_staff_id")})
+            r_uids = list({o.get("requester_id") for o in reimb_items if o.get("requester_id")})
+            _proj = {"_id": 0, "id": 1, "user_id": 1, "name": 1, "bank_account_no": 1, "ifsc": 1, "bank_name": 1, "account_holder_name": 1}
+            staff_by_id, staff_by_uid = {}, {}
+            if r_sids:
+                for s in await db.staff.find({"id": {"$in": r_sids}}, _proj).to_list(2000):
+                    staff_by_id[s["id"]] = s
+            if r_uids:
+                for s in await db.staff.find({"user_id": {"$in": r_uids}}, _proj).to_list(2000):
+                    if s.get("user_id"):
+                        staff_by_uid[s["user_id"]] = s
+            for o in reimb_items:
+                s = staff_by_id.get(o.get("_staff_id")) or staff_by_uid.get(o.get("requester_id"))
+                if s and s.get("bank_account_no"):
+                    o["summary"]["payee_account_no"] = s.get("bank_account_no")
+                    o["summary"]["payee_ifsc"] = s.get("ifsc")
+                    o["summary"]["payee_bank_name"] = s.get("bank_name")
+                    o["summary"]["payee_account_holder"] = s.get("account_holder_name") or s.get("name")
     # Add partner-cross-approve-eligible transactions (not already in chain list)
     if user_role == "partner":
         pending_txns = await db.transactions.find(
@@ -12243,7 +12267,7 @@ async def unlock_attendance(body: AttendanceUnlockIn, user=Depends(require_role(
             "paid_batch_blocked": paid_batch_blocked}
 
 
-async def _payroll_batch_out(batch_id: str) -> dict:
+async def _payroll_batch_out(batch_id: str, include_full_bank: bool = False) -> dict:
     """Fetch a batch + inline its payroll rows for the UI.
 
     Phase 60 — always enriched with `pending_at_label`, `pending_at_role`,
@@ -12258,15 +12282,22 @@ async def _payroll_batch_out(batch_id: str) -> dict:
     # Enrich rows with staff name/emp_code for the review UI.
     sids = list({r.get("staff_id") for r in rows if r.get("staff_id")})
     if sids:
-        srows = await db.staff.find({"id": {"$in": sids}}, {"_id": 0, "id": 1, "name": 1, "employee_code": 1, "bank_account_no": 1, "ifsc": 1}).to_list(2000)
+        srows = await db.staff.find({"id": {"$in": sids}}, {"_id": 0, "id": 1, "name": 1, "employee_code": 1, "bank_account_no": 1, "ifsc": 1, "bank_name": 1, "account_holder_name": 1}).to_list(2000)
         by_id = {s["id"]: s for s in srows}
         for r in rows:
             s = by_id.get(r.get("staff_id"))
             if s:
                 r["staff_name"] = s.get("name")
                 r["employee_code"] = s.get("employee_code")
-                r["bank_account_no_masked"] = ("****" + (s.get("bank_account_no") or "")[-4:]) if s.get("bank_account_no") else None
+                acct = s.get("bank_account_no") or ""
+                r["bank_account_no_masked"] = ("****" + acct[-4:]) if acct else None
+                # Full account no is sensitive — only surfaced to salary-visible
+                # roles (Accounts/HR/Admin/Partner/Managers) so they can release payment.
+                if include_full_bank and acct:
+                    r["bank_account_no"] = acct
                 r["ifsc"] = s.get("ifsc")
+                r["bank_name"] = s.get("bank_name")
+                r["account_holder_name"] = s.get("account_holder_name") or s.get("name")
     b["rows"] = rows
     # Per-row payment status + batch-level paid/pending aggregates (partial payment).
     paid_amount = 0.0
@@ -12355,7 +12386,8 @@ async def list_payroll_batches(
 
 @api.get("/payroll-batches/{batch_id}")
 async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff", "partner"))):
-    b = await _payroll_batch_out(batch_id)
+    include_full = user.get("role") in SALARY_VISIBLE_ROLES
+    b = await _payroll_batch_out(batch_id, include_full_bank=include_full)
     # Phase 65 — IDOR guard. Scoped users MUST be mapped to the batch's center,
     # UNLESS they are a legitimate participant in the batch's approval/payment:
     #  • a current-step approver (the one-screen Approve+Pay accountant is here),
