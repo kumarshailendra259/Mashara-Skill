@@ -544,11 +544,44 @@ function LineEditor({ items, units, lines, setLines, mode }) {
   );
 }
 
+const GST_RATE_OPTIONS = ["0", "5", "12", "18", "28"];
+const num = (v) => Number(v) || 0;
+const newReceiptLine = () => ({ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "18", hsn_sac: "", accepted_qty: "", rejected_qty: 0 });
+
 function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
-  const [f, setF] = useState({ center_id: centerId || "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
-  const [lines, setLines] = useState([{ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "", hsn_sac: "", accepted_qty: "", rejected_qty: 0 }]);
+  const [f, setF] = useState({ center_id: centerId || "", supplier_id: "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
+  const [lines, setLines] = useState([newReceiptLine()]);
+  const [vendors, setVendors] = useState([]);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
+
+  useEffect(() => { api.get("/vendors").then((r) => setVendors(Array.isArray(r.data) ? r.data : [])).catch(() => setVendors([])); }, []);
+
+  const pickVendor = (id) => {
+    const v = vendors.find((x) => x.id === id);
+    setF((p) => ({ ...p, supplier_id: id, supplier_name: v ? v.name : "" }));
+  };
+
+  const unitsFor = (id) => { const it = items.find((x) => x.id === id); return it ? [...new Set([it.base_unit, it.purchase_unit])] : units; };
+  const addLine = () => setLines([...lines, newReceiptLine()]);
+  const rmLine = (i) => setLines(lines.filter((_, idx) => idx !== i));
+  const upd = (i, k, v) => {
+    const n = [...lines];
+    n[i] = { ...n[i], [k]: v };
+    if (k === "item_id") { const it = items.find((x) => x.id === v); if (it) n[i].unit = it.base_unit; }
+    setLines(n);
+  };
+
+  const lineTaxable = (ln) => Math.max(num(ln.qty) * num(ln.unit_price) - num(ln.discount), 0);
+  const lineGst = (ln) => lineTaxable(ln) * num(ln.gst_rate) / 100;
+  const lineTotal = (ln) => lineTaxable(ln) + lineGst(ln);
+  const subtotal = lines.reduce((s, l) => s + num(l.qty) * num(l.unit_price), 0);
+  const totalDiscount = lines.reduce((s, l) => s + num(l.discount), 0);
+  const totalGst = lines.reduce((s, l) => s + lineGst(l), 0);
+  const grandTotal = subtotal - totalDiscount + totalGst;
+  const rateSet = [...new Set(lines.filter((l) => num(l.qty) > 0).map((l) => num(l.gst_rate)))];
+  const gstLabel = rateSet.length === 1 ? ` (${rateSet[0]}%)` : "";
+
   const uploadBill = async (file) => {
     if (!file) return;
     setUploading(true);
@@ -561,12 +594,14 @@ function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
     } catch (e) { toast.error(formatError(e)); } finally { setUploading(false); }
   };
   const rmAtt = (i) => setF((p) => ({ ...p, attachments: p.attachments.filter((_, idx) => idx !== i) }));
+
   const save = async () => {
     if (!f.center_id) { toast.error("Select a center"); return; }
     if (!f.invoice_no.trim()) { toast.error("Invoice number required"); return; }
-    const clean = lines.filter(l => l.item_id && Number(l.qty) > 0).map(l => ({
+    if (!f.supplier_id) { toast.error("Select a supplier from the vendor list"); return; }
+    const clean = lines.filter((l) => l.item_id && Number(l.qty) > 0).map((l) => ({
       item_id: l.item_id, qty: Number(l.qty), unit: l.unit, unit_price: Number(l.unit_price || 0),
-      discount: Number(l.discount || 0), tax: Number(l.tax || 0),
+      discount: Number(l.discount || 0), tax: 0,
       gst_rate: l.gst_rate === "" || l.gst_rate == null ? null : Number(l.gst_rate),
       hsn_sac: (l.hsn_sac || "").trim() || null,
       accepted_qty: Number(l.accepted_qty || l.qty), rejected_qty: Number(l.rejected_qty || 0),
@@ -576,39 +611,138 @@ function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
     try { await api.post("/mess/receipts", { ...f, lines: clean }); toast.success("Goods receipt created — routed to approval workflow"); onSaved(); }
     catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
   };
+
+  const inputCls = "w-full border border-slate-200 rounded-lg px-2.5 h-9 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400";
+  const Label = ({ children }) => <div className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide mb-1.5">{children}</div>;
+
   return (
     <Dialog open onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="rounded-xl max-w-3xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader><DialogTitle className="font-heading">New Goods Receipt</DialogTitle><DialogDescription className="sr-only">Create a goods receipt with line items</DialogDescription></DialogHeader>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Center</div>
-            <select value={f.center_id} onChange={(e) => setF({ ...f, center_id: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="receipt-center"><option value="">Select…</option>{centers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
-          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Invoice No</div><Input value={f.invoice_no} onChange={(e) => setF({ ...f, invoice_no: e.target.value })} className="rounded-lg" data-testid="receipt-invoice" /></div>
-          <div><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Invoice Date</div><Input type="date" value={f.invoice_date} onChange={(e) => setF({ ...f, invoice_date: e.target.value })} className="rounded-lg" /></div>
-          <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Supplier</div><Input value={f.supplier_name} onChange={(e) => setF({ ...f, supplier_name: e.target.value })} className="rounded-lg" data-testid="receipt-supplier" /></div>
-          <div className="col-span-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">PO No (optional)</div><Input value={f.po_no} onChange={(e) => setF({ ...f, po_no: e.target.value })} className="rounded-lg" /></div>
-        </div>
-        <div className="mt-2"><div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Items</div>
-          <LineEditor items={items} units={units} lines={lines} setLines={setLines} mode="receipt" />
-        </div>
-        <div className="mt-2">
-          <div className="text-[10px] uppercase font-semibold text-slate-500 mb-1">Shop Bill (upload — optional)</div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <label className="inline-flex items-center gap-1.5 text-sm cursor-pointer border border-dashed border-slate-300 rounded-lg px-3 py-1.5 hover:bg-slate-50" data-testid="receipt-bill-upload">
-              <Upload size={14} /> {uploading ? "Uploading…" : "Attach bill (PDF/Image)"}
+      <DialogContent className="rounded-2xl max-w-6xl w-[96vw] max-h-[92vh] overflow-y-auto p-0 gap-0" data-testid="receipt-dialog">
+        <DialogHeader className="px-6 pt-6 pb-4 border-b border-slate-100">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-50 text-blue-600 p-2.5 rounded-xl"><Package size={22} /></div>
+            <div>
+              <DialogTitle className="font-heading text-xl text-slate-900">New Goods Receipt</DialogTitle>
+              <DialogDescription className="text-sm text-slate-500">Record received goods against a purchase order</DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <div className="px-6 py-5 space-y-5">
+          {/* Top fields */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div><Label>Center</Label>
+              <select value={f.center_id} onChange={(e) => setF({ ...f, center_id: e.target.value })} className={inputCls} data-testid="receipt-center"><option value="">Select Center</option>{centers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+            <div><Label>Invoice No</Label><Input value={f.invoice_no} onChange={(e) => setF({ ...f, invoice_no: e.target.value })} placeholder="Enter invoice no." className="rounded-lg h-9" data-testid="receipt-invoice" /></div>
+            <div><Label>Invoice Date</Label><Input type="date" value={f.invoice_date} onChange={(e) => setF({ ...f, invoice_date: e.target.value })} className="rounded-lg h-9" data-testid="receipt-date" /></div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div><Label>Supplier</Label>
+              <select value={f.supplier_id} onChange={(e) => pickVendor(e.target.value)} className={inputCls} data-testid="receipt-supplier">
+                <option value="">Select Supplier</option>
+                {vendors.filter((v) => v.active !== false).map((v) => <option key={v.id} value={v.id}>{v.name}{v.gst_number ? ` · ${v.gst_number}` : ""}</option>)}
+              </select>
+              {vendors.length === 0 && <div className="text-[11px] text-amber-600 mt-1">No vendors found — add suppliers in Procurement → Vendors.</div>}
+            </div>
+            <div><Label>PO No. <span className="text-slate-400 normal-case">(optional)</span></Label><Input value={f.po_no} onChange={(e) => setF({ ...f, po_no: e.target.value })} placeholder="Enter PO number" className="rounded-lg h-9" data-testid="receipt-po" /></div>
+          </div>
+
+          {/* Items table */}
+          <div>
+            <Label>Items</Label>
+            <div className="rounded-xl border border-slate-200 overflow-x-auto">
+              <table className="w-full text-sm min-w-[1000px]">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide">
+                    <th className="px-3 py-2.5 text-center w-10">S.No.</th>
+                    <th className="px-3 py-2.5 text-left min-w-[260px]">Item</th>
+                    <th className="px-2 py-2.5 text-left w-16">Qty</th>
+                    <th className="px-2 py-2.5 text-left w-20">Unit</th>
+                    <th className="px-2 py-2.5 text-left w-24">Rate</th>
+                    <th className="px-2 py-2.5 text-left w-24">Discount</th>
+                    <th className="px-2 py-2.5 text-left w-20">GST %</th>
+                    <th className="px-2 py-2.5 text-left w-24">Accepted Qty</th>
+                    <th className="px-3 py-2.5 text-right w-28">Line Total</th>
+                    <th className="px-2 py-2.5 text-center w-12">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lines.map((ln, i) => (
+                    <tr key={i} className="border-b border-slate-100 last:border-0 align-top" data-testid={`line-${i}`}>
+                      <td className="px-3 py-3 text-center text-slate-500 font-semibold">{i + 1}</td>
+                      <td className="px-3 py-3">
+                        <select value={ln.item_id} onChange={(e) => upd(i, "item_id", e.target.value)} className={inputCls} data-testid={`line-item-${i}`}>
+                          <option value="">Select…</option>{items.filter((it) => it.active !== false).map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+                        </select>
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className="text-[10px] uppercase font-semibold text-slate-400 whitespace-nowrap">HSN/SAC <span className="normal-case text-slate-300">(Optional)</span></span>
+                          <Input value={ln.hsn_sac || ""} onChange={(e) => upd(i, "hsn_sac", e.target.value)} placeholder="Enter HSN/SAC" className="rounded-lg h-8 text-xs flex-1 min-w-0" data-testid={`line-hsn-${i}`} />
+                        </div>
+                      </td>
+                      <td className="px-2 py-3"><Input type="number" value={ln.qty} onChange={(e) => upd(i, "qty", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-qty-${i}`} /></td>
+                      <td className="px-2 py-3">
+                        <select value={ln.unit} onChange={(e) => upd(i, "unit", e.target.value)} className={inputCls} data-testid={`line-unit-${i}`}>{unitsFor(ln.item_id).map((u) => <option key={u}>{u}</option>)}</select>
+                      </td>
+                      <td className="px-2 py-3"><Input type="number" value={ln.unit_price} onChange={(e) => upd(i, "unit_price", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-rate-${i}`} /></td>
+                      <td className="px-2 py-3"><Input type="number" value={ln.discount} onChange={(e) => upd(i, "discount", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-disc-${i}`} /></td>
+                      <td className="px-2 py-3">
+                        <select value={String(ln.gst_rate ?? "")} onChange={(e) => upd(i, "gst_rate", e.target.value)} className={inputCls} data-testid={`line-gst-${i}`}>
+                          {[...new Set([...GST_RATE_OPTIONS, String(ln.gst_rate ?? "")])].filter((x) => x !== "").map((r) => <option key={r} value={r}>{r}%</option>)}
+                        </select>
+                      </td>
+                      <td className="px-2 py-3"><Input type="number" value={ln.accepted_qty} onChange={(e) => upd(i, "accepted_qty", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-acc-${i}`} /></td>
+                      <td className="px-3 py-3 text-right font-bold text-slate-900 num whitespace-nowrap" data-testid={`line-total-${i}`}>{inr(lineTotal(ln))}</td>
+                      <td className="px-2 py-3 text-center"><Button size="sm" variant="outline" onClick={() => rmLine(i)} className="rounded-lg h-8 w-8 p-0 text-rose-600 border-rose-200 hover:bg-rose-50" data-testid={`line-rm-${i}`}><Trash2 size={14} /></Button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Button size="sm" variant="outline" onClick={addLine} className="rounded-lg gap-1.5 mt-3 text-blue-600 border-blue-200 hover:bg-blue-50 font-semibold" data-testid="add-line"><Plus size={15} /> Add Line</Button>
+          </div>
+
+          {/* Amount summary */}
+          <div className="rounded-xl bg-slate-50 border border-slate-200 p-4">
+            <div className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide mb-3">Amount Summary</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 items-stretch">
+              <div data-testid="receipt-subtotal"><div className="text-xs text-slate-500">Subtotal</div><div className="text-xl font-bold text-slate-900 num mt-0.5">{inr(subtotal)}</div></div>
+              <div data-testid="receipt-discount"><div className="text-xs text-slate-500">Total Discount</div><div className="text-xl font-bold text-slate-900 num mt-0.5">{inr(totalDiscount)}</div></div>
+              <div data-testid="receipt-gst"><div className="text-xs text-slate-500">Total GST{gstLabel}</div><div className="text-xl font-bold text-slate-900 num mt-0.5">{inr(totalGst)}</div></div>
+              <div className="rounded-lg bg-blue-600 text-white p-3.5 shadow-sm" data-testid="receipt-grand-total">
+                <div className="text-[10px] uppercase font-semibold text-blue-100 tracking-wide flex items-center justify-between">Grand Total <RefreshCw size={12} className="opacity-80" /></div>
+                <div className="text-2xl font-black num mt-0.5 leading-tight">{inr(grandTotal)}</div>
+                <div className="text-[10px] text-blue-100">(Updates automatically)</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Shop bill upload */}
+          <div>
+            <Label>Shop Bill <span className="text-slate-400 normal-case">(upload — optional)</span></Label>
+            <label className="flex items-center gap-3 cursor-pointer border border-dashed border-slate-300 rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors" data-testid="receipt-bill-upload">
+              <Upload size={20} className="text-slate-400" />
+              <div>
+                <div className="text-sm font-semibold text-slate-700">{uploading ? "Uploading…" : "Attach bill (PDF/Image)"}</div>
+                <div className="text-[11px] text-slate-400">Supported formats: PDF, JPG, PNG · Max size: 5MB</div>
+              </div>
               <input type="file" className="hidden" accept=".pdf,image/*" disabled={uploading} onChange={(e) => uploadBill(e.target.files?.[0])} />
             </label>
-            {(f.attachments || []).map((att, i) => (
-              <span key={i} className="inline-flex items-center gap-1 text-[11px] bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-2 py-1" data-testid={`receipt-att-chip-${i}`}>
-                <FileText size={11} /> {att.filename}
-                <button onClick={() => rmAtt(i)} className="ml-1 text-rose-500 hover:text-rose-700"><X size={11} /></button>
-              </span>
-            ))}
+            {(f.attachments || []).length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap mt-2">
+                {(f.attachments || []).map((att, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 text-[11px] bg-blue-50 border border-blue-200 text-blue-700 rounded-md px-2 py-1" data-testid={`receipt-att-chip-${i}`}>
+                    <FileText size={11} /> {att.filename}
+                    <button onClick={() => rmAtt(i)} className="ml-1 text-rose-500 hover:text-rose-700"><X size={11} /></button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         </div>
-        <DialogFooter>
+
+        <DialogFooter className="px-6 py-4 border-t border-slate-100 bg-slate-50/50">
           <Button variant="outline" onClick={onClose} className="rounded-lg">Cancel</Button>
-          <Button onClick={save} disabled={busy} className="brand-btn rounded-lg gap-1" data-testid="save-receipt"><Check size={14} /> {busy ? "Saving…" : "Create Receipt"}</Button>
+          <Button onClick={save} disabled={busy} className="brand-btn rounded-lg gap-1.5" data-testid="save-receipt"><Check size={16} /> {busy ? "Saving…" : "Create Receipt"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
