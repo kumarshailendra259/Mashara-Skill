@@ -12356,14 +12356,25 @@ async def list_payroll_batches(
 @api.get("/payroll-batches/{batch_id}")
 async def get_payroll_batch(batch_id: str, user=Depends(require_role("admin", "hr", "accountant", "senior_manager", "manager", "center_manager", "center_staff", "partner"))):
     b = await _payroll_batch_out(batch_id)
-    # Phase 65 — IDOR guard. Scoped users MUST be mapped to the batch's center.
+    # Phase 65 — IDOR guard. Scoped users MUST be mapped to the batch's center,
+    # UNLESS they are a legitimate participant in the batch's approval/payment:
+    #  • a current-step approver (the one-screen Approve+Pay accountant is here),
+    #  • someone who already acted on an earlier step (so they can still review),
+    #  • an Accountant when the batch is in a payer state — payroll payment is a
+    #    central accounts function and the /pay endpoint itself is NOT center-scoped.
     await _enrich_user_with_associations(user)
     allowed = _scoped_center_ids(user)
     if allowed is not None:
-        if b.get("center_id") and b["center_id"] not in allowed:
-            raise HTTPException(403, "Not authorised to view this payroll batch")
-        if not b.get("center_id"):
-            # center_id=null (Unassigned) → head-level only.
+        in_scope = bool(b.get("center_id") and b["center_id"] in allowed)
+        is_current_approver = await _user_can_act_on_request(user, b)
+        acted_before = any(
+            h.get("by_user_id") == user["id"] for h in (b.get("chain_history") or [])
+        )
+        is_payer = (
+            user.get("role") == "accountant"
+            and b.get("status") in ("pending_payment", "partially_paid", "paid")
+        )
+        if not (in_scope or is_current_approver or acted_before or is_payer):
             raise HTTPException(403, "Not authorised to view this payroll batch")
     return b
 

@@ -1057,6 +1057,7 @@ export default function PendingApprovals() {
                       <thead className="sticky top-0 bg-slate-100 text-slate-600 uppercase text-[9px]">
                         <tr>
                           <th className="text-left px-2 py-1 font-bold">Employee</th>
+                          <th className="text-left px-2 py-1 font-bold">A/C No · IFSC</th>
                           <th className="text-right px-2 py-1 font-bold">Gross</th>
                           <th className="text-right px-2 py-1 font-bold">Deductions</th>
                           <th className="text-right px-2 py-1 font-bold">Net</th>
@@ -1068,6 +1069,11 @@ export default function PendingApprovals() {
                             <td className="px-2 py-1">
                               <b className="text-slate-800">{r.staff_name || r.staff_id?.slice(0, 8)}</b>
                               {r.employee_code && <span className="text-slate-400 ml-1">{r.employee_code}</span>}
+                            </td>
+                            <td className="px-2 py-1 whitespace-nowrap" data-testid={`breakdown-acct-${r.staff_id}`}>
+                              {r.bank_account_no_masked
+                                ? <span className="font-mono text-slate-700">{r.bank_account_no_masked}{r.ifsc ? <span className="text-slate-400"> · {r.ifsc}</span> : null}</span>
+                                : <span className="text-amber-600">No bank details</span>}
                             </td>
                             <td className="px-2 py-1 text-right num text-slate-700">{inr(r.gross)}</td>
                             <td className="px-2 py-1 text-right num text-rose-600">{inr(r.deductions)}</td>
