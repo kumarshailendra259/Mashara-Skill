@@ -22,7 +22,7 @@ import {
   Plus, Pencil, Trash2, Download, Upload, Paperclip, List, CheckSquare,
   Search, Filter, X, ChevronDown, ChevronLeft, ChevronRight, Eye, Check, Ban,
   FileText, Clock, Building2, Rows, LayoutGrid, TrendingUp, TrendingDown,
-  Wallet, CircleCheck, CircleX, Hourglass, ListChecks, ArrowRightLeft,
+  Wallet, CircleCheck, CircleX, Hourglass, ListChecks, ArrowRightLeft, RefreshCw,
 } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import FYSwitcher from "@/components/FYSwitcher";
@@ -75,6 +75,8 @@ export default function Transactions() {
   const myPartnerId = user?.assigned_partner_id || null;
   const [entities, setEntities] = useState({ company: [], partner: [], center: [], project: [] });
   const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);   // initial / filter-change fetch (content skeleton)
+  const [error, setError] = useState(null);        // last fetch error (surfaced, never silently swallowed)
   // Server-side filters (everything EXCEPT status, which we handle client-side
   // so the KPI counts stay accurate regardless of the active status card).
   const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
@@ -116,17 +118,31 @@ export default function Transactions() {
     return p;
   }, [filters, pendingMyApproval, fy]);
 
-  const load = () => api.get("/transactions", { params }).then((r) => {
-    const list = r.data || [];
-    if (pendingMyApproval && isPartner && myPartnerId) {
-      setItems(list.filter((it) =>
-        it.status === "pending" && it.created_by !== user.id &&
-        it.partner_id && it.partner_id !== myPartnerId
-      ));
-    } else {
-      setItems(list);
-    }
-  });
+  // `background` keeps the current rows mounted (used after mutations / silent
+  // refresh) so the table never flashes empty; the initial & filter-change
+  // fetches show the content skeleton. API errors are surfaced (error state +
+  // toast) and NEVER converted into a false empty list.
+  const load = (background = false) => {
+    if (!background) setLoading(true);
+    setError(null);
+    return api.get("/transactions", { params }).then((r) => {
+      const list = Array.isArray(r.data) ? r.data : [];
+      if (pendingMyApproval && isPartner && myPartnerId) {
+        setItems(list.filter((it) =>
+          it.status === "pending" && it.created_by !== user.id &&
+          it.partner_id && it.partner_id !== myPartnerId
+        ));
+      } else {
+        setItems(list);
+      }
+    }).catch((e) => {
+      const msg = formatError(e);
+      setError(msg);
+      if (background) toast.error(msg);  // keep existing rows visible, surface the failure
+    }).finally(() => {
+      if (!background) setLoading(false);
+    });
+  };
 
   const nameOf = (etype, id) => entities[etype].find((e) => e.id === id)?.name || "—";
 
@@ -180,16 +196,16 @@ export default function Transactions() {
   const sortIcon = (field) => (sort.field !== field ? "↕" : sort.dir === "asc" ? "↑" : "↓");
 
   const approveTxn = async (id) => {
-    try { await api.post(`/transactions/${id}/approve`); load(); toast.success("Approved"); setDrawer(null); }
+    try { await api.post(`/transactions/${id}/approve`); load(true); toast.success("Approved"); setDrawer(null); }
     catch (e) { toast.error(formatError(e)); }
   };
   const rejectTxn = async (id) => {
     const reason = window.prompt("Reason (optional):") || "";
-    try { await api.post(`/transactions/${id}/reject`, { reason }); load(); toast.success("Rejected"); setDrawer(null); }
+    try { await api.post(`/transactions/${id}/reject`, { reason }); load(true); toast.success("Rejected"); setDrawer(null); }
     catch (e) { toast.error(formatError(e)); }
   };
   const partnerApproveTxn = async (id) => {
-    try { await api.post(`/transactions/${id}/partner-approve`); load(); toast.success("Approved (partner cross-approval)"); setDrawer(null); }
+    try { await api.post(`/transactions/${id}/partner-approve`); load(true); toast.success("Approved (partner cross-approval)"); setDrawer(null); }
     catch (e) { toast.error(formatError(e)); }
   };
   const canPartnerCrossApprove = (it) => {
@@ -208,7 +224,7 @@ export default function Transactions() {
   const bulkApprove = async () => {
     const ids = Array.from(selected).filter((id) => eligibleIds.includes(id));
     if (ids.length === 0) { toast.error("Nothing to approve"); return; }
-    try { const { data } = await api.post("/transactions/bulk-approve", { ids }); setSelected(new Set()); await load(); toast.success(`Approved ${data.approved} transaction${data.approved === 1 ? "" : "s"}`); }
+    try { const { data } = await api.post("/transactions/bulk-approve", { ids }); setSelected(new Set()); await load(true); toast.success(`Approved ${data.approved} transaction${data.approved === 1 ? "" : "s"}`); }
     catch (e) { toast.error(formatError(e)); }
   };
 
@@ -219,7 +235,7 @@ export default function Transactions() {
     try {
       const ids = Array.from(selected);
       const { data } = await api.post("/transactions/bulk-delete", { ids });
-      setSelected(new Set()); setBulkDeleteOpen(false); await load();
+      setSelected(new Set()); setBulkDeleteOpen(false); await load(true);
       toast.success(`Deleted ${data.deleted} transaction${data.deleted === 1 ? "" : "s"}`);
     } catch (e) { toast.error(formatError(e)); }
     finally { setBulkDeleteBusy(false); }
@@ -290,7 +306,7 @@ export default function Transactions() {
     setItems((cur) => cur.filter((x) => x.id !== it.id));
     setDrawer(null);
     try { await api.delete(`/transactions/${it.id}`); toast.success("Deleted"); }
-    catch (e) { toast.error(formatError(e)); load(); }
+    catch (e) { toast.error(formatError(e)); load(true); }
     finally { setDeleting((s) => { const n = new Set(s); n.delete(it.id); return n; }); }
   };
 
@@ -314,7 +330,7 @@ export default function Transactions() {
     try {
       const { data } = await api.post("/transactions/import", fd, { headers: { "Content-Type": "multipart/form-data" } });
       toast.success(`Imported ${data.inserted}` + (data.errors?.length ? ` (${data.errors.length} errors)` : ""));
-      loadEntities(); load();
+      loadEntities(); load(true);
     } catch (err) { toast.error(formatError(err)); }
     finally { e.target.value = ""; }
   };
@@ -422,6 +438,9 @@ export default function Transactions() {
   };
 
   const colCount = 5 + (isAdmin ? 1 : 0) + (view !== "compact" ? 1 : 0) + (canEdit ? 1 : 0);
+  const kpiLoading = loading && items.length === 0;
+  const hasActiveFilters = activeChips.length > 0 || pendingMyApproval || (fy && fy !== "all");
+  const Skel = ({ w = "w-10" }) => <span className={`inline-block h-5 ${w} bg-slate-200 rounded animate-pulse align-middle`} />;
   const groups = useMemo(() => {
     if (view !== "grouped") return null;
     const order = ["pending", "approved", "rejected"];
@@ -468,12 +487,22 @@ export default function Transactions() {
 
       {/* KPI cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
-        <KPI id="total" icon={ListChecks} label="Total Transactions" value={kpis.total} tone="bg-blue-50 text-blue-600" active={!statusFilter && !filters.type} onClick={() => { setStatusFilter(""); setF("type", ""); }} />
-        <KPI id="expense" icon={Wallet} label="Total Expense" value={inr(kpis.expense)} tone="bg-rose-50 text-rose-600" active={filters.type === "expense"} onClick={() => setF("type", filters.type === "expense" ? "" : "expense")} />
-        <KPI id="pending" icon={Hourglass} label="Pending Approval" value={kpis.pending} tone="bg-amber-50 text-amber-600" active={statusFilter === "pending"} onClick={() => setStatusFilter(statusFilter === "pending" ? "" : "pending")} />
-        <KPI id="approved" icon={CircleCheck} label="Approved" value={kpis.approved} tone="bg-emerald-50 text-emerald-600" active={statusFilter === "approved"} onClick={() => setStatusFilter(statusFilter === "approved" ? "" : "approved")} />
-        <KPI id="rejected" icon={CircleX} label="Rejected" value={kpis.rejected} tone="bg-rose-50 text-rose-600" active={statusFilter === "rejected"} onClick={() => setStatusFilter(statusFilter === "rejected" ? "" : "rejected")} />
+        <KPI id="total" icon={ListChecks} label="Total Transactions" value={kpiLoading ? <Skel /> : kpis.total} tone="bg-blue-50 text-blue-600" active={!statusFilter && !filters.type} onClick={() => { setStatusFilter(""); setF("type", ""); }} />
+        <KPI id="expense" icon={Wallet} label="Total Expense" value={kpiLoading ? <Skel w="w-20" /> : inr(kpis.expense)} tone="bg-rose-50 text-rose-600" active={filters.type === "expense"} onClick={() => setF("type", filters.type === "expense" ? "" : "expense")} />
+        <KPI id="pending" icon={Hourglass} label="Pending Approval" value={kpiLoading ? <Skel /> : kpis.pending} tone="bg-amber-50 text-amber-600" active={statusFilter === "pending"} onClick={() => setStatusFilter(statusFilter === "pending" ? "" : "pending")} />
+        <KPI id="approved" icon={CircleCheck} label="Approved" value={kpiLoading ? <Skel /> : kpis.approved} tone="bg-emerald-50 text-emerald-600" active={statusFilter === "approved"} onClick={() => setStatusFilter(statusFilter === "approved" ? "" : "approved")} />
+        <KPI id="rejected" icon={CircleX} label="Rejected" value={kpiLoading ? <Skel /> : kpis.rejected} tone="bg-rose-50 text-rose-600" active={statusFilter === "rejected"} onClick={() => setStatusFilter(statusFilter === "rejected" ? "" : "rejected")} />
       </div>
+
+      {/* Background-refresh error banner — shown only when we still have rows on
+          screen (initial-load failures render in the table with a Retry). */}
+      {error && items.length > 0 && (
+        <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg px-3 py-2 text-sm" data-testid="txn-refresh-error">
+          <CircleX size={15} />
+          <span className="flex-1">Couldn’t refresh transactions: {error}</span>
+          <Button size="sm" variant="outline" onClick={() => load()} className="rounded-lg h-7 gap-1.5 border-rose-300 text-rose-700" data-testid="txn-refresh-retry"><RefreshCw size={13} /> Retry</Button>
+        </div>
+      )}
 
       {isPartner && (
         <div className="flex items-center gap-2 border-l-2 border-[var(--brand)] bg-blue-50 px-3 py-2 rounded-r-lg">
@@ -563,8 +592,27 @@ export default function Transactions() {
               </tr>
             </thead>
             <tbody>
-              {filtered.length === 0 ? (
-                <tr><td colSpan={colCount} className="text-center py-12 text-slate-400">{t("no_data")}</td></tr>
+              {loading && items.length === 0 ? (
+                Array.from({ length: 6 }).map((_, i) => (
+                  <tr key={`sk-${i}`} data-testid="txn-skeleton-row">
+                    {Array.from({ length: colCount }).map((__, j) => (
+                      <td key={j} className={rowPad}><div className="h-4 bg-slate-100 rounded animate-pulse" /></td>
+                    ))}
+                  </tr>
+                ))
+              ) : error && items.length === 0 ? (
+                <tr><td colSpan={colCount} className="py-14">
+                  <div className="flex flex-col items-center gap-3 text-center" data-testid="txn-error-state">
+                    <span className="w-12 h-12 rounded-full bg-rose-50 flex items-center justify-center"><CircleX className="text-rose-500" size={24} /></span>
+                    <div className="text-sm font-medium text-slate-700">Couldn’t load transactions</div>
+                    <div className="text-xs text-slate-400 max-w-md">{error}</div>
+                    <Button variant="outline" size="sm" onClick={() => load()} className="rounded-lg gap-2" data-testid="txn-retry"><RefreshCw size={14} /> Retry</Button>
+                  </div>
+                </td></tr>
+              ) : filtered.length === 0 ? (
+                <tr><td colSpan={colCount} className="text-center py-12 text-slate-400" data-testid="txn-empty-state">
+                  {hasActiveFilters ? "No transactions found for the selected filters." : t("no_data")}
+                </td></tr>
               ) : view === "grouped" ? (
                 groups.map((g) => (
                   <React.Fragment key={g.status}>

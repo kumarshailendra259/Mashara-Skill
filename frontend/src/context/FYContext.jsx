@@ -26,6 +26,10 @@ export function FYProvider({ children }) {
     setApiFy(val); // synchronous — module var updated BEFORE any refetch fires
     try { localStorage.setItem(KEY, val); } catch { /* ignore */ }
     _setFy(val);
+    // Per user preference: changing the Financial Year does a full refresh so
+    // every page/module re-fetches cleanly for the selected FY. The value is
+    // already persisted to localStorage above, so the reload picks it up.
+    if (typeof window !== "undefined") window.location.reload();
   }, []);
 
   return (

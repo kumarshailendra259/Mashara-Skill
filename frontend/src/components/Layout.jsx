@@ -23,16 +23,6 @@ import CompanySwitcher from "@/components/CompanySwitcher";
 import FYSwitcher from "@/components/FYSwitcher";
 import TrialBanner from "@/components/TrialBanner";
 
-// Force a FULL browser page reload for menu/submenu navigation (instead of
-// client-side SPA routing) so every destination fetches fresh backend data.
-// Modifier / middle clicks fall through to the browser (open-in-new-tab stays
-// intact). URLs, query params and route mappings are preserved verbatim.
-function hardNavigate(e, to) {
-  if (e && (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1)) return;
-  if (e && e.preventDefault) e.preventDefault();
-  window.location.assign(to);
-}
-
 // Grouped sidebar structure (exact order per product spec).
 // Each group has: key (i18n), icon, and items (each item preserves its own
 // role-gate flag exactly as before — RBAC filtering is unchanged).
@@ -232,7 +222,7 @@ function SidebarBody({ t, visibleGroups, badgeFor, onNavigate, companyLine, expa
                         key={it.to}
                         to={it.to}
                         end={it.end}
-                        onClick={(e) => { if (onNavigate) onNavigate(); hardNavigate(e, it.to); }}
+                        onClick={onNavigate}
                         data-testid={`nav-${it.key}`}
                         className={({ isActive }) =>
                           `sb-link flex items-center gap-3 pl-9 pr-3 py-2 text-[13px] rounded-lg mx-2 ${isActive ? "sb-link-active font-semibold" : "font-medium"} ${isLocked && !isActive ? "opacity-60" : ""}`
@@ -319,7 +309,7 @@ export default function Layout({ children }) {
         unread: Math.max(0, s.unread - 1),
       }));
     }
-    if (n.link) window.location.assign(n.link);
+    if (n.link) nav(n.link);
   };
 
   const badgeFor = (key) => {
@@ -514,7 +504,7 @@ export default function Layout({ children }) {
             {totalApprovalBadge > 0 && (
               <button
                 type="button"
-                onClick={() => window.location.assign("/pending-approvals")}
+                onClick={() => nav("/pending-approvals")}
                 data-testid="pending-requests-pill"
                 title="Pending requests"
                 className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors"
@@ -653,7 +643,7 @@ export default function Layout({ children }) {
                     <div className="mt-6 flex items-center justify-center gap-3">
                       <button
                         type="button"
-                        onClick={() => window.location.assign("/subscription")}
+                        onClick={() => nav("/subscription")}
                         className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-md hover:bg-blue-700 transition-colors"
                         data-testid="locked-goto-subscription"
                       >
@@ -661,7 +651,7 @@ export default function Layout({ children }) {
                       </button>
                       <button
                         type="button"
-                        onClick={() => window.location.assign("/")}
+                        onClick={() => nav("/")}
                         className="inline-flex items-center gap-2 px-4 py-2 border border-slate-200 text-slate-600 text-sm font-medium rounded-md hover:bg-slate-50 transition-colors"
                         data-testid="locked-goto-home"
                       >
@@ -692,7 +682,6 @@ export default function Layout({ children }) {
                 key={tab.to}
                 to={tab.to}
                 end={tab.end}
-                onClick={(e) => hardNavigate(e, tab.to)}
                 data-testid={`mobile-tab-${tab.key}`}
                 className={({ isActive }) =>
                   `flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium relative transition-colors ${

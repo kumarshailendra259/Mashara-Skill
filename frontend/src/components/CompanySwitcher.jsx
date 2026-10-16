@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,7 +15,6 @@ import { Building2, Check, ChevronDown } from "lucide-react";
  */
 export default function CompanySwitcher() {
   const { scope, companies, switchCompany, isSuperCompanies } = useAuth();
-  const nav = useNavigate();
   const [busy, setBusy] = useState(false);
 
   // Super Admin is global — no per-company switch here. Only multi-company
@@ -35,7 +33,9 @@ export default function CompanySwitcher() {
     if (res.ok) {
       const c = companies.find((x) => x.id === companyId);
       toast.success(`Switched to ${c?.name || "company"}`);
-      nav("/", { replace: true });
+      // Hard refresh so every page/module reloads with the new company's data
+      // and scope (per user preference: Company switch = full refresh).
+      window.location.assign("/");
     } else {
       toast.error(res.error || "Could not switch company");
     }
