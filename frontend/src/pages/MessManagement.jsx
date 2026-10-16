@@ -392,10 +392,17 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, onCreate, onChan
   const downloadBill = async (r) => {
     try {
       const resp = await api.get(`/mess/receipts/${r.id}/bill`, { responseType: "blob" });
-      const url = URL.createObjectURL(resp.data);
-      const a = document.createElement("a");
-      a.href = url; a.download = `${r.bill_no || "mess-bill"}.pdf`; a.click();
-      URL.revokeObjectURL(url);
+      const blob = resp.data;
+      const type = blob.type || "application/pdf";
+      const isPdf = type.includes("pdf");
+      const url = URL.createObjectURL(blob);
+      if (isPdf) {
+        window.open(url, "_blank");              // view the PDF inline
+      } else {
+        const a = document.createElement("a");   // DOCX fallback → download so it opens in Word
+        a.href = url; a.download = `${r.bill_no || "mess-bill"}.docx`; a.click();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
     } catch (e) { toast.error(formatError(e)); }
   };
   const viewAttachment = async (att) => {

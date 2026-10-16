@@ -8299,15 +8299,54 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             }
         elif body.request_type == "mess_payment":
             now = datetime.now(timezone.utc).isoformat()
+            # Accountant (final approver) picks the SOURCE bank/cash account to
+            # debit and confirms the center/partner allocation for the expense.
+            acct = await _require_bank_account_if_configured(body.bank_account_id)
+            eff_center_id = body.txn_center_id or rec.get("center_id")
+            _mp_center = await db.centers.find_one({"id": eff_center_id}, {"_id": 0, "name": 1}) if eff_center_id else None
+            eff_center_name = (_mp_center or {}).get("name") or rec.get("center_name")
+            eff_partner_id = body.txn_partner_id
+            if eff_partner_id is None and eff_center_id:
+                eff_partner_id = (await _derive_context_for_center(eff_center_id)).get("partner_id")
+            pay_date = rec.get("payment_date") or now[:10]
+            pay_amt = float(rec.get("actual_amount") or rec.get("amount") or 0)
+            bank_txn_id = None
+            if acct and pay_amt > 0:
+                _ledger = await _post_bank_ledger(
+                    account_id=acct["id"], direction="debit", amount=pay_amt,
+                    source="mess_payment", source_id=rec.get("id"),
+                    remarks=(f"Mess Payment · Inv {rec.get('invoice_no','')} · {rec.get('supplier_name','')}"
+                             + (f" · {body.remarks}" if body.remarks else "")),
+                    vendor_name=rec.get("supplier_name"),
+                    center_id=eff_center_id, center_name=eff_center_name,
+                    date=pay_date, user=user,
+                )
+                bank_txn_id = _ledger["id"]
+            # Re-allocate the linked expense txn (created at receipt approval) to the
+            # accountant's chosen center/partner and link the bank debit.
+            _mp_receipt = await db.mess_receipts.find_one({"id": rec.get("receipt_id")}, {"_id": 0, "expense_txn_id": 1})
+            if _mp_receipt and _mp_receipt.get("expense_txn_id"):
+                _exp_upd = {"center_id": eff_center_id, "center_name": eff_center_name}
+                if eff_partner_id is not None:
+                    _exp_upd["partner_id"] = eff_partner_id
+                if acct:
+                    _exp_upd["bank_account_id"] = acct["id"]
+                    _exp_upd["bank_txn_id"] = bank_txn_id
+                await db.transactions.update_one(
+                    {"id": _mp_receipt["expense_txn_id"]}, {"$set": _exp_upd})
             _bill = await _mess_finalize_payment(rec, user)
             update = {
                 "current_level": 0,
                 "chain_history": history,
                 "status": "paid",
                 "paid_at": now,
-                "paid_by": user["id"],
-                "paid_by_name": rec.get("paid_by_name") or user.get("name") or user.get("email"),
+                "paid_by": body.paid_by_user_id or user["id"],
+                "paid_by_name": body.paid_by_name or rec.get("paid_by_name") or user.get("name") or user.get("email"),
                 "payment_status": "paid",
+                "center_id": eff_center_id, "center_name": eff_center_name,
+                "partner_id": eff_partner_id,
+                "bank_account_id": (acct or {}).get("id"),
+                "bank_txn_id": bank_txn_id,
                 "bill_pdf_path": (_bill or {}).get("file_path"),
                 "bill_no": (_bill or {}).get("bill_no"),
             }
@@ -25626,7 +25665,10 @@ async def _mess_finalize_payment(payment: dict, user: dict) -> Optional[dict]:
     if bill:
         upd["bill_pdf_path"] = bill["file_path"]
         upd["bill_no"] = bill["bill_no"]
-        upd["bill_pdf_filename"] = f"{bill['bill_no']}.pdf"
+        _ct = bill.get("content_type") or "application/pdf"
+        _ext = "pdf" if _ct == "application/pdf" else "docx"
+        upd["bill_content_type"] = _ct
+        upd["bill_pdf_filename"] = f"{bill['bill_no']}.{_ext}"
     await db.mess_receipts.update_one({"id": receipt["id"]}, {"$set": upd})
     return bill
 
@@ -25704,8 +25746,22 @@ async def mess_download_bill(receipt_id: str, user=Depends(require_role(*MESS_VI
         data, _ct = _get_object(path)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, f"Bill fetch failed: {str(e)[:120]}") from e
-    return Response(content=data, media_type="application/pdf",
-                    headers={"Content-Disposition": f'inline; filename="{rec.get("bill_no") or "mess-bill"}.pdf"'})
+    # Serve with the ACTUAL file type sniffed from the bytes. A DOCX fallback
+    # (produced when LibreOffice PDF conversion was unavailable at generation
+    # time) must NOT be mislabelled as a PDF — that is what made the browser
+    # show "Failed to load PDF document".
+    bill_no = rec.get("bill_no") or "mess-bill"
+    if data[:4] == b"%PDF":
+        media, ext, disp = "application/pdf", "pdf", "inline"
+    elif data[:2] == b"PK":
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ext, disp = "docx", "attachment"
+    else:
+        media = rec.get("bill_content_type") or "application/pdf"
+        ext = "pdf" if media == "application/pdf" else "docx"
+        disp = "inline" if ext == "pdf" else "attachment"
+    return Response(content=data, media_type=media,
+                    headers={"Content-Disposition": f'{disp}; filename="{bill_no}.{ext}"'})
 
 
 # ---------- Mess Bill Templates (HR Settings) ----------

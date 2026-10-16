@@ -295,6 +295,7 @@ export default function PendingApprovals() {
       item.request_type === "payment"
       || item.request_type === "reimbursement"
       || item.request_type === "advance_request"
+      || item.request_type === "mess_payment"
     )) {
       // Lazy fetch — cache once loaded so subsequent dialogs stay snappy.
       if (payers.length === 0) {
@@ -328,9 +329,15 @@ export default function PendingApprovals() {
     acting && acting.action === "approve" && acting.item.is_final_step &&
     (acting.item.request_type === "payment"
      || acting.item.request_type === "reimbursement"
-     || acting.item.request_type === "advance_request")
+     || acting.item.request_type === "advance_request"
+     || acting.item.request_type === "mess_payment")
   );
-  const paidByOptional = acting?.item?.request_type === "advance_request";
+  // Paid By is optional for advance (captured at Release) and mess payment
+  // (already captured when the payment was raised) — accountant mainly confirms
+  // Center / Partner / Bank there.
+  const paidByOptional = ["advance_request", "mess_payment"].includes(acting?.item?.request_type);
+  // Center must be chosen for payment / reimbursement / mess_payment.
+  const centerMandatory = needsPaidBy && ["payment", "reimbursement", "mess_payment"].includes(acting?.item?.request_type);
 
   // One-screen Approve+Pay flag — true when an Accounts/Admin user is finalising
   // a payroll batch (payment form shown + "Approve & Record Payment").
@@ -396,15 +403,15 @@ export default function PendingApprovals() {
       toast.error("Please select who is making the payment (Paid By is mandatory)");
       return;
     }
-    if (needsPaidBy && !txnCenterId && !paidByOptional) {
+    if (needsPaidBy && !txnCenterId && centerMandatory) {
       toast.error("Please select the Center for this payment");
       return;
     }
-    // Bank/Cash Reconciliation: payment / reimbursement final approvals must
-    // debit a specific account (once at least one is configured).
+    // Bank/Cash Reconciliation: payment / reimbursement / mess payment final
+    // approvals must debit a specific account (once at least one is configured).
     const needsBankAccount = (
       needsPaidBy &&
-      (acting.item.request_type === "payment" || acting.item.request_type === "reimbursement") &&
+      (acting.item.request_type === "payment" || acting.item.request_type === "reimbursement" || acting.item.request_type === "mess_payment") &&
       bankAccounts.length > 0
     );
     if (needsBankAccount && !bankAccountId) {
@@ -967,12 +974,12 @@ export default function PendingApprovals() {
               {needsPaidBy && (
                 <div className="border border-emerald-300 bg-emerald-50/60 p-3 space-y-3" data-testid="paid-by-block">
                   <div className="overline font-bold text-emerald-900">
-                    Payment attribution {paidByOptional ? "(optional — can be filled at Release)" : "(mandatory)"}
+                    Payment attribution {centerMandatory ? "(mandatory)" : "(optional — can be filled at Release)"}
                   </div>
 
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Center {paidByOptional ? "" : "*"}</div>
+                      <div className="text-[10px] uppercase text-emerald-900 mb-1">Center {centerMandatory ? "*" : ""}</div>
                       <select
                         value={txnCenterId}
                         onChange={(e) => { setTxnCenterId(e.target.value); loadCenterPartners(e.target.value); }}
@@ -1019,7 +1026,7 @@ export default function PendingApprovals() {
                       ))}
                     </select>
                   </div>
-                  {(acting.item.request_type === "payment" || acting.item.request_type === "reimbursement") && bankAccounts.length > 0 && (
+                  {(acting.item.request_type === "payment" || acting.item.request_type === "reimbursement" || acting.item.request_type === "mess_payment") && bankAccounts.length > 0 && (
                     <div>
                       <div className="text-[10px] uppercase text-emerald-900 mb-1">Bank / Cash Account (kis account se paisa jayega) *</div>
                       <select
@@ -1036,9 +1043,11 @@ export default function PendingApprovals() {
                     </div>
                   )}
                   <div className="text-[10px] text-emerald-900/80">
-                    {paidByOptional
+                    {acting.item.request_type === "advance_request"
                       ? "Advance approval hai — abhi Center/Partner/Paid-By skip kar sakte hain, Release step par bhi enter kar sakte hain. Enter karne pe automatically release txn me stamp ho jayega."
-                      : "Center, Partner aur Paid By — teenon auto-created transaction pe stamp ho jayenge, jisse Dashboard mein sahi center/partner filter ke saath update dikhega."}
+                      : acting.item.request_type === "mess_payment"
+                        ? "Center, Partner aur Bank account — ye mess expense par stamp honge aur selected account ka ledger debit hoga (balance kam hoga)."
+                        : "Center, Partner aur Paid By — teenon auto-created transaction pe stamp ho jayenge, jisse Dashboard mein sahi center/partner filter ke saath update dikhega."}
                   </div>
                 </div>
               )}

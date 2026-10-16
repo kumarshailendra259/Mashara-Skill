@@ -504,9 +504,17 @@ def build_mess_bill_pdf(receipt: dict, payment: Optional[dict], company: Optiona
 
 
 def _docx_to_pdf(docx_path: str, out_dir: str) -> Optional[str]:
+    # A private, per-call UserInstallation profile is critical on headless
+    # servers: without it concurrent soffice runs (salary slip / offer letter /
+    # mess bill) collide on the shared ~/.config profile lock and the conversion
+    # silently fails — which is exactly why production fell back to DOCX.
     try:
-        subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
-                       check=True, capture_output=True, timeout=60)
+        profile = "file://" + os.path.join(out_dir, "_lo_profile")
+        subprocess.run(
+            ["libreoffice", f"-env:UserInstallation={profile}",
+             "--headless", "--norestore", "--nolockcheck",
+             "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+            check=True, capture_output=True, timeout=90)
         for f in os.listdir(out_dir):
             if f.endswith(".pdf"):
                 return os.path.join(out_dir, f)
