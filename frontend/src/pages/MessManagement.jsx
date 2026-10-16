@@ -171,7 +171,7 @@ export default function MessManagement() {
       {tab === "stock" && <StockTab stock={stock} loading={loading} />}
 
       {tab === "receipts" && <ReceiptsTab receipts={receipts} loading={loading} canEntry={canEntry}
-        canApprove={canApprove} onCreate={() => setReceiptDlg(true)} onChanged={refresh} centerName={centerName} />}
+        canApprove={canApprove} canRegen={["admin", "accountant"].includes(user?.role)} onCreate={() => setReceiptDlg(true)} onChanged={refresh} centerName={centerName} />}
 
       {tab === "consumption" && <ConsumptionTab rows={consumption} loading={loading} canEntry={canEntry}
         onAdd={() => setConsDlg("consumption")} />}
@@ -380,8 +380,20 @@ function StockTab({ stock, loading }) {
 }
 
 /* ---------------- Receipts ---------------- */
-function ReceiptsTab({ receipts, loading, canEntry, canApprove, onCreate, onChanged, centerName }) {
+function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCreate, onChanged, centerName }) {
   const [payFor, setPayFor] = useState(null);
+  const [regenId, setRegenId] = useState(null);
+  const regenBill = async (r) => {
+    setRegenId(r.id);
+    try {
+      const { data } = await api.post(`/mess/receipts/${r.id}/regenerate-bill`);
+      toast.success(data.used_template
+        ? `Bill ${data.bill_no} regenerated as PDF from your template`
+        : `Bill ${data.bill_no} regenerated as PDF (default layout — template PDF unavailable)`);
+      onChanged();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setRegenId(null); }
+  };
   const pendingWithText = (r) => {
     const names = (r.pending_with || []).map((u) => u.name || u.email).filter(Boolean);
     if (names.length === 0) return r.current_step_label || "Pending approval";
@@ -449,6 +461,11 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, onCreate, onChan
                 )}
                 {r.payment_status === "paid" && (
                   <Button size="sm" variant="outline" onClick={() => downloadBill(r)} className="rounded-lg h-8 gap-1 text-emerald-700 border-emerald-300" data-testid={`download-bill-${r.id}`}><Download size={12} /> Bill {r.bill_no ? `· ${r.bill_no}` : ""}</Button>
+                )}
+                {canRegen && r.payment_status === "paid" && r.bill_no && (
+                  <Button size="sm" variant="outline" onClick={() => regenBill(r)} disabled={regenId === r.id} className="rounded-lg h-8 gap-1 text-slate-600 border-slate-300" data-testid={`regen-bill-${r.id}`} title="Regenerate bill as PDF using the current template">
+                    <RefreshCw size={12} className={regenId === r.id ? "animate-spin" : ""} /> {regenId === r.id ? "Regenerating…" : "Regenerate"}
+                  </Button>
                 )}
               </div>
             </div>

@@ -25585,9 +25585,12 @@ async def _next_mess_bill_no() -> str:
     return f"{prefix}{counter:04d}"
 
 
-async def _generate_mess_bill(receipt: dict, payment: dict, user: dict) -> Optional[dict]:
+async def _generate_mess_bill(receipt: dict, payment: dict, user: dict, reuse_bill_no: Optional[str] = None) -> Optional[dict]:
     """Render + store the purchase-bill PDF. Prefers an admin-uploaded DOCX
-    template (HR Settings → Mess Bill), else a professional ReportLab default."""
+    template (HR Settings → Mess Bill) rendered to PDF via LibreOffice; if a PDF
+    cannot be produced it ALWAYS falls back to the professional ReportLab PDF so
+    the bill is guaranteed to be a real PDF. Pass `reuse_bill_no` to regenerate
+    an existing bill under the same number."""
     from mess_bill import (build_mess_bill_pdf, build_mess_bill_context,
                            render_mess_bill, compute_mess_tax)
     center_id = receipt.get("center_id")
@@ -25602,21 +25605,25 @@ async def _generate_mess_bill(receipt: dict, payment: dict, user: dict) -> Optio
     tax = compute_mess_tax(
         receipt, (company or {}).get("gst") or (company or {}).get("gstin"),
         supplier.get("gst_number") or receipt.get("supplier_gst"))
-    bill_no = await _next_mess_bill_no()
+    bill_no = reuse_bill_no or await _next_mess_bill_no()
     bill_id = str(uuid.uuid4())
     chain = payment.get("chain_history") or []
     pdf_bytes = None
     content_type = "application/pdf"
     ext = "pdf"
+    used_template = False
     tpl = await _resolve_mess_bill_template(company_id)
     if tpl:
         try:
             template_bytes, _ = _get_object(tpl["file_path"])
             context = build_mess_bill_context(receipt, payment, company or {}, center, bill_no, supplier=supplier, tax=tax)
-            pdf_bytes, content_type, ext = render_mess_bill(template_bytes, context)
+            rendered, rct, rext = render_mess_bill(template_bytes, context)
+            if rext == "pdf":
+                pdf_bytes, content_type, ext, used_template = rendered, rct, rext, True
+            else:
+                logger.warning("Mess bill template produced %s (LibreOffice PDF unavailable) — using default PDF layout for receipt %s", rext, receipt.get("id"))
         except Exception:  # noqa: BLE001
             logger.exception("Mess bill template render failed — using default layout")
-            pdf_bytes = None
     if pdf_bytes is None:
         pdf_bytes = build_mess_bill_pdf(receipt, payment, company, center, bill_no, chain, supplier=supplier, tax=tax)
         content_type, ext = "application/pdf", "pdf"
@@ -25635,7 +25642,7 @@ async def _generate_mess_bill(receipt: dict, payment: dict, user: dict) -> Optio
     doc = {
         "id": bill_id, "bill_no": bill_no, "receipt_id": receipt["id"],
         "payment_id": payment.get("id"), "center_id": center_id, "company_id": company_id,
-        "file_path": file_path, "content_type": content_type,
+        "file_path": file_path, "content_type": content_type, "used_template": used_template,
         "amount": float(receipt.get("total_amount") or 0),
         "vendor_name": receipt.get("supplier_name"),
         "generated_at": now_iso, "generated_by": user["id"],
@@ -25762,6 +25769,42 @@ async def mess_download_bill(receipt_id: str, user=Depends(require_role(*MESS_VI
         disp = "inline" if ext == "pdf" else "attachment"
     return Response(content=data, media_type=media,
                     headers={"Content-Disposition": f'{disp}; filename="{bill_no}.{ext}"'})
+
+
+@api.post("/mess/receipts/{receipt_id}/regenerate-bill")
+async def mess_regenerate_bill(receipt_id: str, user=Depends(require_role("admin", "accountant"))):
+    """Re-create the purchase bill for a PAID receipt using the CURRENT active
+    mess-bill template, as a PDF, reusing the same bill number. Lets finance
+    refresh older bills that were generated before a template was uploaded or
+    that came out as DOCX."""
+    rec = await db.mess_receipts.find_one({"id": receipt_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(404, "Receipt not found")
+    scoped = await _mess_scope(user)
+    _mess_assert_center(scoped, rec["center_id"])
+    if rec.get("payment_status") != "paid":
+        raise HTTPException(400, "Bill can be regenerated only for a PAID receipt")
+    payment = await db.mess_payments.find_one({"receipt_id": receipt_id}, {"_id": 0}) or {
+        "id": rec.get("mess_payment_id"), "chain_history": [],
+        "paid_by_name": rec.get("paid_by_name"), "payment_mode": rec.get("payment_mode"),
+    }
+    # If LibreOffice isn't ready yet, kick off the (idempotent) install for next
+    # time but don't block the request — generation falls back to a PDF anyway.
+    import shutil as _sh
+    if not (_sh.which("soffice") or _sh.which("libreoffice")):
+        asyncio.create_task(_ensure_libreoffice_installed())
+    await db.mess_bills.delete_many({"receipt_id": receipt_id})
+    bill = await _generate_mess_bill(rec, payment, user, reuse_bill_no=rec.get("bill_no"))
+    if not bill:
+        raise HTTPException(500, "Bill generation failed")
+    _ct = bill.get("content_type") or "application/pdf"
+    _ext = "pdf" if _ct == "application/pdf" else "docx"
+    await db.mess_receipts.update_one({"id": receipt_id}, {"$set": {
+        "bill_pdf_path": bill["file_path"], "bill_no": bill["bill_no"],
+        "bill_content_type": _ct, "bill_pdf_filename": f"{bill['bill_no']}.{_ext}",
+    }})
+    return {"ok": True, "bill_no": bill["bill_no"], "format": _ext,
+            "used_template": bool(bill.get("used_template"))}
 
 
 # ---------- Mess Bill Templates (HR Settings) ----------
