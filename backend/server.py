@@ -813,6 +813,11 @@ TxnStatus = Literal["pending", "approved", "rejected"]
 class TransactionOut(TransactionIn):
     # Override: output tolerates amount >= 0 (historical/edge-case data; input still enforces > 0)
     amount: float = Field(ge=0)
+    # Override: READ tolerates any stored type (e.g. legacy/auto-created 'asset'
+    # rows). INPUT (TransactionIn.type) stays a strict Literal so NEW txns can
+    # only be investment/income/expense — one stray stored value must never be
+    # able to 500 the whole list response.
+    type: str
     id: str
     created_by: str
     created_at: str
@@ -3837,7 +3842,16 @@ async def list_transactions(
         q["date"] = rng
     docs = await db.transactions.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
     await _attach_pending_at(docs)
-    return [TransactionOut(**d) for d in docs]
+    # Defensive per-row serialization: a single malformed/legacy document must
+    # never 500 the entire list. Bad rows are logged and skipped rather than
+    # taking the whole endpoint down.
+    out = []
+    for d in docs:
+        try:
+            out.append(TransactionOut(**d))
+        except Exception as e:
+            logger.warning("Skipping unserializable transaction %s: %s", d.get("id"), e)
+    return out
 
 
 @api.post("/transactions", response_model=TransactionOut)
