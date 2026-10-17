@@ -11982,6 +11982,10 @@ class PayrollBatchReopenIn(BaseModel):
     reverse_transaction: bool = True  # If batch was already paid, reverse the txn too.
 
 
+class PayrollBatchResubmitIn(BaseModel):
+    remarks: Optional[str] = None
+
+
 async def _derive_pending_at(batch: dict) -> dict:
     """Compute a dynamic 'Pending At' label + role for a payroll batch.
 
@@ -12648,16 +12652,24 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
 
 
 @api.post("/payroll-batches/{batch_id}/reopen")
-async def reopen_payroll_batch(batch_id: str, body: PayrollBatchReopenIn, user=Depends(require_role("admin"))):
-    """Admin-only escape hatch. Reverses a paid batch's transaction (if requested)
-    and unlocks the underlying payroll rows so HR can re-edit them.
+async def reopen_payroll_batch(batch_id: str, body: PayrollBatchReopenIn, user=Depends(require_role("admin", "hr"))):
+    """Reverses a paid batch's transaction (if requested) and unlocks the
+    underlying payroll rows so HR can re-edit them.
+
+    HR may reopen a non-financial batch (rejected / reopened / pending_approval);
+    reopening a batch that already moved money (approved / paid / processing)
+    reverses the transaction and is restricted to admin.
     """
     batch = await db.payroll_batches.find_one({"id": batch_id}, {"_id": 0})
     if not batch:
         raise HTTPException(404, "Batch not found")
 
-    now = datetime.now(timezone.utc).isoformat()
     old_status = batch.get("status")
+    _financial = {"paid", "partially_paid", "pending_payment", "processing", "approved"}
+    if old_status in _financial and user.get("role") != "admin":
+        raise HTTPException(403, "Only an admin can reopen a batch that is already approved/paid (it reverses the transaction).")
+
+    now = datetime.now(timezone.utc).isoformat()
     # Reverse the linked transaction only if the batch was actually paid.
     if old_status == "paid" and body.reverse_transaction and batch.get("transaction_id"):
         rev_id = str(uuid.uuid4())
@@ -12722,6 +12734,91 @@ async def reopen_payroll_batch(batch_id: str, body: PayrollBatchReopenIn, user=D
         {"id": batch_id},
         {"$set": {"status": "reopened", "reopened_at": now, "reopened_by": user["id"], "audit_log": audit_log}},
     )
+    return await _payroll_batch_out(batch_id)
+
+
+@api.post("/payroll-batches/{batch_id}/resubmit")
+async def resubmit_payroll_batch(batch_id: str, body: PayrollBatchResubmitIn, user=Depends(require_role("admin", "hr"))):
+    """Recompute + validate a REJECTED / REOPENED batch and route it back through
+    the approval chain from Level 1 — reusing the SAME batch so the full audit
+    trail (finalise → reject → reopen → resubmit) is preserved."""
+    batch = await db.payroll_batches.find_one({"id": batch_id}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    if batch.get("status") not in ("rejected", "reopened"):
+        raise HTTPException(400, f"Only rejected/reopened batches can be resubmitted (current status: {batch.get('status')}).")
+
+    rows = await db.payroll.find({"batch_id": batch_id}, {"_id": 0}).to_list(5000)
+    if not rows:
+        raise HTTPException(400, "No payroll rows found for this batch. Re-run payroll first.")
+
+    # Recalculate every employee's totals from their current components, then
+    # validate — no negative nets, and the batch must still have staff.
+    errors: list = []
+    gross = ded = net = 0.0
+    for r in rows:
+        _recalc_payroll(r)
+        n = float(r.get("net") or 0)
+        if n < 0:
+            errors.append(f"{r.get('staff_name') or r.get('staff_id')}: negative net (₹{round(n, 2)})")
+        gross += float(r.get("gross") or 0)
+        ded += float(r.get("deductions") or 0)
+        net += n
+        await db.payroll.update_one({"id": r["id"]}, {"$set": {
+            "gross": r.get("gross"), "deductions": r.get("deductions"), "net": r.get("net"),
+        }})
+    if errors:
+        raise HTTPException(400, "Validation failed — fix these before resubmitting: " + "; ".join(errors[:6]))
+
+    now = datetime.now(timezone.utc).isoformat()
+    audit_log = list(batch.get("audit_log") or [])
+    audit_log.append({
+        "action": "resubmitted", "at": now, "by": user["id"],
+        "by_name": user.get("name") or user.get("email"), "by_role": user.get("role"),
+        "old_status": batch.get("status"), "new_status": "pending_approval",
+        "remarks": body.remarks or "",
+    })
+
+    # Re-attach the approval chain from scratch (restart at Level 1).
+    chain_doc: dict = {"center_id": batch.get("center_id"), "amount": round(net, 2),
+                       "month": batch.get("month"), "year": batch.get("year")}
+    await _attach_chain_to_request("payroll", chain_doc)
+
+    set_doc = {
+        "status": "pending_approval",
+        "gross": round(gross, 2), "deductions": round(ded, 2),
+        "net_payable": round(net, 2), "amount": round(net, 2),
+        "staff_count": len(rows),
+        "chain_id": chain_doc.get("chain_id"),
+        "chain_snapshot": chain_doc.get("chain_snapshot") or [],
+        "current_level": chain_doc.get("current_level"),
+        "chain_history": [],
+        "resubmitted_at": now, "resubmitted_by": user["id"],
+        "resubmitted_by_name": user.get("name") or user.get("email"),
+        "audit_log": audit_log,
+    }
+    await db.payroll_batches.update_one(
+        {"id": batch_id}, {"$set": set_doc, "$unset": {"rejected_reason": "", "rejected_at": ""}},
+    )
+    # Re-lock the rows under this batch while it is back in approval.
+    await db.payroll.update_many(
+        {"batch_id": batch_id},
+        {"$set": {"batch_status": "pending_approval", "locked": True,
+                  "finalised_at": now, "finalised_by": user["id"]}},
+    )
+
+    # No approval chain configured → auto-approve straight to pending_payment.
+    if not set_doc["chain_snapshot"]:
+        await db.payroll_batches.update_one(
+            {"id": batch_id},
+            {"$set": {"status": "pending_payment", "approved_at": now, "approved_by": user["id"],
+                      "audit_log": audit_log + [{"action": "auto_approved", "at": now,
+                                                 "by": user["id"], "by_name": user.get("name") or user.get("email"),
+                                                 "by_role": user.get("role"),
+                                                 "remarks": "No approval chain configured — auto-approved",
+                                                 "old_status": "pending_approval", "new_status": "pending_payment"}]}},
+        )
+
     return await _payroll_batch_out(batch_id)
 
 

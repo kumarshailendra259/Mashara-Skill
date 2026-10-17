@@ -2873,8 +2873,15 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
   const tone = batch ? (BATCH_STATUS_TONE[batch.status] || { cls: "bg-gray-100 text-gray-700 border-gray-300", label: batch.status }) : null;
   const isAdmin = currentUser?.role === "admin";
   const isAccountant = currentUser?.role === "accountant";
+  const isHr = currentUser?.role === "hr";
   const canPay = (isAdmin || isAccountant) && (batch?.status === "pending_payment" || batch?.status === "partially_paid");
-  const canReopen = isAdmin && ["paid", "partially_paid", "pending_payment", "approved", "rejected", "processing"].includes(batch?.status);
+  // Admin can reopen any batch (reverses txn if paid). HR can reopen a
+  // non-financial batch (rejected / reopened) to rectify + resubmit.
+  const canReopen = (isAdmin && ["paid", "partially_paid", "pending_payment", "approved", "rejected", "processing"].includes(batch?.status))
+    || (isHr && ["rejected", "reopened"].includes(batch?.status));
+  // After a rejection (or reopen), HR/Admin recompute + validate and send the
+  // SAME batch back through the approval chain.
+  const canResubmit = (isAdmin || isHr) && ["rejected", "reopened"].includes(batch?.status);
   const payableRows = (batch?.rows || []).filter((r) => (r.pay_status || "pending") !== "paid");
   const paySelCount = payableRows.filter((r) => paySel[r.staff_id]).length;
   const paySelAmount = payableRows.filter((r) => paySel[r.staff_id]).reduce((s, r) => s + Number(r.net || 0), 0);
@@ -2913,13 +2920,27 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
     if (!window.confirm(
       batch.status === "paid"
         ? "This will REVERSE the linked transaction and unlock all payroll rows so HR can re-edit. Continue?"
-        : "This will unlock all payroll rows so HR can re-edit. Continue?"
+        : "This will unlock all payroll rows so HR can rectify salary / attendance. Continue?"
     )) return;
     setBusy(true);
     try {
       await api.post(`/payroll-batches/${batchId}/reopen`, { reason, reverse_transaction: true });
-      toast.success("Batch reopened — rows unlocked");
+      toast.success("Batch reopened — rows unlocked for editing. Rectify, then Resubmit for Approval.");
       onClose?.();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBusy(false); }
+  };
+
+  const submitResubmit = async () => {
+    if (!window.confirm("Recalculate all employee amounts, validate them and send this batch back for approval?")) return;
+    const remarks = window.prompt("Remarks for resubmission (optional):", "") || "";
+    setBusy(true);
+    try {
+      const { data } = await api.post(`/payroll-batches/${batchId}/resubmit`, { remarks });
+      toast.success(data?.status === "pending_payment"
+        ? "Recalculated & auto-approved (no approval chain configured) — ready for payment."
+        : "Recalculated & resubmitted — batch is now Pending Approval.");
+      load();
     } catch (e) { toast.error(formatError(e)); }
     finally { setBusy(false); }
   };
@@ -3079,7 +3100,12 @@ function PayrollBatchDialog({ batchId, onClose, currentUser, autoPay = false }) 
           <Button variant="outline" onClick={onClose} className="rounded-none" data-testid="batch-close">Close</Button>
           {canReopen && (
             <Button onClick={submitReopen} disabled={busy} variant="outline" className="rounded-none border-orange-500 text-orange-700 hover:bg-orange-50" data-testid="batch-reopen">
-              <RefreshCw size={13} className="mr-1" /> Reopen (Admin)
+              <RefreshCw size={13} className="mr-1" /> Reopen{isHr && !isAdmin ? "" : " (Admin)"}
+            </Button>
+          )}
+          {canResubmit && (
+            <Button onClick={submitResubmit} disabled={busy} className="rounded-none bg-[var(--brand)] hover:opacity-90 text-white" data-testid="batch-resubmit">
+              <RefreshCw size={13} className="mr-1" /> Resubmit for Approval
             </Button>
           )}
           {canPay && (
