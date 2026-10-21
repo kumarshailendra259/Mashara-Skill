@@ -1,65 +1,73 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { LangProvider } from "@/context/LangContext";
 import { AuthProvider } from "@/context/AuthContext";
 import { PermissionProvider } from "@/context/PermissionContext";
 import { FYProvider } from "@/context/FYContext";
-import MenuAccessControl from "@/pages/MenuAccessControl";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
-import Register from "@/pages/Register";
-import Dashboard from "@/pages/Dashboard";
-import Entities from "@/pages/Entities";
-import Transactions from "@/pages/Transactions";
-import Reports from "@/pages/Reports";
-import Users from "@/pages/Users";
-import HRMS from "@/pages/HRMS";
-import MyProfile from "@/pages/MyProfile";
-import StaffSalaryDetail from "@/pages/StaffSalaryDetail";
-import StaffProfile from "@/pages/StaffProfile";
-import Advances from "@/pages/Advances";
-import Stock from "@/pages/Stock";
-import ApprovalLog from "@/pages/ApprovalLog";
-import ApprovalWorkflows from "@/pages/ApprovalWorkflows";
-import HrSettings from "@/pages/HrSettings";
-import Programs from "@/pages/Programs";
-import BatchManagement from "@/pages/BatchManagement";
-import CheckIn from "@/pages/CheckIn";
-import ForgotPassword from "@/pages/ForgotPassword";
-import PartnerAssociations from "@/pages/PartnerAssociations";
-import TdsRegister from "@/pages/TdsRegister";
-import PendingApprovals from "@/pages/PendingApprovals";
-import MessManagement from "@/pages/MessManagement";
-import LoginHistory from "@/pages/LoginHistory";
-import AssetManagement from "@/pages/AssetManagement";
-import EmployeeTransfers from "@/pages/EmployeeTransfers";
-import CenterManagerDashboard from "@/pages/CenterManagerDashboard";
-import Quotations from "@/pages/Quotations";
-import Vendors from "@/pages/Vendors";
-import Candidates from "@/pages/Candidates";
-import BankGuarantees from "@/pages/BankGuarantees";
-import MISDashboard from "@/pages/mis/MISDashboard";
-import PaymentDashboard from "@/pages/PaymentDashboard";
-import BankReconciliation from "@/pages/BankReconciliation";
-import Invoices from "@/pages/Invoices";
-import InvoiceDetail from "@/pages/InvoiceDetail";
-import StaffFinancialHistory from "@/pages/StaffFinancialHistory";
-import Notifications from "@/pages/Notifications";
-import SubscriptionBilling from "@/pages/SubscriptionBilling";
-import CompaniesAdmin from "@/pages/CompaniesAdmin";
-import CenterManagement from "@/pages/CenterManagement";
-import CompanySelect from "@/pages/CompanySelect";
-import PartnerSettlement from "@/pages/PartnerSettlement";
-import CourseMaster from "@/pages/CourseMaster";
-import RateConfig from "@/pages/RateConfig";
-import EntityMappings from "@/pages/EntityMappings";
+const Register = lazy(() => import("@/pages/Register"));
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const Entities = lazy(() => import("@/pages/Entities"));
+const Transactions = lazy(() => import("@/pages/Transactions"));
+const Reports = lazy(() => import("@/pages/Reports"));
+const Users = lazy(() => import("@/pages/Users"));
+const HRMS = lazy(() => import("@/pages/HRMS"));
+const MyProfile = lazy(() => import("@/pages/MyProfile"));
+const StaffSalaryDetail = lazy(() => import("@/pages/StaffSalaryDetail"));
+const StaffProfile = lazy(() => import("@/pages/StaffProfile"));
+const Advances = lazy(() => import("@/pages/Advances"));
+const Stock = lazy(() => import("@/pages/Stock"));
+const ApprovalLog = lazy(() => import("@/pages/ApprovalLog"));
+const ApprovalWorkflows = lazy(() => import("@/pages/ApprovalWorkflows"));
+const HrSettings = lazy(() => import("@/pages/HrSettings"));
+const Programs = lazy(() => import("@/pages/Programs"));
+const BatchManagement = lazy(() => import("@/pages/BatchManagement"));
+const CheckIn = lazy(() => import("@/pages/CheckIn"));
+const ForgotPassword = lazy(() => import("@/pages/ForgotPassword"));
+const PartnerAssociations = lazy(() => import("@/pages/PartnerAssociations"));
+const TdsRegister = lazy(() => import("@/pages/TdsRegister"));
+const PendingApprovals = lazy(() => import("@/pages/PendingApprovals"));
+const MessManagement = lazy(() => import("@/pages/MessManagement"));
+const LoginHistory = lazy(() => import("@/pages/LoginHistory"));
+const AssetManagement = lazy(() => import("@/pages/AssetManagement"));
+const EmployeeTransfers = lazy(() => import("@/pages/EmployeeTransfers"));
+const CenterManagerDashboard = lazy(() => import("@/pages/CenterManagerDashboard"));
+const Quotations = lazy(() => import("@/pages/Quotations"));
+const Vendors = lazy(() => import("@/pages/Vendors"));
+const Candidates = lazy(() => import("@/pages/Candidates"));
+const BankGuarantees = lazy(() => import("@/pages/BankGuarantees"));
+const MISDashboard = lazy(() => import("@/pages/mis/MISDashboard"));
+const PaymentDashboard = lazy(() => import("@/pages/PaymentDashboard"));
+const BankReconciliation = lazy(() => import("@/pages/BankReconciliation"));
+const Invoices = lazy(() => import("@/pages/Invoices"));
+const InvoiceDetail = lazy(() => import("@/pages/InvoiceDetail"));
+const StaffFinancialHistory = lazy(() => import("@/pages/StaffFinancialHistory"));
+const Notifications = lazy(() => import("@/pages/Notifications"));
+const SubscriptionBilling = lazy(() => import("@/pages/SubscriptionBilling"));
+const CompaniesAdmin = lazy(() => import("@/pages/CompaniesAdmin"));
+const CenterManagement = lazy(() => import("@/pages/CenterManagement"));
+const CompanySelect = lazy(() => import("@/pages/CompanySelect"));
+const PartnerSettlement = lazy(() => import("@/pages/PartnerSettlement"));
+const CourseMaster = lazy(() => import("@/pages/CourseMaster"));
+const RateConfig = lazy(() => import("@/pages/RateConfig"));
+const EntityMappings = lazy(() => import("@/pages/EntityMappings"));
+const MenuAccessControl = lazy(() => import("@/pages/MenuAccessControl"));
 import { useAuth } from "@/context/AuthContext";
 import { Toaster } from "@/components/ui/sonner";
 import "@/App.css";
 
 function Shell({ children }) {
   return <Layout>{children}</Layout>;
+}
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center h-screen text-sm overline" data-testid="route-loading">
+      Loading…
+    </div>
+  );
 }
 
 // Auth-only wrapper WITHOUT the company-select gate (used by /select-company).
@@ -85,6 +93,7 @@ function App() {
         <PermissionProvider>
         <FYProvider>
         <BrowserRouter>
+          <Suspense fallback={<PageFallback />}>
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
@@ -138,6 +147,7 @@ function App() {
             <Route path="/check-in" element={<CheckIn />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </Suspense>
         </BrowserRouter>
         <Toaster position="top-right" />
         </FYProvider>

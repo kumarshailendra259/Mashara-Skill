@@ -207,7 +207,7 @@ export default function Login() {
       {/* =========================
           RIGHT — Login Form
           ========================= */}
-      <div
+      <main
         className="flex-1 flex items-center justify-center p-4 sm:p-8 relative"
         style={{
           background:
@@ -367,7 +367,7 @@ export default function Login() {
             © {new Date().getFullYear()} Mashara Skills · Finance Tracker v1
           </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

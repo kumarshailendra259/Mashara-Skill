@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, Suspense } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useLang } from "@/context/LangContext";
@@ -623,6 +623,7 @@ export default function Layout({ children }) {
           data-testid="main-content"
         >
           <TrialBanner />
+          <Suspense fallback={<div className="flex items-center justify-center py-20 text-sm overline" data-testid="content-loading">Loading…</div>}>
           {(() => {
             const blocked = scope?.blocked_modules || [];
             const match = moduleForPath(location.pathname);
@@ -667,6 +668,7 @@ export default function Layout({ children }) {
             }
             return children;
           })()}
+          </Suspense>
         </main>
 
         {/* Bottom tab-bar — mobile only */}
