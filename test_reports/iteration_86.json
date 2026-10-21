@@ -1,0 +1,29 @@
+{
+  "summary": "Frontend-only regression check of React.lazy route-based code splitting. Static check: all 47 lazy import paths in App.js resolve to existing files with default exports; webpack compiles (1 pre-existing lint warning). Logged in as admin@finance.app and ended up on the Dashboard with no errors. Visited 38 lazy routes via client-side navigation, plus 8 sidebar nav-link clicks (nav-transactions, nav-HRMS, nav-reports, nav-vendors, nav-advances, nav-user_management, nav-pending_approvals, nav-mis_dashboard). Every page rendered content inside main-content, the sidebar stayed mounted, and no content-loading fallback was left stuck. No ChunkLoadError or 'Loading chunk failed' console errors. The recharts chunk works: 4 charts render on the Dashboard. On the MIS Reports tab the charts show the EmptyChart state because there is no data (data-driven, expected). The leaflet chunk works: MapPicker in HR Settings > Geofences > Add Geofence renders .leaflet-container with tiles. Note: /check-in (CheckIn.jsx) does not use leaflet at all; it renders the Staff App dashboard. Login page has exactly 1 <main> landmark. Mobile 390px /transactions renders. Fonts: no CSS refers to the removed Chivo/IBM Plex fontsource fonts; Inter/JetBrains Mono load non-blocking via preload+onload with a noscript fallback. robots.txt exists.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MapPicker (HR Settings > Geofences dialog)", "issue": "CARTO base-map tiles display an 'API KEY REQUIRED' watermark. This is about the tile provider URL, not lazy loading; existed before this change.", "selector": ".leaflet-container", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Optional: change the MapPicker tile URL to a provider that needs no key (e.g. OSM tile.openstreetmap.org) or add a CARTO key",
+    "Optional: fix the missing React 'key' prop warning in Reports.jsx list render",
+    "Optional cleanup: the @fontsource/* packages are still in package.json but no longer imported, so they can be removed",
+    "Cosmetic: App.js line 56 declares `const MenuAccessControl = lazy(...)` between import statements. ESM hoisting makes it work, but move it below the imports for readability"
+  ],
+  "critical_code_review_comments": [
+    "All lazy() paths are valid and every page has a default export, so the refactor has no path risk",
+    "Layout inner Suspense keeps the sidebar/header mounted, as intended"
+  ],
+  "updated_files": ["/app/test_reports/iteration_86.json"],
+  "success_rate": {"backend": "N/A (skipped)", "frontend": "100%"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Code-splitting refactor verified. Leaflet is only used by components/MapPicker.jsx (HrSettings geofence dialog), not by CheckIn. MIS recharts are on the Reports tab (pages/mis/ReportsTab.jsx) and only render when there is data. The only console error seen is a pre-existing key-prop warning in Reports, plus an expected 401 from /auth/me before login."
+}
