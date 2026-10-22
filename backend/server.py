@@ -25521,6 +25521,8 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
     _mess_assert_center(scoped, body.center_id)
     if not body.lines:
         raise HTTPException(400, "At least one line is required")
+    if not body.attachments:
+        raise HTTPException(400, "A bill attachment is required for every goods receipt")
     # Duplicate invoice guard (same supplier + invoice + center, not rejected).
     dup = await db.mess_receipts.find_one({
         "center_id": body.center_id, "invoice_no": body.invoice_no.strip(),

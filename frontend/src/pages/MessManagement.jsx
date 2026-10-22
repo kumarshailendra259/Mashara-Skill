@@ -1119,6 +1119,7 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
       accepted_qty: Number(l.accepted_qty || l.qty), rejected_qty: Number(l.rejected_qty || 0),
     }));
     if (clean.length === 0) { toast.error("Add at least one valid line"); return; }
+    if (!(f.attachments || []).length) { toast.error("Bill attach karna zaroori hai (PDF/Image)"); return; }
     setBusy(true);
     try { await api.post("/mess/receipts", { ...f, lines: clean }); toast.success("Goods receipt created — routed to approval workflow"); onSaved(); }
     catch (e) { toast.error(formatError(e)); } finally { setBusy(false); }
@@ -1230,12 +1231,12 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
 
           {/* Shop bill upload */}
           <div>
-            <Label>Shop Bill <span className="text-slate-400 normal-case">(upload — optional)</span></Label>
-            <label className="flex items-center gap-3 cursor-pointer border border-dashed border-slate-300 rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors" data-testid="receipt-bill-upload">
-              <Upload size={20} className="text-slate-400" />
+            <Label>Shop Bill <span className="text-rose-500 normal-case font-semibold">(required)</span></Label>
+            <label className={`flex items-center gap-3 cursor-pointer border border-dashed rounded-xl px-4 py-3 hover:bg-slate-50 transition-colors ${(f.attachments || []).length ? "border-slate-300" : "border-rose-300 bg-rose-50/40"}`} data-testid="receipt-bill-upload">
+              <Upload size={20} className={(f.attachments || []).length ? "text-slate-400" : "text-rose-400"} />
               <div>
                 <div className="text-sm font-semibold text-slate-700">{uploading ? "Uploading…" : "Attach bill (PDF/Image)"}</div>
-                <div className="text-[11px] text-slate-400">Supported formats: PDF, JPG, PNG · Max size: 5MB</div>
+                <div className="text-[11px] text-slate-400">Supported formats: PDF, JPG, PNG · Max size: 5MB · <span className="text-rose-500 font-semibold">mandatory</span></div>
               </div>
               <input type="file" className="hidden" accept=".pdf,image/*" disabled={uploading} onChange={(e) => uploadBill(e.target.files?.[0])} />
             </label>

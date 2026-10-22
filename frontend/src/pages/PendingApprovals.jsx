@@ -972,13 +972,30 @@ export default function PendingApprovals() {
                   reimbursement approvers couldn't see the raiser's uploaded bill. */}
               {(acting.item.summary?.attachments || []).length > 0 && (
                 <div className="border border-blue-200 bg-blue-50/30 p-3 text-xs" data-testid="approval-attachments-block">
-                  <div className="overline font-bold text-blue-900 mb-1">Attachments ({acting.item.summary.attachments.length})</div>
-                  <div className="flex flex-wrap gap-1">
-                    {acting.item.summary.attachments.map((a) => (
-                      <a key={a.id} href={`${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`} target="_blank" rel="noreferrer" className="text-[10px] text-blue-900 hover:underline inline-flex items-center gap-1 border border-blue-200 bg-white px-1.5 py-0.5">
-                        📎 {a.filename}
-                      </a>
-                    ))}
+                  <div className="overline font-bold text-blue-900 mb-2">Bill / Attachments ({acting.item.summary.attachments.length}) — cross-check before approving</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {acting.item.summary.attachments.map((a) => {
+                      const url = `${process.env.REACT_APP_BACKEND_URL}/api/files/view?path=${encodeURIComponent(a.path)}`;
+                      const name = (a.filename || "").toLowerCase();
+                      const ct = (a.content_type || "").toLowerCase();
+                      const isImg = ct.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|heic)$/.test(name);
+                      const isPdf = ct.includes("pdf") || name.endsWith(".pdf");
+                      return (
+                        <div key={a.id} className="border border-blue-200 bg-white rounded-md overflow-hidden" data-testid={`attach-preview-${a.id}`}>
+                          <a href={url} target="_blank" rel="noreferrer" className="flex items-center justify-between gap-2 px-2 py-1 bg-blue-50 border-b border-blue-100 text-[10px] text-blue-900 font-semibold hover:underline">
+                            <span className="truncate">📎 {a.filename}</span>
+                            <span className="shrink-0 text-blue-700">Open ↗</span>
+                          </a>
+                          {isImg ? (
+                            <a href={url} target="_blank" rel="noreferrer"><img src={url} alt={a.filename} className="w-full max-h-52 object-contain bg-slate-50" loading="lazy" /></a>
+                          ) : isPdf ? (
+                            <iframe title={a.filename} src={`${url}#toolbar=0&navpanes=0`} className="w-full h-60 bg-slate-50 border-0" />
+                          ) : (
+                            <div className="px-2 py-5 text-center text-slate-400">Preview not available — click Open ↗</div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}

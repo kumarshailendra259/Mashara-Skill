@@ -2884,3 +2884,11 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
   - Frontend (`PendingApprovals.jsx` acting modal): renders an item table (Item / Qty / Unit / Rate / Amount) from `acting.item.summary.items` when present, below amount/date — so approver verifies goods before acting.
 - Verified: `/approvals/pending` returns summary.items for 4 mess receipts (Bread 5 packet ₹1,180 etc.); approve modal screenshot shows the item table; Reorder on Chana Dal opens New Goods Receipt pre-filled (center + Chana Dal/kg line) with removable line. Isolated to Mess + approvals; no other module touched.
 - **Requires redeploy** for production.
+
+## Phase 125 (Jun 2026) — Mandatory bill attachment + bill preview in approve modal
+- Task A (bill attachment mandatory on goods receipts):
+  - Backend (`server.py` `POST /mess/receipts`): `if not body.attachments: raise HTTPException(400, "A bill attachment is required for every goods receipt")` (before dup check). Never bypassable from frontend.
+  - Frontend (`MessManagement.jsx` ReceiptDialog.save): blocks submit with toast "Bill attach karna zaroori hai" when no attachment; Shop Bill label now "(required)" with rose dashed border + "mandatory" hint until a file is attached.
+- Task B (approver sees the bill): approve/reject/send-back modal attachments block upgraded from plain links to inline PREVIEW — image attachments render as <img> thumbnails, PDFs embed in an <iframe> (#toolbar=0&navpanes=0), others show a fallback; each keeps an "Open ↗" new-tab link. Uses existing `/api/files/view?path=` + summary.attachments. Benefits all approval types. (`PendingApprovals.jsx` approval-attachments-block, testid attach-preview-<id>.)
+- Verified: curl create receipt w/o attachment → HTTP 400 "A bill attachment is required…"; created a throwaway receipt with a sample PDF bill via real API → approve modal showed item table (Rice 10 kg ₹55 ₹550) + embedded PDF preview iframe (sample_bill.pdf + Open link); test receipt + file cleaned from DB. Isolated to Mess + approvals.
+- **Requires redeploy** for production.
