@@ -344,6 +344,8 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
         <Button onClick={downloadPdf} variant="outline" className="rounded-lg gap-1.5 border-slate-800 text-slate-800" data-testid="qa-pdf"><FileText size={15} /> Generate PDF Report</Button>
       </div>
 
+      {/* Inventory dashboard — hidden while the Today's Cost Summary view is open */}
+      {!showCost && (<>
       {/* Inventory status KPIs */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="Total Items" value={summary.total_items} sub="Distinct · selected period" Icon={Package} tone="blue" accent="border-l-blue-600" testid="mess-stat-total" />
@@ -390,6 +392,7 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
       {/* Interactive inventory table */}
       <InventoryTable rows={filtered} loading={loadingRep} canEntry={canEntry}
         onReceive={onReceive} onHistory={(it) => setHistItem(it)} />
+      </>)}
 
       {/* Today's Cost Summary — toggled from the quick-actions bar */}
       {showCost && <CostSummaryPanel dash={dash} cpp={cpp} stock={stock}

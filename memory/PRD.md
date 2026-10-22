@@ -2892,3 +2892,9 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 - Task B (approver sees the bill): approve/reject/send-back modal attachments block upgraded from plain links to inline PREVIEW — image attachments render as <img> thumbnails, PDFs embed in an <iframe> (#toolbar=0&navpanes=0), others show a fallback; each keeps an "Open ↗" new-tab link. Uses existing `/api/files/view?path=` + summary.attachments. Benefits all approval types. (`PendingApprovals.jsx` approval-attachments-block, testid attach-preview-<id>.)
 - Verified: curl create receipt w/o attachment → HTTP 400 "A bill attachment is required…"; created a throwaway receipt with a sample PDF bill via real API → approve modal showed item table (Rice 10 kg ₹55 ₹550) + embedded PDF preview iframe (sample_bill.pdf + Open link); test receipt + file cleaned from DB. Isolated to Mess + approvals.
 - **Requires redeploy** for production.
+
+## Phase 126 (Jun 2026) — Today's Cost Summary becomes a dedicated view
+- User: when "Today's Cost Summary" (beside Record Wastage) is selected, ONLY that section should show.
+- Frontend (`MessManagement.jsx` DashboardTab): wrapped the inventory dashboard blocks (status KPIs, received/issued strips, filter bar, InventoryTable) in `{!showCost && (<>…</>)}`. Now toggle ON → only CostSummaryPanel; toggle OFF → inventory dashboard. Quick-actions row (incl. toggle) always visible.
+- Verified (admin, TEST_iter28_C): toggle ON hides mess-stat-total/mess-dash-search/mess-inventory-table and shows only mess-cost-summary; screenshot confirms.
+- **Requires redeploy** for production.
