@@ -26194,6 +26194,158 @@ async def mess_ledger_export(center_id: Optional[str] = None, item_id: Optional[
         headers={"Content-Disposition": "attachment; filename=mess_stock_ledger.xlsx"})
 
 
+# ---------- Monthly / Date-wise Stock Report ----------
+def _fmt_rep_qty(v) -> str:
+    """Format a quantity: whole numbers without decimals, else trimmed (e.g. 164, 351.5)."""
+    v = round(float(v or 0), 3)
+    if v == int(v):
+        return str(int(v))
+    return ("%.3f" % v).rstrip("0").rstrip(".")
+
+
+def _mess_report_label(date_from: str, date_to: str) -> str:
+    """'January-25' for a full calendar month, else 'DD-Mon-YYYY to DD-Mon-YYYY'."""
+    import calendar
+    try:
+        d1 = datetime.strptime(date_from, "%Y-%m-%d")
+        d2 = datetime.strptime(date_to, "%Y-%m-%d")
+    except Exception:
+        return f"{date_from} to {date_to}"
+    last = calendar.monthrange(d1.year, d1.month)[1]
+    if d1.day == 1 and d1.year == d2.year and d1.month == d2.month and d2.day == last:
+        return d1.strftime("%B-%y")
+    return f"{d1.strftime('%d-%b-%Y')} to {d2.strftime('%d-%b-%Y')}"
+
+
+async def _mess_stock_report_rows(user, center_id, date_from, date_to):
+    """Per-item opening / received / issued / remaining balance for the period.
+
+    opening  = running balance (qty_in - qty_out) for every ledger entry BEFORE date_from
+    received = sum of qty_in within [date_from, date_to]
+    issued   = sum of qty_out within [date_from, date_to]
+    remaining = opening + received - issued
+    """
+    if not date_from or not date_to:
+        raise HTTPException(400, "date_from and date_to are required")
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return [], None
+    cq = _mess_center_query(user, scoped, center_id)
+    center_name = None
+    if center_id:
+        c = await db.centers.find_one({"id": center_id}, {"_id": 0, "name": 1})
+        center_name = (c or {}).get("name")
+    in_period = {"$and": [{"$gte": [{"$ifNull": ["$date", ""]}, date_from]},
+                          {"$lte": [{"$ifNull": ["$date", ""]}, date_to]}]}
+    pipeline = [
+        {"$match": cq},
+        {"$group": {
+            "_id": "$item_id",
+            "item_name": {"$last": "$item_name"},
+            "opening": {"$sum": {"$cond": [
+                {"$lt": [{"$ifNull": ["$date", ""]}, date_from]},
+                {"$subtract": [{"$ifNull": ["$qty_in", 0]}, {"$ifNull": ["$qty_out", 0]}]}, 0]}},
+            "received": {"$sum": {"$cond": [in_period, {"$ifNull": ["$qty_in", 0]}, 0]}},
+            "issued": {"$sum": {"$cond": [in_period, {"$ifNull": ["$qty_out", 0]}, 0]}},
+        }},
+    ]
+    groups = await db.mess_ledger.aggregate(pipeline).to_list(5000)
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    out = []
+    for g in groups:
+        opening = round(float(g.get("opening") or 0), 3)
+        received = round(float(g.get("received") or 0), 3)
+        issued = round(float(g.get("issued") or 0), 3)
+        if opening == 0 and received == 0 and issued == 0:
+            continue
+        it = items.get(g["_id"], {})
+        out.append({
+            "item_id": g["_id"],
+            "name": it.get("name") or g.get("item_name") or "—",
+            "unit": it.get("base_unit") or "",
+            "opening": opening,
+            "received": received,
+            "issued": issued,
+            "remaining": round(opening + received - issued, 3),
+        })
+    out.sort(key=lambda x: (x["name"] or "").lower())
+    return out, center_name
+
+
+@api.get("/mess/stock-report")
+async def mess_stock_report(center_id: Optional[str] = None,
+                            date_from: Optional[str] = None, date_to: Optional[str] = None,
+                            user=Depends(require_role(*MESS_VIEW_ROLES))):
+    rows, center_name = await _mess_stock_report_rows(user, center_id, date_from, date_to)
+    return {
+        "title": _mess_report_label(date_from, date_to),
+        "center_name": center_name or "All authorized centers",
+        "date_from": date_from, "date_to": date_to,
+        "rows": rows,
+    }
+
+
+@api.get("/mess/stock-report.pdf")
+async def mess_stock_report_pdf(center_id: Optional[str] = None,
+                                date_from: Optional[str] = None, date_to: Optional[str] = None,
+                                user=Depends(require_role(*MESS_VIEW_ROLES))):
+    import io
+    from fastapi.responses import StreamingResponse
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
+
+    rows, center_name = await _mess_stock_report_rows(user, center_id, date_from, date_to)
+    label = _mess_report_label(date_from, date_to)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
+                            topMargin=14 * mm, bottomMargin=14 * mm)
+    title_style = ParagraphStyle("rep_t", fontName="Helvetica-Bold", fontSize=18,
+                                 alignment=TA_CENTER, spaceAfter=2)
+    sub_style = ParagraphStyle("rep_s", fontName="Helvetica", fontSize=10, alignment=TA_CENTER,
+                               textColor=colors.HexColor("#444444"), spaceAfter=10)
+    hstyle = ParagraphStyle("rep_h", fontName="Helvetica-Bold", fontSize=9, alignment=TA_CENTER, leading=11)
+    nstyle = ParagraphStyle("rep_n", fontName="Helvetica", fontSize=9, alignment=TA_LEFT, leading=11)
+
+    elems = [
+        Paragraph(label, title_style),
+        Paragraph(f"Mess Stock Report &middot; {center_name or 'All authorized centers'}", sub_style),
+    ]
+    header = [Paragraph(x, hstyle) for x in
+              ["Sr. No", "Description / Item Name", "Unit", "Opening Balance",
+               "Received", "Issued", "Remaining Balance"]]
+    data = [header]
+    for i, r in enumerate(rows, 1):
+        data.append([str(i), Paragraph(r["name"], nstyle), r["unit"],
+                     _fmt_rep_qty(r["opening"]), _fmt_rep_qty(r["received"]),
+                     _fmt_rep_qty(r["issued"]), _fmt_rep_qty(r["remaining"])])
+    if len(data) == 1:
+        data.append(["", Paragraph("No stock movement in this period", nstyle), "", "", "", "", ""])
+
+    col_widths = [12 * mm, 54 * mm, 16 * mm, 24 * mm, 22 * mm, 20 * mm, 26 * mm]
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f7")),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elems.append(tbl)
+    doc.build(elems)
+    buf.seek(0)
+    safe = label.replace(" ", "_").replace("/", "-")
+    return StreamingResponse(buf, media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=mess_stock_report_{safe}.pdf"})
+
+
 # ---------- Physical Stock Count (adjustments) ----------
 class MessStockCountLine(BaseModel):
     item_id: str

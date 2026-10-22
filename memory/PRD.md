@@ -2848,3 +2848,14 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 - Frontend (`MessManagement.jsx`): `API_ADMIN_ROLES` adds `"center_manager"` → `canAdmin` true → "Add Item" button + per-row edit pencil now render for center_manager.
 - Verified: curl as center_manager (cmtest_salary@x.com) `POST /mess/items` → HTTP 200 item created (test item cleaned up); UI screenshot as center_manager shows "Add Item" button (add-item-btn count 1) + edit controls on Item Master.
 - **Requires redeploy** for production.
+
+## Phase 121 (Jun 2026) — Mess Monthly / Date-wise Stock Report (PDF)
+- User: monthly report PDF showing per item — carry-forward from past month (Opening Balance), Received this month, Issued (consumption) this month, Remaining Balance; same also available date-wise (custom date range). Format per reference image (title "January-25"; cols Sr No | Description/Item Name | Unit | Opening Balance | Received | Issued | Remaining Balance).
+- Backend (`server.py`, before Physical Stock Count section):
+  - Helper `_mess_stock_report_rows(user, center_id, date_from, date_to)` aggregates `mess_ledger`: opening = Σ(qty_in-qty_out) for date < date_from (carry forward), received = Σ qty_in in [from,to], issued = Σ qty_out in [from,to], remaining = opening+received-issued. Respects mess center scope (`_mess_scope`/`_mess_center_query`). Only items with non-zero movement shown, sorted by name.
+  - `_mess_report_label()` → "Month-YY" for a full calendar month, else "DD-Mon-YYYY to DD-Mon-YYYY".
+  - `GET /api/mess/stock-report` → JSON preview {title, center_name, rows}.
+  - `GET /api/mess/stock-report.pdf` → ReportLab PDF (A4), bold centered title, subtitle "Mess Stock Report · <center>", bordered 7-col table. StreamingResponse application/pdf. Role: MESS_VIEW_ROLES.
+- Frontend (`MessManagement.jsx`): new "Monthly Report" tab (`mess-tab-report`) → `ReportTab`. Toggle Monthly (`<input type=month>`) vs Date Range (from/to). Uses the top Center selector. Live preview table (same cols) + "Download PDF" (opens inline). testids: report-mode-month/range, report-month, report-from/to, report-download-pdf, report-row-*.
+- Verified: JSON Oct-26 (Rice open0 recv529 iss284 rem245 ✓); carry-forward June→July (rem12→open12 ✓); monthly+range PDFs valid %PDF-1.4; PDF structure analysis confirms title "October-26" + all 7 columns + correct math; UI screenshot shows tab, month picker, preview table, download button all working.
+- **Requires redeploy** for production.

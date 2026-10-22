@@ -13,7 +13,7 @@ import {
   UtensilsCrossed, RefreshCw, Package, ClipboardList, BookOpen, LayoutDashboard,
   Plus, Check, X, Trash2, Download, PackagePlus, Soup, AlertTriangle, Boxes,
   IndianRupee, Users, TrendingDown, FileWarning, Pencil, Lock, Scale, CalendarCheck, Unlock,
-  Wallet, Upload, FileText, Clock,
+  Wallet, Upload, FileText, Clock, FileBarChart2,
 } from "lucide-react";
 
 const API_ENTRY_ROLES = ["admin", "senior_manager", "manager", "center_manager", "mess_staff"];
@@ -115,6 +115,7 @@ export default function MessManagement() {
     { key: "closing", label: "Daily Closing", icon: CalendarCheck },
     { key: "stockcount", label: "Stock Count", icon: Scale },
     { key: "ledger", label: "Stock Ledger", icon: BookOpen },
+    { key: "report", label: "Monthly Report", icon: FileBarChart2 },
   ];
 
   return (
@@ -177,6 +178,8 @@ export default function MessManagement() {
         onAdd={() => setConsDlg("consumption")} />}
 
       {tab === "ledger" && <LedgerTab ledger={ledger} loading={loading} centerParam={centerParam} />}
+
+      {tab === "report" && <ReportTab centerId={centerId} centers={centers} />}
 
       {tab === "closing" && <ClosingTab closing={closing} loading={loading} canApprove={canApprove}
         centerId={centerId} date={date} onChanged={refresh} />}
@@ -977,6 +980,144 @@ function LedgerTab({ ledger, loading, centerParam }) {
             {ledger.length === 0 && <tr><td colSpan={9} className="text-center text-slate-400 py-8">No ledger entries</td></tr>}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+
+/* ---------------- Monthly / Date-wise Stock Report ---------------- */
+const repQty = (v) => {
+  const n = Math.round((Number(v) || 0) * 1000) / 1000;
+  return String(n);
+};
+
+function ReportTab({ centerId, centers }) {
+  const [mode, setMode] = useState("month");           // "month" | "range"
+  const [ym, setYm] = useState(() => new Date().toISOString().slice(0, 7));
+  const [from, setFrom] = useState(() => `${new Date().toISOString().slice(0, 7)}-01`);
+  const [to, setTo] = useState(todayStr());
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const range = useMemo(() => {
+    if (mode === "month") {
+      const [y, m] = ym.split("-").map(Number);
+      const last = new Date(y, m, 0).getDate();
+      return { date_from: `${ym}-01`, date_to: `${ym}-${String(last).padStart(2, "0")}` };
+    }
+    return { date_from: from, date_to: to };
+  }, [mode, ym, from, to]);
+
+  const qs = () => {
+    const p = new URLSearchParams();
+    if (centerId) p.set("center_id", centerId);
+    p.set("date_from", range.date_from);
+    p.set("date_to", range.date_to);
+    return p.toString();
+  };
+
+  const load = async () => {
+    if (!range.date_from || !range.date_to) return;
+    setLoading(true);
+    try {
+      const { data: d } = await api.get(`/mess/stock-report?${qs()}`);
+      setData(d);
+    } catch (e) { toast.error(formatError(e)); setData(null); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [centerId, range.date_from, range.date_to]);
+
+  const downloadPdf = async () => {
+    try {
+      const resp = await api.get(`/mess/stock-report.pdf?${qs()}`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([resp.data], { type: "application/pdf" }));
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const rows = data?.rows || [];
+  const centerName = centerId ? (centers.find((c) => c.id === centerId)?.name || "") : "All authorized centers";
+  const pill = (active) => `px-3 py-1.5 text-xs font-semibold transition-colors ${active ? "bg-[var(--brand)] text-white" : "bg-white text-slate-600 hover:bg-slate-50"}`;
+
+  return (
+    <div className="space-y-4" data-testid="mess-report-tab">
+      {/* Controls */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-wrap items-end gap-3">
+        <div>
+          <div className="text-[9px] uppercase tracking-wide text-slate-400 mb-1">Report Type</div>
+          <div className="inline-flex rounded-lg border border-slate-200 overflow-hidden">
+            <button onClick={() => setMode("month")} className={pill(mode === "month")} data-testid="report-mode-month">Monthly</button>
+            <button onClick={() => setMode("range")} className={pill(mode === "range")} data-testid="report-mode-range">Date Range</button>
+          </div>
+        </div>
+        {mode === "month" ? (
+          <div>
+            <div className="text-[9px] uppercase tracking-wide text-slate-400 mb-1">Month</div>
+            <input type="month" value={ym} onChange={(e) => setYm(e.target.value)}
+              className="text-sm rounded-lg px-2 py-1.5 border border-slate-200 text-slate-800" data-testid="report-month" />
+          </div>
+        ) : (
+          <>
+            <div>
+              <div className="text-[9px] uppercase tracking-wide text-slate-400 mb-1">From</div>
+              <input type="date" value={from} onChange={(e) => setFrom(e.target.value)}
+                className="text-sm rounded-lg px-2 py-1.5 border border-slate-200 text-slate-800" data-testid="report-from" />
+            </div>
+            <div>
+              <div className="text-[9px] uppercase tracking-wide text-slate-400 mb-1">To</div>
+              <input type="date" value={to} onChange={(e) => setTo(e.target.value)}
+                className="text-sm rounded-lg px-2 py-1.5 border border-slate-200 text-slate-800" data-testid="report-to" />
+            </div>
+          </>
+        )}
+        <div className="flex-1" />
+        <Button onClick={downloadPdf} disabled={loading || rows.length === 0}
+          className="brand-btn rounded-lg gap-1.5" data-testid="report-download-pdf">
+          <Download size={14} /> Download PDF
+        </Button>
+      </div>
+
+      {/* Preview (same columns as the PDF) */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="text-center py-3 border-b border-slate-200">
+          <div className="font-heading font-black text-xl text-slate-900">{data?.title || "—"}</div>
+          <div className="text-xs text-slate-500 mt-0.5">Mess Stock Report · {data?.center_name || centerName}</div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border-collapse">
+            <thead className="bg-slate-50 text-slate-600 text-[11px] uppercase">
+              <tr>
+                <th className="text-center px-2 py-2 border border-slate-200 w-14">Sr. No</th>
+                <th className="text-left px-3 py-2 border border-slate-200">Description / Item Name</th>
+                <th className="text-center px-2 py-2 border border-slate-200">Unit</th>
+                <th className="text-center px-2 py-2 border border-slate-200">Opening Balance</th>
+                <th className="text-center px-2 py-2 border border-slate-200">Received</th>
+                <th className="text-center px-2 py-2 border border-slate-200">Issued</th>
+                <th className="text-center px-2 py-2 border border-slate-200">Remaining Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={7} className="text-center text-slate-400 py-10">Loading…</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={7} className="text-center text-slate-400 py-10">No stock movement in this period</td></tr>
+              ) : rows.map((r, i) => (
+                <tr key={r.item_id} className="hover:bg-slate-50" data-testid={`report-row-${r.item_id}`}>
+                  <td className="text-center px-2 py-2 border border-slate-200">{i + 1}</td>
+                  <td className="text-left px-3 py-2 border border-slate-200 font-medium text-slate-800">{r.name}</td>
+                  <td className="text-center px-2 py-2 border border-slate-200">{r.unit}</td>
+                  <td className="text-center px-2 py-2 border border-slate-200 num">{repQty(r.opening)}</td>
+                  <td className="text-center px-2 py-2 border border-slate-200 num text-emerald-700">{repQty(r.received)}</td>
+                  <td className="text-center px-2 py-2 border border-slate-200 num text-rose-600">{repQty(r.issued)}</td>
+                  <td className="text-center px-2 py-2 border border-slate-200 num font-bold">{repQty(r.remaining)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
