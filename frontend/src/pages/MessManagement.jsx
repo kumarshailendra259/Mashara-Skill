@@ -47,6 +47,7 @@ export default function MessManagement() {
 
   const [itemDlg, setItemDlg] = useState(null);      // item being created/edited
   const [receiptDlg, setReceiptDlg] = useState(false);
+  const [receiptPrefill, setReceiptPrefill] = useState(null);   // item_id to pre-fill as a (removable) line
   const [consDlg, setConsDlg] = useState(null);      // "consumption" | "wastage"
 
   const centerParam = centerId ? `?center_id=${centerId}` : "";
@@ -164,7 +165,7 @@ export default function MessManagement() {
       </div>
 
       {tab === "dashboard" && <DashboardTab dash={dash} stock={stock} loading={loading}
-        onReceive={() => setReceiptDlg(true)} onConsume={() => setConsDlg("consumption")}
+        onReceive={(itemId) => { setReceiptPrefill(typeof itemId === "string" ? itemId : null); setReceiptDlg(true); }} onConsume={() => setConsDlg("consumption")}
         onWaste={() => setConsDlg("wastage")} canEntry={canEntry} centerId={centerId}
         centers={centers} onViewHistory={() => setTab("ledger")} onGoto={setTab} />}
 
@@ -174,7 +175,7 @@ export default function MessManagement() {
       {tab === "stock" && <StockTab stock={stock} loading={loading} />}
 
       {tab === "receipts" && <ReceiptsTab receipts={receipts} loading={loading} canEntry={canEntry}
-        canApprove={canApprove} canRegen={["admin", "accountant"].includes(user?.role)} onCreate={() => setReceiptDlg(true)} onChanged={refresh} centerName={centerName} />}
+        canApprove={canApprove} canRegen={["admin", "accountant"].includes(user?.role)} onCreate={() => { setReceiptPrefill(null); setReceiptDlg(true); }} onChanged={refresh} centerName={centerName} />}
 
       {tab === "consumption" && <ConsumptionTab rows={consumption} loading={loading} canEntry={canEntry}
         onAdd={() => setConsDlg("consumption")} />}
@@ -192,8 +193,8 @@ export default function MessManagement() {
       {/* Dialogs */}
       {itemDlg && <ItemDialog item={itemDlg} units={units} onClose={() => setItemDlg(null)}
         onSaved={() => { setItemDlg(null); api.get("/mess/items").then(r => setItems(r.data)); }} />}
-      {receiptDlg && <ReceiptDialog items={items} units={units} centers={centers} centerId={centerId}
-        onClose={() => setReceiptDlg(false)} onSaved={() => { setReceiptDlg(false); setTab("receipts"); refresh(); }} />}
+      {receiptDlg && <ReceiptDialog items={items} units={units} centers={centers} centerId={centerId} prefillItemId={receiptPrefill}
+        onClose={() => { setReceiptDlg(false); setReceiptPrefill(null); }} onSaved={() => { setReceiptDlg(false); setReceiptPrefill(null); setTab("receipts"); refresh(); }} />}
       {consDlg && <ConsumptionDialog mode={consDlg} items={items} units={units} centers={centers} centerId={centerId}
         onClose={() => setConsDlg(null)} onSaved={() => { setConsDlg(null); refresh(); }} />}
     </div>
@@ -392,7 +393,8 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
 
       {/* Today's Cost Summary — toggled from the quick-actions bar */}
       {showCost && <CostSummaryPanel dash={dash} cpp={cpp} stock={stock}
-        pendingBills={pendingBills} loadingBills={loadingBills} onGoto={onGoto} />}
+        pendingBills={pendingBills} loadingBills={loadingBills} onGoto={onGoto}
+        canEntry={canEntry} onReorder={onReceive} />}
 
       {histItem && <ItemHistoryDrawer item={histItem} centerId={centerId} onClose={() => setHistItem(null)} />}
     </div>
@@ -442,7 +444,7 @@ function StatTile({ Icon, tint, label, value, small }) {
   );
 }
 
-function CostSummaryPanel({ dash, cpp, stock, pendingBills, loadingBills, onGoto }) {
+function CostSummaryPanel({ dash, cpp, stock, pendingBills, loadingBills, onGoto, canEntry, onReorder }) {
   const d = dash || {};
   const lastUpd = new Date().toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const lows = stock || [];
@@ -477,6 +479,7 @@ function CostSummaryPanel({ dash, cpp, stock, pendingBills, loadingBills, onGoto
                   <th className="text-right px-3 py-2">Rate</th>
                   <th className="text-right px-3 py-2">Days Left</th>
                   <th className="text-center px-3 py-2">Status</th>
+                  {canEntry && <th className="text-right px-3 py-2">Reorder</th>}
                 </tr></thead>
                 <tbody className="divide-y divide-slate-100">
                   {lows.slice(0, 8).map((s) => {
@@ -491,6 +494,7 @@ function CostSummaryPanel({ dash, cpp, stock, pendingBills, loadingBills, onGoto
                         <td className="px-3 py-2.5 text-right num text-slate-600">{s.consumption_rate_daily ? `${repQty(s.consumption_rate_daily)}/day` : "—"}</td>
                         <td className="px-3 py-2.5 text-right num text-slate-700">{s.est_days_left == null ? "—" : `${s.est_days_left} day${s.est_days_left === 1 ? "" : "s"}`}</td>
                         <td className="px-3 py-2.5 text-center"><span className={`inline-block text-[11px] font-bold rounded-full border px-2 py-0.5 ${st.cls}`}>{st.label}</span></td>
+                        {canEntry && <td className="px-3 py-2.5 text-right"><Button size="sm" variant="outline" className="h-7 rounded-lg gap-1 border-[var(--brand)] text-[var(--brand)]" onClick={() => onReorder(s.item_id)} data-testid={`ls-reorder-${s.item_id}`}><PackagePlus size={13} /> Reorder</Button></td>}
                       </tr>
                     );
                   })}
@@ -629,7 +633,7 @@ function InventoryTable({ rows, loading, canEntry, onReceive, onHistory }) {
                     <td className="px-3 py-2.5 text-center"><StatusBadge status={r.status} /></td>
                     <td className="px-3 py-2.5 text-right whitespace-nowrap">
                       <Button size="sm" variant="ghost" onClick={() => onHistory(r)} className="rounded-lg h-7 px-2 text-slate-500" data-testid={`inv-history-${r.item_id}`}><History size={13} /></Button>
-                      {canEntry && <Button size="sm" variant="outline" onClick={onReceive} className="rounded-lg h-7 px-2 ml-1 gap-1" data-testid={`inv-addentry-${r.item_id}`}><Plus size={12} /> Entry</Button>}
+                      {canEntry && <Button size="sm" variant="outline" onClick={() => onReceive(r.item_id)} className="rounded-lg h-7 px-2 ml-1 gap-1" data-testid={`inv-addentry-${r.item_id}`}><Plus size={12} /> Entry</Button>}
                     </td>
                   </tr>
                 ))}
@@ -662,7 +666,7 @@ function InventoryTable({ rows, loading, canEntry, onReceive, onHistory }) {
                       </div>
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" onClick={() => onHistory(r)} className="flex-1 rounded-lg gap-1.5" data-testid={`inv-mhistory-${r.item_id}`}><History size={13} /> History</Button>
-                        {canEntry && <Button size="sm" onClick={onReceive} className="flex-1 brand-btn rounded-lg gap-1.5" data-testid={`inv-maddentry-${r.item_id}`}><Plus size={13} /> Add Stock Entry</Button>}
+                        {canEntry && <Button size="sm" onClick={() => onReceive(r.item_id)} className="flex-1 brand-btn rounded-lg gap-1.5" data-testid={`inv-maddentry-${r.item_id}`}><Plus size={13} /> Add Stock Entry</Button>}
                       </div>
                     </div>
                   )}
@@ -1050,9 +1054,15 @@ const GST_RATE_OPTIONS = ["0", "5", "12", "18", "28"];
 const num = (v) => Number(v) || 0;
 const newReceiptLine = () => ({ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "18", hsn_sac: "", accepted_qty: "", rejected_qty: 0 });
 
-function ReceiptDialog({ items, units, centers, centerId, onClose, onSaved }) {
+function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose, onSaved }) {
   const [f, setF] = useState({ center_id: centerId || "", supplier_id: "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
-  const [lines, setLines] = useState([newReceiptLine()]);
+  const [lines, setLines] = useState(() => {
+    if (prefillItemId) {
+      const it = items.find((x) => x.id === prefillItemId);
+      return [{ ...newReceiptLine(), item_id: prefillItemId, unit: it?.base_unit || "" }];
+    }
+    return [newReceiptLine()];
+  });
   const [vendors, setVendors] = useState([]);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);

@@ -886,6 +886,35 @@ export default function PendingApprovals() {
                   {acting.item.summary?.amount != null && <>Amount: <span className="font-black text-emerald-800 text-[14px]">{inr(acting.item.summary.amount)}</span> · </>}
                   {acting.item.summary?.date}
                 </div>
+
+                {/* Line items — so the approver can verify WHAT is being purchased
+                    before approve / reject / send back (e.g. mess goods receipts). */}
+                {Array.isArray(acting.item.summary?.items) && acting.item.summary.items.length > 0 && (
+                  <div className="mt-2 border border-slate-200 rounded-md overflow-hidden bg-white" data-testid="approval-items">
+                    <table className="w-full text-[12px]">
+                      <thead className="bg-slate-100 text-slate-500 text-[10px] uppercase">
+                        <tr>
+                          <th className="text-left px-2 py-1">Item</th>
+                          <th className="text-right px-2 py-1">Qty</th>
+                          <th className="text-left px-2 py-1">Unit</th>
+                          <th className="text-right px-2 py-1">Rate</th>
+                          <th className="text-right px-2 py-1">Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {acting.item.summary.items.map((l, i) => (
+                          <tr key={i} data-testid={`approval-item-${i}`}>
+                            <td className="px-2 py-1 font-medium text-slate-800">{l.item_name || "—"}</td>
+                            <td className="px-2 py-1 text-right num">{l.accepted_qty ?? l.qty}</td>
+                            <td className="px-2 py-1 text-slate-500">{l.unit || l.base_unit || ""}</td>
+                            <td className="px-2 py-1 text-right num">{inr(l.unit_price || 0)}</td>
+                            <td className="px-2 py-1 text-right num font-semibold">{inr(l.line_total ?? l.accepted_cost ?? ((Number(l.qty) || 0) * (Number(l.unit_price) || 0)))}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {/* Payee details — shown for both PAYMENT and ADVANCE REQUEST so

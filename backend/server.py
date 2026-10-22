@@ -8535,6 +8535,7 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                     "payee_upi_id": rec.get("payee_upi_id"),
                     "payee_proof_attachments": rec.get("payee_proof_attachments") or [],
                     "attachments": rec.get("attachments") or [],
+                    "items": rec.get("lines") if req_type == "mess_receipt" else None,
                     "chain_history": rec.get("chain_history") or [],
                     "center_id": rec.get("center_id"),
                     "center_name": rec.get("center_name"),
