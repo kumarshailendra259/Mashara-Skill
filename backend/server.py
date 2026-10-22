@@ -26217,19 +26217,34 @@ def _mess_report_label(date_from: str, date_to: str) -> str:
     return f"{d1.strftime('%d-%b-%Y')} to {d2.strftime('%d-%b-%Y')}"
 
 
+_STATUS_LABEL = {"available": "Available", "low": "Low Stock", "out": "Out of Stock"}
+
+
+def _mess_stock_status(remaining: float, min_stock, reorder_level) -> str:
+    threshold = max(float(min_stock or 0), float(reorder_level or 0))
+    if remaining <= 0:
+        return "out"
+    if threshold > 0 and remaining <= threshold:
+        return "low"
+    return "available"
+
+
 async def _mess_stock_report_rows(user, center_id, date_from, date_to):
-    """Per-item opening / received / issued / remaining balance for the period.
+    """Per-item opening / received / issued / remaining balance + status + summary.
 
     opening  = running balance (qty_in - qty_out) for every ledger entry BEFORE date_from
     received = sum of qty_in within [date_from, date_to]
     issued   = sum of qty_out within [date_from, date_to]
     remaining = opening + received - issued
+    status   = out (<=0) / low (<= reorder threshold) / available
     """
     if not date_from or not date_to:
         raise HTTPException(400, "date_from and date_to are required")
+    empty_summary = {"total_items": 0, "available": 0, "low": 0, "out": 0,
+                     "received_by_unit": {}, "issued_by_unit": {}}
     scoped = await _mess_scope(user)
     if scoped is not None and len(scoped) == 0:
-        return [], None
+        return [], None, empty_summary
     cq = _mess_center_query(user, scoped, center_id)
     center_name = None
     if center_id:
@@ -26252,6 +26267,8 @@ async def _mess_stock_report_rows(user, center_id, date_from, date_to):
     groups = await db.mess_ledger.aggregate(pipeline).to_list(5000)
     items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
     out = []
+    summary = {"total_items": 0, "available": 0, "low": 0, "out": 0,
+               "received_by_unit": {}, "issued_by_unit": {}}
     for g in groups:
         opening = round(float(g.get("opening") or 0), 3)
         received = round(float(g.get("received") or 0), 3)
@@ -26259,29 +26276,42 @@ async def _mess_stock_report_rows(user, center_id, date_from, date_to):
         if opening == 0 and received == 0 and issued == 0:
             continue
         it = items.get(g["_id"], {})
+        remaining = round(opening + received - issued, 3)
+        unit = it.get("base_unit") or ""
+        min_s = float(it.get("min_stock") or 0)
+        reorder = float(it.get("reorder_level") or 0)
+        status = _mess_stock_status(remaining, min_s, reorder)
         out.append({
             "item_id": g["_id"],
             "name": it.get("name") or g.get("item_name") or "—",
-            "unit": it.get("base_unit") or "",
-            "opening": opening,
-            "received": received,
-            "issued": issued,
-            "remaining": round(opening + received - issued, 3),
+            "category": it.get("category") or "",
+            "unit": unit,
+            "opening": opening, "received": received, "issued": issued,
+            "remaining": remaining,
+            "min_stock": min_s, "reorder_level": reorder,
+            "status": status,
         })
+        summary["total_items"] += 1
+        summary[status] += 1
+        if received:
+            summary["received_by_unit"][unit] = round(summary["received_by_unit"].get(unit, 0) + received, 3)
+        if issued:
+            summary["issued_by_unit"][unit] = round(summary["issued_by_unit"].get(unit, 0) + issued, 3)
     out.sort(key=lambda x: (x["name"] or "").lower())
-    return out, center_name
+    return out, center_name, summary
 
 
 @api.get("/mess/stock-report")
 async def mess_stock_report(center_id: Optional[str] = None,
                             date_from: Optional[str] = None, date_to: Optional[str] = None,
                             user=Depends(require_role(*MESS_VIEW_ROLES))):
-    rows, center_name = await _mess_stock_report_rows(user, center_id, date_from, date_to)
+    rows, center_name, summary = await _mess_stock_report_rows(user, center_id, date_from, date_to)
     return {
         "title": _mess_report_label(date_from, date_to),
         "center_name": center_name or "All authorized centers",
         "date_from": date_from, "date_to": date_to,
         "rows": rows,
+        "summary": summary,
     }
 
 
@@ -26290,60 +26320,130 @@ async def mess_stock_report_pdf(center_id: Optional[str] = None,
                                 date_from: Optional[str] = None, date_to: Optional[str] = None,
                                 user=Depends(require_role(*MESS_VIEW_ROLES))):
     import io
+    from datetime import timedelta
     from fastapi.responses import StreamingResponse
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Table, TableStyle,
+                                    Spacer, HRFlowable)
 
-    rows, center_name = await _mess_stock_report_rows(user, center_id, date_from, date_to)
+    rows, center_name, summary = await _mess_stock_report_rows(user, center_id, date_from, date_to)
     label = _mess_report_label(date_from, date_to)
+    gen_ts = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%d-%b-%Y %I:%M %p IST")
+    gen_by = user.get("name") or user.get("full_name") or user.get("email") or "—"
+
+    NAVY = colors.HexColor("#0F172A")
+    BLUE = colors.HexColor("#2563EB")
+    MUTED = colors.HexColor("#64748B")
+    status_bg = {"available": colors.HexColor("#ECFDF5"), "low": colors.HexColor("#FEF3C7"),
+                 "out": colors.HexColor("#FEF2F2")}
+    status_fg = {"available": colors.HexColor("#047857"), "low": colors.HexColor("#92400E"),
+                 "out": colors.HexColor("#991B1B")}
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
-                            topMargin=14 * mm, bottomMargin=14 * mm)
-    title_style = ParagraphStyle("rep_t", fontName="Helvetica-Bold", fontSize=18,
-                                 alignment=TA_CENTER, spaceAfter=2)
-    sub_style = ParagraphStyle("rep_s", fontName="Helvetica", fontSize=10, alignment=TA_CENTER,
-                               textColor=colors.HexColor("#444444"), spaceAfter=10)
-    hstyle = ParagraphStyle("rep_h", fontName="Helvetica-Bold", fontSize=9, alignment=TA_CENTER, leading=11)
-    nstyle = ParagraphStyle("rep_n", fontName="Helvetica", fontSize=9, alignment=TA_LEFT, leading=11)
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=13 * mm, rightMargin=13 * mm,
+                            topMargin=13 * mm, bottomMargin=16 * mm, title="Mess Stock Report")
 
-    elems = [
-        Paragraph(label, title_style),
-        Paragraph(f"Mess Stock Report &middot; {center_name or 'All authorized centers'}", sub_style),
-    ]
+    s_brand = ParagraphStyle("brand", fontName="Helvetica-Bold", fontSize=20, textColor=NAVY, leading=20)
+    s_brand_sub = ParagraphStyle("brandsub", fontName="Helvetica", fontSize=7, textColor=MUTED, leading=9, spaceBefore=1)
+    s_gen = ParagraphStyle("gen", fontName="Helvetica", fontSize=8, textColor=MUTED, alignment=TA_RIGHT, leading=11)
+    s_title = ParagraphStyle("title", fontName="Helvetica-Bold", fontSize=15, textColor=NAVY, spaceBefore=4)
+    s_meta = ParagraphStyle("meta", fontName="Helvetica", fontSize=9, textColor=colors.HexColor("#334155"), leading=13)
+    s_sum = ParagraphStyle("sum", fontName="Helvetica", fontSize=9, textColor=colors.HexColor("#334155"), alignment=TA_CENTER, leading=12)
+    hstyle = ParagraphStyle("rep_h", fontName="Helvetica-Bold", fontSize=8.5, alignment=TA_CENTER, leading=10, textColor=colors.white)
+    nstyle = ParagraphStyle("rep_n", fontName="Helvetica", fontSize=8.5, alignment=TA_LEFT, leading=10.5)
+    ststyle = {k: ParagraphStyle(f"st_{k}", fontName="Helvetica-Bold", fontSize=7.5,
+                                 alignment=TA_CENTER, textColor=status_fg[k], leading=9)
+               for k in status_fg}
+
+    # Brand header (Mashara wordmark + generated timestamp)
+    head_tbl = Table([[
+        Paragraph("Mashara<font color='#2563EB'>.</font>", s_brand),
+        Paragraph(f"Generated: {gen_ts}<br/>Generated by: {gen_by}", s_gen),
+    ]], colWidths=[110 * mm, 74 * mm])
+    head_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                  ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                  ("RIGHTPADDING", (0, 0), (-1, -1), 0)]))
+    elems = [head_tbl,
+             Paragraph("FINANCE CONSOLE &middot; MESS &amp; INVENTORY", s_brand_sub),
+             Spacer(1, 4), HRFlowable(width="100%", thickness=1.2, color=BLUE),
+             Spacer(1, 6),
+             Paragraph("Mess Stock Report", s_title),
+             Paragraph(
+                 f"<b>Center:</b> {center_name or 'All authorized centers'} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                 f"<b>Reporting Period:</b> {label} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                 f"<b>Date Range:</b> {date_from} to {date_to}", s_meta),
+             Spacer(1, 6)]
+
+    # Summary strip
+    summ = (f"Distinct Items: <b>{summary['total_items']}</b> &nbsp;&bull;&nbsp; "
+            f"<font color='#047857'>Available: <b>{summary['available']}</b></font> &nbsp;&bull;&nbsp; "
+            f"<font color='#92400E'>Low Stock: <b>{summary['low']}</b></font> &nbsp;&bull;&nbsp; "
+            f"<font color='#991B1B'>Out of Stock: <b>{summary['out']}</b></font>")
+    sum_tbl = Table([[Paragraph(summ, s_sum)]], colWidths=[184 * mm])
+    sum_tbl.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+                                 ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#E2E8F0")),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+    elems += [sum_tbl, Spacer(1, 8)]
+
+    # Main table
     header = [Paragraph(x, hstyle) for x in
-              ["Sr. No", "Description / Item Name", "Unit", "Opening Balance",
-               "Received", "Issued", "Remaining Balance"]]
+              ["Sr. No", "Item Name", "Unit", "Opening", "Received", "Issued", "Remaining", "Status"]]
     data = [header]
+    row_status = []
     for i, r in enumerate(rows, 1):
-        data.append([str(i), Paragraph(r["name"], nstyle), r["unit"],
+        nm = r["name"] + (f"<br/><font size=6 color='#94A3B8'>{r['category']}</font>" if r.get("category") else "")
+        data.append([str(i), Paragraph(nm, nstyle), r["unit"],
                      _fmt_rep_qty(r["opening"]), _fmt_rep_qty(r["received"]),
-                     _fmt_rep_qty(r["issued"]), _fmt_rep_qty(r["remaining"])])
+                     _fmt_rep_qty(r["issued"]), _fmt_rep_qty(r["remaining"]),
+                     Paragraph(_STATUS_LABEL[r["status"]], ststyle[r["status"]])])
+        row_status.append(r["status"])
     if len(data) == 1:
-        data.append(["", Paragraph("No stock movement in this period", nstyle), "", "", "", "", ""])
+        data.append(["", Paragraph("No stock movement in this period.", nstyle), "", "", "", "", "", ""])
 
-    col_widths = [12 * mm, 54 * mm, 16 * mm, 24 * mm, 22 * mm, 20 * mm, 26 * mm]
+    col_widths = [11 * mm, 46 * mm, 14 * mm, 20 * mm, 20 * mm, 18 * mm, 22 * mm, 26 * mm]
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
-    tbl.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2f7")),
+    style = [
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
         ("ALIGN", (2, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("FONTSIZE", (0, 1), (-1, -1), 8.5),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    elems.append(tbl)
-    doc.build(elems)
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+    ]
+    for idx, st in enumerate(row_status, 1):
+        style.append(("BACKGROUND", (7, idx), (7, idx), status_bg[st]))
+    tbl.setStyle(TableStyle(style))
+    elems += [tbl, Spacer(1, 18)]
+
+    # Signature block
+    sig = Table([[Paragraph("Prepared by", s_meta), "", Paragraph("Verified by", s_meta)]],
+                colWidths=[70 * mm, 44 * mm, 70 * mm])
+    sig.setStyle(TableStyle([("LINEABOVE", (0, 0), (0, 0), 0.6, colors.HexColor("#94A3B8")),
+                             ("LINEABOVE", (2, 0), (2, 0), 0.6, colors.HexColor("#94A3B8")),
+                             ("TOPPADDING", (0, 0), (-1, -1), 3)]))
+    elems.append(sig)
+
+    def _footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(MUTED)
+        w, _h = A4
+        canvas.drawString(13 * mm, 9 * mm, f"Mashara Finance · Mess Stock Report · Generated {gen_ts}")
+        canvas.drawRightString(w - 13 * mm, 9 * mm, f"Page {_doc.page}")
+        canvas.restoreState()
+
+    doc.build(elems, onFirstPage=_footer, onLaterPages=_footer)
     buf.seek(0)
     safe = label.replace(" ", "_").replace("/", "-")
     return StreamingResponse(buf, media_type="application/pdf",
-        headers={"Content-Disposition": f"attachment; filename=mess_stock_report_{safe}.pdf"})
+        headers={"Content-Disposition": f"attachment; filename=Mashara_Mess_Stock_Report_{safe}.pdf"})
 
 
 # ---------- Physical Stock Count (adjustments) ----------

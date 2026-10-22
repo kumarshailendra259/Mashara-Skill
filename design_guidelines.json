@@ -1,117 +1,291 @@
 {
-  "app_type": "dashboard",
-  "scope": "Page redesign of /pending-approvals for Mashara Finance enterprise dashboard",
-  "theme": {
-    "type": "light",
-    "background": "bg-[#f8f9fa]",
-    "workspace": "bg-white",
-    "sidebar": "navy-blue (shared layout, shared top bar)",
-    "primary_brand": "#002fa7",
-    "primary_brand_hover": "#00227d",
-    "primary_brand_soft": "#ebf2ff"
+  "project_title": "Mashara Finance - Mess Management Module Redesign Blueprint",
+  "app_context": {
+    "type": "Dashboard module inside existing ERP/Finance SaaS",
+    "shell_constraint": "Embeds inside existing Navy/White sidebar and top header app shell - content area redesign only",
+    "theme_preference": "Light & professional theme with Navy Blue header band, White background, subtle border cards, Royal Blue & Emerald Green accents"
+  },
+  "archetype_and_theme": {
+    "archetype": "Swiss & High-Contrast (Archetype 4) merged with Organic Precision",
+    "vibe": "Clean, trustworthy, high-density financial clarity for institutional kitchen & mess inventory management",
+    "color_mode": "Light mode",
+    "header_band": "Navy Dark Blue (#0F172A / #1E293B) with white/ice-blue micro accents",
+    "surface": "Crisp White (#FFFFFF) cards on Light Cool Neutral (#F8FAFC) background",
+    "accent_palette": {
+      "primary_blue": "#2563EB",
+      "primary_blue_hover": "#1D4ED8",
+      "secondary_green": "#059669",
+      "secondary_green_hover": "#047857",
+      "warning_amber": "#D97706",
+      "danger_red": "#DC2626"
+    }
   },
   "typography": {
-    "font_family_heading": "Inter, -apple-system, BlinkMacSystemFont, sans-serif",
-    "font_family_body": "Inter, -apple-system, BlinkMacSystemFont, sans-serif",
-    "font_family_mono": "JetBrains Mono, ui-monospace, SFMono-Regular, monospace",
-    "hierarchy": {
-      "h1_page_header": "text-2xl md:text-3xl font-black tracking-tight text-slate-900",
-      "h2_section_header": "text-lg md:text-xl font-bold tracking-tight text-slate-900",
-      "card_title": "text-sm md:text-base font-bold text-slate-900",
-      "body": "text-xs md:text-sm text-slate-700 leading-relaxed",
-      "caption_overline": "text-[10px] md:text-xs font-semibold uppercase tracking-wider text-slate-500",
-      "tabular_nums": "font-mono font-bold tracking-tight"
+    "heading_font": "Outfit, Manrope, or Satoshi, sans-serif",
+    "body_font": "Plus Jakarta Sans or Inter, sans-serif",
+    "numeric_font": "JetBrains Mono or Tabular Nums (tabular-nums)",
+    "scale": {
+      "module_title": "text-2xl sm:text-3xl font-bold tracking-tight text-slate-900",
+      "section_title": "text-lg sm:text-xl font-semibold text-slate-800",
+      "card_kpi_value": "text-2xl sm:text-3xl font-bold tracking-tight tabular-nums",
+      "card_kpi_label": "text-xs font-semibold uppercase tracking-wider text-slate-500",
+      "table_header": "text-xs font-bold uppercase tracking-wider text-slate-500 bg-slate-50",
+      "table_cell": "text-sm text-slate-700 font-medium",
+      "body_text": "text-sm text-slate-600",
+      "caption": "text-xs text-slate-500"
     }
   },
   "colors": {
-    "brand_navy": "#002fa7",
-    "brand_navy_soft": "#ebf2ff",
-    "emerald_success": "#059669",
-    "emerald_soft": "#ecfdf5",
-    "rose_danger": "#dc2626",
-    "rose_soft": "#fef2f2",
-    "amber_warning": "#d97706",
-    "amber_soft": "#fffbeb",
-    "indigo_accent": "#4f46e5",
-    "indigo_soft": "#eef2ff",
-    "cyan_accent": "#0891b2",
-    "cyan_soft": "#ecfeff",
-    "purple_accent": "#7c3aed",
-    "purple_soft": "#f5f3ff",
-    "kpi_pastel_tiles": {
-      "total_awaiting": { "bg": "bg-blue-50", "border": "border-blue-100", "text": "text-blue-700", "icon_bg": "bg-blue-500" },
-      "total_amount": { "bg": "bg-emerald-50", "border": "border-emerald-100", "text": "text-emerald-700", "icon_bg": "bg-emerald-500" },
-      "oldest_pending": { "bg": "bg-amber-50", "border": "border-amber-100", "text": "text-amber-700", "icon_bg": "bg-amber-500" },
-      "last_updated": { "bg": "bg-purple-50", "border": "border-purple-100", "text": "text-purple-700", "icon_bg": "bg-purple-500" }
+    "header_bg": "#0F172A",
+    "header_text": "#F8FAFC",
+    "header_border": "#1E293B",
+    "page_bg": "#F8FAFC",
+    "card_bg": "#FFFFFF",
+    "card_border": "#E2E8F0",
+    "card_border_hover": "#CBD5E1",
+    "text_primary": "#0F172A",
+    "text_secondary": "#475569",
+    "text_muted": "#64748B",
+    "brand_blue": {
+      "main": "#2563EB",
+      "light": "#EFF6FF",
+      "border": "#BFDBFE",
+      "dark": "#1D4ED8"
+    },
+    "brand_green": {
+      "main": "#059669",
+      "light": "#ECFDF5",
+      "border": "#A7F3D0",
+      "dark": "#047857"
+    },
+    "status_available": {
+      "bg": "#ECFDF5",
+      "text": "#047857",
+      "border": "#A7F3D0",
+      "icon_color": "#059669"
+    },
+    "status_low_stock": {
+      "bg": "#FEF3C7",
+      "text": "#92400E",
+      "border": "#FDE68A",
+      "icon_color": "#D97706"
+    },
+    "status_out_of_stock": {
+      "bg": "#FEF2F2",
+      "text": "#991B1B",
+      "border": "#FECACA",
+      "icon_color": "#DC2626"
     }
   },
-  "layout_and_blueprint": {
-    "container": "max-w-7xl mx-auto space-y-6 p-4 md:p-6",
-    "page_header_section": {
-      "title": "Pending Approvals",
-      "subtitle": "All requests awaiting your action across transactions, leaves, reimbursements, assets, and payrolls.",
-      "decoration": "Subtle blue gradient background (from-slate-900 via-indigo-950 to-blue-900 or soft gradient card) with an illustrative icon container",
-      "actions": ["Refresh Button", "List/Grid Toggle Button", "Filter Popover Trigger", "Bulk Action Bar (when selected)"]
+  "spacing_and_layout": {
+    "container_padding": "p-4 sm:p-6 lg:p-8 space-y-6 sm:space-y-8",
+    "card_padding": "p-5 sm:p-6",
+    "kpi_grid": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6",
+    "secondary_kpi_grid": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4",
+    "radius": {
+      "card": "rounded-xl",
+      "input": "rounded-lg",
+      "button": "rounded-lg",
+      "badge": "rounded-full"
     },
-    "kpi_grid": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4",
-    "payroll_highlight_card": {
-      "style": "bg-gradient-to-r from-purple-900 via-indigo-900 to-purple-950 text-white rounded-xl p-5 shadow-md border border-purple-800/50",
-      "elements": ["Batch Count & Amount", "Quick Review CTA Button", "Preview list of top 3 pending batches with instant approve button"]
-    },
-    "tab_bar": {
-      "style": "flex items-center gap-1.5 overflow-x-auto pb-2 scrollbar-none border-b border-slate-200",
-      "tabs": ["All", "Transactions", "Leaves", "Reimbursements", "Assets", "Transfers", "Regularisations", "Quotations", "Payments", "Advances", "Payrolls"],
-      "active_state": "bg-[#002fa7] text-white font-semibold rounded-lg px-3 py-1.5 text-xs shadow-sm",
-      "inactive_state": "text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
-      "count_badge": "ml-1.5 px-1.5 py-0.5 text-[10px] font-bold rounded-full"
-    },
-    "toolbar": {
-      "search_input": "w-full md:w-72 pl-9 text-xs rounded-lg border-slate-200 focus:border-[#002fa7]",
-      "filter_popover": "Popover with status, date range, amount range, partner, center dropdowns",
-      "view_toggle": "Grouped icon buttons for List view and Grid view",
-      "bulk_actions_bar": "Sticky bottom or top banner when items are checked, featuring 'Approve Selected' and 'Reject Selected' buttons with counter"
-    },
-    "request_card_anatomy": {
-      "card_style": "bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-sm hover:shadow-md hover:border-blue-300 transition-all duration-200 space-y-3",
-      "header_row": "Type badge + PARTNER CROSS-APPROVAL pill + FINAL STEP pill + Checkbox for bulk select",
-      "requester_box": "Soft slate-50 box with Requester Name, Employee ID, Department, Designation, and Center Chip",
-      "purpose_and_vendor": "Bold purpose heading + Vendor/Payee tag pill",
-      "description_box": "Indigo-tinted box with bold indigo text for full request description",
-      "amount_and_dates": "Large tabular Emerald INR amount + Request date + Raised date",
-      "actions_group": "View Button, Approve Button, Reject Button, Send Back Button (for Quotations/Payments)"
+    "shadows": {
+      "card_default": "shadow-sm border border-slate-200/80",
+      "card_hover": "shadow-md transition-shadow duration-200",
+      "modal": "shadow-2xl border border-slate-200"
     }
   },
-  "states": {
-    "loading_skeleton": "Grid/List of animated pulses matching KPI cards and request cards shape",
-    "empty_state_inbox_zero": "Centered container with Inbox Zero illustration/icon, celebratory heading ('Inbox Zero! 🎉'), and descriptive subtext",
-    "bulk_confirm_dialog": "AlertDialog showing count of items, sum of total amount, optional global remarks field, and confirm/cancel controls"
+  "key_components": {
+    "header_band": {
+      "description": "Clean Navy-Blue Module Header Band providing context, center selection, and print/export shortcuts",
+      "tailwind_classes": "bg-slate-900 text-white rounded-xl p-5 sm:p-6 shadow-md border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4",
+      "elements": [
+        "Module Breadcrumb & Title ('Mashara Finance / Mess Management')",
+        "Center Location Switcher (Dropdown: Main Hostel Mess, Staff Canteen, Executive Dining)",
+        "Selected Period Indicator with quick date toggle",
+        "Primary PDF Export Action Button (High visibility green accent)"
+      ]
+    },
+    "quick_action_toolbar": {
+      "description": "Prominent action triggers for frequent inventory workflows",
+      "layout": "flex flex-wrap items-center gap-3 py-2",
+      "actions": [
+        {
+          "name": "Add Stock Received",
+          "variant": "Primary Blue Button",
+          "icon": "PlusCircle",
+          "testid": "quick-action-receive-stock"
+        },
+        {
+          "name": "Issue / Consume Stock",
+          "variant": "Secondary Emerald Button",
+          "icon": "ArrowUpRight",
+          "testid": "quick-action-issue-stock"
+        },
+        {
+          "name": "View Stock History",
+          "variant": "Outline Slate Button",
+          "icon": "History",
+          "testid": "quick-action-stock-history"
+        },
+        {
+          "name": "Generate PDF Report",
+          "variant": "Outline Slate/Navy Button",
+          "icon": "FileText",
+          "testid": "quick-action-generate-pdf"
+        }
+      ]
+    },
+    "kpi_summary_cards": {
+      "description": "High-impact summary statistics showing real-time inventory metrics and consumption totals grouped by compatible units",
+      "cards": [
+        {
+          "title": "Total Distinct Items",
+          "key": "total_items",
+          "accent_color": "border-l-4 border-l-blue-600",
+          "icon": "Package"
+        },
+        {
+          "title": "Items Available",
+          "key": "available_items",
+          "accent_color": "border-l-4 border-l-emerald-500",
+          "icon": "CheckCircle2"
+        },
+        {
+          "title": "Low Stock Alerts",
+          "key": "low_stock_items",
+          "accent_color": "border-l-4 border-l-amber-500",
+          "icon": "AlertTriangle"
+        },
+        {
+          "title": "Out of Stock",
+          "key": "out_of_stock_items",
+          "accent_color": "border-l-4 border-l-rose-500",
+          "icon": "XCircle"
+        }
+      ],
+      "unit_grouped_quantities": {
+        "description": "Secondary KPI bar displaying Total Received & Issued by unit for the selected period",
+        "units": ["kg (Kilograms)", "L (Liters)", "Bags / Sacks", "Pcs / Units"]
+      }
+    },
+    "filter_bar": {
+      "description": "Comprehensive search and period filtering controls",
+      "layout": "bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row gap-3 items-center justify-between",
+      "controls": [
+        "Center Dropdown Selector (Center ID filter)",
+        "Period Picker Dropdown (This Month, Last Month, Custom Date Range)",
+        "Search Input with Search Icon (Search by item name or SKU)",
+        "Status Filter Pills (All [count], Available [count], Low Stock [count], Out of Stock [count])"
+      ]
+    },
+    "interactive_inventory_table": {
+      "description": "Desktop multi-column data grid & Mobile expandable card views with accessibility compliance",
+      "columns": [
+        {"key": "sr_no", "label": "Sr No", "sortable": false},
+        {"key": "item_name", "label": "Item Name & Category", "sortable": true},
+        {"key": "unit", "label": "Unit", "sortable": true},
+        {"key": "opening_balance", "label": "Opening", "sortable": true, "numeric": true},
+        {"key": "received_qty", "label": "Received", "sortable": true, "numeric": true},
+        {"key": "issued_qty", "label": "Issued", "sortable": true, "numeric": true},
+        {"key": "remaining_balance", "label": "Remaining Balance", "sortable": true, "numeric": true},
+        {"key": "stock_status", "label": "Stock Status", "sortable": true},
+        {"key": "actions", "label": "Actions", "sortable": false}
+      ],
+      "mobile_view": "Responsive cards with collapsed state showing Item Name, Remaining Balance & Accessible Badge; expandable state showing Opening, Received, Issued breakdown + inline 'Add Stock Entry' button",
+      "pagination": "Items per page selector, Page X of Y, Previous/Next navigation"
+    },
+    "accessible_status_badges": {
+      "rule": "MUST NEVER rely on color alone. Always combine explicit text + visual icon + background contrast ratio >= 4.5:1",
+      "variants": {
+        "Available": {"icon": "CheckCircle2", "text": "Available", "bg": "bg-emerald-50 text-emerald-800 border-emerald-200"},
+        "Low Stock": {"icon": "AlertTriangle", "text": "Low Stock", "bg": "bg-amber-50 text-amber-900 border-amber-300"},
+        "Out of Stock": {"icon": "XCircle", "text": "Out of Stock", "bg": "bg-rose-50 text-rose-900 border-rose-300"}
+      }
+    },
+    "modal_workflows": {
+      "receive_stock_modal": "Form to record incoming items: Select Item, Vendor/Supplier, Quantity Received, Batch/Invoice No, Date, Notes. With instant auto-calculation of new remaining balance.",
+      "issue_stock_modal": "Form to record mess kitchen usage: Select Item, Recipient/Meal (Breakfast/Lunch/Dinner), Quantity Issued, Issued By, Date, Reorder alert check.",
+      "history_drawer": "Slide-over drawer showing chronological transaction audit log (Received vs Issued, timestamp, user, reference ID)."
+    },
+    "branded_pdf_report": {
+      "description": "Print-ready, pixel-perfect downloadable/printable report for audit & record keeping",
+      "wordmark": "Styled 'Mashara Finance - Mess Inventory Report' text wordmark",
+      "sections": [
+        "Company & Mess Center Header Block",
+        "Selected Period & Generated Date timestamp",
+        "KPI Summary Table",
+        "Full Inventory Audit Ledger with Unit-wise Totals",
+        "Authorized Signature & Stamp Block"
+      ]
+    }
   },
-  "testing": {
-    "data_testid_requirements": [
-      "pending-approvals-page",
-      "btn-refresh-approvals",
-      "view-mode-list",
-      "view-mode-grid",
-      "select-all-checkbox",
-      "bulk-approve-btn",
-      "bulk-reject-btn",
-      "tab-{type}",
-      "search-approvals-input",
-      "filter-popover-trigger",
-      "approval-card-{id}",
-      "btn-view-{id}",
-      "btn-approve-{id}",
-      "btn-reject-{id}",
-      "btn-sendback-{id}",
-      "confirm-act",
-      "approval-remarks"
+  "visual_enhancers": {
+    "glassmorphism": "Optional subtle backdrop-blur-md on fixed toolbar actions (backdrop-blur-md bg-white/90)",
+    "micro_animations": "Smooth hover lift on KPI cards (hover:-translate-y-0.5 transition-transform duration-200), smooth accordion expand/collapse on mobile cards",
+    "tabular_alignment": "Right-aligned numeric columns for Opening, Received, Issued, Remaining with tabular numbers font class"
+  },
+  "image_urls": [
+    {
+      "category": "inventory_background",
+      "url": "https://images.unsplash.com/photo-1579150877125-53b49ce88315?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzh8MHwxfHNlYXJjaHwzfHxmcmVzaCUyMHZlZ2V0YWJsZXMlMjByYXclMjBmb29kJTIwaW52ZW50b3J5JTIwa2l0Y2hlbiUyMGNsZWFufGVufDB8fHx8MTc5MjY4ODc5MXww&ixlib=rb-4.1.0&q=85",
+      "description": "Fresh vegetables raw food inventory kitchen clean background context"
+    },
+    {
+      "category": "mess_kitchen_prep",
+      "url": "https://images.unsplash.com/photo-1591189863430-ab87e120f312?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1Nzh8MHwxfHNlYXJjaHw0fHxmcmVzaCUyMHZlZ2V0YWJsZXMlMjByYXclMjBmb29kJTIwaW52ZW50b3J5JTIwa2l0Y2hlbiUyMGNsZWFufGVufDB8fHx8MTc5MjY4ODc5MXww&ixlib=rb-4.1.0&q=85",
+      "description": "Green fresh inventory items"
+    }
+  ],
+  "testing_guidelines": {
+    "data_testid_convention": "kebab-case, role-based, unique identifier for all interactive and key data elements",
+    "required_test_ids": [
+      "mess-header-title",
+      "center-select-dropdown",
+      "period-select-dropdown",
+      "quick-action-receive-stock",
+      "quick-action-issue-stock",
+      "quick-action-stock-history",
+      "quick-action-generate-pdf",
+      "kpi-card-total-items",
+      "kpi-card-available",
+      "kpi-card-low-stock",
+      "kpi-card-out-of-stock",
+      "inventory-search-input",
+      "status-filter-all",
+      "status-filter-available",
+      "status-filter-low-stock",
+      "status-filter-out-of-stock",
+      "inventory-table",
+      "inventory-table-row",
+      "inventory-mobile-card",
+      "receive-stock-modal",
+      "issue-stock-modal",
+      "history-drawer",
+      "pdf-report-container",
+      "pdf-print-button"
     ]
   },
   "instructions_to_main_agent": [
-    "Note: Files in frontend/src use .js / .jsx extension, NOT .tsx.",
-    "Preserve all existing API endpoints (/approvals/pending, /approvals/act, /transactions/.../partner-approve, /payroll-batches/...).",
-    "Maintain all data-testid attributes for testing compatibility.",
-    "Adopt soft rounded cards (rounded-xl) with clean borders for page cards as inspired by the design reference.",
-    "Ensure total accessibility contrast (APCA / WCAG AA 4.5:1 ratio) across all badge text and dark background headers."
+    "1. Keep the existing navy/white ERP sidebar and header unchanged. Embed the Mess Management Redesign directly into the main content viewport.",
+    "2. Render the top Navy Blue Module Header Band (#0F172A) with clear breadcrumbs, center switcher, period indicator, and quick PDF export button.",
+    "3. Render the 4 primary KPI cards (Total Items, Available, Low Stock, Out of Stock) with left border color indicators and tabular numeric formatting.",
+    "4. Add a secondary unit summary bar displaying Total Received and Issued broken down by unit (kg, L, Bags, Pcs).",
+    "5. Provide quick action buttons ('Add Stock Received', 'Issue Stock', 'View Stock History', 'Generate PDF Report') with Shadcn dialog/modal overlays for user transactions.",
+    "6. Build the interactive filter bar with Center dropdown, Period picker, search input, and filter chips/pills for stock statuses.",
+    "7. Construct the inventory table for desktop (sortable headers, sticky table header, numeric alignment) and expandable card views for mobile screens.",
+    "8. Ensure all status badges include both visual icons (CheckCircle, AlertTriangle, XCircle) and text labels for full accessibility compliance.",
+    "9. Create a dedicated PDF printable template view containing the 'Mashara' wordmark header, key statistics summary, item audit table, and authorization signature section.",
+    "10. Attach explicit data-testid attributes to all buttons, inputs, modals, cards, table rows, and status badges as specified in testing_guidelines."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Do not make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with subtle borders and card elevation.",
+    "You MUST NOT apply universal transition (e.g., transition: all). Add specific transitions like transition-colors or transition-transform.",
+    "You MUST NOT center align the app container. Maintain left-aligned tabular data and natural reading flow.",
+    "Always use modern button styles (pill or rounded-lg with crisp hover states).",
+    "NEVER use AI assistant emoji characters (🤖🧠💭💡) for status icons. Use Lucide React icons (CheckCircle2, AlertTriangle, XCircle, etc.).",
+    "Ensure generous padding inside cards (p-5 or p-6) to avoid text collision with borders.",
+    "All interactive elements MUST include data-testid attributes."
   ]
 }

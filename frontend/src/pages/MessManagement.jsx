@@ -14,6 +14,7 @@ import {
   Plus, Check, X, Trash2, Download, PackagePlus, Soup, AlertTriangle, Boxes,
   IndianRupee, Users, TrendingDown, FileWarning, Pencil, Lock, Scale, CalendarCheck, Unlock,
   Wallet, Upload, FileText, Clock, FileBarChart2,
+  CheckCircle2, XCircle, History, ChevronDown, ChevronUp, ArrowUpDown, Search, PlusCircle, ArrowUpRight, Layers,
 } from "lucide-react";
 
 const API_ENTRY_ROLES = ["admin", "senior_manager", "manager", "center_manager", "mess_staff"];
@@ -164,7 +165,8 @@ export default function MessManagement() {
 
       {tab === "dashboard" && <DashboardTab dash={dash} stock={stock} loading={loading}
         onReceive={() => setReceiptDlg(true)} onConsume={() => setConsDlg("consumption")}
-        onWaste={() => setConsDlg("wastage")} canEntry={canEntry} centerId={centerId} />}
+        onWaste={() => setConsDlg("wastage")} canEntry={canEntry} centerId={centerId}
+        centers={centers} onViewHistory={() => setTab("ledger")} />}
 
       {tab === "items" && <ItemsTab items={items} canAdmin={canAdmin} units={units}
         onAdd={() => setItemDlg({})} onEdit={(it) => setItemDlg(it)} />}
@@ -219,29 +221,171 @@ function KpiCard({ label, value, sub, Icon, tone }) {
   );
 }
 
-function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, canEntry }) {
-  if (loading && !dash) return <div className="text-sm text-slate-500 p-8 text-center">Loading…</div>;
+/* ---------------- Dashboard ---------------- */
+const MESS_STATUS = {
+  available: { label: "Available", cls: "bg-emerald-50 text-emerald-700 border-emerald-200", Icon: CheckCircle2 },
+  low: { label: "Low Stock", cls: "bg-amber-50 text-amber-800 border-amber-200", Icon: AlertTriangle },
+  out: { label: "Out of Stock", cls: "bg-rose-50 text-rose-700 border-rose-200", Icon: XCircle },
+};
+
+function StatusBadge({ status }) {
+  const s = MESS_STATUS[status] || MESS_STATUS.available;
+  return (
+    <span className={`inline-flex items-center gap-1 text-[11px] font-bold rounded-full border px-2 py-0.5 ${s.cls}`} data-testid={`status-${status}`}>
+      <s.Icon size={12} /> {s.label}
+    </span>
+  );
+}
+
+function StatCard({ label, value, sub, Icon, accent, tone, testid }) {
+  const tones = {
+    blue: ["text-blue-600", "bg-blue-50"],
+    green: ["text-emerald-600", "bg-emerald-50"],
+    amber: ["text-amber-600", "bg-amber-50"],
+    rose: ["text-rose-600", "bg-rose-50"],
+  }[tone] || ["text-slate-600", "bg-slate-50"];
+  return (
+    <div className={`bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow p-4 flex items-start justify-between border-l-4 ${accent}`} data-testid={testid}>
+      <div>
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{label}</div>
+        <div className="num font-black text-3xl text-slate-900 mt-1 tabular-nums">{value}</div>
+        {sub && <div className="text-[11px] text-slate-500 mt-0.5">{sub}</div>}
+      </div>
+      <div className={`${tones[1]} ${tones[0]} p-2 rounded-lg`}><Icon size={18} /></div>
+    </div>
+  );
+}
+
+function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, canEntry, centerId, centers, onViewHistory }) {
+  const [ym, setYm] = useState(() => new Date().toISOString().slice(0, 7));
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("all");
+  const [report, setReport] = useState(null);
+  const [loadingRep, setLoadingRep] = useState(false);
+  const [histItem, setHistItem] = useState(null);
+
+  const range = useMemo(() => {
+    const [y, m] = ym.split("-").map(Number);
+    const last = new Date(y, m, 0).getDate();
+    return { from: `${ym}-01`, to: `${ym}-${String(last).padStart(2, "0")}` };
+  }, [ym]);
+
+  const qs = () => {
+    const p = new URLSearchParams();
+    if (centerId) p.set("center_id", centerId);
+    p.set("date_from", range.from);
+    p.set("date_to", range.to);
+    return p.toString();
+  };
+
+  const loadReport = async () => {
+    setLoadingRep(true);
+    try { const { data } = await api.get(`/mess/stock-report?${qs()}`); setReport(data); }
+    catch (e) { toast.error(formatError(e)); setReport(null); }
+    finally { setLoadingRep(false); }
+  };
+  useEffect(() => { loadReport(); /* eslint-disable-next-line */ }, [centerId, range.from, range.to]);
+
+  const downloadPdf = async () => {
+    try {
+      const resp = await api.get(`/mess/stock-report.pdf?${qs()}`, { responseType: "blob" });
+      const url = URL.createObjectURL(new Blob([resp.data], { type: "application/pdf" }));
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 15000);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+
+  const summary = report?.summary || { total_items: 0, available: 0, low: 0, out: 0, received_by_unit: {}, issued_by_unit: {} };
+  const allRows = report?.rows || [];
+  const filtered = allRows.filter((r) =>
+    (status === "all" || r.status === status) &&
+    (!search || (r.name || "").toLowerCase().includes(search.toLowerCase()) || (r.category || "").toLowerCase().includes(search.toLowerCase()))
+  );
+  const unitStr = (obj) => {
+    const e = Object.entries(obj || {});
+    if (!e.length) return "—";
+    return e.map(([u, q]) => `${repQty(q)} ${u || ""}`.trim()).join(" · ");
+  };
   const d = dash || {};
   const cpp = d.cost_per_person == null ? "N/A" : inr(d.cost_per_person);
+  const pill = (val, lbl, testid) => (
+    <button onClick={() => setStatus(val)} data-testid={testid}
+      className={`px-3 py-1.5 text-xs font-semibold rounded-full border transition-colors ${status === val ? "bg-[var(--brand)] text-white border-[var(--brand)]" : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"}`}>{lbl}</button>
+  );
+
   return (
-    <div className="space-y-4">
-      {canEntry && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button onClick={onReceive} className="brand-btn rounded-lg gap-1.5" data-testid="qa-receive"><PackagePlus size={15} /> Receive Stock</Button>
-          <Button onClick={onConsume} variant="outline" className="rounded-lg gap-1.5" data-testid="qa-consume"><Soup size={15} /> Record Consumption</Button>
-          <Button onClick={onWaste} variant="outline" className="rounded-lg gap-1.5 text-rose-700 border-rose-300" data-testid="qa-waste"><TrendingDown size={15} /> Record Wastage</Button>
-        </div>
-      )}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard label="Opening Stock" value={inr(d.opening_value || 0)} sub="Start of day" Icon={Boxes} tone="blue" />
-        <KpiCard label="Goods Received" value={inr(d.today_received_value || 0)} sub="Today" Icon={PackagePlus} tone="green" />
-        <KpiCard label="Consumption Cost" value={inr(d.today_consumption_cost || 0)} sub="Today (weighted-avg)" Icon={Soup} tone="orange" />
-        <KpiCard label="Closing Stock" value={inr(d.closing_value || 0)} sub="Current valuation" Icon={Boxes} tone="purple" />
-        <KpiCard label="Mess Expenses" value={inr(d.today_mess_expenses || 0)} sub="Purchases today" Icon={IndianRupee} tone="blue" />
-        <KpiCard label="Meals Served" value={d.meals_served || 0} sub="Today" Icon={Users} tone="green" />
-        <KpiCard label="Cost / Person" value={cpp} sub="Consumption ÷ meals" Icon={IndianRupee} tone="orange" />
-        <KpiCard label="Wastage" value={inr(d.today_wastage_cost || 0)} sub="Today" Icon={TrendingDown} tone="red" />
+    <div className="space-y-5" data-testid="mess-dashboard">
+      {/* Quick actions */}
+      <div className="flex flex-wrap items-center gap-2.5">
+        {canEntry && <Button onClick={onReceive} className="brand-btn rounded-lg gap-1.5" data-testid="qa-receive"><PackagePlus size={15} /> Receive Stock</Button>}
+        {canEntry && <Button onClick={onConsume} className="rounded-lg gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="qa-consume"><ArrowUpRight size={15} /> Issue / Consume</Button>}
+        {canEntry && <Button onClick={onWaste} variant="outline" className="rounded-lg gap-1.5 text-rose-700 border-rose-300" data-testid="qa-waste"><TrendingDown size={15} /> Record Wastage</Button>}
+        <Button onClick={onViewHistory} variant="outline" className="rounded-lg gap-1.5" data-testid="qa-history"><History size={15} /> View Stock History</Button>
+        <Button onClick={downloadPdf} variant="outline" className="rounded-lg gap-1.5 border-slate-800 text-slate-800" data-testid="qa-pdf"><FileText size={15} /> Generate PDF Report</Button>
       </div>
+
+      {/* Inventory status KPIs */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard label="Total Items" value={summary.total_items} sub="Distinct · selected period" Icon={Package} tone="blue" accent="border-l-blue-600" testid="mess-stat-total" />
+        <StatCard label="Available" value={summary.available} sub="Healthy stock" Icon={CheckCircle2} tone="green" accent="border-l-emerald-500" testid="mess-stat-available" />
+        <StatCard label="Low Stock" value={summary.low} sub="At / below reorder" Icon={AlertTriangle} tone="amber" accent="border-l-amber-500" testid="mess-stat-low" />
+        <StatCard label="Out of Stock" value={summary.out} sub="Needs purchase" Icon={XCircle} tone="rose" accent="border-l-rose-500" testid="mess-stat-out" />
+      </div>
+
+      {/* Received / Issued by unit */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-3" data-testid="mess-received-strip">
+          <div className="bg-emerald-50 text-emerald-600 p-2.5 rounded-lg"><PackagePlus size={18} /></div>
+          <div><div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Total Received (period)</div>
+            <div className="num font-bold text-lg text-slate-900">{unitStr(summary.received_by_unit)}</div></div>
+        </div>
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex items-center gap-3" data-testid="mess-issued-strip">
+          <div className="bg-blue-50 text-blue-600 p-2.5 rounded-lg"><ArrowUpRight size={18} /></div>
+          <div><div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Total Issued (period)</div>
+            <div className="num font-bold text-lg text-slate-900">{unitStr(summary.issued_by_unit)}</div></div>
+        </div>
+      </div>
+
+      {/* Filter bar */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end gap-3">
+        <div>
+          <div className="text-[9px] uppercase tracking-wide text-slate-400 mb-1">Reporting Period</div>
+          <input type="month" value={ym} onChange={(e) => setYm(e.target.value)} className="text-sm rounded-lg px-2 py-1.5 border border-slate-200 text-slate-800" data-testid="mess-dash-month" />
+        </div>
+        <div className="flex-1 min-w-[180px]">
+          <div className="text-[9px] uppercase tracking-wide text-slate-400 mb-1">Search Item</div>
+          <div className="relative">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Item or category…" className="rounded-lg pl-8" data-testid="mess-dash-search" />
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {pill("all", "All", "filter-all")}
+          {pill("available", "Available", "filter-available")}
+          {pill("low", "Low Stock", "filter-low")}
+          {pill("out", "Out of Stock", "filter-out")}
+        </div>
+      </div>
+
+      {/* Interactive inventory table */}
+      <InventoryTable rows={filtered} loading={loadingRep} canEntry={canEntry}
+        onReceive={onReceive} onHistory={(it) => setHistItem(it)} />
+
+      {/* Secondary: today's cost summary (preserved) */}
+      <div className="pt-2">
+        <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Today&apos;s Cost Summary · {d.date || ""}</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <KpiCard label="Opening Stock" value={inr(d.opening_value || 0)} sub="Start of day" Icon={Boxes} tone="blue" />
+          <KpiCard label="Goods Received" value={inr(d.today_received_value || 0)} sub="Today" Icon={PackagePlus} tone="green" />
+          <KpiCard label="Consumption Cost" value={inr(d.today_consumption_cost || 0)} sub="Today (weighted-avg)" Icon={Soup} tone="orange" />
+          <KpiCard label="Closing Stock" value={inr(d.closing_value || 0)} sub="Current valuation" Icon={Boxes} tone="purple" />
+          <KpiCard label="Mess Expenses" value={inr(d.today_mess_expenses || 0)} sub="Purchases today" Icon={IndianRupee} tone="blue" />
+          <KpiCard label="Meals Served" value={d.meals_served || 0} sub="Today" Icon={Users} tone="green" />
+          <KpiCard label="Cost / Person" value={cpp} sub="Consumption ÷ meals" Icon={IndianRupee} tone="orange" />
+          <KpiCard label="Wastage" value={inr(d.today_wastage_cost || 0)} sub="Today" Icon={TrendingDown} tone="red" />
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <div className="flex items-center gap-2 font-bold text-sm mb-3"><AlertTriangle size={16} className="text-amber-500" /> Low Stock Alerts <span className="num text-xs text-slate-400">({d.low_stock_count || 0})</span></div>
@@ -262,7 +406,205 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
           <div className="text-xs text-slate-500 mt-1">Goods receipts awaiting approval</div>
         </div>
       </div>
+
+      {histItem && <ItemHistoryDrawer item={histItem} centerId={centerId} onClose={() => setHistItem(null)} />}
     </div>
+  );
+}
+
+/* ---- Interactive inventory table (desktop grid + mobile cards) ---- */
+function InventoryTable({ rows, loading, canEntry, onReceive, onHistory }) {
+  const [sortKey, setSortKey] = useState("name");
+  const [sortDir, setSortDir] = useState("asc");
+  const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState(null);
+  const perPage = 15;
+
+  useEffect(() => { setPage(1); }, [rows]);
+
+  const sorted = useMemo(() => {
+    const arr = [...rows];
+    arr.sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (typeof av === "string" || typeof bv === "string") { av = (av || "").toString().toLowerCase(); bv = (bv || "").toString().toLowerCase(); }
+      if (av < bv) return sortDir === "asc" ? -1 : 1;
+      if (av > bv) return sortDir === "asc" ? 1 : -1;
+      return 0;
+    });
+    return arr;
+  }, [rows, sortKey, sortDir]);
+
+  const pages = Math.max(1, Math.ceil(sorted.length / perPage));
+  const cur = Math.min(page, pages);
+  const start = (cur - 1) * perPage;
+  const pageRows = sorted.slice(start, start + perPage);
+
+  const toggleSort = (k) => {
+    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir("asc"); }
+  };
+  const Th = ({ k, children, className = "" }) => (
+    <th className={`px-3 py-2.5 ${className}`}>
+      <button onClick={() => toggleSort(k)} className="inline-flex items-center gap-1 hover:text-slate-800">
+        {children} <ArrowUpDown size={11} className={sortKey === k ? "text-[var(--brand)]" : "text-slate-300"} />
+      </button>
+    </th>
+  );
+
+  if (loading && rows.length === 0) return <div className="bg-white border border-slate-200 rounded-xl p-10 text-center text-sm text-slate-400">Loading inventory…</div>;
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm" data-testid="mess-inventory-table">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+        <div className="flex items-center gap-2 font-bold text-sm text-slate-800"><Layers size={16} className="text-[var(--brand)]" /> Inventory</div>
+        <div className="text-xs text-slate-400">{sorted.length} item{sorted.length === 1 ? "" : "s"}</div>
+      </div>
+
+      {sorted.length === 0 ? (
+        <div className="p-10 text-center text-sm text-slate-400">No items match the selected filters for this period.</div>
+      ) : (
+        <>
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-slate-500 text-[11px] font-bold uppercase tracking-wider">
+                <tr>
+                  <th className="px-3 py-2.5 text-center w-14">Sr No</th>
+                  <Th k="name" className="text-left">Item Name</Th>
+                  <Th k="unit" className="text-center">Unit</Th>
+                  <Th k="opening" className="text-right">Opening</Th>
+                  <Th k="received" className="text-right">Received</Th>
+                  <Th k="issued" className="text-right">Issued</Th>
+                  <Th k="remaining" className="text-right">Remaining</Th>
+                  <Th k="status" className="text-center">Status</Th>
+                  <th className="px-3 py-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {pageRows.map((r, i) => (
+                  <tr key={r.item_id} className="hover:bg-slate-50" data-testid={`inv-row-${r.item_id}`}>
+                    <td className="px-3 py-2.5 text-center num text-slate-400">{start + i + 1}</td>
+                    <td className="px-3 py-2.5">
+                      <div className="font-semibold text-slate-800">{r.name}</div>
+                      {r.category && <div className="text-[11px] text-slate-400">{r.category}</div>}
+                    </td>
+                    <td className="px-3 py-2.5 text-center text-slate-600">{r.unit}</td>
+                    <td className="px-3 py-2.5 text-right num tabular-nums">{repQty(r.opening)}</td>
+                    <td className="px-3 py-2.5 text-right num tabular-nums text-emerald-700">{repQty(r.received)}</td>
+                    <td className="px-3 py-2.5 text-right num tabular-nums text-rose-600">{repQty(r.issued)}</td>
+                    <td className="px-3 py-2.5 text-right num tabular-nums font-bold">{repQty(r.remaining)}</td>
+                    <td className="px-3 py-2.5 text-center"><StatusBadge status={r.status} /></td>
+                    <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                      <Button size="sm" variant="ghost" onClick={() => onHistory(r)} className="rounded-lg h-7 px-2 text-slate-500" data-testid={`inv-history-${r.item_id}`}><History size={13} /></Button>
+                      {canEntry && <Button size="sm" variant="outline" onClick={onReceive} className="rounded-lg h-7 px-2 ml-1 gap-1" data-testid={`inv-addentry-${r.item_id}`}><Plus size={12} /> Entry</Button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile expandable cards */}
+          <div className="md:hidden divide-y divide-slate-100">
+            {pageRows.map((r, i) => {
+              const open = expanded === r.item_id;
+              return (
+                <div key={r.item_id} data-testid={`inv-card-${r.item_id}`}>
+                  <button onClick={() => setExpanded(open ? null : r.item_id)} className="w-full flex items-center justify-between gap-2 px-4 py-3 text-left">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-800 truncate">{start + i + 1}. {r.name}</div>
+                      <div className="mt-1"><StatusBadge status={r.status} /></div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div className="text-right"><div className="num font-black text-lg text-slate-900">{repQty(r.remaining)}</div><div className="text-[10px] text-slate-400">{r.unit}</div></div>
+                      {open ? <ChevronUp size={18} className="text-slate-400" /> : <ChevronDown size={18} className="text-slate-400" />}
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-4 pb-4 space-y-3">
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="bg-slate-50 rounded-lg py-2"><div className="text-[10px] uppercase text-slate-400">Opening</div><div className="num font-bold text-slate-800">{repQty(r.opening)}</div></div>
+                        <div className="bg-emerald-50 rounded-lg py-2"><div className="text-[10px] uppercase text-emerald-600">Received</div><div className="num font-bold text-emerald-700">{repQty(r.received)}</div></div>
+                        <div className="bg-rose-50 rounded-lg py-2"><div className="text-[10px] uppercase text-rose-600">Issued</div><div className="num font-bold text-rose-700">{repQty(r.issued)}</div></div>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" onClick={() => onHistory(r)} className="flex-1 rounded-lg gap-1.5" data-testid={`inv-mhistory-${r.item_id}`}><History size={13} /> History</Button>
+                        {canEntry && <Button size="sm" onClick={onReceive} className="flex-1 brand-btn rounded-lg gap-1.5" data-testid={`inv-maddentry-${r.item_id}`}><Plus size={13} /> Add Stock Entry</Button>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Pagination */}
+          {pages > 1 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 text-sm">
+              <span className="text-slate-500">Page {cur} / {pages}</span>
+              <div className="flex gap-1.5">
+                <Button size="sm" variant="outline" disabled={cur <= 1} onClick={() => setPage(cur - 1)} className="rounded-lg h-8" data-testid="inv-prev">Prev</Button>
+                <Button size="sm" variant="outline" disabled={cur >= pages} onClick={() => setPage(cur + 1)} className="rounded-lg h-8" data-testid="inv-next">Next</Button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---- Per-item transaction history ---- */
+function ItemHistoryDrawer({ item, centerId, onClose }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => {
+    const p = new URLSearchParams();
+    if (centerId) p.set("center_id", centerId);
+    p.set("item_id", item.item_id);
+    p.set("limit", "300");
+    api.get(`/mess/ledger?${p.toString()}`).then((r) => setRows(r.data)).catch(() => setRows([]));
+  }, [item, centerId]);
+  const typeLabel = { receipt: "Received", consumption: "Consumed", wastage: "Wastage", adjustment: "Adjustment" };
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="rounded-xl max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="font-heading flex items-center gap-2"><History size={18} className="text-[var(--brand)]" /> {item.name} — Transaction History</DialogTitle>
+          <DialogDescription className="sr-only">Stock ledger entries for this item</DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-auto -mx-1">
+          {rows === null ? <div className="text-center text-slate-400 py-10 text-sm">Loading…</div> :
+            rows.length === 0 ? <div className="text-center text-slate-400 py-10 text-sm">No transactions recorded for this item.</div> : (
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500 text-[11px] uppercase sticky top-0">
+                  <tr>
+                    <th className="text-left px-3 py-2">Date</th><th className="text-left px-3 py-2">Type</th>
+                    <th className="text-right px-3 py-2">In</th><th className="text-right px-3 py-2">Out</th>
+                    <th className="text-right px-3 py-2">Balance</th><th className="text-left px-3 py-2">By</th>
+                    <th className="text-left px-3 py-2">Remarks</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {rows.map((l) => (
+                    <tr key={l.id} className="hover:bg-slate-50" data-testid={`hist-${l.id}`}>
+                      <td className="px-3 py-2 whitespace-nowrap">{l.date}</td>
+                      <td className="px-3 py-2"><span className="text-[11px] font-semibold text-slate-600">{typeLabel[l.type] || l.type}</span></td>
+                      <td className="px-3 py-2 text-right num text-emerald-700">{l.qty_in ? repQty(l.qty_in) : "—"}</td>
+                      <td className="px-3 py-2 text-right num text-rose-600">{l.qty_out ? repQty(l.qty_out) : "—"}</td>
+                      <td className="px-3 py-2 text-right num font-bold">{repQty(l.balance_qty)}</td>
+                      <td className="px-3 py-2 text-slate-500">{l.created_by_name || "—"}</td>
+                      <td className="px-3 py-2 text-slate-500 text-xs">{l.notes || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} className="rounded-lg">Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
