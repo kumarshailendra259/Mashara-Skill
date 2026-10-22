@@ -138,7 +138,7 @@ export default function MessManagement() {
               <div className="text-[9px] uppercase tracking-wide text-white/60 mb-0.5">Center</div>
               <select value={centerId} onChange={(e) => setCenterId(e.target.value)} className="text-sm rounded-lg px-2 py-1.5 text-slate-800 bg-white" data-testid="mess-center-select">
                 <option value="">All authorized</option>
-                {centers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                {centers.map((c) => <option key={c.id} value={c.id}>{c.name || c.code || "(unnamed center)"}</option>)}
               </select>
             </div>
             <div>
@@ -257,7 +257,10 @@ function StatCard({ label, value, sub, Icon, accent, tone, testid }) {
 }
 
 function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, canEntry, centerId, centers, onViewHistory }) {
-  const [ym, setYm] = useState(() => new Date().toISOString().slice(0, 7));
+  const [ym, setYm] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
   const [report, setReport] = useState(null);
@@ -296,11 +299,13 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
   };
 
   const summary = report?.summary || { total_items: 0, available: 0, low: 0, out: 0, received_by_unit: {}, issued_by_unit: {} };
-  const allRows = report?.rows || [];
-  const filtered = allRows.filter((r) =>
-    (status === "all" || r.status === status) &&
-    (!search || (r.name || "").toLowerCase().includes(search.toLowerCase()) || (r.category || "").toLowerCase().includes(search.toLowerCase()))
-  );
+  const filtered = useMemo(() => {
+    const rows = report?.rows || [];
+    return rows.filter((r) =>
+      (status === "all" || r.status === status) &&
+      (!search || (r.name || "").toLowerCase().includes(search.toLowerCase()) || (r.category || "").toLowerCase().includes(search.toLowerCase()))
+    );
+  }, [report, status, search]);
   const unitStr = (obj) => {
     const e = Object.entries(obj || {});
     if (!e.length) return "—";
@@ -445,7 +450,7 @@ function InventoryTable({ rows, loading, canEntry, onReceive, onHistory }) {
   };
   const Th = ({ k, children, className = "" }) => (
     <th className={`px-3 py-2.5 ${className}`}>
-      <button onClick={() => toggleSort(k)} className="inline-flex items-center gap-1 hover:text-slate-800">
+      <button onClick={() => toggleSort(k)} className="inline-flex items-center gap-1 hover:text-slate-800" data-testid={`inv-sort-${k}`}>
         {children} <ArrowUpDown size={11} className={sortKey === k ? "text-[var(--brand)]" : "text-slate-300"} />
       </button>
     </th>
@@ -1336,7 +1341,10 @@ const repQty = (v) => {
 
 function ReportTab({ centerId, centers }) {
   const [mode, setMode] = useState("month");           // "month" | "range"
-  const [ym, setYm] = useState(() => new Date().toISOString().slice(0, 7));
+  const [ym, setYm] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  });
   const [from, setFrom] = useState(() => `${new Date().toISOString().slice(0, 7)}-01`);
   const [to, setTo] = useState(todayStr());
   const [data, setData] = useState(null);

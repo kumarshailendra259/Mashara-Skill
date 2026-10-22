@@ -1,0 +1,35 @@
+{
+  "summary": "Frontend-only test of the redesigned Mess Dashboard (/mess), done with Playwright on the preview URL at desktop 1920px and mobile 390px, as admin and as center_manager. Passed: 4 status KPI cards; center select (TEST_Center_Phase72 shows 4 rows); Received/Issued strips (Oct-2026: 1129 kg received / 284 kg issued); inventory table columns; Remaining = Opening + Received - Issued on every row (Rice: 0 + 529 - 284 = 245, which matches the ledger's final balance of 245); status pills (all=4, available=4, low=0, out=0, with the empty-state message); search by name ('rice') and by category ('grains'); sort by Item Name (asc/desc) and Remaining (asc/desc); month picker (Sep-2026 is empty; Nov-2026 carries forward opening 245/200/200/200 with 0 received/issued). Also passed: History modal shows 'Rice — Transaction History' with 17 entries and headers Date/Type/In/Out/Balance/By/Remarks, and Escape closes it. qa-pdf: /mess/stock-report.pdf returns 200 application/pdf and a blob popup opens. qa-receive, qa-consume and qa-waste open the New Goods Receipt, Record Consumption and Record Wastage dialogs; row inv-addentry opens New Goods Receipt; qa-history switches to the Stock Ledger tab. All 9 mess tabs render. Regression: /transactions renders (1159 transactions). center_manager (cmtest_salary, Valeur Fabtex): the center dropdown lists only their own center, the dashboard is scoped (1 item, Chana Dal, Low Stock), and direct requests for another center to stock-report, stock-report.pdf and ledger return 403 'Center not authorised'. Mobile 390px: the inv-card is used (desktop table hidden), it expands to show Opening/Received/Issued, the History button works, and the page has no horizontal overflow. No ChunkLoadError and no uncaught page errors. Pagination was NOT tested live: no center has more than 15 items (All authorized = 6), so this was checked by code review only. No data was created or modified.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "InventoryTable pagination", "issue": "useEffect(() => setPage(1), [rows]) runs on every DashboardTab render, because `filtered` is a new array each render. Any parent re-render resets the table to page 1, e.g. opening the History modal (setHistItem) or a parent loading-state change. So a user on page 2 who clicks History lands back on page 1. Fix: wrap `filtered` in useMemo([allRows, status, search]), or key the reset on status/search/report.", "selector": "[data-testid='inv-next']", "priority": "MEDIUM"},
+      {"component": "Center select", "issue": "One center option has an empty name (value 7f11829a-aba3-469a-9974-8ff8c0e0513a) and shows as a blank row in the dropdown. This is a data issue; consider a fallback label such as name || code || id.", "selector": "[data-testid='mess-center-select']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Item History modal (mobile 390px)", "issues": ["The 7-column table overflows horizontally inside the modal, so the By and Remarks columns are cut off (they scroll inside the modal). Consider a stacked/card layout on mobile."]},
+      {"screen": "Inventory row 'Entry' button", "issues": ["It opens a blank New Goods Receipt dialog with no item pre-selected. A user would expect the row's item to be filled in."]}
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [
+    "Memoize `filtered` in DashboardTab, or change the setPage(1) effect deps, so pagination does not reset to page 1 on unrelated re-renders",
+    "Optional: pre-select the row item when the inv-addentry (Entry) button opens ReceiptDialog",
+    "Optional: give the History modal a mobile-friendly layout; show a fallback label for centers with an empty name"
+  ],
+  "critical_code_review_comments": [
+    "DashboardTab's default month uses new Date().toISOString().slice(0,7), which is UTC. In IST between 00:00 and 05:30 on the 1st it defaults to the previous month. Build the month from local getFullYear()/getMonth() instead.",
+    "ItemHistoryDrawer shows the item's whole ledger (limit 300), not only the selected reporting period. If that is intended, fine; otherwise pass date_from/date_to.",
+    "The sortable column header buttons have no data-testid (tests have to use the header text). Consider adding inv-sort-<key>.",
+    "MessManagement.jsx is 1467 lines (over the 700-line guideline); split DashboardTab/InventoryTable/dialogs into their own files.",
+    "The console warning '<span> cannot be a child of <option>' in the ReceiptDialog unit select (line ~1059) comes from the injected visual-edit wrapper spans, not from app code. Harmless."
+  ],
+  "updated_files": ["/app/test_reports/iteration_87.json"],
+  "success_rate": {"backend": "N/A (skipped)", "frontend": "100% of the requested features that were testable (pagination checked by code review only)"},
+  "test_credentials": "admin@finance.app / Admin@123; cmtest_salary@x.com / Test@1234 (company Valeur Fabtex Pvt Ltd, LPEKKN) from /app/memory/test_credentials.md",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The browser clock is in Oct 2026, so the dashboard defaults to period 2026-10. TEST_Center_Phase72 (668de8a2...) has 4 items: Rice 0/529/284/245 and three TEST_WAvg items at 0/200/0/200. Rice has 17 ledger entries. The center_manager's only center is TEST_iter28_C_5f3eac (10751714...), with Chana Dal at 20 kg, Low Stock. To test pagination you need a center with more than 15 items for the selected period."
+}
