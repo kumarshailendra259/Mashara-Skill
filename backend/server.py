@@ -25199,7 +25199,7 @@ MESS_UNITS = ["kg", "gram", "litre", "ml", "piece", "packet", "dozen", "cylinder
 MESS_VIEW_ROLES = ("admin", "senior_manager", "manager", "center_manager", "accountant", "mess_staff", "partner", "viewer")
 MESS_ENTRY_ROLES = ("admin", "senior_manager", "manager", "center_manager", "mess_staff")
 MESS_APPROVE_ROLES = ("admin", "senior_manager", "manager", "accountant")
-MESS_ADMIN_ROLES = ("admin", "senior_manager", "manager")
+MESS_ADMIN_ROLES = ("admin", "senior_manager", "manager", "center_manager")
 
 DEFAULT_MESS_ITEMS = [
     ("Rice", "Grains", "kg", "bag", 25, 50, 100),

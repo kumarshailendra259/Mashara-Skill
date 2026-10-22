@@ -2841,3 +2841,10 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 - **Verified:** prod `yarn build` succeeds (57 chunks). Frontend testing agent (iteration_86) = 100%: all 47 lazy routes render, sidebar/header persist, no ChunkLoadError, charts + maps work, Login has exactly 1 `<main>`, fonts non-blocking, robots.txt present. No business logic / backend / payroll / financial rules touched.
 - **Requires redeploy** for production (finance.masharaskills.com). Final PageSpeed numbers must be measured against the deployed prod build after redeploy.
 - **Not done (infra-level, documented):** HTTP security headers (CSP, COOP, X-Frame-Options) and long-lived Cache-Control are set at the hosting/ingress layer, not in frontend source — cannot be changed safely from code without risking PostHog/fonts/API breakage.
+
+## Phase 120 (Jun 2026) — Mess Item Master create/edit access for center_manager
+- User: "Item create karne ka option center manager ko bhi dijiye" (Mess → Item Master).
+- Backend (`server.py`): `MESS_ADMIN_ROLES` now `("admin","senior_manager","manager","center_manager")`. Used ONLY by `POST /mess/items` + `PUT /mess/items/{id}` — no other endpoint affected.
+- Frontend (`MessManagement.jsx`): `API_ADMIN_ROLES` adds `"center_manager"` → `canAdmin` true → "Add Item" button + per-row edit pencil now render for center_manager.
+- Verified: curl as center_manager (cmtest_salary@x.com) `POST /mess/items` → HTTP 200 item created (test item cleaned up); UI screenshot as center_manager shows "Add Item" button (add-item-btn count 1) + edit controls on Item Master.
+- **Requires redeploy** for production.

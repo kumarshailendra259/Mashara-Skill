@@ -18,7 +18,7 @@ import {
 
 const API_ENTRY_ROLES = ["admin", "senior_manager", "manager", "center_manager", "mess_staff"];
 const API_APPROVE_ROLES = ["admin", "senior_manager", "manager", "accountant"];
-const API_ADMIN_ROLES = ["admin", "senior_manager", "manager"];
+const API_ADMIN_ROLES = ["admin", "senior_manager", "manager", "center_manager"];
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
