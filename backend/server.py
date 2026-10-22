@@ -25436,14 +25436,36 @@ async def mess_stock(center_id: Optional[str] = None, low_only: bool = False,
     cq = _mess_center_query(user, scoped, center_id)
     rows = await db.mess_stock.find(cq, {"_id": 0}).to_list(5000)
     items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    # Trailing-30-day average daily consumption (for rate / days-left estimates)
+    from datetime import date as _date, timedelta
+    win_start = (_date.today() - timedelta(days=30)).isoformat()
+    consumed = {}
+    async for g in db.mess_ledger.aggregate([
+        {"$match": {**cq, "date": {"$gte": win_start}}},
+        {"$group": {"_id": "$item_id", "out": {"$sum": {"$ifNull": ["$qty_out", 0]}}}},
+    ]):
+        consumed[g["_id"]] = float(g.get("out") or 0)
     out = []
     for r in rows:
         it = items.get(r["item_id"], {})
         min_s = float(it.get("min_stock") or 0)
         reorder = float(it.get("reorder_level") or 0)
-        low = float(r.get("qty") or 0) <= max(min_s, reorder)
+        qty = float(r.get("qty") or 0)
+        low = qty <= max(min_s, reorder)
+        rate = round(consumed.get(r["item_id"], 0) / 30.0, 3)
+        days_left = round(qty / rate, 1) if rate > 0 else None
+        if qty <= 0:
+            st = "out"
+        elif days_left is not None and days_left <= 1:
+            st = "critical"
+        elif low:
+            st = "low"
+        else:
+            st = "ok"
         rec = {**r, "category": it.get("category"), "min_stock": min_s,
-               "reorder_level": reorder, "is_low": low}
+               "reorder_level": reorder, "is_low": low,
+               "consumption_rate_daily": rate, "est_days_left": days_left,
+               "stock_status": st}
         if (not low_only) or low:
             out.append(rec)
     out.sort(key=lambda x: (not x["is_low"], x.get("item_name") or ""))

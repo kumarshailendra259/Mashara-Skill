@@ -14,7 +14,7 @@ import {
   Plus, Check, X, Trash2, Download, PackagePlus, Soup, AlertTriangle, Boxes,
   IndianRupee, Users, TrendingDown, FileWarning, Pencil, Lock, Scale, CalendarCheck, Unlock,
   Wallet, Upload, FileText, Clock, FileBarChart2,
-  CheckCircle2, XCircle, History, ChevronDown, ChevronUp, ArrowUpDown, Search, PlusCircle, ArrowUpRight, Layers,
+  CheckCircle2, XCircle, History, ChevronDown, ChevronUp, ChevronRight, ArrowUpDown, Search, PlusCircle, ArrowUpRight, Layers,
 } from "lucide-react";
 
 const API_ENTRY_ROLES = ["admin", "senior_manager", "manager", "center_manager", "mess_staff"];
@@ -166,7 +166,7 @@ export default function MessManagement() {
       {tab === "dashboard" && <DashboardTab dash={dash} stock={stock} loading={loading}
         onReceive={() => setReceiptDlg(true)} onConsume={() => setConsDlg("consumption")}
         onWaste={() => setConsDlg("wastage")} canEntry={canEntry} centerId={centerId}
-        centers={centers} onViewHistory={() => setTab("ledger")} />}
+        centers={centers} onViewHistory={() => setTab("ledger")} onGoto={setTab} />}
 
       {tab === "items" && <ItemsTab items={items} canAdmin={canAdmin} units={units}
         onAdd={() => setItemDlg({})} onEdit={(it) => setItemDlg(it)} />}
@@ -256,7 +256,7 @@ function StatCard({ label, value, sub, Icon, accent, tone, testid }) {
   );
 }
 
-function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, canEntry, centerId, centers, onViewHistory }) {
+function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, canEntry, centerId, centers, onViewHistory, onGoto }) {
   const [ym, setYm] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -266,6 +266,9 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
   const [report, setReport] = useState(null);
   const [loadingRep, setLoadingRep] = useState(false);
   const [histItem, setHistItem] = useState(null);
+  const [showCost, setShowCost] = useState(false);
+  const [pendingBills, setPendingBills] = useState([]);
+  const [loadingBills, setLoadingBills] = useState(false);
 
   const range = useMemo(() => {
     const [y, m] = ym.split("-").map(Number);
@@ -288,6 +291,16 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
     finally { setLoadingRep(false); }
   };
   useEffect(() => { loadReport(); /* eslint-disable-next-line */ }, [centerId, range.from, range.to]);
+
+  useEffect(() => {
+    if (!showCost) return;
+    setLoadingBills(true);
+    const p = new URLSearchParams();
+    if (centerId) p.set("center_id", centerId);
+    p.set("status", "pending");
+    api.get(`/mess/receipts?${p.toString()}`).then((r) => setPendingBills(r.data || []))
+      .catch(() => setPendingBills([])).finally(() => setLoadingBills(false));
+  }, [showCost, centerId]);
 
   const downloadPdf = async () => {
     try {
@@ -325,6 +338,7 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
         {canEntry && <Button onClick={onReceive} className="brand-btn rounded-lg gap-1.5" data-testid="qa-receive"><PackagePlus size={15} /> Receive Stock</Button>}
         {canEntry && <Button onClick={onConsume} className="rounded-lg gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white" data-testid="qa-consume"><ArrowUpRight size={15} /> Issue / Consume</Button>}
         {canEntry && <Button onClick={onWaste} variant="outline" className="rounded-lg gap-1.5 text-rose-700 border-rose-300" data-testid="qa-waste"><TrendingDown size={15} /> Record Wastage</Button>}
+        <Button onClick={() => setShowCost((v) => !v)} className={`rounded-lg gap-1.5 ${showCost ? "bg-indigo-600 hover:bg-indigo-700 text-white" : "bg-white text-indigo-700 border border-indigo-300 hover:bg-indigo-50"}`} data-testid="qa-cost-summary"><IndianRupee size={15} /> Today's Cost Summary {showCost ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</Button>
         <Button onClick={onViewHistory} variant="outline" className="rounded-lg gap-1.5" data-testid="qa-history"><History size={15} /> View Stock History</Button>
         <Button onClick={downloadPdf} variant="outline" className="rounded-lg gap-1.5 border-slate-800 text-slate-800" data-testid="qa-pdf"><FileText size={15} /> Generate PDF Report</Button>
       </div>
@@ -376,43 +390,157 @@ function DashboardTab({ dash, stock, loading, onReceive, onConsume, onWaste, can
       <InventoryTable rows={filtered} loading={loadingRep} canEntry={canEntry}
         onReceive={onReceive} onHistory={(it) => setHistItem(it)} />
 
-      {/* Secondary: today's cost summary (preserved) */}
-      <div className="pt-2">
-        <div className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">Today&apos;s Cost Summary · {d.date || ""}</div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <KpiCard label="Opening Stock" value={inr(d.opening_value || 0)} sub="Start of day" Icon={Boxes} tone="blue" />
-          <KpiCard label="Goods Received" value={inr(d.today_received_value || 0)} sub="Today" Icon={PackagePlus} tone="green" />
-          <KpiCard label="Consumption Cost" value={inr(d.today_consumption_cost || 0)} sub="Today (weighted-avg)" Icon={Soup} tone="orange" />
-          <KpiCard label="Closing Stock" value={inr(d.closing_value || 0)} sub="Current valuation" Icon={Boxes} tone="purple" />
-          <KpiCard label="Mess Expenses" value={inr(d.today_mess_expenses || 0)} sub="Purchases today" Icon={IndianRupee} tone="blue" />
-          <KpiCard label="Meals Served" value={d.meals_served || 0} sub="Today" Icon={Users} tone="green" />
-          <KpiCard label="Cost / Person" value={cpp} sub="Consumption ÷ meals" Icon={IndianRupee} tone="orange" />
-          <KpiCard label="Wastage" value={inr(d.today_wastage_cost || 0)} sub="Today" Icon={TrendingDown} tone="red" />
+      {/* Today's Cost Summary — toggled from the quick-actions bar */}
+      {showCost && <CostSummaryPanel dash={dash} cpp={cpp} stock={stock}
+        pendingBills={pendingBills} loadingBills={loadingBills} onGoto={onGoto} />}
+
+      {histItem && <ItemHistoryDrawer item={histItem} centerId={centerId} onClose={() => setHistItem(null)} />}
+    </div>
+  );
+}
+
+/* ---- Today's Cost Summary panel (redesigned, toggled) ---- */
+const LS_STATUS = {
+  out: { label: "Out of Stock", cls: "bg-rose-100 text-rose-800 border-rose-200" },
+  critical: { label: "Critical", cls: "bg-red-100 text-red-700 border-red-200" },
+  low: { label: "Low Stock", cls: "bg-amber-100 text-amber-800 border-amber-200" },
+  ok: { label: "OK", cls: "bg-emerald-100 text-emerald-700 border-emerald-200" },
+};
+
+function CostCard({ label, value, sub, Icon, tint }) {
+  const T = {
+    blue: ["bg-blue-50/70", "bg-blue-500", "text-blue-700"],
+    green: ["bg-emerald-50/70", "bg-emerald-500", "text-emerald-700"],
+    amber: ["bg-amber-50/80", "bg-amber-500", "text-amber-700"],
+    purple: ["bg-violet-50/70", "bg-violet-500", "text-violet-700"],
+    rose: ["bg-rose-50/70", "bg-rose-500", "text-rose-700"],
+  }[tint] || ["bg-slate-50", "bg-slate-500", "text-slate-700"];
+  return (
+    <div className={`rounded-2xl border border-slate-100 ${T[0]} p-4 flex items-start justify-between shadow-sm hover:shadow-md transition-shadow`} data-testid={`cost-${label.toLowerCase().replace(/[^a-z]+/g, "-")}`}>
+      <div className="flex items-start gap-3 min-w-0">
+        <div className={`${T[1]} text-white p-2.5 rounded-xl shadow-sm shrink-0`}><Icon size={18} /></div>
+        <div className="min-w-0">
+          <div className={`text-[11px] font-bold uppercase tracking-wider ${T[2]}`}>{label}</div>
+          <div className="num font-black text-2xl text-slate-900 mt-0.5 truncate">{value}</div>
+          <div className="text-[11px] text-slate-500">{sub}</div>
         </div>
+      </div>
+      <ChevronRight size={16} className="text-slate-300 mt-1 shrink-0" />
+    </div>
+  );
+}
+
+function StatTile({ Icon, tint, label, value, small }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-4">
+      <div className={`${tint} p-2 rounded-lg shrink-0`}><Icon size={16} /></div>
+      <div className="min-w-0">
+        <div className="text-[10px] uppercase tracking-wide text-slate-400">{label}</div>
+        <div className={`font-bold text-slate-900 ${small ? "text-xs" : "num text-lg"}`}>{value}</div>
+      </div>
+    </div>
+  );
+}
+
+function CostSummaryPanel({ dash, cpp, stock, pendingBills, loadingBills, onGoto }) {
+  const d = dash || {};
+  const lastUpd = new Date().toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  const lows = stock || [];
+  const bills = pendingBills || [];
+  return (
+    <div className="space-y-4 pt-1" data-testid="mess-cost-summary">
+      <div className="text-xs font-bold uppercase tracking-wider text-slate-400">Today&apos;s Cost Summary · {d.date || ""}</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <CostCard label="Opening Stock" value={inr(d.opening_value || 0)} sub="Start of day" Icon={Boxes} tint="blue" />
+        <CostCard label="Goods Received" value={inr(d.today_received_value || 0)} sub="Today" Icon={PackagePlus} tint="green" />
+        <CostCard label="Consumption Cost" value={inr(d.today_consumption_cost || 0)} sub="Today (weighted-avg)" Icon={Soup} tint="amber" />
+        <CostCard label="Closing Stock" value={inr(d.closing_value || 0)} sub="Current valuation" Icon={Boxes} tint="purple" />
+        <CostCard label="Mess Expenses" value={inr(d.today_mess_expenses || 0)} sub="Purchases today" Icon={IndianRupee} tint="blue" />
+        <CostCard label="Meals Served" value={d.meals_served || 0} sub="Today" Icon={Users} tint="green" />
+        <CostCard label="Cost / Person" value={cpp} sub="Consumption ÷ meals" Icon={IndianRupee} tint="amber" />
+        <CostCard label="Wastage" value={inr(d.today_wastage_cost || 0)} sub="Today" Icon={TrendingDown} tint="rose" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="flex items-center gap-2 font-bold text-sm mb-3"><AlertTriangle size={16} className="text-amber-500" /> Low Stock Alerts <span className="num text-xs text-slate-400">({d.low_stock_count || 0})</span></div>
-          {(stock || []).length === 0 ? <div className="text-xs text-slate-400 py-4 text-center">No low-stock items 🎉</div> : (
-            <div className="space-y-1.5 max-h-72 overflow-auto">
-              {(stock || []).slice(0, 30).map((s) => (
-                <div key={s.item_id} className="flex items-center justify-between text-sm border-b border-slate-50 py-1" data-testid={`low-${s.item_id}`}>
-                  <span className="font-medium text-slate-800">{s.item_name}</span>
-                  <span className="num text-rose-600 font-bold">{s.qty} {s.base_unit} <span className="text-[10px] text-slate-400">/ min {s.min_stock}</span></span>
-                </div>
-              ))}
+        {/* Low Stock Alerts */}
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+            <div className="flex items-center gap-2 font-bold text-sm text-slate-800"><AlertTriangle size={16} className="text-amber-500" /> Low Stock Alerts <span className="num text-xs text-slate-400">({lows.length})</span></div>
+            <button onClick={() => onGoto("stock")} className="text-xs font-semibold text-[var(--brand)] hover:underline flex items-center gap-1" data-testid="ls-viewall">View All <ArrowUpRight size={12} /></button>
+          </div>
+          {lows.length === 0 ? <div className="text-xs text-slate-400 py-10 text-center">No low-stock items 🎉</div> : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 text-slate-500 text-[11px] uppercase"><tr>
+                  <th className="text-left px-4 py-2">Item</th>
+                  <th className="text-right px-3 py-2">Current Stock</th>
+                  <th className="text-right px-3 py-2">Rate</th>
+                  <th className="text-right px-3 py-2">Days Left</th>
+                  <th className="text-center px-3 py-2">Status</th>
+                </tr></thead>
+                <tbody className="divide-y divide-slate-100">
+                  {lows.slice(0, 8).map((s) => {
+                    const st = LS_STATUS[s.stock_status] || LS_STATUS.low;
+                    return (
+                      <tr key={s.item_id} className="hover:bg-slate-50" data-testid={`ls-${s.item_id}`}>
+                        <td className="px-4 py-2.5"><div className="flex items-center gap-2.5">
+                          <div className="bg-slate-100 text-slate-500 w-8 h-8 rounded-lg flex items-center justify-center shrink-0"><Package size={15} /></div>
+                          <div className="min-w-0"><div className="font-semibold text-slate-800 truncate">{s.item_name}</div>{s.category && <div className="text-[11px] text-slate-400">{s.category}</div>}</div>
+                        </div></td>
+                        <td className="px-3 py-2.5 text-right num font-bold text-rose-600">{repQty(s.qty)} <span className="text-[10px] text-slate-400 font-normal">{s.base_unit}</span></td>
+                        <td className="px-3 py-2.5 text-right num text-slate-600">{s.consumption_rate_daily ? `${repQty(s.consumption_rate_daily)}/day` : "—"}</td>
+                        <td className="px-3 py-2.5 text-right num text-slate-700">{s.est_days_left == null ? "—" : `${s.est_days_left} day${s.est_days_left === 1 ? "" : "s"}`}</td>
+                        <td className="px-3 py-2.5 text-center"><span className={`inline-block text-[11px] font-bold rounded-full border px-2 py-0.5 ${st.cls}`}>{st.label}</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-4">
-          <div className="flex items-center gap-2 font-bold text-sm mb-3"><FileWarning size={16} className="text-blue-500" /> Pending Purchase Bills</div>
-          <div className="num font-black text-3xl text-slate-900">{d.pending_bills || 0}</div>
-          <div className="text-xs text-slate-500 mt-1">Goods receipts awaiting approval</div>
+
+        {/* Pending Purchase Bills */}
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
+            <div className="flex items-center gap-2 font-bold text-sm text-slate-800"><FileWarning size={16} className="text-blue-500" /> Pending Purchase Bills <span className="num text-xs text-slate-400">({bills.length})</span></div>
+            <button onClick={() => onGoto("receipts")} className="text-xs font-semibold text-[var(--brand)] hover:underline flex items-center gap-1" data-testid="pb-viewall">View All <ArrowUpRight size={12} /></button>
+          </div>
+          {loadingBills ? <div className="text-xs text-slate-400 py-10 text-center">Loading…</div> :
+            bills.length === 0 ? <div className="text-xs text-slate-400 py-10 text-center">No pending bills 🎉</div> : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 text-slate-500 text-[11px] uppercase"><tr>
+                    <th className="text-left px-4 py-2">Bill No</th>
+                    <th className="text-left px-3 py-2">Vendor</th>
+                    <th className="text-left px-3 py-2">Item(s)</th>
+                    <th className="text-right px-3 py-2">Amount</th>
+                    <th className="text-right px-3 py-2">Action</th>
+                  </tr></thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {bills.slice(0, 8).map((b) => (
+                      <tr key={b.id} className="hover:bg-slate-50" data-testid={`pb-${b.id}`}>
+                        <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{b.invoice_no || "—"}</td>
+                        <td className="px-3 py-2.5 text-slate-600">{b.supplier_name || "—"}</td>
+                        <td className="px-3 py-2.5 text-slate-500 text-xs max-w-[150px] truncate">{(b.lines || []).map((l) => l.item_name).filter(Boolean).join(", ") || "—"}</td>
+                        <td className="px-3 py-2.5 text-right num font-bold">{inr(b.total_amount || 0)}</td>
+                        <td className="px-3 py-2.5 text-right"><Button size="sm" variant="outline" className="h-7 rounded-lg" onClick={() => onGoto("receipts")} data-testid={`pb-view-${b.id}`}>View</Button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
         </div>
       </div>
 
-      {histItem && <ItemHistoryDrawer item={histItem} centerId={centerId} onClose={() => setHistItem(null)} />}
+      {/* Bottom stats bar (real metrics only) */}
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm grid grid-cols-2 md:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-slate-100" data-testid="mess-stats-bar">
+        <StatTile Icon={Users} tint="text-emerald-600 bg-emerald-50" label="Meals Served Today" value={d.meals_served || 0} />
+        <StatTile Icon={IndianRupee} tint="text-amber-600 bg-amber-50" label="Avg Cost / Person" value={cpp} />
+        <StatTile Icon={Soup} tint="text-blue-600 bg-blue-50" label="Food Cost (today)" value={inr(d.today_consumption_cost || 0)} />
+        <StatTile Icon={Clock} tint="text-slate-600 bg-slate-100" label="Last Updated" value={lastUpd} small />
+      </div>
     </div>
   );
 }
