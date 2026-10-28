@@ -868,6 +868,9 @@ function StockTab({ stock, loading }) {
 function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCreate, onChanged, centerName }) {
   const [payFor, setPayFor] = useState(null);
   const [regenId, setRegenId] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const toggleExpand = (id) => setExpanded((cur) => (cur === id ? null : id));
+  const lineAmount = (l) => (Number(l.accepted_qty ?? l.qty) || 0) * (Number(l.unit_price) || 0) - (Number(l.discount) || 0) + (Number(l.tax) || 0);
   const regenBill = async (r) => {
     setRegenId(r.id);
     try {
@@ -922,7 +925,13 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${r.status === "approved" ? "bg-emerald-100 text-emerald-800" : r.status === "rejected" ? "bg-rose-100 text-rose-700" : "bg-amber-100 text-amber-800"}`}>{r.status.toUpperCase()}</span>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${r.payment_status === "paid" ? "bg-emerald-100 text-emerald-800" : r.payment_status === "payment_pending" ? "bg-blue-100 text-blue-700" : "bg-slate-100 text-slate-600"}`}>{(r.payment_status || "unpaid").replace("_", " ").toUpperCase()}</span>
                 </div>
-                <div className="text-xs text-slate-500 mt-1">{r.supplier_name || "—"} · {r.center_name || centerName(r.center_id)} · {r.invoice_date} · {r.lines?.length || 0} item(s)</div>
+                <div className="text-xs text-slate-500 mt-1">
+                  {r.supplier_name || "—"} · {r.center_name || centerName(r.center_id)} · {r.invoice_date} ·{" "}
+                  <button onClick={() => toggleExpand(r.id)} className="inline-flex items-center gap-0.5 font-semibold text-blue-700 hover:text-blue-900 hover:underline" data-testid={`receipt-items-toggle-${r.id}`}>
+                    {r.lines?.length || 0} item(s)
+                    {expanded === r.id ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  </button>
+                </div>
                 {r.status === "pending" && (
                   <div className="flex items-center gap-1.5 mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 w-fit" data-testid={`pending-with-${r.id}`}>
                     <Clock size={12} /> <span className="font-semibold">Pending with:</span> {pendingWithText(r)}
@@ -954,6 +963,43 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
                 )}
               </div>
             </div>
+            {expanded === r.id && (
+              <div className="mt-3 border border-slate-200 rounded-xl overflow-hidden" data-testid={`receipt-items-${r.id}`}>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs min-w-[520px]">
+                    <thead className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase font-semibold text-slate-500">
+                      <tr>
+                        <th className="text-left px-3 py-2">Item</th>
+                        <th className="text-right px-3 py-2">Qty</th>
+                        <th className="text-left px-3 py-2">Unit</th>
+                        <th className="text-right px-3 py-2">Rate</th>
+                        <th className="text-right px-3 py-2">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(r.lines || []).map((l, i) => (
+                        <tr key={i} data-testid={`receipt-${r.id}-line-${i}`}>
+                          <td className="px-3 py-2 font-medium text-slate-800">{l.item_name || "—"}</td>
+                          <td className="px-3 py-2 text-right num">{Number(l.accepted_qty ?? l.qty) || 0}</td>
+                          <td className="px-3 py-2 text-slate-500">{l.unit || l.base_unit || ""}</td>
+                          <td className="px-3 py-2 text-right num">{inr(Number(l.unit_price) || 0)}</td>
+                          <td className="px-3 py-2 text-right num font-semibold">{inr(lineAmount(l))}</td>
+                        </tr>
+                      ))}
+                      {(r.lines || []).length === 0 && (
+                        <tr><td colSpan={5} className="text-center text-slate-400 py-4">No item details</td></tr>
+                      )}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-slate-50 font-bold text-slate-800 border-t border-slate-200">
+                        <td className="px-3 py-2" colSpan={4}>Total</td>
+                        <td className="px-3 py-2 text-right num" data-testid={`receipt-${r.id}-total`}>{inr((r.lines || []).reduce((s, l) => s + lineAmount(l), 0))}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         ))}
         {receipts.length === 0 && <div className="text-center text-slate-400 py-10 bg-white border border-slate-200 rounded-xl">No goods receipts</div>}
@@ -1055,7 +1101,7 @@ function LineEditor({ items, units, lines, setLines, mode }) {
 
 const GST_RATE_OPTIONS = ["0", "5", "12", "18", "28"];
 const num = (v) => Number(v) || 0;
-const newReceiptLine = () => ({ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "18", hsn_sac: "", accepted_qty: "", rejected_qty: 0 });
+const newReceiptLine = () => ({ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "0", hsn_sac: "", accepted_qty: "", rejected_qty: 0 });
 
 function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose, onSaved }) {
   const [f, setF] = useState({ center_id: centerId || "", supplier_id: "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
@@ -1167,15 +1213,14 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
           <div>
             <Label>Items</Label>
             <div className="rounded-xl border border-slate-200 overflow-x-auto">
-              <table className="w-full text-sm min-w-[1000px]">
+              <table className="w-full text-sm min-w-[860px]">
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide">
                     <th className="px-3 py-2.5 text-center w-10">S.No.</th>
                     <th className="px-3 py-2.5 text-left min-w-[260px]">Item</th>
-                    <th className="px-2 py-2.5 text-left w-16">Qty</th>
+                    <th className="px-2 py-2.5 text-left w-32">Qty</th>
                     <th className="px-2 py-2.5 text-left w-20">Unit</th>
                     <th className="px-2 py-2.5 text-left w-24">Rate</th>
-                    <th className="px-2 py-2.5 text-left w-24">Discount</th>
                     <th className="px-2 py-2.5 text-left w-20">GST %</th>
                     <th className="px-2 py-2.5 text-left w-24">Accepted Qty</th>
                     <th className="px-3 py-2.5 text-right w-28">Line Total</th>
@@ -1190,17 +1235,12 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
                         <select value={ln.item_id} onChange={(e) => upd(i, "item_id", e.target.value)} className={inputCls} data-testid={`line-item-${i}`}>
                           <option value="">Select…</option>{items.filter((it) => it.active !== false).map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
                         </select>
-                        <div className="mt-2 flex items-center gap-2">
-                          <span className="text-[10px] uppercase font-semibold text-slate-400 whitespace-nowrap">HSN/SAC <span className="normal-case text-slate-300">(Optional)</span></span>
-                          <Input value={ln.hsn_sac || ""} onChange={(e) => upd(i, "hsn_sac", e.target.value)} placeholder="Enter HSN/SAC" className="rounded-lg h-8 text-xs flex-1 min-w-0" data-testid={`line-hsn-${i}`} />
-                        </div>
                       </td>
                       <td className="px-2 py-3"><Input type="number" value={ln.qty} onChange={(e) => upd(i, "qty", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-qty-${i}`} /></td>
                       <td className="px-2 py-3">
                         <select value={ln.unit} onChange={(e) => upd(i, "unit", e.target.value)} className={inputCls} data-testid={`line-unit-${i}`}>{unitsFor(ln.item_id).map((u) => <option key={u}>{u}</option>)}</select>
                       </td>
                       <td className="px-2 py-3"><Input type="number" value={ln.unit_price} onChange={(e) => upd(i, "unit_price", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-rate-${i}`} /></td>
-                      <td className="px-2 py-3"><Input type="number" value={ln.discount} onChange={(e) => upd(i, "discount", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-disc-${i}`} /></td>
                       <td className="px-2 py-3">
                         <select value={String(ln.gst_rate ?? "")} onChange={(e) => upd(i, "gst_rate", e.target.value)} className={inputCls} data-testid={`line-gst-${i}`}>
                           {[...new Set([...GST_RATE_OPTIONS, String(ln.gst_rate ?? "")])].filter((x) => x !== "").map((r) => <option key={r} value={r}>{r}%</option>)}
@@ -1220,9 +1260,8 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
           {/* Amount summary */}
           <div className="rounded-xl bg-slate-50 border border-slate-200 p-4">
             <div className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide mb-3">Amount Summary</div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 items-stretch">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 items-stretch">
               <div data-testid="receipt-subtotal"><div className="text-xs text-slate-500">Subtotal</div><div className="text-xl font-bold text-slate-900 num mt-0.5">{inr(subtotal)}</div></div>
-              <div data-testid="receipt-discount"><div className="text-xs text-slate-500">Total Discount</div><div className="text-xl font-bold text-slate-900 num mt-0.5">{inr(totalDiscount)}</div></div>
               <div data-testid="receipt-gst"><div className="text-xs text-slate-500">Total GST{gstLabel}</div><div className="text-xl font-bold text-slate-900 num mt-0.5">{inr(totalGst)}</div></div>
               <div className="rounded-lg bg-blue-600 text-white p-3.5 shadow-sm" data-testid="receipt-grand-total">
                 <div className="text-[10px] uppercase font-semibold text-blue-100 tracking-wide flex items-center justify-between">Grand Total <RefreshCw size={12} className="opacity-80" /></div>

@@ -2904,3 +2904,8 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 - Fix (`PendingApprovals.jsx` approval-items table): compute each row amount on the fly from the shown qty × unit_price (minus discount + tax) — never trust stored line_total. Added a Total row (data-testid approval-items-total) summing the computed line amounts so the approver can cross-check it equals the receipt amount. QTY = accepted_qty ?? qty, RATE = unit_price.
 - Verified (preview, controlled receipt): Rice 15×₹30=₹450, Wheat 17×₹980=₹16,660, Total ₹17,110 — matches header Amount ₹17,110. For the prod case (Salt 450×₹30) AMOUNT now correctly shows ₹13,500 and the Total sums to ₹1,99,07,100. Test receipts/files cleaned up. No backend/data change; display-only fix.
 - **Requires redeploy** for production.
+
+## 2026-10-28 — Mess Goods Receipt UI tweaks
+- Receipt list: "X item(s)" is now a toggle → expands an item-detail table (item, qty, unit, rate, amount + total) so requester/viewer sees what was received.
+- New Goods Receipt form: removed Discount column + HSN/SAC field; widened Qty column; GST % kept but now defaults to 0% (GST_RATE_OPTIONS unchanged). Amount Summary drops the Total Discount tile.
+- Frontend-only (MessManagement.jsx). Payload still sends discount:0 / hsn_sac:null; no backend change. Verified via screenshots in preview.
