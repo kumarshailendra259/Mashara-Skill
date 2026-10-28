@@ -902,16 +902,30 @@ export default function PendingApprovals() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {acting.item.summary.items.map((l, i) => (
-                          <tr key={i} data-testid={`approval-item-${i}`}>
-                            <td className="px-2 py-1 font-medium text-slate-800">{l.item_name || "—"}</td>
-                            <td className="px-2 py-1 text-right num">{l.accepted_qty ?? l.qty}</td>
-                            <td className="px-2 py-1 text-slate-500">{l.unit || l.base_unit || ""}</td>
-                            <td className="px-2 py-1 text-right num">{inr(l.unit_price || 0)}</td>
-                            <td className="px-2 py-1 text-right num font-semibold">{inr(l.line_total ?? l.accepted_cost ?? ((Number(l.qty) || 0) * (Number(l.unit_price) || 0)))}</td>
-                          </tr>
-                        ))}
+                        {acting.item.summary.items.map((l, i) => {
+                          const q = Number(l.accepted_qty ?? l.qty) || 0;
+                          const rate = Number(l.unit_price) || 0;
+                          // Always derive the line amount from the qty & rate shown (plus any
+                          // discount/tax), so the row is self-consistent and sums to the total —
+                          // never trust a possibly-stale stored line_total.
+                          const amount = q * rate - (Number(l.discount) || 0) + (Number(l.tax) || 0);
+                          return (
+                            <tr key={i} data-testid={`approval-item-${i}`}>
+                              <td className="px-2 py-1 font-medium text-slate-800">{l.item_name || "—"}</td>
+                              <td className="px-2 py-1 text-right num">{q}</td>
+                              <td className="px-2 py-1 text-slate-500">{l.unit || l.base_unit || ""}</td>
+                              <td className="px-2 py-1 text-right num">{inr(rate)}</td>
+                              <td className="px-2 py-1 text-right num font-semibold">{inr(amount)}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
+                      <tfoot>
+                        <tr className="bg-slate-100 font-bold text-slate-800">
+                          <td className="px-2 py-1" colSpan={4}>Total</td>
+                          <td className="px-2 py-1 text-right num" data-testid="approval-items-total">{inr(acting.item.summary.items.reduce((s, l) => s + ((Number(l.accepted_qty ?? l.qty) || 0) * (Number(l.unit_price) || 0) - (Number(l.discount) || 0) + (Number(l.tax) || 0)), 0))}</td>
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 )}

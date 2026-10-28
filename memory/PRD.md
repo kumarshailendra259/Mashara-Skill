@@ -2898,3 +2898,9 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 - Frontend (`MessManagement.jsx` DashboardTab): wrapped the inventory dashboard blocks (status KPIs, received/issued strips, filter bar, InventoryTable) in `{!showCost && (<>…</>)}`. Now toggle ON → only CostSummaryPanel; toggle OFF → inventory dashboard. Quick-actions row (incl. toggle) always visible.
 - Verified (admin, TEST_iter28_C): toggle ON hides mess-stat-total/mess-dash-search/mess-inventory-table and shows only mess-cost-summary; screenshot confirms.
 - **Requires redeploy** for production.
+
+## Phase 127 (Jun 2026) — Fix wrong per-line AMOUNT in approve-mess-receipt modal
+- Bug (prod screenshot): approve modal item table showed AMOUNT = QTY value (e.g. Salt qty 450 → amount ₹450) instead of qty×rate; header/receipt total (₹1,99,07,100 = Σ qty×rate) was correct. Root cause: the AMOUNT cell trusted a stored `line_total`/`accepted_cost` that is unreliable/stale on older production receipt lines.
+- Fix (`PendingApprovals.jsx` approval-items table): compute each row amount on the fly from the shown qty × unit_price (minus discount + tax) — never trust stored line_total. Added a Total row (data-testid approval-items-total) summing the computed line amounts so the approver can cross-check it equals the receipt amount. QTY = accepted_qty ?? qty, RATE = unit_price.
+- Verified (preview, controlled receipt): Rice 15×₹30=₹450, Wheat 17×₹980=₹16,660, Total ₹17,110 — matches header Amount ₹17,110. For the prod case (Salt 450×₹30) AMOUNT now correctly shows ₹13,500 and the Total sums to ₹1,99,07,100. Test receipts/files cleaned up. No backend/data change; display-only fix.
+- **Requires redeploy** for production.
