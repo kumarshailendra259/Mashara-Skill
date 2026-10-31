@@ -25314,6 +25314,18 @@ def _to_base_qty(item: dict, qty: float, unit: str) -> float:
         raise HTTPException(400, str(e))
 
 
+def _mess_validate_item_units(body) -> None:
+    """Ensure an item's consumption_unit is convertible to its base unit."""
+    it = {"name": body.name, "base_unit": body.base_unit,
+          "purchase_unit": body.purchase_unit, "conversion_factor": body.conversion_factor}
+    cu = (body.consumption_unit or "").strip()
+    if not cu:
+        body.consumption_unit = body.base_unit
+        return
+    if not _uc.is_compatible(it, cu):
+        raise HTTPException(400, f"Consumption unit '{cu}' is not compatible with base unit '{body.base_unit}'")
+
+
 async def _mess_apply_receipt(center_id, item, qty_base, total_cost, ref_id, date, user, notes=""):
     now = datetime.now(timezone.utc).isoformat()
     st = await db.mess_stock.find_one({"center_id": center_id, "item_id": item["id"]})
@@ -25411,6 +25423,7 @@ async def mess_item_categories(user=Depends(require_role(*MESS_VIEW_ROLES))):
 async def mess_create_item(body: MessItemIn, user=Depends(require_role(*MESS_ADMIN_ROLES))):
     if body.conversion_factor <= 0:
         raise HTTPException(400, "conversion_factor must be > 0")
+    _mess_validate_item_units(body)
     dup = await db.mess_items.find_one({"name": {"$regex": f"^{body.name.strip()}$", "$options": "i"}})
     if dup:
         raise HTTPException(409, "Item with this name already exists")
@@ -25426,6 +25439,7 @@ async def mess_create_item(body: MessItemIn, user=Depends(require_role(*MESS_ADM
 async def mess_update_item(item_id: str, body: MessItemIn, user=Depends(require_role(*MESS_ADMIN_ROLES))):
     if body.conversion_factor <= 0:
         raise HTTPException(400, "conversion_factor must be > 0")
+    _mess_validate_item_units(body)
     res = await db.mess_items.update_one({"id": item_id}, {"$set": {
         **body.dict(), "name": body.name.strip(),
         "updated_by": user["id"], "updated_at": datetime.now(timezone.utc).isoformat()}})
@@ -25604,6 +25618,8 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
             raise HTTPException(400, f"Unknown item {ln.item_id}")
         if ln.accepted_qty < 0 or ln.qty < 0:
             raise HTTPException(400, "Quantities cannot be negative")
+        if it.get("allow_decimal") is False and (float(ln.qty) % 1 != 0 or float(ln.accepted_qty) % 1 != 0):
+            raise HTTPException(400, f"{it['name']} does not allow fractional quantities")
         # Normalise qty to the item's BASE unit via the central engine; the
         # entered unit_price is the rate PER BASE UNIT. This makes the amount
         # correct even when qty is entered in a different unit than the rate
@@ -25669,13 +25685,16 @@ async def _mess_post_receipt(rec: dict, user: dict) -> dict:
         it = items.get(ln["item_id"])
         if not it or float(ln.get("accepted_qty") or 0) <= 0:
             continue
-        qty_base = _to_base_qty(it, ln["accepted_qty"], ln["unit"])
+        # Use the base qty captured at creation time for engine-normalised lines
+        # so the stock-in matches the approved amount even if the item's
+        # conversion_factor was edited after the receipt was raised.
+        if ln.get("rate_basis") == "base" and ln.get("accepted_qty_base") is not None:
+            qty_base = float(ln["accepted_qty_base"])
+        else:
+            qty_base = _to_base_qty(it, ln["accepted_qty"], ln["unit"])
         await _mess_apply_receipt(rec["center_id"], it, qty_base,
                                   float(ln.get("accepted_cost") or 0), rec["id"],
                                   rec["invoice_date"], user, notes=f"Invoice {rec['invoice_no']}")
-        st = await db.mess_stock.find_one({"center_id": rec["center_id"], "item_id": it["id"]})
-        if st:
-            await db.mess_items.update_one({"id": it["id"]}, {"$set": {"avg_cost": st.get("avg_cost", 0)}})
     ctx = await _derive_context_for_center(rec["center_id"])
     txn = {
         "id": str(uuid.uuid4()), "type": "expense",
@@ -26137,6 +26156,8 @@ async def mess_post_consumption(body: MessConsumptionIn, user=Depends(require_ro
             raise HTTPException(400, f"Unknown item {ln.item_id}")
         if ln.qty <= 0:
             raise HTTPException(400, f"Quantity must be > 0 for {it['name']}")
+        if it.get("allow_decimal") is False and float(ln.qty) % 1 != 0:
+            raise HTTPException(400, f"{it['name']} does not allow fractional quantities")
         qty_base = _to_base_qty(it, ln.qty, ln.unit)
         kind = "wastage" if ln.kind == "wastage" else "consumption"
         prepared.append((it, qty_base, kind))

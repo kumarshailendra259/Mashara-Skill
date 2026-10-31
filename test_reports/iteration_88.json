@@ -1,0 +1,43 @@
+{
+  "summary": "Tested the Mess Unit Conversion Engine end to end as admin, in the UI (Playwright) and through the API (pytest, 10 of 11 pass). The acceptance case works: 500 gram at Rs 400/kg shows '= 0.5 kg', line total Rs 200 and grand total Rs 200 in the receipt dialog. The same Rs 200 appears in the receipt list item table, the Pending Approvals modal (approval-items-total), the stored receipt and the posted stock ledger (qty_in 0.5 kg, unit_cost 400, expense Rs 200), and in the GST bill computation (compute_mess_tax). Other cases also work: Rice 2 bag (factor 25) gives '= 50 kg' and Rs 20,000; Bread offers only 'packet' with no converted preview and gives Rs 1,000; Eggs 2 dozen at Rs 6/piece gives '= 24 piece' and Rs 144. Unit dropdowns only offer compatible units. Create Receipt without a bill shows the toast and the dialog stays open; with a bill it saves. Unit Review opens read-only, shows the empty state and changes no data. Item Master saves consumption_unit and allow_decimal. Consumption entered in gram deducts the right base qty (200 -> 199.5 kg). Regression: all 9 Mess tabs load, Monthly Report PDF downloads, existing receipt totals are unchanged, no ChunkLoadError.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST/PUT /api/mess/items", "issue": "consumption_unit is not checked against base_unit. An item with base_unit=kg and consumption_unit=litre is saved with 200. The frontend Consumption Unit dropdown (item-cons-unit) also lists every MESS_UNIT. As a result LineEditor defaults the line unit to 'litre', which is not in the compatible options: the select shows 'kg' but the state holds 'litre', and posting fails with 400 'not compatible'."},
+      {"endpoint": "Mess receipts / consumption / wastage", "issue": "allow_decimal is stored but never enforced. 0.5 qty is still accepted for an item with allow_decimal=false, and the frontend inputs do not restrict it either."},
+      {"endpoint": "_mess_post_receipt (approval posting)", "issue": "Approval recomputes qty_base from the item's CURRENT config (_to_base_qty(it, accepted_qty, unit)) instead of the accepted_qty_base stored on the line. If conversion_factor is edited between creation and approval, the stock-in no longer matches the amount that was approved. Use ln['accepted_qty_base'] when rate_basis=='base'."},
+      {"endpoint": "_mess_post_receipt", "issue": "Pre-existing: the global mess_items.avg_cost is overwritten with ONE center's avg_cost after every approval. Approving a Rs 400/kg receipt at one center changed the Rice master avg_cost from 55 to 400. Testing agent restored it to 55.324."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "StockTab table (MessManagement.jsx ~L859)", "issue": "React duplicate key warning: key={s.item_id}, but under 'All authorized' the same item can have a stock row in several centers (Rice now does). Use key={`${s.center_id}-${s.item_id}`}. The same pattern appears at L492, L626, L1548 and L1741.", "selector": "[data-testid^=stock-row-]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "New Goods Receipt dialog", "issues": ["The Unit column is too narrow. Selected units show cut off as 'gra', 'bag', 'pac', 'doz', so users cannot see which unit they picked. Widen the Unit column (e.g. w-24/w-28) or shrink the Item column."]},
+      {"screen": "Goods Receipt / Pending Approvals", "issues": ["One center in the receipt-center dropdown has an EMPTY name (id 7f11829a-...). It shows as a blank option and the receipt subtitle shows '—'. This is a data issue.", "'Pending with' badge repeats 'Center Manager (initiator) · Center Manager (initiator)' (pre-existing)."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_mess_unit_engine.py", "/app/test_reports/pytest/mess_unit_engine.xml"],
+  "action_items": [
+    "Validate consumption_unit with compatible_units(item) in POST/PUT /mess/items, and limit the item-cons-unit dropdown to compatibleUnits({base_unit, purchase_unit, conversion_factor}).",
+    "Enforce allow_decimal (backend 400 when a fractional qty is entered for allow_decimal=false; optionally set step=1 on the inputs).",
+    "In _mess_post_receipt, use the stored accepted_qty_base for rate_basis=='base' lines instead of recomputing from the current item config.",
+    "Widen the Unit column in the ReceiptDialog so selected units are fully readable.",
+    "Fix duplicate React keys in the stock/report tables under multi-center view (key on center_id+item_id)."
+  ],
+  "critical_code_review_comments": [
+    "The backend engine (unit_conversion.py) and the frontend mirror (lib/units.js) match each other and handle weight, volume, count and packaging-via-conversion_factor correctly.",
+    "The unit-review heuristic assumes every legacy line priced in a non-base, non-purchase unit was priced per base. A legacy line genuinely priced per gram would be flagged incorrectly. It is acceptable because the review is read-only.",
+    "The frontend clamps taxable at 0 (Math.max) and the backend does not, so a discount larger than the line amount would give different totals in the preview and the saved receipt.",
+    "MessManagement.jsx is 1758 lines; consider splitting it (ReceiptDialog, ItemDialog, Tabs)."
+  ],
+  "updated_files": ["/app/backend/tests/test_mess_unit_engine.py"],
+  "success_rate": {"backend": "91% (10/11; the failure is the consumption_unit validation gap)", "frontend": "100% of requested flows pass (minor design/key issues noted)"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Receipt TEST-UNIT-1793427551 (Rice 500 gram @400, center 7f11829a) was created through the UI and APPROVED through Pending Approvals. Rice stock at center 7f11829a is now 0.5 kg; expense txn e9b66b9e Rs 200. Receipt TEST-UE-OK-* was created via the API and rejected. Consumption of 500 gram TEST_WAvg_1791961530 at center 668de8a2 (stock 200 -> 199.5). Items TEST_UnitItem_Engine, TEST_UE_Item_*, TEST_UE_BadCons_* were created and then deactivated (there is no delete endpoint). Rice avg_cost was restored to 55.324.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Item data: Chana Dal has conversion_factor 30 (not 25); use Rice (bag=25) for the bag case. The Goods Receipt dialog needs a center, an invoice, a supplier (Shree Traders) and a bill uploaded through the hidden input in [data-testid=receipt-bill-upload]. Approval in Pending Approvals uses btn-approve-{receipt_id}, then the modal textarea and 'Confirm Approve'; admin needed 3 approvals. A bill PDF only exists after payment."
+}

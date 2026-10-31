@@ -489,7 +489,7 @@ function CostSummaryPanel({ dash, cpp, stock, pendingBills, loadingBills, onGoto
                   {lows.slice(0, 8).map((s) => {
                     const st = LS_STATUS[s.stock_status] || LS_STATUS.low;
                     return (
-                      <tr key={s.item_id} className="hover:bg-slate-50" data-testid={`ls-${s.item_id}`}>
+                      <tr key={`${s.center_id}-${s.item_id}`} className="hover:bg-slate-50" data-testid={`ls-${s.item_id}`}>
                         <td className="px-4 py-2.5"><div className="flex items-center gap-2.5">
                           <div className="bg-slate-100 text-slate-500 w-8 h-8 rounded-lg flex items-center justify-center shrink-0"><Package size={15} /></div>
                           <div className="min-w-0"><div className="font-semibold text-slate-800 truncate">{s.item_name}</div>{s.category && <div className="text-[11px] text-slate-400">{s.category}</div>}</div>
@@ -623,7 +623,7 @@ function InventoryTable({ rows, loading, canEntry, onReceive, onHistory }) {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {pageRows.map((r, i) => (
-                  <tr key={r.item_id} className="hover:bg-slate-50" data-testid={`inv-row-${r.item_id}`}>
+                  <tr key={`${r.center_id || ""}-${r.item_id}`} className="hover:bg-slate-50" data-testid={`inv-row-${r.item_id}`}>
                     <td className="px-3 py-2.5 text-center num text-slate-400">{start + i + 1}</td>
                     <td className="px-3 py-2.5">
                       <div className="font-semibold text-slate-800">{r.name}</div>
@@ -650,7 +650,7 @@ function InventoryTable({ rows, loading, canEntry, onReceive, onHistory }) {
             {pageRows.map((r, i) => {
               const open = expanded === r.item_id;
               return (
-                <div key={r.item_id} data-testid={`inv-card-${r.item_id}`}>
+                <div key={`${r.center_id || ""}-${r.item_id}`} data-testid={`inv-card-${r.item_id}`}>
                   <button onClick={() => setExpanded(open ? null : r.item_id)} className="w-full flex items-center justify-between gap-2 px-4 py-3 text-left">
                     <div className="min-w-0">
                       <div className="font-semibold text-slate-800 truncate">{start + i + 1}. {r.name}</div>
@@ -824,10 +824,10 @@ function ItemDialog({ item, units, onClose, onSaved }) {
           <div className="col-span-2"><Field label="Name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} className="rounded-lg" data-testid="item-name" /></Field></div>
           <Field label="Category"><Input value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="rounded-lg" /></Field>
           <Field label="Avg Cost (₹)"><Input type="number" value={f.avg_cost} onChange={(e) => setF({ ...f, avg_cost: e.target.value })} className="rounded-lg" /></Field>
-          <Field label="Base Unit"><select value={f.base_unit} onChange={(e) => setF({ ...f, base_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="item-base-unit">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
+          <Field label="Base Unit"><select value={f.base_unit} onChange={(e) => setF({ ...f, base_unit: e.target.value, consumption_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="item-base-unit">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
           <Field label="Purchase Unit"><select value={f.purchase_unit} onChange={(e) => setF({ ...f, purchase_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
           <Field label="Conversion (1 purchase = ? base)"><Input type="number" value={f.conversion_factor} onChange={(e) => setF({ ...f, conversion_factor: e.target.value })} className="rounded-lg" data-testid="item-conv" /></Field>
-          <Field label="Consumption Unit"><select value={f.consumption_unit} onChange={(e) => setF({ ...f, consumption_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="item-cons-unit">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
+          <Field label="Consumption Unit"><select value={f.consumption_unit} onChange={(e) => setF({ ...f, consumption_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="item-cons-unit">{compatibleUnits({ base_unit: f.base_unit, purchase_unit: f.purchase_unit, conversion_factor: Number(f.conversion_factor) || 1 }).map(u => <option key={u}>{u}</option>)}</select></Field>
           <Field label="Min Stock"><Input type="number" value={f.min_stock} onChange={(e) => setF({ ...f, min_stock: e.target.value })} className="rounded-lg" /></Field>
           <Field label="Reorder Level"><Input type="number" value={f.reorder_level} onChange={(e) => setF({ ...f, reorder_level: e.target.value })} className="rounded-lg" /></Field>
           <label className="flex items-center gap-2 text-sm mt-5"><input type="checkbox" checked={f.allow_decimal} onChange={(e) => setF({ ...f, allow_decimal: e.target.checked })} data-testid="item-allow-decimal" /> Allow decimal qty</label>
@@ -856,7 +856,7 @@ function StockTab({ stock, loading }) {
         </thead>
         <tbody className="divide-y divide-slate-100">
           {stock.map((s) => (
-            <tr key={s.item_id} className="hover:bg-slate-50" data-testid={`stock-row-${s.item_id}`}>
+            <tr key={`${s.center_id}-${s.item_id}`} className="hover:bg-slate-50" data-testid={`stock-row-${s.item_id}`}>
               <td className="px-3 py-2 font-semibold text-slate-800">{s.item_name}</td>
               <td className="px-3 py-2 text-slate-600">{s.category}</td>
               <td className="px-3 py-2 text-right num font-bold">{s.qty} {s.base_unit}</td>
@@ -1311,9 +1311,9 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide">
                     <th className="px-3 py-2.5 text-center w-10">S.No.</th>
-                    <th className="px-3 py-2.5 text-left min-w-[260px]">Item</th>
+                    <th className="px-3 py-2.5 text-left min-w-[220px]">Item</th>
                     <th className="px-2 py-2.5 text-left w-36">Qty</th>
-                    <th className="px-2 py-2.5 text-left w-20">Unit</th>
+                    <th className="px-2 py-2.5 text-left w-28">Unit</th>
                     <th className="px-2 py-2.5 text-left w-28">Rate <span className="normal-case text-slate-400">(per base unit)</span></th>
                     <th className="px-2 py-2.5 text-left w-20">GST %</th>
                     <th className="px-2 py-2.5 text-left w-24">Accepted Qty</th>
@@ -1738,7 +1738,7 @@ function ReportTab({ centerId, centers }) {
               ) : rows.length === 0 ? (
                 <tr><td colSpan={7} className="text-center text-slate-400 py-10">No stock movement in this period</td></tr>
               ) : rows.map((r, i) => (
-                <tr key={r.item_id} className="hover:bg-slate-50" data-testid={`report-row-${r.item_id}`}>
+                <tr key={`${r.item_id}-${i}`} className="hover:bg-slate-50" data-testid={`report-row-${r.item_id}`}>
                   <td className="text-center px-2 py-2 border border-slate-200">{i + 1}</td>
                   <td className="text-left px-3 py-2 border border-slate-200 font-medium text-slate-800">{r.name}</td>
                   <td className="text-center px-2 py-2 border border-slate-200">{r.unit}</td>

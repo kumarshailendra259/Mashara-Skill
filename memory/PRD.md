@@ -2909,3 +2909,13 @@ Collections added: mess_closings, mess_stock_counts. Verified via curl + screens
 - Receipt list: "X item(s)" is now a toggle → expands an item-detail table (item, qty, unit, rate, amount + total) so requester/viewer sees what was received.
 - New Goods Receipt form: removed Discount column + HSN/SAC field; widened Qty column; GST % kept but now defaults to 0% (GST_RATE_OPTIONS unchanged). Amount Summary drops the Total Discount tile.
 - Frontend-only (MessManagement.jsx). Payload still sends discount:0 / hsn_sac:null; no backend change. Verified via screenshots in preview.
+
+## 2026-10-31 — Centralized Unit Conversion Engine (Mess module)
+User decisions: rate ALWAYS per item base unit; roll out across whole Mess module; do NOT modify historical receipts (read-only review list instead).
+- New engine: backend/unit_conversion.py + frontend/src/lib/units.js (weight/volume/count global tables: kg/gram/mg/quintal/ton, litre/ml, piece/dozen/pair; packaging units via item conversion_factor). Single source of truth; backend authoritative.
+- Goods Receipt: qty normalised to base; unit_price is per BASE unit; line stores qty_base/accepted_qty_base/rate_per_base/rate_basis. FIX: 500 gram @ Rs400/kg now = Rs200 (was Rs2,00,000). UI shows converted preview (= 0.5 kg) + "per <base>" hint; compatible-unit dropdown; incompatible-unit guard.
+- Approval modal + receipt-list item toggle + mess_bill.py GST breakdown all use base-normalised displayLine(). Consumption/Wastage accept any compatible unit (default = consumption_unit). Stock-in on approval uses stored accepted_qty_base.
+- Item Master: added consumption_unit (validated vs base) + allow_decimal (enforced on receipt/consumption). Dropdown limited to compatible units.
+- Read-only historical "Unit Review" (GET /mess/receipts/unit-review + Unit Review dialog) flags legacy mismatched lines with stored-vs-corrected amounts; changes nothing.
+- Also fixed pre-existing cross-center avg_cost contamination (removed global mess_items.avg_cost overwrite on approval) + duplicate React keys in stock/inventory/report tables.
+- Tested: testing_agent iteration_88 (10/11 API + all frontend flows); all 5 action items fixed & self-verified via API (consumption_unit 400, allow_decimal 400, 2 dozen@10/pc=240) and screenshots. Test data cleaned up.
