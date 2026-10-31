@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { inr } from "@/lib/i18n";
+import { toBaseQty, toBaseFactor, compatibleUnits, isCompatible, displayLine } from "@/lib/units";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -798,6 +799,8 @@ function ItemDialog({ item, units, onClose, onSaved }) {
     base_unit: item.base_unit || "kg", purchase_unit: item.purchase_unit || "kg",
     conversion_factor: item.conversion_factor ?? 1, min_stock: item.min_stock ?? 0,
     reorder_level: item.reorder_level ?? 0, avg_cost: item.avg_cost ?? 0, active: item.active ?? true,
+    consumption_unit: item.consumption_unit || item.base_unit || "kg",
+    allow_decimal: item.allow_decimal ?? true,
   });
   const [busy, setBusy] = useState(false);
   const save = async () => {
@@ -824,9 +827,14 @@ function ItemDialog({ item, units, onClose, onSaved }) {
           <Field label="Base Unit"><select value={f.base_unit} onChange={(e) => setF({ ...f, base_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="item-base-unit">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
           <Field label="Purchase Unit"><select value={f.purchase_unit} onChange={(e) => setF({ ...f, purchase_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
           <Field label="Conversion (1 purchase = ? base)"><Input type="number" value={f.conversion_factor} onChange={(e) => setF({ ...f, conversion_factor: e.target.value })} className="rounded-lg" data-testid="item-conv" /></Field>
+          <Field label="Consumption Unit"><select value={f.consumption_unit} onChange={(e) => setF({ ...f, consumption_unit: e.target.value })} className="w-full border border-slate-200 rounded-lg p-2 text-sm" data-testid="item-cons-unit">{units.map(u => <option key={u}>{u}</option>)}</select></Field>
           <Field label="Min Stock"><Input type="number" value={f.min_stock} onChange={(e) => setF({ ...f, min_stock: e.target.value })} className="rounded-lg" /></Field>
           <Field label="Reorder Level"><Input type="number" value={f.reorder_level} onChange={(e) => setF({ ...f, reorder_level: e.target.value })} className="rounded-lg" /></Field>
+          <label className="flex items-center gap-2 text-sm mt-5"><input type="checkbox" checked={f.allow_decimal} onChange={(e) => setF({ ...f, allow_decimal: e.target.checked })} data-testid="item-allow-decimal" /> Allow decimal qty</label>
           <label className="flex items-center gap-2 text-sm mt-5"><input type="checkbox" checked={f.active} onChange={(e) => setF({ ...f, active: e.target.checked })} /> Active</label>
+          <div className="col-span-2 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2 leading-relaxed">
+            Rate is always entered <b>per base unit</b> ({f.base_unit}). Any compatible unit can be used when receiving/consuming — the system auto-converts to {f.base_unit}.
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} className="rounded-lg">Cancel</Button>
@@ -869,8 +877,8 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
   const [payFor, setPayFor] = useState(null);
   const [regenId, setRegenId] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const toggleExpand = (id) => setExpanded((cur) => (cur === id ? null : id));
-  const lineAmount = (l) => (Number(l.accepted_qty ?? l.qty) || 0) * (Number(l.unit_price) || 0) - (Number(l.discount) || 0) + (Number(l.tax) || 0);
   const regenBill = async (r) => {
     setRegenId(r.id);
     try {
@@ -914,7 +922,12 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
   if (loading) return <div className="text-sm text-slate-500 p-8 text-center">Loading…</div>;
   return (
     <div className="space-y-3">
-      {canEntry && <div className="flex justify-end"><Button onClick={onCreate} className="brand-btn rounded-lg gap-1.5" data-testid="create-receipt-btn"><Plus size={15} /> New Goods Receipt</Button></div>}
+      {(canEntry || canApprove) && (
+        <div className="flex justify-end gap-2">
+          {canApprove && <Button variant="outline" onClick={() => setReviewOpen(true)} className="rounded-lg gap-1.5 text-amber-700 border-amber-300 hover:bg-amber-50" data-testid="unit-review-btn"><AlertTriangle size={15} /> Unit Review</Button>}
+          {canEntry && <Button onClick={onCreate} className="brand-btn rounded-lg gap-1.5" data-testid="create-receipt-btn"><Plus size={15} /> New Goods Receipt</Button>}
+        </div>
+      )}
       <div className="space-y-2">
         {receipts.map((r) => (
           <div key={r.id} className="bg-white border border-slate-200 rounded-xl p-4" data-testid={`receipt-${r.id}`}>
@@ -977,15 +990,18 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {(r.lines || []).map((l, i) => (
+                      {(r.lines || []).map((l, i) => {
+                        const d = displayLine(l);
+                        return (
                         <tr key={i} data-testid={`receipt-${r.id}-line-${i}`}>
                           <td className="px-3 py-2 font-medium text-slate-800">{l.item_name || "—"}</td>
-                          <td className="px-3 py-2 text-right num">{Number(l.accepted_qty ?? l.qty) || 0}</td>
-                          <td className="px-3 py-2 text-slate-500">{l.unit || l.base_unit || ""}</td>
-                          <td className="px-3 py-2 text-right num">{inr(Number(l.unit_price) || 0)}</td>
-                          <td className="px-3 py-2 text-right num font-semibold">{inr(lineAmount(l))}</td>
+                          <td className="px-3 py-2 text-right num">{d.qty.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
+                          <td className="px-3 py-2 text-slate-500">{d.unit}</td>
+                          <td className="px-3 py-2 text-right num">{inr(d.rate)}</td>
+                          <td className="px-3 py-2 text-right num font-semibold">{inr(d.amount)}</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                       {(r.lines || []).length === 0 && (
                         <tr><td colSpan={5} className="text-center text-slate-400 py-4">No item details</td></tr>
                       )}
@@ -993,7 +1009,7 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
                     <tfoot>
                       <tr className="bg-slate-50 font-bold text-slate-800 border-t border-slate-200">
                         <td className="px-3 py-2" colSpan={4}>Total</td>
-                        <td className="px-3 py-2 text-right num" data-testid={`receipt-${r.id}-total`}>{inr((r.lines || []).reduce((s, l) => s + lineAmount(l), 0))}</td>
+                        <td className="px-3 py-2 text-right num" data-testid={`receipt-${r.id}-total`}>{inr((r.lines || []).reduce((s, l) => s + displayLine(l).amount, 0))}</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -1008,9 +1024,75 @@ function ReceiptsTab({ receipts, loading, canEntry, canApprove, canRegen, onCrea
         <div className="text-[11px] text-slate-400 text-center">Approvals are actioned from the <span className="font-semibold">Pending Approvals</span> inbox by the configured approvers.</div>
       )}
       {payFor && <RaisePaymentDialog receipt={payFor} onClose={() => setPayFor(null)} onSaved={() => { setPayFor(null); onChanged(); }} />}
+      {reviewOpen && <UnitReviewDialog onClose={() => setReviewOpen(false)} />}
     </div>
   );
 }
+
+function UnitReviewDialog({ onClose }) {
+  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState({ flagged: [], count: 0 });
+  useEffect(() => {
+    api.get("/mess/receipts/unit-review")
+      .then((r) => setData(r.data || { flagged: [], count: 0 }))
+      .catch((e) => toast.error(formatError(e)))
+      .finally(() => setLoading(false));
+  }, []);
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="rounded-2xl max-w-4xl w-[96vw] max-h-[90vh] overflow-y-auto" data-testid="unit-review-dialog">
+        <DialogHeader>
+          <DialogTitle className="font-heading flex items-center gap-2"><AlertTriangle size={18} className="text-amber-600" /> Historical Unit Review</DialogTitle>
+          <DialogDescription className="text-sm text-slate-500">
+            Read-only audit. These older receipt lines were entered in a unit different from the item's base unit and their stored amount looks off. Nothing is changed automatically — review and re-enter if needed.
+          </DialogDescription>
+        </DialogHeader>
+        {loading ? (
+          <div className="text-sm text-slate-500 p-8 text-center">Scanning receipts…</div>
+        ) : data.count === 0 ? (
+          <div className="text-center py-10" data-testid="unit-review-empty">
+            <CheckCircle2 size={36} className="text-emerald-500 mx-auto mb-2" />
+            <div className="text-slate-700 font-semibold">No unit-mismatch issues found</div>
+            <div className="text-xs text-slate-500 mt-1">All historical receipts look consistent.</div>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-slate-200 overflow-x-auto">
+            <table className="w-full text-xs min-w-[760px]" data-testid="unit-review-table">
+              <thead className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase font-semibold text-slate-500">
+                <tr>
+                  <th className="text-left px-3 py-2">Invoice</th>
+                  <th className="text-left px-3 py-2">Item</th>
+                  <th className="text-right px-3 py-2">Entered</th>
+                  <th className="text-right px-3 py-2">Converted</th>
+                  <th className="text-right px-3 py-2">Rate</th>
+                  <th className="text-right px-3 py-2">Stored ₹</th>
+                  <th className="text-right px-3 py-2">Should be ₹</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {data.flagged.map((x, i) => (
+                  <tr key={i} data-testid={`unit-review-row-${i}`} className="hover:bg-amber-50/40">
+                    <td className="px-3 py-2"><div className="font-semibold text-slate-800">{x.invoice_no}</div><div className="text-[10px] text-slate-400">{x.invoice_date} · {x.status}</div></td>
+                    <td className="px-3 py-2 text-slate-700">{x.item_name}</td>
+                    <td className="px-3 py-2 text-right num">{x.qty} {x.unit}</td>
+                    <td className="px-3 py-2 text-right num text-emerald-700">{x.converted_qty} {x.base_unit}</td>
+                    <td className="px-3 py-2 text-right num">{inr(x.rate)}/{x.base_unit}</td>
+                    <td className="px-3 py-2 text-right num text-rose-600 font-semibold">{inr(x.stored_amount)}</td>
+                    <td className="px-3 py-2 text-right num text-emerald-700 font-bold">{inr(x.corrected_amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} className="rounded-lg">Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 
 function RaisePaymentDialog({ receipt, onClose, onSaved }) {
   const [f, setF] = useState({
@@ -1061,9 +1143,9 @@ function LineEditor({ items, units, lines, setLines, mode }) {
   const addLine = () => setLines([...lines, mode === "receipt"
     ? { item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "", hsn_sac: "", accepted_qty: "", rejected_qty: 0 }
     : { item_id: "", qty: "", unit: "", kind: mode }]);
-  const upd = (i, k, v) => { const n = [...lines]; n[i] = { ...n[i], [k]: v }; if (k === "item_id") { const it = items.find(x => x.id === v); if (it) n[i].unit = it.base_unit; } setLines(n); };
+  const upd = (i, k, v) => { const n = [...lines]; n[i] = { ...n[i], [k]: v }; if (k === "item_id") { const it = items.find(x => x.id === v); if (it) n[i].unit = it.consumption_unit || it.base_unit; } setLines(n); };
   const rm = (i) => setLines(lines.filter((_, idx) => idx !== i));
-  const unitsFor = (id) => { const it = items.find(x => x.id === id); return it ? [...new Set([it.base_unit, it.purchase_unit])] : units; };
+  const unitsFor = (id) => { const it = items.find(x => x.id === id); return it ? compatibleUnits(it) : units; };
   return (
     <div className="space-y-2">
       {lines.map((ln, i) => (
@@ -1123,20 +1205,25 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
     setF((p) => ({ ...p, supplier_id: id, supplier_name: v ? v.name : "" }));
   };
 
-  const unitsFor = (id) => { const it = items.find((x) => x.id === id); return it ? [...new Set([it.base_unit, it.purchase_unit])] : units; };
+  const itemOf = (id) => items.find((x) => x.id === id);
+  const unitsFor = (id) => { const it = itemOf(id); return it ? compatibleUnits(it) : units; };
+  const qtyBase = (ln) => { const it = itemOf(ln.item_id); const b = it ? toBaseQty(it, num(ln.qty), ln.unit) : null; return b == null ? num(ln.qty) : b; };
+  const baseUnitOf = (ln) => { const it = itemOf(ln.item_id); return it?.base_unit || ln.unit || ""; };
   const addLine = () => setLines([...lines, newReceiptLine()]);
   const rmLine = (i) => setLines(lines.filter((_, idx) => idx !== i));
   const upd = (i, k, v) => {
     const n = [...lines];
     n[i] = { ...n[i], [k]: v };
-    if (k === "item_id") { const it = items.find((x) => x.id === v); if (it) n[i].unit = it.base_unit; }
+    if (k === "item_id") { const it = itemOf(v); if (it) n[i].unit = it.base_unit; }
     setLines(n);
   };
 
-  const lineTaxable = (ln) => Math.max(num(ln.qty) * num(ln.unit_price) - num(ln.discount), 0);
+  // Rate (unit_price) is ALWAYS per the item's BASE unit; qty is normalised to
+  // base via the central engine before costing (500 gram @ ₹400/kg -> ₹200).
+  const lineTaxable = (ln) => Math.max(qtyBase(ln) * num(ln.unit_price) - num(ln.discount), 0);
   const lineGst = (ln) => lineTaxable(ln) * num(ln.gst_rate) / 100;
   const lineTotal = (ln) => lineTaxable(ln) + lineGst(ln);
-  const subtotal = lines.reduce((s, l) => s + num(l.qty) * num(l.unit_price), 0);
+  const subtotal = lines.reduce((s, l) => s + qtyBase(l) * num(l.unit_price), 0);
   const totalDiscount = lines.reduce((s, l) => s + num(l.discount), 0);
   const totalGst = lines.reduce((s, l) => s + lineGst(l), 0);
   const grandTotal = subtotal - totalDiscount + totalGst;
@@ -1168,6 +1255,13 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
       accepted_qty: Number(l.accepted_qty || l.qty), rejected_qty: Number(l.rejected_qty || 0),
     }));
     if (clean.length === 0) { toast.error("Add at least one valid line"); return; }
+    for (const l of clean) {
+      const it = itemOf(l.item_id);
+      if (it && !isCompatible(it, l.unit)) {
+        toast.error(`Unit '${l.unit}' is not compatible with ${it.name} (base: ${it.base_unit})`);
+        return;
+      }
+    }
     if (!(f.attachments || []).length) { toast.error("Bill attach karna zaroori hai (PDF/Image)"); return; }
     setBusy(true);
     try { await api.post("/mess/receipts", { ...f, lines: clean }); toast.success("Goods receipt created — routed to approval workflow"); onSaved(); }
@@ -1218,9 +1312,9 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
                   <tr className="text-[10px] uppercase font-semibold text-slate-500 tracking-wide">
                     <th className="px-3 py-2.5 text-center w-10">S.No.</th>
                     <th className="px-3 py-2.5 text-left min-w-[260px]">Item</th>
-                    <th className="px-2 py-2.5 text-left w-32">Qty</th>
+                    <th className="px-2 py-2.5 text-left w-36">Qty</th>
                     <th className="px-2 py-2.5 text-left w-20">Unit</th>
-                    <th className="px-2 py-2.5 text-left w-24">Rate</th>
+                    <th className="px-2 py-2.5 text-left w-28">Rate <span className="normal-case text-slate-400">(per base unit)</span></th>
                     <th className="px-2 py-2.5 text-left w-20">GST %</th>
                     <th className="px-2 py-2.5 text-left w-24">Accepted Qty</th>
                     <th className="px-3 py-2.5 text-right w-28">Line Total</th>
@@ -1236,11 +1330,19 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
                           <option value="">Select…</option>{items.filter((it) => it.active !== false).map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
                         </select>
                       </td>
-                      <td className="px-2 py-3"><Input type="number" value={ln.qty} onChange={(e) => upd(i, "qty", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-qty-${i}`} /></td>
+                      <td className="px-2 py-3">
+                        <Input type="number" value={ln.qty} onChange={(e) => upd(i, "qty", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-qty-${i}`} />
+                        {ln.item_id && num(ln.qty) > 0 && ln.unit !== baseUnitOf(ln) && (
+                          <div className="text-[10px] text-emerald-600 font-semibold mt-1 whitespace-nowrap" data-testid={`line-conv-${i}`}>= {qtyBase(ln).toLocaleString(undefined, { maximumFractionDigits: 4 })} {baseUnitOf(ln)}</div>
+                        )}
+                      </td>
                       <td className="px-2 py-3">
                         <select value={ln.unit} onChange={(e) => upd(i, "unit", e.target.value)} className={inputCls} data-testid={`line-unit-${i}`}>{unitsFor(ln.item_id).map((u) => <option key={u}>{u}</option>)}</select>
                       </td>
-                      <td className="px-2 py-3"><Input type="number" value={ln.unit_price} onChange={(e) => upd(i, "unit_price", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-rate-${i}`} /></td>
+                      <td className="px-2 py-3">
+                        <Input type="number" value={ln.unit_price} onChange={(e) => upd(i, "unit_price", e.target.value)} className="rounded-lg h-9 text-sm" data-testid={`line-rate-${i}`} />
+                        {ln.item_id && <div className="text-[10px] text-slate-400 mt-1 whitespace-nowrap">per {baseUnitOf(ln)}</div>}
+                      </td>
                       <td className="px-2 py-3">
                         <select value={String(ln.gst_rate ?? "")} onChange={(e) => upd(i, "gst_rate", e.target.value)} className={inputCls} data-testid={`line-gst-${i}`}>
                           {[...new Set([...GST_RATE_OPTIONS, String(ln.gst_rate ?? "")])].filter((x) => x !== "").map((r) => <option key={r} value={r}>{r}%</option>)}

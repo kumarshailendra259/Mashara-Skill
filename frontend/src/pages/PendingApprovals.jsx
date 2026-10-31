@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { api, formatError } from "@/lib/api";
 import { inr } from "@/lib/i18n";
+import { displayLine } from "@/lib/units";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -903,19 +904,16 @@ export default function PendingApprovals() {
                       </thead>
                       <tbody className="divide-y divide-slate-100">
                         {acting.item.summary.items.map((l, i) => {
-                          const q = Number(l.accepted_qty ?? l.qty) || 0;
-                          const rate = Number(l.unit_price) || 0;
-                          // Always derive the line amount from the qty & rate shown (plus any
-                          // discount/tax), so the row is self-consistent and sums to the total —
-                          // never trust a possibly-stale stored line_total.
-                          const amount = q * rate - (Number(l.discount) || 0) + (Number(l.tax) || 0);
+                          // Reliable display via the central unit engine — base-
+                          // normalised for new receipts, historical for legacy.
+                          const d = displayLine(l);
                           return (
                             <tr key={i} data-testid={`approval-item-${i}`}>
                               <td className="px-2 py-1 font-medium text-slate-800">{l.item_name || "—"}</td>
-                              <td className="px-2 py-1 text-right num">{q}</td>
-                              <td className="px-2 py-1 text-slate-500">{l.unit || l.base_unit || ""}</td>
-                              <td className="px-2 py-1 text-right num">{inr(rate)}</td>
-                              <td className="px-2 py-1 text-right num font-semibold">{inr(amount)}</td>
+                              <td className="px-2 py-1 text-right num">{d.qty.toLocaleString(undefined, { maximumFractionDigits: 4 })}</td>
+                              <td className="px-2 py-1 text-slate-500">{d.unit}</td>
+                              <td className="px-2 py-1 text-right num">{inr(d.rate)}</td>
+                              <td className="px-2 py-1 text-right num font-semibold">{inr(d.amount)}</td>
                             </tr>
                           );
                         })}
@@ -923,7 +921,7 @@ export default function PendingApprovals() {
                       <tfoot>
                         <tr className="bg-slate-100 font-bold text-slate-800">
                           <td className="px-2 py-1" colSpan={4}>Total</td>
-                          <td className="px-2 py-1 text-right num" data-testid="approval-items-total">{inr(acting.item.summary.items.reduce((s, l) => s + ((Number(l.accepted_qty ?? l.qty) || 0) * (Number(l.unit_price) || 0) - (Number(l.discount) || 0) + (Number(l.tax) || 0)), 0))}</td>
+                          <td className="px-2 py-1 text-right num" data-testid="approval-items-total">{inr(acting.item.summary.items.reduce((s, l) => s + displayLine(l).amount, 0))}</td>
                         </tr>
                       </tfoot>
                     </table>

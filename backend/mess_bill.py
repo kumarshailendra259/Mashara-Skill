@@ -165,9 +165,18 @@ def compute_mess_tax(receipt: dict, company_gstin: Optional[str] = None,
     total_qty = Decimal("0")
     out_lines: List[dict] = []
     for idx, ln in enumerate(lines, start=1):
-        qty = _D(ln.get("qty"))
-        acc = _D(ln.get("accepted_qty") if ln.get("accepted_qty") is not None else ln.get("qty"))
-        rate = _D(ln.get("unit_price"))
+        # New receipts store base-normalised figures (rate is per BASE unit).
+        # Legacy receipts fall back to the entered qty/unit (rate per entered unit).
+        if ln.get("rate_basis") == "base" and ln.get("qty_base") is not None:
+            qty = _D(ln.get("qty_base"))
+            acc = _D(ln.get("accepted_qty_base") if ln.get("accepted_qty_base") is not None else ln.get("qty_base"))
+            rate = _D(ln.get("rate_per_base") if ln.get("rate_per_base") is not None else ln.get("unit_price"))
+            disp_unit = ln.get("base_unit") or ln.get("unit") or ""
+        else:
+            qty = _D(ln.get("qty"))
+            acc = _D(ln.get("accepted_qty") if ln.get("accepted_qty") is not None else ln.get("qty"))
+            rate = _D(ln.get("unit_price"))
+            disp_unit = ln.get("unit") or ""
         disc = _D(ln.get("discount"))
         acc_frac = (acc / qty) if qty > 0 else (Decimal("1") if acc else Decimal("0"))
         line_taxable = ((qty * rate - disc) * acc_frac).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -202,7 +211,7 @@ def compute_mess_tax(receipt: dict, company_gstin: Optional[str] = None,
             "item_name": ln.get("item_name") or ln.get("item_id") or "",
             "hsn_sac": ln.get("hsn_sac") or "",
             "qty": _money(acc),
-            "unit": ln.get("unit") or "",
+            "unit": disp_unit,
             "unit_price": _money(rate),
             "accepted_qty": _money(acc),
             "tax_rate": _money(l_rate),

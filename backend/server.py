@@ -25196,7 +25196,12 @@ async def twilio_status_webhook(request: Request):
 # MESS & INVENTORY MANAGEMENT MODULE (Phase 1 — MVP core)
 # Weighted-average costing · center-scoped RBAC · Finance expense link.
 # ===================================================================
-MESS_UNITS = ["kg", "gram", "litre", "ml", "piece", "packet", "dozen", "cylinder", "bag", "box"]
+import unit_conversion as _uc  # centralized unit-conversion engine (single source of truth)
+
+# All selectable units across the mess module (weight/volume/count/packaging).
+MESS_UNITS = ["kg", "gram", "mg", "quintal", "ton", "litre", "ml",
+              "piece", "dozen", "pair", "packet", "bag", "box", "carton",
+              "bottle", "sack", "bundle", "cylinder"]
 MESS_VIEW_ROLES = ("admin", "senior_manager", "manager", "center_manager", "accountant", "mess_staff", "partner", "viewer")
 MESS_ENTRY_ROLES = ("admin", "senior_manager", "manager", "center_manager", "mess_staff")
 MESS_APPROVE_ROLES = ("admin", "senior_manager", "manager", "accountant")
@@ -25228,6 +25233,8 @@ class MessItemIn(BaseModel):
     base_unit: str = "kg"
     purchase_unit: str = "kg"
     conversion_factor: float = 1.0
+    consumption_unit: Optional[str] = None   # default unit for consumption/wastage entry
+    allow_decimal: bool = True               # allow fractional quantities (e.g. 0.5 kg)
     min_stock: float = 0.0
     reorder_level: float = 0.0
     preferred_supplier_id: Optional[str] = None
@@ -25299,12 +25306,12 @@ def _mess_assert_center(scoped, center_id):
 
 
 def _to_base_qty(item: dict, qty: float, unit: str) -> float:
-    """Convert an entered qty+unit into the item's base unit without rounding loss."""
-    if unit == item.get("base_unit"):
-        return float(qty)
-    if unit == item.get("purchase_unit"):
-        return float(qty) * float(item.get("conversion_factor") or 1)
-    raise HTTPException(400, f"Unit '{unit}' incompatible with item {item.get('name')}")
+    """Convert an entered qty+unit into the item's base unit via the central
+    unit-conversion engine (weight/volume/count globals + item packaging factor)."""
+    try:
+        return _uc.to_base_qty(item, qty, unit)
+    except _uc.UnitError as e:
+        raise HTTPException(400, str(e))
 
 
 async def _mess_apply_receipt(center_id, item, qty_base, total_cost, ref_id, date, user, notes=""):
@@ -25515,6 +25522,62 @@ async def mess_list_receipts(center_id: Optional[str] = None, status: Optional[s
     return rows
 
 
+@api.get("/mess/receipts/unit-review")
+async def mess_receipt_unit_review(center_id: Optional[str] = None,
+                                   user=Depends(require_role(*MESS_APPROVE_ROLES))):
+    """READ-ONLY audit: flags historical receipt lines whose stored amount looks
+    wrong because the entered unit differs from the item's base unit in a
+    scaling way (e.g. 500 gram entered against a per-kg rate). New receipts
+    (rate_basis='base') are already engine-normalised and skipped. Nothing is
+    modified — the user reviews/corrects manually."""
+    scoped = await _mess_scope(user)
+    if scoped is not None and len(scoped) == 0:
+        return {"flagged": [], "count": 0}
+    q = _mess_center_query(user, scoped, center_id)
+    items = {i["id"]: i for i in await db.mess_items.find({}, {"_id": 0}).to_list(2000)}
+    rows = await db.mess_receipts.find(q, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    flagged = []
+    for r in rows:
+        for ln in (r.get("lines") or []):
+            if ln.get("rate_basis") == "base":
+                continue  # already engine-normalised
+            it = items.get(ln.get("item_id"))
+            if not it:
+                continue
+            unit = ln.get("unit")
+            base = it.get("base_unit")
+            if not unit or unit == base:
+                continue
+            try:
+                factor = _uc.to_base_factor(it, unit)
+            except _uc.UnitError:
+                continue
+            # purchase/packaging unit priced per that unit is a legitimate legacy case
+            if unit == it.get("purchase_unit") or factor == 1:
+                continue
+            qty = float(ln.get("qty") or 0)
+            rate = float(ln.get("unit_price") or 0)
+            disc = float(ln.get("discount") or 0)
+            tax = float(ln.get("tax") or 0)
+            stored = float(ln.get("line_total") if ln.get("line_total") is not None else (qty * rate - disc + tax))
+            corrected = round(qty * factor * rate - disc + tax, 2)
+            if abs(stored - corrected) < 0.5:
+                continue
+            flagged.append({
+                "receipt_id": r.get("id"), "invoice_no": r.get("invoice_no"),
+                "invoice_date": r.get("invoice_date"), "status": r.get("status"),
+                "center_name": r.get("center_name"), "supplier_name": r.get("supplier_name"),
+                "item_name": ln.get("item_name") or (it.get("name")),
+                "qty": qty, "unit": unit, "base_unit": base,
+                "converted_qty": round(qty * factor, 4), "rate": rate,
+                "stored_amount": round(stored, 2), "corrected_amount": corrected,
+                "difference": round(stored - corrected, 2),
+            })
+    flagged.sort(key=lambda x: abs(x["difference"]), reverse=True)
+    return {"flagged": flagged, "count": len(flagged)}
+
+
+
 @api.post("/mess/receipts")
 async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*MESS_ENTRY_ROLES))):
     scoped = await _mess_scope(user)
@@ -25541,13 +25604,21 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
             raise HTTPException(400, f"Unknown item {ln.item_id}")
         if ln.accepted_qty < 0 or ln.qty < 0:
             raise HTTPException(400, "Quantities cannot be negative")
-        taxable = round(ln.qty * ln.unit_price - ln.discount, 2)
+        # Normalise qty to the item's BASE unit via the central engine; the
+        # entered unit_price is the rate PER BASE UNIT. This makes the amount
+        # correct even when qty is entered in a different unit than the rate
+        # (e.g. 500 gram @ ₹400/kg -> 0.5kg × 400 = ₹200, not ₹2,00,000).
+        qty_base = round(_to_base_qty(it, ln.qty, ln.unit), 4)
+        accepted_qty_base = round(_to_base_qty(it, ln.accepted_qty, ln.unit), 4)
+        taxable = round(qty_base * ln.unit_price - ln.discount, 2)
         tax_amt = round(taxable * ln.gst_rate / 100.0, 2) if (ln.gst_rate not in (None, 0, 0.0)) else ln.tax
         line_total = round(taxable + tax_amt, 2)
         acc_frac = (ln.accepted_qty / ln.qty) if ln.qty > 0 else 0.0
         accepted_cost = round(line_total * acc_frac, 2)
         total += accepted_cost
         out_lines.append({**ln.dict(), "item_name": it["name"], "base_unit": it["base_unit"],
+                          "qty_base": qty_base, "accepted_qty_base": accepted_qty_base,
+                          "rate_per_base": ln.unit_price, "rate_basis": "base",
                           "tax": tax_amt, "taxable": taxable,
                           "line_total": line_total, "accepted_cost": accepted_cost})
     cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
