@@ -238,6 +238,9 @@ export default function Programs() {
   const [recvTarget, setRecvTarget] = useState(null);
   const [recvTds, setRecvTds] = useState("0");
   const [recvCompanyId, setRecvCompanyId] = useState("");
+  // Work Order to stamp on all milestone-generated txns (income/TDS/recovery/assessment)
+  const [recvWorkOrders, setRecvWorkOrders] = useState([]);
+  const [recvWoId, setRecvWoId] = useState("");
 
   // Phase 40 — Bill Status (linked Invoice stages) per milestone.
   const [billStatuses, setBillStatuses] = useState({}); // { [payment_id]: statusObj }
@@ -528,10 +531,22 @@ export default function Programs() {
   const openReceive = (p) => {
     setRecvTarget(p);
     setRecvTds("0");
+    setRecvWoId("");
     // Pre-fill company from BatchPayment row, falling back to active batch's company_id
     setRecvCompanyId(p.company_id || activeBatch?.company_id || "");
     setRecvOpen(true);
   };
+  // Load Work Orders for the batch's center when the receive dialog opens.
+  // ensure_demo=true → a placeholder "DEMO Work Order" is auto-created if none exist.
+  useEffect(() => {
+    const cid = activeBatch?.center_id;
+    if (!recvOpen || !cid) { setRecvWorkOrders([]); return; }
+    let cancelled = false;
+    api.get("/work-orders", { params: { center_id: cid, include_inactive: false, ensure_demo: true } })
+      .then((r) => { if (!cancelled) { const list = r.data || []; setRecvWorkOrders(list); setRecvWoId((prev) => prev || (list[0]?.id || "")); } })
+      .catch(() => { if (!cancelled) setRecvWorkOrders([]); });
+    return () => { cancelled = true; };
+  }, [recvOpen, activeBatch?.center_id]);
   const confirmReceive = async () => {
     if (!recvTarget || recvBusy) return;  // guard against rapid double-click
     setRecvBusy(true);
@@ -539,6 +554,7 @@ export default function Programs() {
       await api.patch(`/batch-payments/${recvTarget.id}/receive`, {
         tds_percent: parseInt(recvTds, 10) || 0,
         company_id: recvCompanyId || null,
+        work_order_id: recvWoId || null,
       });
       const r = await api.get("/batch-payments", { params: { batch_id: selectedBatchId } });
       setPayments(r.data);
@@ -1269,6 +1285,17 @@ export default function Programs() {
                   </SelectContent>
                 </Select>
                 <div className="text-[10px] text-[var(--muted)] mt-1">Company-share portion of this income will be tagged to the selected company on dashboard.</div>
+              </div>
+              <div>
+                <Label>Work Order</Label>
+                <Select value={recvWoId || "__none__"} onValueChange={(v) => setRecvWoId(v === "__none__" ? "" : v)}>
+                  <SelectTrigger className="rounded-none" data-testid="recv-wo-select"><SelectValue placeholder="Select work order" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">— Auto (DEMO Work Order) —</SelectItem>
+                    {recvWorkOrders.map((w) => <SelectItem key={w.id} value={w.id}>{w.wo_number}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <div className="text-[10px] text-[var(--muted)] mt-1">Is milestone ke saare transactions (income, TDS, recovery) isi Work Order ke under dikhenge. Center ka WO na ho to "DEMO Work Order" apne-aap ban jayega — baad me update kar sakte hain.</div>
               </div>
               <div>
                 <Label>TDS Deduction by Department</Label>

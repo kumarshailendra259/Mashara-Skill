@@ -1266,6 +1266,46 @@ async def _derive_context_for_center(center_id: Optional[str]) -> dict:
     return {"company_id": company_id, "partner_id": partner_id, "project_id": project_id}
 
 
+async def _ensure_demo_work_order(center_id: Optional[str]) -> Optional[dict]:
+    """Guarantee a Work Order exists for a center.
+
+    Work Order selection is mandatory on manual income/expense booking, but some
+    transactions are entered BEFORE the real Work Order arrives. When a center has
+    no Work Orders at all, auto-create a placeholder 'DEMO Work Order' (is_demo=True)
+    so booking is never blocked. The demo WO can be edited later with real details.
+
+    Returns {id, wo_number} for the center's existing-or-created WO, or None when
+    no center is supplied.
+    """
+    if not center_id:
+        return None
+    existing = await db.work_orders.find_one({"center_id": center_id}, {"_id": 0, "id": 1, "wo_number": 1})
+    if existing:
+        return {"id": existing["id"], "wo_number": existing.get("wo_number")}
+    ctx = await _derive_context_for_center(center_id)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "company_id": ctx.get("company_id"),
+        "project_id": ctx.get("project_id") or "",
+        "center_id": center_id,
+        "fy": _current_fy_value(),
+        "wo_number": "DEMO Work Order",
+        "loi_number": "", "issue_date": "", "expiry_date": "",
+        "status": "active", "scheme": "", "training_service_provider": "",
+        "nature_of_training": "", "centre_level": "", "centre_type": "",
+        "district_block": "", "lwe_district": "",
+        "pbg_mode": "3", "pbg_percent": 0.0, "work_order_value_override": None,
+        "courses": [], "remarks": "Auto-generated placeholder — update with the real Work Order details.",
+        "is_demo": True,
+        "total_training_fee": 0.0, "total_boarding_cost": 0.0, "computed_value": 0.0,
+        "work_order_value": 0.0, "grand_total": 0.0, "pbg_amount": 0.0, "total_beneficiaries": 0,
+        "created_by": "system", "created_at": now, "updated_at": now,
+    }
+    await db.work_orders.insert_one(doc)
+    return {"id": doc["id"], "wo_number": doc["wo_number"]}
+
+
 async def _enrich_user_with_associations(user: dict) -> dict:
     """Mutates `user` to add scope hints per role.
 
@@ -3994,10 +4034,10 @@ async def create_transaction(
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
     # Expense Booking: a Work Order is mandatory for manually-entered expenses
-    # (the New Transaction dialog). Auto-sourced expenses (mess/quotation/stock
-    # entries, which set `source`) are exempt.
-    if body.type == "expense" and not body.source and not body.work_order_id:
-        raise HTTPException(400, "Work Order is required for expense booking")
+    # AND income (the New Transaction dialog). Auto-sourced rows (mess/quotation/
+    # stock/milestone/fooding entries, which set `source`) are exempt.
+    if body.type in ("expense", "income") and not body.source and not body.work_order_id:
+        raise HTTPException(400, "Work Order is required for booking")
     # Validate the Work Order exists and belongs to the selected center (reuse of
     # Batch Management's Work Order master — never a duplicate).
     if body.work_order_id:
@@ -4159,6 +4199,54 @@ async def bulk_delete_transactions(body: BulkIds, _=Depends(require_role("admin"
         return {"deleted": 0}
     r = await db.transactions.delete_many({"id": {"$in": body.ids}})
     return {"deleted": r.deleted_count}
+
+
+class BulkAssignIn(BaseModel):
+    """Admin bulk-assign context fields onto many transactions at once.
+    Only the fields that are currently EMPTY on each row get filled (non-destructive)."""
+    ids: List[str]
+    company_id: Optional[str] = None
+    partner_id: Optional[str] = None
+    center_id: Optional[str] = None
+    project_id: Optional[str] = None
+    work_order_id: Optional[str] = None
+
+
+@api.post("/transactions/bulk-assign")
+async def bulk_assign_transactions(body: BulkAssignIn, _=Depends(require_role("admin"))):
+    fields = {k: v for k, v in {
+        "company_id": body.company_id, "partner_id": body.partner_id,
+        "center_id": body.center_id, "project_id": body.project_id,
+        "work_order_id": body.work_order_id,
+    }.items() if v}
+    if not body.ids:
+        raise HTTPException(400, "No transactions selected")
+    if not fields:
+        raise HTTPException(400, "Pick at least one field to assign")
+    wo_no = None
+    if fields.get("work_order_id"):
+        wo = await db.work_orders.find_one({"id": fields["work_order_id"]}, {"_id": 0, "id": 1, "wo_number": 1})
+        if not wo:
+            raise HTTPException(400, "Selected Work Order does not exist")
+        wo_no = wo.get("wo_number")
+    touched: set[str] = set()
+    per_field: dict = {}
+    for k, v in fields.items():
+        # Only fill rows where this field is currently empty (missing / null / "").
+        empty_cond = {"$or": [{k: {"$exists": False}}, {k: None}, {k: ""}]}
+        filt = {"id": {"$in": body.ids}, **empty_cond}
+        matched = await db.transactions.find(filt, {"_id": 0, "id": 1}).to_list(10000)
+        matched_ids = [d["id"] for d in matched]
+        if not matched_ids:
+            per_field[k] = 0
+            continue
+        setd = {k: v}
+        if k == "work_order_id":
+            setd["work_order_no"] = wo_no
+        r = await db.transactions.update_many({"id": {"$in": matched_ids}}, {"$set": setd})
+        per_field[k] = r.modified_count
+        touched.update(matched_ids)
+    return {"updated": len(touched), "by_field": per_field}
 
 
 @api.post("/transactions/backfill-company-partner")
@@ -13640,6 +13728,10 @@ class ReceivePaymentIn(BaseModel):
     # Optional company override at receive-time. If provided, the company-share income
     # txn is tagged with this company. Falls back to BatchPayment.company_id when omitted.
     company_id: Optional[str] = None
+    # Work Order to stamp on every generated milestone txn (income / TDS / recovery /
+    # assessment) so they surface under the right WO in Transactions & Reports. When
+    # omitted, a placeholder DEMO Work Order for the batch center is used.
+    work_order_id: Optional[str] = None
 
 
 @api.get("/batches", response_model=List[BatchOut])
@@ -14351,6 +14443,26 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
     description_base = f"{project_name} — {batch.get('name','') if batch else ''} — {rec['milestone']} milestone"
     created_txn_ids: list[str] = []
 
+    # Work Order linkage — stamp every milestone-generated txn with a WO so they
+    # surface under the right Work Order in Transactions & Reports. Validate the
+    # picked WO belongs to the batch center; otherwise fall back to a DEMO WO.
+    batch_center_id = (batch or {}).get("center_id")
+    wo_id = body.work_order_id
+    wo_no = None
+    if wo_id:
+        _wo = await db.work_orders.find_one({"id": wo_id}, {"_id": 0, "id": 1, "center_id": 1, "wo_number": 1})
+        if not _wo:
+            await _rollback("work order not found")
+            raise HTTPException(400, "Selected Work Order does not exist")
+        if _wo.get("center_id") and batch_center_id and _wo["center_id"] != batch_center_id:
+            await _rollback("work order center mismatch")
+            raise HTTPException(400, "Selected Work Order does not belong to the batch's center")
+        wo_no = _wo.get("wo_number")
+    else:
+        _demo = await _ensure_demo_work_order(batch_center_id)
+        if _demo:
+            wo_id, wo_no = _demo["id"], _demo.get("wo_number")
+
     # Income split: partners get partner_share_pct% of gross (split equally among them),
     # company keeps the rest. If no partners OR partner_share_pct == 0, the whole amount
     # is recorded as company income (partner_id=null).
@@ -14386,6 +14498,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
             "items": [], "attachments": [],
+            "work_order_id": wo_id, "work_order_no": wo_no,
             "source": "milestone",
             "milestone": rec["milestone"],
             # Cascade-delete linkage: cleanup uses these to remove orphaned income
@@ -14422,6 +14535,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
             "items": [], "attachments": [],
+            "work_order_id": wo_id, "work_order_no": wo_no,
             "source": "candidate_recovery",
             "milestone": rec["milestone"],
             "batch_id": rec["batch_id"],
@@ -14457,6 +14571,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
             "items": [], "attachments": [],
+            "work_order_id": wo_id, "work_order_no": wo_no,
             "source": "assessment_fee",
             "milestone": rec["milestone"],
             "batch_id": rec["batch_id"],
@@ -14495,6 +14610,7 @@ async def receive_batch_payment(pid: str, body: ReceivePaymentIn = ReceivePaymen
                 "center_id": (batch or {}).get("center_id"),
                 "project_id": (batch or {}).get("project_id"),
                 "items": [], "attachments": [],
+                "work_order_id": wo_id, "work_order_no": wo_no,
                 "source": "tds_deduction",
                 "milestone": rec["milestone"],
                 "batch_id": rec["batch_id"],
@@ -15092,8 +15208,13 @@ async def list_work_orders(
     district: Optional[str] = None,
     q: Optional[str] = None,                # search: wo_number / loi / project / center / company name
     include_inactive: bool = Query(True, description="Include expired/cancelled (client filters/badges)"),
+    ensure_demo: bool = Query(False, description="Auto-create a placeholder DEMO Work Order when the center has none"),
     user=Depends(require_role(*WO_READ_ROLES)),
 ):
+    # When booking a txn against a center that has no Work Orders yet, make sure a
+    # placeholder 'DEMO Work Order' exists so the mandatory picker is never empty.
+    if ensure_demo and center_id:
+        await _ensure_demo_work_order(center_id)
     query: dict = {}
     if project_id: query["project_id"] = project_id
     if center_id:  query["center_id"] = center_id

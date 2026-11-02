@@ -147,15 +147,18 @@ export default function Transactions() {
   const fileRef = useRef(null);
   const attachRef = useRef(null);
   const [uploading, setUploading] = useState(false);
-  // Work Orders for the selected center (reused from Batch Management; mandatory for expense booking)
+  // Work Orders for the selected center (reused from Batch Management; mandatory for income & expense booking)
   const [workOrders, setWorkOrders] = useState([]);
   const [woLoading, setWoLoading] = useState(false);
   const [woPickerOpen, setWoPickerOpen] = useState(false);
   useEffect(() => {
-    if (!open || form.type !== "expense" || !form.center_id) { setWorkOrders([]); return; }
+    const woNeeded = form.type === "expense" || form.type === "income";
+    if (!open || !woNeeded || !form.center_id) { setWorkOrders([]); return; }
     let cancelled = false;
     setWoLoading(true);
-    api.get("/work-orders", { params: { center_id: form.center_id, include_inactive: false } })
+    // ensure_demo=true → if the center has no WO yet, backend auto-creates a
+    // placeholder "DEMO Work Order" so the mandatory picker is never empty.
+    api.get("/work-orders", { params: { center_id: form.center_id, include_inactive: false, ensure_demo: true } })
       .then((r) => { if (!cancelled) setWorkOrders(r.data || []); })
       .catch(() => { if (!cancelled) setWorkOrders([]); })
       .finally(() => { if (!cancelled) setWoLoading(false); });
@@ -312,6 +315,25 @@ export default function Transactions() {
     finally { setBulkDeleteBusy(false); }
   };
 
+  // Admin bulk-assign: fill chosen context fields on all selected rows (only where empty).
+  const EMPTY_BULK = { company_id: "", partner_id: "", center_id: "", project_id: "", work_order_id: "" };
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+  const [bulkAssignBusy, setBulkAssignBusy] = useState(false);
+  const [bulkAssign, setBulkAssign] = useState(EMPTY_BULK);
+  const doBulkAssign = async () => {
+    const ids = Array.from(selected);
+    const fields = Object.fromEntries(Object.entries(bulkAssign).filter(([, v]) => v));
+    if (ids.length === 0) { toast.error("Koi transaction select nahi hai"); return; }
+    if (Object.keys(fields).length === 0) { toast.error("Kam se kam ek field chunein"); return; }
+    setBulkAssignBusy(true);
+    try {
+      const { data } = await api.post("/transactions/bulk-assign", { ids, ...fields });
+      setBulkAssignOpen(false); setBulkAssign(EMPTY_BULK); setSelected(new Set()); await load(true);
+      toast.success(`${data.updated} transaction${data.updated === 1 ? "" : "s"} updated — sirf khaali fields bhari gayi`);
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setBulkAssignBusy(false); }
+  };
+
   useEffect(() => { loadEntities(); }, []);
   useEffect(() => { load(); }, [params]);
 
@@ -362,9 +384,8 @@ export default function Transactions() {
     try {
       const computedAmount = form.items.length ? itemsTotal : parseFloat(form.amount);
       if (!(computedAmount > 0)) { toast.error("Amount must be > 0"); return; }
-      if (form.type === "expense" && !editing) {
-        if (!form.center_id) { toast.error("Expense ke liye Center select karein"); return; }
-        if (workOrders.length === 0) { toast.error("Is center ke liye koi Work Order nahi hai — pehle Batch Management me banayein"); return; }
+      if ((form.type === "expense" || form.type === "income") && !editing) {
+        if (!form.center_id) { toast.error(`${t(form.type)} ke liye Center select karein`); return; }
         if (!form.work_order_id) { toast.error("Work Order select karna zaroori hai"); return; }
       }
       const payload = { ...form, amount: computedAmount };
@@ -662,6 +683,7 @@ export default function Transactions() {
           <span className="text-sm font-medium">{selected.size} transaction{selected.size === 1 ? "" : "s"} selected</span>
           <div className="ml-auto flex flex-wrap gap-2">
             <Button size="sm" onClick={bulkApprove} className="rounded-lg bg-emerald-600 hover:bg-emerald-700 gap-1.5" data-testid="btn-bulk-approve"><Check size={14} /> Approve</Button>
+            <Button size="sm" onClick={() => setBulkAssignOpen(true)} className="rounded-lg bg-indigo-600 hover:bg-indigo-700 gap-1.5" data-testid="btn-bulk-assign"><ListChecks size={14} /> Assign</Button>
             <Button size="sm" variant="outline" onClick={exportCsv} className="rounded-lg gap-1.5 bg-transparent text-white border-white/30 hover:bg-white/10"><Download size={14} /> Export</Button>
             <Button size="sm" variant="outline" onClick={() => setBulkDeleteOpen(true)} className="rounded-lg gap-1.5 bg-transparent text-rose-300 border-rose-400/40 hover:bg-rose-500/10" data-testid="btn-bulk-delete-txn"><Trash2 size={14} /> Delete</Button>
             <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())} className="rounded-lg text-white/70 hover:bg-white/10"><X size={14} /></Button>
@@ -1015,7 +1037,7 @@ export default function Transactions() {
                 </Select>
               </div>
             ))}
-            {form.type === "expense" && (
+            {(form.type === "expense" || form.type === "income") && (
               <div className="col-span-2">
                 <Label>Select Work Order <span className="text-rose-500">*</span></Label>
                 {!form.center_id ? (
@@ -1023,7 +1045,7 @@ export default function Transactions() {
                 ) : woLoading ? (
                   <div className="text-xs text-slate-500 border border-slate-200 rounded-lg px-3 py-2.5">Loading work orders…</div>
                 ) : workOrders.length === 0 ? (
-                  <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2.5" data-testid="wo-none">Is center ke liye koi Work Order nahi mila. Expense book karne ke liye pehle Batch Management me Work Order banayein.</div>
+                  <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2.5" data-testid="wo-none">Is center ke liye koi Work Order nahi mila.</div>
                 ) : (
                   <Popover open={woPickerOpen} onOpenChange={setWoPickerOpen}>
                     <PopoverTrigger asChild>
@@ -1140,6 +1162,47 @@ export default function Transactions() {
         onConfirm={bulkDelete}
         warning="Approved transactions will also be deleted — re-running 'mark received' on a milestone will recreate them."
       />
+
+      {/* Admin bulk-assign dialog */}
+      <Dialog open={bulkAssignOpen} onOpenChange={setBulkAssignOpen}>
+        <DialogContent className="rounded-lg max-w-lg" data-testid="bulk-assign-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-heading tracking-tight">Assign to {selected.size} transaction{selected.size === 1 ? "" : "s"}</DialogTitle>
+            <DialogDescription>
+              Jo fields aap yahan chunenge woh sirf un rows par lagengi jahan woh field abhi <b>khaali</b> hai. Jiska value pehle se hai usse chheda nahi jayega.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3 py-1">
+            {ENTITY_TYPES.map((etype) => (
+              <div key={etype} className={etype === "project" ? "col-span-2" : ""}>
+                <Label className="text-xs">{t(etype)}</Label>
+                <Select value={bulkAssign[`${etype}_id`] || "__none"} onValueChange={(v) => setBulkAssign((s) => ({ ...s, [`${etype}_id`]: v === "__none" ? "" : v }))}>
+                  <SelectTrigger className="rounded-lg" data-testid={`bulk-assign-${etype}`}><SelectValue placeholder="— leave unchanged —" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none">— leave unchanged —</SelectItem>
+                    {(entities[etype] || []).map((e) => <SelectItem key={e.id} value={e.id}>{e.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            ))}
+            <div className="col-span-2">
+              <Label className="text-xs">Work Order</Label>
+              <Select value={bulkAssign.work_order_id || "__none"} onValueChange={(v) => setBulkAssign((s) => ({ ...s, work_order_id: v === "__none" ? "" : v }))}>
+                <SelectTrigger className="rounded-lg" data-testid="bulk-assign-work-order"><SelectValue placeholder="— leave unchanged —" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none">— leave unchanged —</SelectItem>
+                  {filterWorkOrders.map((w) => <SelectItem key={w.id} value={w.id}>{w.wo_number}{w.center_name ? ` · ${w.center_name}` : ""}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <div className="text-[10px] text-slate-400 mt-1">Center filter chalu ho to sirf us center ke Work Orders dikhte hain.</div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkAssignOpen(false)} className="rounded-lg">{t("cancel")}</Button>
+            <SubmitButton onClick={doBulkAssign} className="brand-btn rounded-lg" data-testid="bulk-assign-apply" loadingLabel="Assigning…">Assign</SubmitButton>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
