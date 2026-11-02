@@ -1,0 +1,47 @@
+{
+  "summary": "Tested Mess → Accounting finance fixes end-to-end (API + UI). All 7 requested features PASS. Flow tested: admin created a Goods Receipt in the UI (Rice 10kg @50, PDF attached) and approved it through Pending Approvals (3 steps). This created ONE mess_purchase expense txn with no partner (Unassigned), status Approved, payment status Unpaid, Paid ₹0 · Bal ₹500. Raise Payment in the UI → 3 approvals; at the final step the admin picked center + partner (Shailendra Kumar) + bank. The SAME txn became Paid / Bal ₹0 with the chosen partner. No duplicate txn; 1 bank ledger debit. Transactions page: payment badge, Paid/Bal text, drawer Payment Status + Paid/Balance, and the Payment Status filter (Unpaid/Partially Paid/Paid + chip) all work. Partner Audit dialog listed a fake old txn with a partner (₹777, created for the test), 'Set all to Unassigned' cleared it, the change was logged in audit_corrections and the dialog switched to the empty state. Non-admins (center_manager, company_admin, partner) get 403 on GET and POST of the audit endpoints; the button is gated on role==='admin'. Center Manager sees Raise Payment on an approved+unpaid receipt and only their own center (another center_id → 403). Quotation create/approve creates no transaction (status approved + QRN stamped). Regression filters (type, status, company, partner, center, project, date) and KPIs work with no page errors. Pytest: 10/10 passed.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "GET/POST /api/admin/mess-partner-audit(/fix)", "issue": "The audit treats any mess_purchase txn WITHOUT a payment_status field as unpaid ($exists:False branch). Every OLD mess txn was created before this change and has no payment_status, including bills already PAID (receipt.payment_status='paid', and in preview txns for paid receipts carried no payment_status). In production, the one-click fix will therefore also unassign partners on bills that were already paid, where the partner was set at payment time. Fix: cross-check db.mess_receipts (by mess_receipt_id/expense_txn_id) and skip receipts with payment_status 'paid', or backfill txn.payment_status from the receipt first.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "migration", "issue": "No backfill of payment_status/paid_amount/balance on old mess_purchase txns (17 in preview). They show no payment badge and are excluded from the Payment Status=Unpaid filter even though their receipts are unpaid or paid."},
+      {"endpoint": "POST /api/approvals/act (mess_payment)", "issue": "txn_partner_id is not validated (does the partner exist? is it mapped to the chosen center?). Any string is saved as partner_id on the expense txn."},
+      {"endpoint": "POST /api/auth/login", "issue": "Playbook: no brute-force lockout. 6 wrong attempts all return 401, never 429. Not related to this change."},
+      {"endpoint": "startup seed (server.py ~1770)", "issue": "Playbook: seed resets an existing admin's password_hash when it differs from ADMIN_PASSWORD. It should only create the admin if missing and never change an existing password."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "PendingApprovals mess_payment final step", "issue": "The Partner picker placeholder says '— Auto-derive from center —' and the hint says 'auto-derive hoga'. The backend no longer auto-derives (partner stays Unassigned), so the text misleads the accountant. Change it to '— Unassigned —'. The picker only lists partners mapped to the center: in preview NO center has mapped partners, so the accountant cannot pick any partner. Consider listing all partners as a fallback.", "selector": "[data-testid=txn-partner-select]", "priority": "MEDIUM"},
+      {"component": "Transactions Partner Audit dialog", "issue": "'Set all to Unassigned' does a bulk change with no confirm step. Also auditData is not reset on close (the effect only loads when !auditData), so reopening the dialog shows stale data until the page reloads.", "selector": "[data-testid=audit-fix-btn]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Transactions Advanced Filters", "issues": ["From/To use native <input type=date> instead of the shadcn Calendar and have no data-testid (existing before this change)"]},
+      {"screen": "Transactions drawer (mess purchase)", "issues": ["An approved, system-generated mess_purchase txn still shows Reject/Edit/Delete. Editing the amount would make it disagree with the receipt and with paid_amount/balance. Consider locking amount/partner edits for source=mess_purchase."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_mess_payment_partner_fix.py", "/app/backend/tests/cleanup_iter89.py", "/app/test_reports/pytest/iter89.xml"],
+  "action_items": [
+    "HIGH: make the mess-partner-audit/fix skip PAID bills (check the linked mess_receipts.payment_status) or backfill txn.payment_status from receipts before running it in production",
+    "Backfill payment_status/paid_amount/balance on existing mess_purchase txns from the receipt's payment_status",
+    "Change the mess_payment partner picker text from 'Auto-derive from center' to 'Unassigned'. Consider a fallback list of all partners when the center has no mapped partners",
+    "Validate txn_partner_id on mess_payment approval (partner exists, ideally mapped to the center)",
+    "Add a confirm step to the Partner Audit fix. Reset auditData when the dialog closes",
+    "(Playbook) add login brute-force lockout. Stop seed_admin from resetting an existing admin password"
+  ],
+  "critical_code_review_comments": [
+    "server.py mess_partner_audit query {'payment_status': {'$exists': False}} also matches old PAID txns. This is the biggest production risk of the new tool.",
+    "mess_payment approval: if the receipt has no expense_txn_id (very old receipts), nothing is marked paid and no txn is created. Payment is then silently missing from accounting. Consider logging or creating a txn in that case.",
+    "On mess_payment approval the txn update sets payment_status/paid_amount but not paid_at/payment_txn ref on the txn. Fine, but there is no partial-payment path although 'partially_paid' is offered in the filter.",
+    "server.py is >26k lines. It should be split into modules."
+  ],
+  "updated_files": ["/app/backend/tests/test_mess_payment_partner_fix.py", "/app/backend/tests/cleanup_iter89.py"],
+  "success_rate": {"backend": "100% (10/10 pytest)", "frontend": "100% of requested flows (1 medium UX issue)"},
+  "test_credentials": "admin@finance.app/Admin@123 OK. cmtest_salary@x.com/Test@1234 OK (center_manager, center 10751714..., goes through select-company → Valeur Fabtex). NOTE: test_center_manager_c6912430@x.com is now role 'center_manager' with NO centers in the preview DB (test_credentials.md says accountant), so it cannot open /transactions. Its 403 on the audit API was still verified. kumarshailendra259@gmail.com now has memberships in TEST_iter40 companies (data drift).",
+  "seed_data_creation": "Temporary data created and then CLEANED via tests/cleanup_iter89.py: TEST-IT89-*/TEST-UI89-* receipts, txns, mess payments/bills, ledger rows (Rice stock reverted), bank debits (balance reverted), the fake TEST_AUDIT_ txn plus its audit_corrections row, TEST_IT89 quotations. The temporary partner mapping on center 10751714 was removed (mappings now []).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Mess receipts: admin approves via /approvals/act 3x (remarks >=3 chars). mess_payment: 3x, final step needs txn_center_id + bank_account_id (1 active bank account exists). The partner picker in the UI only shows partners mapped to the center, and preview centers have none, so add a temp mapping via POST /centers/{cid}/mapped-partners {partner_id:'d9a5228f-144e-481f-81cb-6417cd099901'} and delete it afterwards. Run tests/cleanup_iter89.py after test_mess_payment_partner_fix.py to revert stock and bank balances."
+}

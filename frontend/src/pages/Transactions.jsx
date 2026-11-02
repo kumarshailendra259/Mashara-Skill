@@ -116,6 +116,7 @@ export default function Transactions() {
   };
   useEffect(() => { if (auditOpen && !auditData) loadAudit(); }, [auditOpen]); // eslint-disable-line
   const runFix = async () => {
+    if (!window.confirm("Set all listed unpaid mess expenses to Unassigned partner? This is logged and non-destructive, but will clear the partner on these transactions.")) return;
     setFixing(true);
     try {
       const { data } = await api.post("/admin/mess-partner-audit/fix", {});
@@ -857,7 +858,7 @@ export default function Transactions() {
       </Sheet>
 
       {/* Admin · Mess Partner Audit & Fix */}
-      <Dialog open={auditOpen} onOpenChange={setAuditOpen}>
+      <Dialog open={auditOpen} onOpenChange={(o) => { setAuditOpen(o); if (!o) setAuditData(null); }}>
         <DialogContent className="rounded-2xl max-w-3xl max-h-[90vh] overflow-y-auto" data-testid="partner-audit-dialog">
           <DialogHeader>
             <DialogTitle className="font-heading flex items-center gap-2"><ShieldAlert size={18} className="text-amber-600" /> Mess Expense — Partner Audit & Fix</DialogTitle>
@@ -910,7 +911,7 @@ export default function Transactions() {
             </>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAuditOpen(false)} className="rounded-lg">Close</Button>
+            <Button variant="outline" onClick={() => { setAuditOpen(false); setAuditData(null); }} className="rounded-lg">Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -75,6 +75,7 @@ export default function PendingApprovals() {
   // created transaction reflects the correct dashboard dimensions.
   const [centers, setCenters] = useState([]);
   const [attrPartners, setAttrPartners] = useState([]);   // partners mapped to the selected center only
+  const [allPartners, setAllPartners] = useState([]);     // fallback list when a center has no mapped partners
   const [txnCenterId, setTxnCenterId] = useState("");
   const [txnPartnerId, setTxnPartnerId] = useState("");
   // Phase 29 — Bank/Cash account for final-step debit of Payment / Reimbursement.
@@ -321,6 +322,12 @@ export default function PendingApprovals() {
       setTxnPartnerId(act.length === 1 ? act[0].partner_id : "");
     }).catch(() => { setAttrPartners([]); setTxnPartnerId(""); });
   };
+
+  // Full partner list — shown as a fallback so the accountant can always assign a
+  // partner manually even when the center has no mapped partners configured.
+  useEffect(() => {
+    api.get("/partners").then((r) => setAllPartners((r.data || []).map((p) => ({ partner_id: p.id, name: p.name })))).catch(() => {});
+  }, []);
 
   // Payment attribution (Center / Partner / Paid By) is captured at final approval
   // for: payment, reimbursement, and advance_request. For advance_request it's
@@ -1059,13 +1066,13 @@ export default function PendingApprovals() {
                         className="w-full text-sm border border-emerald-300 bg-white rounded-none p-2 disabled:opacity-60"
                         data-testid="txn-partner-select"
                       >
-                        <option value="">— Auto-derive from center —</option>
-                        {attrPartners.map((p) => (
+                        <option value="">— Unassigned —</option>
+                        {(attrPartners.length ? attrPartners : allPartners).map((p) => (
                           <option key={p.partner_id} value={p.partner_id}>{p.name}{p.role ? ` (${p.role})` : ""}</option>
                         ))}
                       </select>
                       {txnCenterId && attrPartners.length === 0 && (
-                        <div className="text-[9px] text-amber-700 mt-0.5">Is center ke liye koi mapped partner nahi — auto-derive hoga.</div>
+                        <div className="text-[9px] text-amber-700 mt-0.5">Is center ke liye koi mapped partner nahi — neeche se partner chunein (warna Unassigned rahega).</div>
                       )}
                     </div>
                   </div>

@@ -3867,50 +3867,89 @@ async def list_transactions(
 @api.get("/admin/mess-partner-audit")
 async def mess_partner_audit(user=Depends(require_role("admin"))):
     """READ-ONLY audit (admin). Finds mess-purchase expense transactions that still
-    carry a partner that was AUTO-assigned at bill approval (i.e. the bill is not
-    yet paid, so no accountant has manually confirmed the partner). These are the
-    records wrongly stuck to a default partner. Nothing is modified here."""
-    q = {"source": "mess_purchase", "partner_id": {"$ne": None},
-         "$or": [{"payment_status": {"$ne": "paid"}}, {"payment_status": {"$exists": False}}]}
-    docs = await db.transactions.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
+    carry an AUTO-assigned partner on a bill that is NOT yet paid (so no accountant
+    has manually confirmed the partner). Uses the linked mess_receipt as the source
+    of truth for paid/unpaid — so already-PAID bills (where the partner was confirmed
+    at payment time) are never touched. Nothing is modified here."""
+    docs = await db.transactions.find(
+        {"source": "mess_purchase", "partner_id": {"$ne": None}}, {"_id": 0}).sort("date", -1).to_list(5000)
+    rcpt_ids = list({d.get("mess_receipt_id") for d in docs if d.get("mess_receipt_id")})
+    paid = set()
+    if rcpt_ids:
+        async for r in db.mess_receipts.find({"id": {"$in": rcpt_ids}}, {"_id": 0, "id": 1, "payment_status": 1}):
+            if r.get("payment_status") == "paid":
+                paid.add(r["id"])
     parts = {p["id"]: p.get("name") for p in await db.partners.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)}
-    flagged = [{
-        "txn_id": d.get("id"), "date": d.get("date"), "amount": d.get("amount"),
-        "description": d.get("description"), "center_name": d.get("center_name"),
-        "partner_id": d.get("partner_id"), "partner_name": parts.get(d.get("partner_id"), d.get("partner_id")),
-        "payment_status": d.get("payment_status") or "unpaid",
-        "mess_receipt_id": d.get("mess_receipt_id"),
-    } for d in docs]
-    total = round(sum(float(d.get("amount") or 0) for d in docs), 2)
-    return {"flagged": flagged, "count": len(flagged), "total_amount": total}
+    flagged, total = [], 0.0
+    for d in docs:
+        rid = d.get("mess_receipt_id")
+        # Skip paid bills (partner was accountant-confirmed). Skip txns whose receipt
+        # cannot be located (can't verify → leave untouched, be conservative).
+        if not rid or rid in paid:
+            continue
+        total += float(d.get("amount") or 0)
+        flagged.append({
+            "txn_id": d.get("id"), "date": d.get("date"), "amount": d.get("amount"),
+            "description": d.get("description"), "center_name": d.get("center_name"),
+            "partner_id": d.get("partner_id"), "partner_name": parts.get(d.get("partner_id"), d.get("partner_id")),
+            "payment_status": d.get("payment_status") or "unpaid",
+            "mess_receipt_id": rid,
+        })
+    return {"flagged": flagged, "count": len(flagged), "total_amount": round(total, 2)}
 
 
 @api.post("/admin/mess-partner-audit/fix")
 async def mess_partner_audit_fix(body: dict = Body(default={}), user=Depends(require_role("admin"))):
     """Admin one-click correction. Clears the auto-assigned partner (→ Unassigned)
-    on unpaid mess-purchase transactions so the accountant assigns the correct
-    partner at payment time. NON-destructive: records are not deleted; the old
-    partner is logged to `audit_corrections` and can be reviewed. Optionally pass
-    {"txn_ids": [...]} to fix a specific subset."""
+    on UNPAID mess-purchase transactions (verified against the linked receipt) so the
+    accountant assigns the correct partner at payment time. Also backfills
+    payment_status/paid_amount/balance from the authoritative receipt on mess txns
+    that pre-date payment tracking. NON-destructive: nothing is deleted; every partner
+    change is logged to `audit_corrections`. Optionally pass {"txn_ids": [...]}."""
     txn_ids = body.get("txn_ids")
-    q = {"source": "mess_purchase", "partner_id": {"$ne": None},
-         "$or": [{"payment_status": {"$ne": "paid"}}, {"payment_status": {"$exists": False}}]}
+    q = {"source": "mess_purchase"}
     if txn_ids:
         q["id"] = {"$in": txn_ids}
-    docs = await db.transactions.find(q, {"_id": 0, "id": 1, "partner_id": 1, "amount": 1, "center_name": 1}).to_list(5000)
+    docs = await db.transactions.find(q, {"_id": 0}).to_list(5000)
+    rcpt_ids = list({d.get("mess_receipt_id") for d in docs if d.get("mess_receipt_id")})
+    rmap = {}
+    if rcpt_ids:
+        async for r in db.mess_receipts.find({"id": {"$in": rcpt_ids}}, {"_id": 0, "id": 1, "payment_status": 1}):
+            rmap[r["id"]] = r.get("payment_status")
     now = datetime.now(timezone.utc).isoformat()
     fixed = 0
+    backfilled = 0
     for d in docs:
-        await db.audit_corrections.insert_one({
-            "id": str(uuid.uuid4()), "type": "mess_partner_unassign", "txn_id": d["id"],
-            "old_partner_id": d.get("partner_id"), "new_partner_id": None,
-            "amount": d.get("amount"), "center_name": d.get("center_name"),
-            "corrected_by": user["id"], "corrected_by_name": user.get("name") or user.get("email"),
-            "corrected_at": now,
-        })
-        await db.transactions.update_one({"id": d["id"]}, {"$set": {"partner_id": None}})
-        fixed += 1
-    return {"fixed": fixed, "message": f"{fixed} unpaid mess expense(s) set to Unassigned. Old partners logged to audit_corrections."}
+        rid = d.get("mess_receipt_id")
+        if not rid or rid not in rmap:
+            continue
+        is_paid = rmap[rid] == "paid"
+        upd = {}
+        # Backfill payment tracking from the receipt when missing (non-destructive).
+        if d.get("payment_status") is None:
+            amt = float(d.get("amount") or 0)
+            if is_paid:
+                upd.update({"payment_status": "paid", "paid_amount": amt, "balance": 0.0})
+            else:
+                upd.update({"payment_status": "unpaid", "paid_amount": 0.0, "balance": amt})
+            backfilled += 1
+        # Unassign the auto-assigned partner ONLY on unpaid bills.
+        if not is_paid and d.get("partner_id") is not None:
+            await db.audit_corrections.insert_one({
+                "id": str(uuid.uuid4()), "type": "mess_partner_unassign", "txn_id": d["id"],
+                "old_partner_id": d.get("partner_id"), "new_partner_id": None,
+                "amount": d.get("amount"), "center_name": d.get("center_name"),
+                "corrected_by": user["id"], "corrected_by_name": user.get("name") or user.get("email"),
+                "corrected_at": now,
+            })
+            upd["partner_id"] = None
+            fixed += 1
+        if upd:
+            await db.transactions.update_one({"id": d["id"]}, {"$set": upd})
+    return {"fixed": fixed, "backfilled": backfilled,
+            "message": f"{fixed} unpaid mess expense(s) set to Unassigned; {backfilled} record(s) got payment status. Old partners logged to audit_corrections."}
+
+
 
 
 
@@ -8367,6 +8406,10 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             eff_center_name = (_mp_center or {}).get("name") or rec.get("center_name")
             eff_partner_id = body.txn_partner_id
             # Partner is assigned MANUALLY by the accountant here (no auto-derive).
+            if eff_partner_id:
+                _pok = await db.partners.find_one({"id": eff_partner_id}, {"_id": 0, "id": 1})
+                if not _pok:
+                    raise HTTPException(400, "Selected partner does not exist")
             pay_date = rec.get("payment_date") or now[:10]
             pay_amt = float(rec.get("actual_amount") or rec.get("amount") or 0)
             bank_txn_id = None
