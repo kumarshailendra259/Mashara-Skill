@@ -792,6 +792,9 @@ class TransactionIn(BaseModel):
     partner_id: Optional[str] = None
     center_id: Optional[str] = None
     project_id: Optional[str] = None
+    # Mandatory Work Order linkage for manual expense bookings (source of truth =
+    # Batch Management db.work_orders). Validated against the selected center.
+    work_order_id: Optional[str] = None
     items: List[TransactionItem] = Field(default_factory=list)
     attachments: List[AttachmentRef] = Field(default_factory=list)
     source: Optional[str] = None        # e.g. "milestone" when auto-created from Programs
@@ -865,6 +868,8 @@ class TransactionOut(TransactionIn):
     paid_amount: Optional[float] = None
     balance: Optional[float] = None
     mess_receipt_id: Optional[str] = None
+    # Enriched Work Order number for display (from linked work_order_id).
+    work_order_no: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -3855,6 +3860,15 @@ async def list_transactions(
     # Defensive per-row serialization: a single malformed/legacy document must
     # never 500 the entire list. Bad rows are logged and skipped rather than
     # taking the whole endpoint down.
+    # Enrich linked Work Order number for display (batch-load, no N+1).
+    wo_ids = list({d.get("work_order_id") for d in docs if d.get("work_order_id")})
+    if wo_ids:
+        wo_map = {}
+        async for w in db.work_orders.find({"id": {"$in": wo_ids}}, {"_id": 0, "id": 1, "wo_number": 1}):
+            wo_map[w["id"]] = w.get("wo_number")
+        for d in docs:
+            if d.get("work_order_id"):
+                d["work_order_no"] = wo_map.get(d["work_order_id"])
     out = []
     for d in docs:
         try:
@@ -3968,6 +3982,19 @@ async def create_transaction(
     doc["id"] = str(uuid.uuid4())
     doc["created_by"] = user["id"]
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
+    # Expense Booking: a Work Order is mandatory for manually-entered expenses
+    # (the New Transaction dialog). Auto-sourced expenses (mess/quotation/stock
+    # entries, which set `source`) are exempt.
+    if body.type == "expense" and not body.source and not body.work_order_id:
+        raise HTTPException(400, "Work Order is required for expense booking")
+    # Validate the Work Order exists and belongs to the selected center (reuse of
+    # Batch Management's Work Order master — never a duplicate).
+    if body.work_order_id:
+        wo = await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1})
+        if not wo:
+            raise HTTPException(400, "Selected Work Order does not exist")
+        if body.center_id and wo.get("center_id") and wo["center_id"] != body.center_id:
+            raise HTTPException(400, "Selected Work Order does not belong to the chosen center")
     # Stamp the Financial Year from the (normalized) transaction date so it is
     # permanently saved with the record (used by FY reports / exports).
     doc["financial_year"] = _fy_for_date(doc.get("date"))
@@ -4064,6 +4091,14 @@ async def update_transaction(tid: str, body: TransactionIn, user=Depends(get_cur
     update = body.model_dump()
     # Re-stamp Financial Year when the date changes on edit.
     update["financial_year"] = _fy_for_date(update.get("date"))
+    # Validate Work Order linkage on edit (exists + center match). Not force-required
+    # here so legacy expenses without a WO remain editable.
+    if body.work_order_id:
+        wo = await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1})
+        if not wo:
+            raise HTTPException(400, "Selected Work Order does not exist")
+        if body.center_id and wo.get("center_id") and wo["center_id"] != body.center_id:
+            raise HTTPException(400, "Selected Work Order does not belong to the chosen center")
     # Editing an approved entry sets it back to pending (unless admin)
     if not is_admin and existing.get("status") == "approved":
         update["status"] = "pending"

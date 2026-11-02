@@ -88,6 +88,7 @@ export default function Stock() {
         company_id: null, partner_id: null,
         center_id: form.center_id || null,
         project_id: null,
+        source: "stock_entry",
         items: [{
           name: form.name.trim(),
           quantity: parseFloat(form.quantity) || 0,

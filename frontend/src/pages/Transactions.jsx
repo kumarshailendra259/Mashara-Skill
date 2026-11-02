@@ -12,6 +12,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem } from "@/components/ui/command";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
@@ -136,11 +138,25 @@ export default function Transactions() {
   useEffect(() => {
     api.get("/items/suggestions").then((r) => setItemSuggestions(r.data || [])).catch(() => {});
   }, [open]);
-  const emptyForm = { type: "expense", amount: "", date: new Date().toISOString().slice(0, 10), description: "", company_id: "", partner_id: "", center_id: "", project_id: "", items: [], attachments: [] };
+  const emptyForm = { type: "expense", amount: "", date: new Date().toISOString().slice(0, 10), description: "", company_id: "", partner_id: "", center_id: "", project_id: "", work_order_id: "", items: [], attachments: [] };
   const [form, setForm] = useState(emptyForm);
   const fileRef = useRef(null);
   const attachRef = useRef(null);
   const [uploading, setUploading] = useState(false);
+  // Work Orders for the selected center (reused from Batch Management; mandatory for expense booking)
+  const [workOrders, setWorkOrders] = useState([]);
+  const [woLoading, setWoLoading] = useState(false);
+  const [woPickerOpen, setWoPickerOpen] = useState(false);
+  useEffect(() => {
+    if (!open || form.type !== "expense" || !form.center_id) { setWorkOrders([]); return; }
+    let cancelled = false;
+    setWoLoading(true);
+    api.get("/work-orders", { params: { center_id: form.center_id, include_inactive: false } })
+      .then((r) => { if (!cancelled) setWorkOrders(r.data || []); })
+      .catch(() => { if (!cancelled) setWorkOrders([]); })
+      .finally(() => { if (!cancelled) setWoLoading(false); });
+    return () => { cancelled = true; };
+  }, [open, form.type, form.center_id]);
 
   const loadEntities = () =>
     Promise.all(ENTITY_TYPES.map((tt) => api.get(`/entities/${tt}`))).then((r) => {
@@ -289,6 +305,7 @@ export default function Transactions() {
       type: it.type, amount: it.amount, date: it.date, description: it.description || "",
       company_id: it.company_id || "", partner_id: it.partner_id || "",
       center_id: it.center_id || "", project_id: it.project_id || "",
+      work_order_id: it.work_order_id || "",
       items: it.items || [], attachments: it.attachments || [],
     });
     setDrawer(null);
@@ -328,6 +345,11 @@ export default function Transactions() {
     try {
       const computedAmount = form.items.length ? itemsTotal : parseFloat(form.amount);
       if (!(computedAmount > 0)) { toast.error("Amount must be > 0"); return; }
+      if (form.type === "expense" && !editing) {
+        if (!form.center_id) { toast.error("Expense ke liye Center select karein"); return; }
+        if (workOrders.length === 0) { toast.error("Is center ke liye koi Work Order nahi hai — pehle Batch Management me banayein"); return; }
+        if (!form.work_order_id) { toast.error("Work Order select karna zaroori hai"); return; }
+      }
       const payload = { ...form, amount: computedAmount };
       ENTITY_TYPES.forEach((et) => { if (!payload[`${et}_id`]) payload[`${et}_id`] = null; });
       if (editing) await api.put(`/transactions/${editing.id}`, payload);
@@ -736,6 +758,7 @@ export default function Transactions() {
                       <DField label={t("partner")} value={nameOf("partner", drawer.partner_id)} />
                       <DField label={t("center")} value={nameOf("center", drawer.center_id)} />
                       <DField label={t("project")} value={nameOf("project", drawer.project_id)} />
+                      {(drawer.work_order_no || drawer.work_order_id) && <DField label="Work Order" value={drawer.work_order_no || drawer.work_order_id} />}
                       {drawer.payment_status && <DField label="Payment Status" value={drawer.payment_status === "partially_paid" ? "Partially Paid" : drawer.payment_status.charAt(0).toUpperCase() + drawer.payment_status.slice(1)} />}
                       {drawer.payment_status && <DField label="Paid / Balance" value={`${inr(drawer.paid_amount || 0)} / ${inr(drawer.balance != null ? drawer.balance : drawer.amount)}`} />}
                     </div>
@@ -939,7 +962,7 @@ export default function Transactions() {
             {ENTITY_TYPES.map((etype) => (
               <div key={etype}>
                 <Label>{t(etype)}</Label>
-                <Select value={form[`${etype}_id`] || "__none"} onValueChange={(v) => setForm({ ...form, [`${etype}_id`]: v === "__none" ? "" : v })}>
+                <Select value={form[`${etype}_id`] || "__none"} onValueChange={(v) => setForm({ ...form, [`${etype}_id`]: v === "__none" ? "" : v, ...(etype === "center" ? { work_order_id: "" } : {}) })}>
                   <SelectTrigger className="rounded-lg" data-testid={`txn-${etype}`}><SelectValue placeholder={t("all")} /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none">—</SelectItem>
@@ -948,6 +971,53 @@ export default function Transactions() {
                 </Select>
               </div>
             ))}
+            {form.type === "expense" && (
+              <div className="col-span-2">
+                <Label>Select Work Order <span className="text-rose-500">*</span></Label>
+                {!form.center_id ? (
+                  <div className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5" data-testid="wo-need-center">Pehle Center select karein — uske Work Orders yahan aayenge.</div>
+                ) : woLoading ? (
+                  <div className="text-xs text-slate-500 border border-slate-200 rounded-lg px-3 py-2.5">Loading work orders…</div>
+                ) : workOrders.length === 0 ? (
+                  <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2.5" data-testid="wo-none">Is center ke liye koi Work Order nahi mila. Expense book karne ke liye pehle Batch Management me Work Order banayein.</div>
+                ) : (
+                  <Popover open={woPickerOpen} onOpenChange={setWoPickerOpen}>
+                    <PopoverTrigger asChild>
+                      <Button type="button" variant="outline" role="combobox" className="w-full justify-between rounded-lg font-normal" data-testid="txn-work-order">
+                        {form.work_order_id
+                          ? (() => { const w = workOrders.find((x) => x.id === form.work_order_id); return w ? `${w.wo_number}${w.scheme || w.project_name ? " · " + (w.scheme || w.project_name) : ""}` : "Select work order…"; })()
+                          : <span className="text-slate-400">Select work order…</span>}
+                        <ChevronDown size={15} className="opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="p-0 w-[var(--radix-popover-trigger-width)]" align="start">
+                      <Command>
+                        <CommandInput placeholder="Search WO number / name…" data-testid="wo-search" />
+                        <CommandList>
+                          <CommandEmpty>No work order found.</CommandEmpty>
+                          <CommandGroup>
+                            {workOrders.map((w) => (
+                              <CommandItem
+                                key={w.id}
+                                value={`${w.wo_number} ${w.scheme || ""} ${w.project_name || ""} ${w.loi_number || ""}`}
+                                onSelect={() => { setForm((f) => ({ ...f, work_order_id: w.id })); setWoPickerOpen(false); }}
+                                data-testid={`wo-option-${w.id}`}
+                              >
+                                <Check size={15} className={`mr-2 ${form.work_order_id === w.id ? "opacity-100" : "opacity-0"}`} />
+                                <div className="min-w-0">
+                                  <div className="font-medium text-slate-800 truncate">{w.wo_number}</div>
+                                  <div className="text-[11px] text-slate-500 truncate">{w.scheme || w.project_name || "—"}{w.effective_status && w.effective_status !== "active" ? ` · ${w.effective_status}` : ""}</div>
+                                </div>
+                              </CommandItem>
+                            ))}
+                          </CommandGroup>
+                        </CommandList>
+                      </Command>
+                    </PopoverContent>
+                  </Popover>
+                )}
+              </div>
+            )}
             <div className="col-span-2">
               <Label>{t("description")}</Label>
               <Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="rounded-lg" rows={2} />
