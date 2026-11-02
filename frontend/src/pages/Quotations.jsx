@@ -12,8 +12,12 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem,
+} from "@/components/ui/command";
 import { toast } from "sonner";
-import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock, Paperclip, Undo2, Pencil } from "lucide-react";
+import { Plus, FileText, IndianRupee, Trash2, Info, CheckCircle2, XCircle, Clock, Paperclip, Undo2, Pencil, Check, ChevronsUpDown } from "lucide-react";
 
 const STATUS_LABEL = {
   pending: { text: "Awaiting Approval", cls: "bg-amber-50 text-amber-700 border-amber-200" },
@@ -53,10 +57,24 @@ export default function Quotations() {
 
   const emptyQ = {
     center_id: "", category: "expense", description: "", vendor_name: "", vendor_id: "",
-    estimated_amount: "", expected_delivery_date: "", purpose: "",
+    estimated_amount: "", expected_delivery_date: "", purpose: "", work_order_id: "",
     attachments: [],
   };
   const [qForm, setQForm] = useState(emptyQ);
+  // Work Orders for the selected center (reused from Batch Management; mandatory for expense quotations)
+  const [workOrders, setWorkOrders] = useState([]);
+  const [woLoading, setWoLoading] = useState(false);
+  const [woPickerOpen, setWoPickerOpen] = useState(false);
+  useEffect(() => {
+    if (!openQ || !qForm.center_id) { setWorkOrders([]); return; }
+    let cancelled = false;
+    setWoLoading(true);
+    api.get("/work-orders", { params: { center_id: qForm.center_id, include_inactive: false } })
+      .then((r) => { if (!cancelled) setWorkOrders(r.data || []); })
+      .catch(() => { if (!cancelled) setWorkOrders([]); })
+      .finally(() => { if (!cancelled) setWoLoading(false); });
+    return () => { cancelled = true; };
+  }, [openQ, qForm.center_id]);
   const [pForm, setPForm] = useState({
     actual_amount: "", payment_mode: "bank", payment_date: new Date().toISOString().slice(0, 10),
     notes: "", txn_type_override: "", attachments: [],
@@ -149,6 +167,10 @@ export default function Quotations() {
       toast.error("Fill center, description, vendor and amount");
       return;
     }
+    if (qForm.category === "expense" && !qForm.work_order_id) {
+      toast.error("Select a Work Order for this expense quotation");
+      return;
+    }
     if (resubmitMode === "quotation" && (!editNote.trim() || editNote.trim().length < 3)) {
       toast.error("Edit note (kya change kiya as per remarks) required — min 3 chars");
       return;
@@ -163,6 +185,7 @@ export default function Quotations() {
           estimated_amount: parseFloat(qForm.estimated_amount),
           expected_delivery_date: qForm.expected_delivery_date || null,
           purpose: qForm.purpose || null,
+          work_order_id: qForm.work_order_id || null,
           attachments: qForm.attachments || [],
           edit_note: editNote.trim(),
         });
@@ -317,6 +340,7 @@ export default function Quotations() {
       vendor_id: q.vendor_id || "", estimated_amount: String(q.estimated_amount || ""),
       expected_delivery_date: q.expected_delivery_date || "",
       purpose: q.purpose || "", attachments: q.attachments || [],
+      work_order_id: q.work_order_id || "",
       _resubmit_id: q.id,
     });
     setResubmitMode("quotation");
@@ -392,6 +416,7 @@ export default function Quotations() {
               <tr className="border-b border-[var(--border)] overline bg-gray-50">
                 <th className="text-left p-3">QRN</th>
                 <th className="text-left p-3">Center</th>
+                <th className="text-left p-3">Work Order</th>
                 <th className="text-left p-3">Vendor · Description</th>
                 <th className="text-left p-3">Category</th>
                 <th className="text-right p-3">Est. Amount</th>
@@ -411,6 +436,11 @@ export default function Quotations() {
                   <tr key={q.id} className="border-b border-[var(--border)] last:border-0" data-testid={`quotation-row-${q.id}`}>
                     <td className="p-3 num font-mono text-xs">{q.qrn || <span className="text-[var(--muted)]">—</span>}</td>
                     <td className="p-3">{q.center_name || <span className="text-[var(--muted)]">—</span>}</td>
+                    <td className="p-3" data-testid={`quotation-wo-${q.id}`}>
+                      {q.work_order_no
+                        ? <span className="font-mono text-xs px-1.5 py-0.5 bg-slate-100 border border-slate-200">{q.work_order_no}</span>
+                        : <span className="text-[var(--muted)]">—</span>}
+                    </td>
                     <td className="p-3">
                       <div className="font-medium">{q.vendor_name}</div>
                       <div className="text-xs text-[var(--muted)] max-w-md truncate">{q.description}</div>
@@ -610,10 +640,68 @@ export default function Quotations() {
           <div className="grid grid-cols-2 gap-3">
             <div className="col-span-2">
               <Label className="overline">Center</Label>
-              <Select value={qForm.center_id || ""} onValueChange={(v) => setQForm({ ...qForm, center_id: v })}>
+              <Select value={qForm.center_id || ""} onValueChange={(v) => setQForm({ ...qForm, center_id: v, work_order_id: "" })}>
                 <SelectTrigger className="rounded-none" data-testid="q-center"><SelectValue placeholder="Select center" /></SelectTrigger>
                 <SelectContent>{centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}</SelectContent>
               </Select>
+            </div>
+            <div className="col-span-2">
+              <Label className="overline">
+                Work Order {qForm.category === "expense" && <span className="text-red-600">*</span>}
+              </Label>
+              {!qForm.center_id ? (
+                <div className="text-xs text-[var(--muted)] border border-dashed p-2 rounded-none" data-testid="q-wo-no-center">
+                  Select a center first to choose its Work Order.
+                </div>
+              ) : (
+                <Popover open={woPickerOpen} onOpenChange={setWoPickerOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button" variant="outline" role="combobox"
+                      className="w-full justify-between rounded-none font-normal"
+                      data-testid="q-wo-trigger"
+                    >
+                      {(() => {
+                        const w = workOrders.find((x) => x.id === qForm.work_order_id);
+                        return w
+                          ? `${w.wo_number}${w.scheme ? ` · ${w.scheme}` : ""}`
+                          : (woLoading ? "Loading work orders…" : "Select work order");
+                      })()}
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="p-0 rounded-none" align="start" style={{ width: "var(--radix-popover-trigger-width)" }}>
+                    <Command>
+                      <CommandInput placeholder="Search WO number / scheme…" data-testid="q-wo-search" />
+                      <CommandList>
+                        <CommandEmpty>No work orders for this center.</CommandEmpty>
+                        <CommandGroup>
+                          {workOrders.map((w) => (
+                            <CommandItem
+                              key={w.id}
+                              value={`${w.wo_number} ${w.scheme || ""}`}
+                              onSelect={() => { setQForm((f) => ({ ...f, work_order_id: w.id })); setWoPickerOpen(false); }}
+                              data-testid={`q-wo-option-${w.id}`}
+                            >
+                              <Check className={`mr-2 h-4 w-4 ${qForm.work_order_id === w.id ? "opacity-100" : "opacity-0"}`} />
+                              <span className="flex-1">
+                                <span className="font-medium">{w.wo_number}</span>
+                                {w.scheme ? <span className="text-[var(--muted)]"> · {w.scheme}</span> : null}
+                                {w.status ? <span className="ml-2 text-[10px] uppercase text-[var(--muted)]">{w.status}</span> : null}
+                              </span>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+              )}
+              {qForm.center_id && !woLoading && workOrders.length === 0 && (
+                <div className="text-[10px] text-amber-700 mt-1" data-testid="q-wo-empty-hint">
+                  No Work Orders found for this center. Create one in Batch Management first.
+                </div>
+              )}
             </div>
             <div>
               <Label className="overline">Category</Label>

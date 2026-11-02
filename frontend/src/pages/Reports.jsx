@@ -9,7 +9,7 @@ import { Download } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import FYSwitcher from "@/components/FYSwitcher";
 
-const DIMS = ["company", "partner", "center", "project", "item"];
+const DIMS = ["company", "partner", "center", "project", "work_order", "item"];
 
 export default function Reports() {
   const { t } = useLang();

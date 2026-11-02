@@ -3824,6 +3824,7 @@ async def list_transactions(
     partner_id: Optional[str] = None,
     center_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    work_order_id: Optional[str] = None,
     payment_status: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -3844,6 +3845,8 @@ async def list_transactions(
         q["center_id"] = center_id
     if project_id:
         q["project_id"] = project_id
+    if work_order_id:
+        q["work_order_id"] = work_order_id
     if payment_status:
         q["payment_status"] = payment_status
     # FY narrows the date window (backend-level filter — cannot be bypassed by UI).
@@ -4575,19 +4578,19 @@ async def dashboard_summary(
     monthly = sorted(months_map.values(), key=lambda x: x["month"])
 
     # breakdown by dimension
-    async def breakdown(group_field: str, collection: str):
+    async def breakdown(group_field: str, collection: str, name_field: str = "name"):
         pipe = [
             {"$match": match},
             {"$group": {"_id": {"id": f"${group_field}", "type": "$type"}, "total": {"$sum": "$amount"}}},
         ]
         rows = await db.transactions.aggregate(pipe).to_list(2000)
         # fetch names
-        ids = list({r["_id"]["id"] for r in rows if r["_id"]["id"]})
-        names_docs = await db[collection].find({"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)
-        name_map = {d["id"]: d["name"] for d in names_docs}
+        ids = list({r["_id"].get("id") for r in rows if r["_id"].get("id")})
+        names_docs = await db[collection].find({"id": {"$in": ids}}, {"_id": 0, "id": 1, name_field: 1}).to_list(2000)
+        name_map = {d["id"]: d.get(name_field) for d in names_docs}
         agg_map: dict = {}
         for r in rows:
-            eid = r["_id"]["id"] or "—"
+            eid = r["_id"].get("id") or "—"
             name = name_map.get(eid, "Unassigned")
             agg_map.setdefault(eid, {"id": eid, "name": name, "investment": 0, "income": 0, "expense": 0})
             agg_map[eid][r["_id"]["type"]] = r["total"]
@@ -4608,6 +4611,7 @@ async def dashboard_summary(
         "by_partner": await breakdown("partner_id", "partners"),
         "by_center": await breakdown("center_id", "centers"),
         "by_project": await breakdown("project_id", "projects"),
+        "by_work_order": await breakdown("work_order_id", "work_orders", name_field="wo_number"),
         "by_item": await _items_breakdown(match),
     }
 
@@ -8270,6 +8274,8 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "items": [], "attachments": rec.get("attachments") or [],
                 "source": "quotation_payment",
                 "quotation_id": rec.get("quotation_id"),
+                "work_order_id": rec.get("work_order_id"),
+                "work_order_no": rec.get("work_order_no"),
                 "payment_id": rec.get("id"),
                 "qrn": rec.get("qrn"),
                 "payment_mode": rec.get("payment_mode"),
@@ -11283,6 +11289,10 @@ class QuotationIn(BaseModel):
     estimated_amount: float = Field(gt=0)
     expected_delivery_date: Optional[str] = None
     purpose: Optional[str] = None
+    # Links this procurement request to an existing Batch Management Work Order so
+    # the end-to-end chain (quotation → payment → expense txn) carries the WO.
+    # Mandatory for `expense` category; validated against the selected center.
+    work_order_id: Optional[str] = None
     attachments: List[AttachmentRef] = Field(default_factory=list)
 
 
@@ -11359,10 +11369,24 @@ async def create_quotation(
     center = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
     if not center:
         raise HTTPException(404, "Center not found")
+    # Work Order linkage (reuse of Batch Management's WO master — never a duplicate).
+    # Mandatory for expense category so the downstream payment → expense txn is
+    # always traceable to a WO; optional for investment/asset.
+    wo_doc = None
+    if body.category == "expense" and not body.work_order_id:
+        raise HTTPException(400, "Work Order is required for expense quotations")
+    if body.work_order_id:
+        wo_doc = await db.work_orders.find_one(
+            {"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1, "wo_number": 1})
+        if not wo_doc:
+            raise HTTPException(400, "Selected Work Order does not exist")
+        if wo_doc.get("center_id") and wo_doc["center_id"] != body.center_id:
+            raise HTTPException(400, "Selected Work Order does not belong to the chosen center")
     doc = body.model_dump()
     doc["id"] = str(uuid.uuid4())
     doc["status"] = "pending"
     doc["center_name"] = center.get("name")
+    doc["work_order_no"] = (wo_doc or {}).get("wo_number")
     doc["created_by"] = user["id"]
     doc["created_by_name"] = user.get("name") or user.get("email")
     doc["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -11413,6 +11437,17 @@ async def list_quotations(
         centers = await _centers_for_partner(own_pid) if own_pid else []
         q["$or"] = [{"center_id": {"$in": centers}}, {"created_by": user["id"]}]
     docs = await db.quotations.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    # Enrich linked Work Order number for display (batch-load, no N+1) — covers any
+    # row that stored work_order_id without the denormalised number.
+    _wo_ids = list({d.get("work_order_id") for d in docs
+                    if d.get("work_order_id") and not d.get("work_order_no")})
+    if _wo_ids:
+        _wo_map = {}
+        async for w in db.work_orders.find({"id": {"$in": _wo_ids}}, {"_id": 0, "id": 1, "wo_number": 1}):
+            _wo_map[w["id"]] = w.get("wo_number")
+        for d in docs:
+            if d.get("work_order_id") and not d.get("work_order_no"):
+                d["work_order_no"] = _wo_map.get(d["work_order_id"])
     for d in docs:
         await _enrich_with_approval_status(d)
     return docs
@@ -11452,6 +11487,7 @@ class QuotationResubmitIn(BaseModel):
     estimated_amount: Optional[float] = Field(default=None, gt=0)
     expected_delivery_date: Optional[str] = None
     purpose: Optional[str] = None
+    work_order_id: Optional[str] = None
     attachments: Optional[List[AttachmentRef]] = None
     edit_note: str = Field(min_length=3, description="What changed as per the send-back remarks")
 
@@ -11477,6 +11513,21 @@ async def resubmit_quotation(qid: str, body: QuotationResubmitIn, user=Depends(g
             update[f] = v
     if body.estimated_amount is not None:
         update["estimated_amount"] = float(body.estimated_amount)
+    # Allow fixing / setting the linked Work Order on resubmit — re-validated against
+    # the quotation's (unchanged) center.
+    if body.work_order_id is not None:
+        if body.work_order_id:
+            wo = await db.work_orders.find_one(
+                {"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1, "wo_number": 1})
+            if not wo:
+                raise HTTPException(400, "Selected Work Order does not exist")
+            if wo.get("center_id") and wo["center_id"] != q.get("center_id"):
+                raise HTTPException(400, "Selected Work Order does not belong to this center")
+            update["work_order_id"] = body.work_order_id
+            update["work_order_no"] = wo.get("wo_number")
+        else:
+            update["work_order_id"] = None
+            update["work_order_no"] = None
     if body.attachments is not None:
         update["attachments"] = [a.model_dump() for a in body.attachments]
     history = list(q.get("chain_history") or [])
@@ -11582,6 +11633,10 @@ async def create_payment(
     doc["qrn"] = q.get("qrn")
     doc["center_id"] = q["center_id"]
     doc["center_name"] = q.get("center_name")
+    # Carry the Work Order linkage from the quotation through to the payment so the
+    # final expense transaction stays tied to the same WO.
+    doc["work_order_id"] = q.get("work_order_id")
+    doc["work_order_no"] = q.get("work_order_no")
     doc["category"] = doc.get("txn_type_override") or q.get("category") or "expense"
     doc["description"] = q.get("description")
     doc["vendor_name"] = q.get("vendor_name")

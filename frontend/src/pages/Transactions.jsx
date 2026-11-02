@@ -98,7 +98,7 @@ export default function Transactions() {
   const [error, setError] = useState(null);        // last fetch error (surfaced, never silently swallowed)
   // Server-side filters (everything EXCEPT status, which we handle client-side
   // so the KPI counts stay accurate regardless of the active status card).
-  const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", payment_status: "", start: "", end: "" });
+  const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", work_order_id: "", payment_status: "", start: "", end: "" });
   const [statusFilter, setStatusFilter] = useState(""); // "" | pending | approved | rejected
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ field: "date", dir: "desc" });
@@ -157,6 +157,18 @@ export default function Transactions() {
       .finally(() => { if (!cancelled) setWoLoading(false); });
     return () => { cancelled = true; };
   }, [open, form.type, form.center_id]);
+
+  // Work Orders for the Advanced Filters drawer — all accessible, optionally scoped to the center filter.
+  const [filterWorkOrders, setFilterWorkOrders] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    const p = { include_inactive: true };
+    if (filters.center_id) p.center_id = filters.center_id;
+    api.get("/work-orders", { params: p })
+      .then((r) => { if (!cancelled) setFilterWorkOrders(r.data || []); })
+      .catch(() => { if (!cancelled) setFilterWorkOrders([]); });
+    return () => { cancelled = true; };
+  }, [filters.center_id]);
 
   const loadEntities = () =>
     Promise.all(ENTITY_TYPES.map((tt) => api.get(`/entities/${tt}`))).then((r) => {
@@ -403,12 +415,13 @@ export default function Transactions() {
     filters.partner_id && { k: "partner", label: `${t("partner")}: ${nameOf("partner", filters.partner_id)}`, clear: () => setF("partner_id", "") },
     filters.center_id && { k: "center", label: `${t("center")}: ${nameOf("center", filters.center_id)}`, clear: () => setF("center_id", "") },
     filters.project_id && { k: "project", label: `${t("project")}: ${nameOf("project", filters.project_id)}`, clear: () => setF("project_id", "") },
+    filters.work_order_id && { k: "work_order", label: `Work Order: ${(filterWorkOrders.find((w) => w.id === filters.work_order_id)?.wo_number) || filters.work_order_id}`, clear: () => setF("work_order_id", "") },
     filters.payment_status && { k: "payment_status", label: `Payment: ${filters.payment_status === "partially_paid" ? "Partially Paid" : filters.payment_status.charAt(0).toUpperCase() + filters.payment_status.slice(1)}`, clear: () => setF("payment_status", "") },
     filters.start && { k: "start", label: `From: ${filters.start}`, clear: () => setF("start", "") },
     filters.end && { k: "end", label: `To: ${filters.end}`, clear: () => setF("end", "") },
     search && { k: "search", label: `“${search}”`, clear: () => setSearch("") },
   ].filter(Boolean);
-  const clearAll = () => { setFilters({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", payment_status: "", start: "", end: "" }); setStatusFilter(""); setSearch(""); };
+  const clearAll = () => { setFilters({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", work_order_id: "", payment_status: "", start: "", end: "" }); setStatusFilter(""); setSearch(""); };
 
   const KPI = ({ id, icon: Icon, label, value, tone, active, onClick, sub }) => (
     <button
@@ -460,6 +473,11 @@ export default function Transactions() {
           )}
         </td>
         <td className={`${rowPad} text-slate-700`}>{nameOf("company", it.company_id)}</td>
+        <td className={rowPad} data-testid={`txn-wo-${it.id}`}>
+          {it.work_order_no
+            ? <span className="font-mono text-[11px] px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded whitespace-nowrap">{it.work_order_no}</span>
+            : <span className="text-slate-300">—</span>}
+        </td>
         <td className={`${rowPad} text-right whitespace-nowrap`}>
           <span className={`text-base font-heading font-black tracking-tight ${it.type === "income" ? "text-emerald-600" : it.type === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(it.amount)}</span>
           {it.payment_status && (
@@ -504,7 +522,7 @@ export default function Transactions() {
     );
   };
 
-  const colCount = 5 + (isAdmin ? 1 : 0) + (view !== "compact" ? 1 : 0) + (canEdit ? 1 : 0);
+  const colCount = 6 + (isAdmin ? 1 : 0) + (view !== "compact" ? 1 : 0) + (canEdit ? 1 : 0);
   const kpiLoading = loading && items.length === 0;
   const hasActiveFilters = activeChips.length > 0 || pendingMyApproval || (fy && fy !== "all");
   const Skel = ({ w = "w-10" }) => <span className={`inline-block h-5 ${w} bg-slate-200 rounded animate-pulse align-middle`} />;
@@ -653,6 +671,7 @@ export default function Transactions() {
                 <th className="text-left py-3 px-4"><button onClick={() => toggleSort("date")} className="inline-flex items-center gap-1" data-testid="sort-date">{t("date")} <span className={sort.field === "date" ? "text-[var(--brand)]" : "opacity-40"}>{sortIcon("date")}</span></button></th>
                 <th className="text-left py-3 px-4">Transaction</th>
                 <th className="text-left py-3 px-4">Organization</th>
+                <th className="text-left py-3 px-4">Work Order</th>
                 <th className="text-right py-3 px-4"><button onClick={() => toggleSort("amount")} className="inline-flex items-center gap-1" data-testid="sort-amount">{t("amount")} <span className={sort.field === "amount" ? "text-[var(--brand)]" : "opacity-40"}>{sortIcon("amount")}</span></button></th>
                 {view !== "compact" && <th className="text-left py-3 px-4">Allocation</th>}
                 <th className="text-left py-3 px-4">{t("status")}</th>
@@ -856,6 +875,23 @@ export default function Transactions() {
                 </Select>
               </div>
             ))}
+            <div>
+              <Label className="overline">Work Order</Label>
+              <Select value={filters.work_order_id || "__all"} onValueChange={(v) => setF("work_order_id", v === "__all" ? "" : v)}>
+                <SelectTrigger className="rounded-lg" data-testid="adv-filter-work-order"><SelectValue placeholder={t("all")} /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all">{t("all")}</SelectItem>
+                  {filterWorkOrders.map((w) => (
+                    <SelectItem key={w.id} value={w.id}>
+                      {w.wo_number}{w.scheme ? ` · ${w.scheme}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {filters.center_id && filterWorkOrders.length === 0 && (
+                <div className="text-[10px] text-slate-400 mt-1">No Work Orders for the selected center.</div>
+              )}
+            </div>
             <div>
               <Label className="overline">Payment Status</Label>
               <Select value={filters.payment_status || "__all"} onValueChange={(v) => setF("payment_status", v === "__all" ? "" : v)}>
