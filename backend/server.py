@@ -858,6 +858,13 @@ class TransactionOut(TransactionIn):
     pending_at: Optional[str] = None
     # Financial Year the txn belongs to (derived from `date`, e.g. "2025-26").
     financial_year: Optional[str] = None
+    # Payment tracking (separate from approval `status`). Primarily populated for
+    # mess-purchase expenses: a bill can be Approved yet still Unpaid until the
+    # payment is approved. Absent on txns that don't track payment separately.
+    payment_status: Optional[str] = None   # "unpaid" | "partially_paid" | "paid"
+    paid_amount: Optional[float] = None
+    balance: Optional[float] = None
+    mess_receipt_id: Optional[str] = None
 
 
 class RejectIn(BaseModel):
@@ -3812,6 +3819,7 @@ async def list_transactions(
     partner_id: Optional[str] = None,
     center_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    payment_status: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
     fy: Optional[str] = None,
@@ -3831,6 +3839,8 @@ async def list_transactions(
         q["center_id"] = center_id
     if project_id:
         q["project_id"] = project_id
+    if payment_status:
+        q["payment_status"] = payment_status
     # FY narrows the date window (backend-level filter — cannot be bypassed by UI).
     start, end = _fy_clamp(start, end, fy)
     if start or end:
@@ -3852,6 +3862,56 @@ async def list_transactions(
         except Exception as e:
             logger.warning("Skipping unserializable transaction %s: %s", d.get("id"), e)
     return out
+
+
+@api.get("/admin/mess-partner-audit")
+async def mess_partner_audit(user=Depends(require_role("admin"))):
+    """READ-ONLY audit (admin). Finds mess-purchase expense transactions that still
+    carry a partner that was AUTO-assigned at bill approval (i.e. the bill is not
+    yet paid, so no accountant has manually confirmed the partner). These are the
+    records wrongly stuck to a default partner. Nothing is modified here."""
+    q = {"source": "mess_purchase", "partner_id": {"$ne": None},
+         "$or": [{"payment_status": {"$ne": "paid"}}, {"payment_status": {"$exists": False}}]}
+    docs = await db.transactions.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
+    parts = {p["id"]: p.get("name") for p in await db.partners.find({}, {"_id": 0, "id": 1, "name": 1}).to_list(2000)}
+    flagged = [{
+        "txn_id": d.get("id"), "date": d.get("date"), "amount": d.get("amount"),
+        "description": d.get("description"), "center_name": d.get("center_name"),
+        "partner_id": d.get("partner_id"), "partner_name": parts.get(d.get("partner_id"), d.get("partner_id")),
+        "payment_status": d.get("payment_status") or "unpaid",
+        "mess_receipt_id": d.get("mess_receipt_id"),
+    } for d in docs]
+    total = round(sum(float(d.get("amount") or 0) for d in docs), 2)
+    return {"flagged": flagged, "count": len(flagged), "total_amount": total}
+
+
+@api.post("/admin/mess-partner-audit/fix")
+async def mess_partner_audit_fix(body: dict = Body(default={}), user=Depends(require_role("admin"))):
+    """Admin one-click correction. Clears the auto-assigned partner (→ Unassigned)
+    on unpaid mess-purchase transactions so the accountant assigns the correct
+    partner at payment time. NON-destructive: records are not deleted; the old
+    partner is logged to `audit_corrections` and can be reviewed. Optionally pass
+    {"txn_ids": [...]} to fix a specific subset."""
+    txn_ids = body.get("txn_ids")
+    q = {"source": "mess_purchase", "partner_id": {"$ne": None},
+         "$or": [{"payment_status": {"$ne": "paid"}}, {"payment_status": {"$exists": False}}]}
+    if txn_ids:
+        q["id"] = {"$in": txn_ids}
+    docs = await db.transactions.find(q, {"_id": 0, "id": 1, "partner_id": 1, "amount": 1, "center_name": 1}).to_list(5000)
+    now = datetime.now(timezone.utc).isoformat()
+    fixed = 0
+    for d in docs:
+        await db.audit_corrections.insert_one({
+            "id": str(uuid.uuid4()), "type": "mess_partner_unassign", "txn_id": d["id"],
+            "old_partner_id": d.get("partner_id"), "new_partner_id": None,
+            "amount": d.get("amount"), "center_name": d.get("center_name"),
+            "corrected_by": user["id"], "corrected_by_name": user.get("name") or user.get("email"),
+            "corrected_at": now,
+        })
+        await db.transactions.update_one({"id": d["id"]}, {"$set": {"partner_id": None}})
+        fixed += 1
+    return {"fixed": fixed, "message": f"{fixed} unpaid mess expense(s) set to Unassigned. Old partners logged to audit_corrections."}
+
 
 
 @api.post("/transactions", response_model=TransactionOut)
@@ -8306,8 +8366,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             _mp_center = await db.centers.find_one({"id": eff_center_id}, {"_id": 0, "name": 1}) if eff_center_id else None
             eff_center_name = (_mp_center or {}).get("name") or rec.get("center_name")
             eff_partner_id = body.txn_partner_id
-            if eff_partner_id is None and eff_center_id:
-                eff_partner_id = (await _derive_context_for_center(eff_center_id)).get("partner_id")
+            # Partner is assigned MANUALLY by the accountant here (no auto-derive).
             pay_date = rec.get("payment_date") or now[:10]
             pay_amt = float(rec.get("actual_amount") or rec.get("amount") or 0)
             bank_txn_id = None
@@ -8323,10 +8382,13 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 )
                 bank_txn_id = _ledger["id"]
             # Re-allocate the linked expense txn (created at receipt approval) to the
-            # accountant's chosen center/partner and link the bank debit.
+            # accountant's chosen center/partner, mark it PAID and link the bank debit.
             _mp_receipt = await db.mess_receipts.find_one({"id": rec.get("receipt_id")}, {"_id": 0, "expense_txn_id": 1})
             if _mp_receipt and _mp_receipt.get("expense_txn_id"):
-                _exp_upd = {"center_id": eff_center_id, "center_name": eff_center_name}
+                _exp = await db.transactions.find_one({"id": _mp_receipt["expense_txn_id"]}, {"_id": 0, "amount": 1})
+                _exp_amt = float((_exp or {}).get("amount") or pay_amt)
+                _exp_upd = {"center_id": eff_center_id, "center_name": eff_center_name,
+                            "payment_status": "paid", "paid_amount": _exp_amt, "balance": 0.0}
                 if eff_partner_id is not None:
                     _exp_upd["partner_id"] = eff_partner_id
                 if acct:
@@ -25696,15 +25758,21 @@ async def _mess_post_receipt(rec: dict, user: dict) -> dict:
                                   float(ln.get("accepted_cost") or 0), rec["id"],
                                   rec["invoice_date"], user, notes=f"Invoice {rec['invoice_no']}")
     ctx = await _derive_context_for_center(rec["center_id"])
+    amt = float(rec["total_amount"])
     txn = {
         "id": str(uuid.uuid4()), "type": "expense",
-        "amount": float(rec["total_amount"]), "date": rec["invoice_date"],
+        "amount": amt, "date": rec["invoice_date"],
         "description": f"Mess Purchase · {rec.get('supplier_name') or ''} · Inv {rec['invoice_no']}".strip(" ·"),
-        "company_id": ctx["company_id"], "partner_id": ctx["partner_id"],
+        # Partner is deliberately left UNASSIGNED at bill approval — the accountant
+        # assigns the correct partner manually when the payment is approved
+        # (same as every other payment). Never auto-derive from txn history.
+        "company_id": ctx["company_id"], "partner_id": None,
         "center_id": rec["center_id"], "center_name": rec.get("center_name"),
         "project_id": ctx["project_id"], "items": [], "attachments": rec.get("attachments") or [],
         "source": "mess_purchase", "mess_receipt_id": rec["id"],
         "vendor_name": rec.get("supplier_name"),
+        # Payment tracking: the bill is Approved but still Unpaid until payment is approved.
+        "payment_status": "unpaid", "paid_amount": 0.0, "balance": amt,
         "created_by": user["id"], "created_at": now,
         "status": "approved", "approved_by": user["id"], "approved_at": now,
         "rejected_reason": None,

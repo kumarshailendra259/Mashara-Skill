@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
@@ -23,6 +23,7 @@ import {
   Search, Filter, X, ChevronDown, ChevronLeft, ChevronRight, Eye, Check, Ban,
   FileText, Clock, Building2, Rows, LayoutGrid, TrendingUp, TrendingDown,
   Wallet, CircleCheck, CircleX, Hourglass, ListChecks, ArrowRightLeft, RefreshCw,
+  ShieldAlert, AlertTriangle,
 } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import FYSwitcher from "@/components/FYSwitcher";
@@ -56,6 +57,22 @@ function StatusBadge({ status, title }) {
   );
 }
 
+const PAY_STYLE = {
+  paid: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  partially_paid: "bg-amber-50 text-amber-700 border-amber-200",
+  unpaid: "bg-rose-50 text-rose-700 border-rose-200",
+};
+function PaymentBadge({ status }) {
+  if (!status) return null;
+  const cls = PAY_STYLE[status] || "bg-slate-50 text-slate-600 border-slate-200";
+  const label = status === "partially_paid" ? "Partially Paid" : status.charAt(0).toUpperCase() + status.slice(1);
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded-full border ${cls}`} data-testid="payment-badge">
+      {label}
+    </span>
+  );
+}
+
 function TypeBadge({ type, t }) {
   const Icon = TYPE_ICON[type] || Wallet;
   return (
@@ -79,7 +96,7 @@ export default function Transactions() {
   const [error, setError] = useState(null);        // last fetch error (surfaced, never silently swallowed)
   // Server-side filters (everything EXCEPT status, which we handle client-side
   // so the KPI counts stay accurate regardless of the active status card).
-  const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" });
+  const [filters, setFilters] = useState({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", payment_status: "", start: "", end: "" });
   const [statusFilter, setStatusFilter] = useState(""); // "" | pending | approved | rejected
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState({ field: "date", dir: "desc" });
@@ -87,6 +104,26 @@ export default function Transactions() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditData, setAuditData] = useState(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const loadAudit = async () => {
+    setAuditLoading(true);
+    try { const { data } = await api.get("/admin/mess-partner-audit"); setAuditData(data); }
+    catch (e) { toast.error(formatError(e)); }
+    finally { setAuditLoading(false); }
+  };
+  useEffect(() => { if (auditOpen && !auditData) loadAudit(); }, [auditOpen]); // eslint-disable-line
+  const runFix = async () => {
+    setFixing(true);
+    try {
+      const { data } = await api.post("/admin/mess-partner-audit/fix", {});
+      toast.success(data.message || `${data.fixed} fixed`);
+      setAuditData(null); await loadAudit(); load();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setFixing(false); }
+  };
 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -343,11 +380,12 @@ export default function Transactions() {
     filters.partner_id && { k: "partner", label: `${t("partner")}: ${nameOf("partner", filters.partner_id)}`, clear: () => setF("partner_id", "") },
     filters.center_id && { k: "center", label: `${t("center")}: ${nameOf("center", filters.center_id)}`, clear: () => setF("center_id", "") },
     filters.project_id && { k: "project", label: `${t("project")}: ${nameOf("project", filters.project_id)}`, clear: () => setF("project_id", "") },
+    filters.payment_status && { k: "payment_status", label: `Payment: ${filters.payment_status === "partially_paid" ? "Partially Paid" : filters.payment_status.charAt(0).toUpperCase() + filters.payment_status.slice(1)}`, clear: () => setF("payment_status", "") },
     filters.start && { k: "start", label: `From: ${filters.start}`, clear: () => setF("start", "") },
     filters.end && { k: "end", label: `To: ${filters.end}`, clear: () => setF("end", "") },
     search && { k: "search", label: `“${search}”`, clear: () => setSearch("") },
   ].filter(Boolean);
-  const clearAll = () => { setFilters({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", start: "", end: "" }); setStatusFilter(""); setSearch(""); };
+  const clearAll = () => { setFilters({ type: "", company_id: "", partner_id: "", center_id: "", project_id: "", payment_status: "", start: "", end: "" }); setStatusFilter(""); setSearch(""); };
 
   const KPI = ({ id, icon: Icon, label, value, tone, active, onClick, sub }) => (
     <button
@@ -401,6 +439,11 @@ export default function Transactions() {
         <td className={`${rowPad} text-slate-700`}>{nameOf("company", it.company_id)}</td>
         <td className={`${rowPad} text-right whitespace-nowrap`}>
           <span className={`text-base font-heading font-black tracking-tight ${it.type === "income" ? "text-emerald-600" : it.type === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(it.amount)}</span>
+          {it.payment_status && (
+            <div className="mt-0.5 text-[10px] text-slate-500 num" data-testid={`txn-paid-${it.id}`}>
+              Paid {inr(it.paid_amount || 0)} · Bal <span className={Number(it.balance) > 0 ? "text-rose-600 font-semibold" : "text-emerald-600"}>{inr(it.balance != null ? it.balance : it.amount)}</span>
+            </div>
+          )}
         </td>
         {view !== "compact" && (
           <td className={`${rowPad} text-[11px] text-slate-500 leading-5`}>
@@ -411,6 +454,7 @@ export default function Transactions() {
         )}
         <td className={rowPad}>
           <StatusBadge status={it.status} title={it.rejected_reason} />
+          {it.payment_status && <div className="mt-1"><PaymentBadge status={it.payment_status} /></div>}
           {(it.status || "pending") === "pending" && it.pending_at && (
             <div className="mt-1 text-[10px] text-amber-700" data-testid={`pending-at-${it.id}`}>Pending at <span className="font-medium">{it.pending_at}</span></div>
           )}
@@ -465,6 +509,7 @@ export default function Transactions() {
         <div className="flex flex-wrap gap-2">
           <FYSwitcher variant="inline" />
           <PrintButton />
+          {isAdmin && <Button variant="outline" onClick={() => setAuditOpen(true)} className="rounded-lg gap-2 text-amber-700 border-amber-300 hover:bg-amber-50" data-testid="btn-partner-audit"><ShieldAlert size={14} /> Partner Audit</Button>}
           <Button variant="outline" onClick={exportCsv} className="rounded-lg gap-2" data-testid="btn-export"><Download size={14} /> {t("export_csv")}</Button>
           {canEdit && (
             <>
@@ -690,6 +735,8 @@ export default function Transactions() {
                       <DField label={t("partner")} value={nameOf("partner", drawer.partner_id)} />
                       <DField label={t("center")} value={nameOf("center", drawer.center_id)} />
                       <DField label={t("project")} value={nameOf("project", drawer.project_id)} />
+                      {drawer.payment_status && <DField label="Payment Status" value={drawer.payment_status === "partially_paid" ? "Partially Paid" : drawer.payment_status.charAt(0).toUpperCase() + drawer.payment_status.slice(1)} />}
+                      {drawer.payment_status && <DField label="Paid / Balance" value={`${inr(drawer.paid_amount || 0)} / ${inr(drawer.balance != null ? drawer.balance : drawer.amount)}`} />}
                     </div>
                     <div>
                       <div className="overline text-[10px] text-slate-400 mb-1">{t("description")}</div>
@@ -785,6 +832,18 @@ export default function Transactions() {
                 </Select>
               </div>
             ))}
+            <div>
+              <Label className="overline">Payment Status</Label>
+              <Select value={filters.payment_status || "__all"} onValueChange={(v) => setF("payment_status", v === "__all" ? "" : v)}>
+                <SelectTrigger className="rounded-lg" data-testid="adv-filter-payment-status"><SelectValue placeholder={t("all")} /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all">{t("all")}</SelectItem>
+                  <SelectItem value="unpaid">Unpaid</SelectItem>
+                  <SelectItem value="partially_paid">Partially Paid</SelectItem>
+                  <SelectItem value="paid">Paid</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div><Label className="overline">From</Label><Input type="date" value={filters.start} onChange={(e) => setF("start", e.target.value)} className="rounded-lg" /></div>
               <div><Label className="overline">To</Label><Input type="date" value={filters.end} onChange={(e) => setF("end", e.target.value)} className="rounded-lg" /></div>
@@ -797,7 +856,64 @@ export default function Transactions() {
         </SheetContent>
       </Sheet>
 
-      {/* New / Edit Dialog */}
+      {/* Admin · Mess Partner Audit & Fix */}
+      <Dialog open={auditOpen} onOpenChange={setAuditOpen}>
+        <DialogContent className="rounded-2xl max-w-3xl max-h-[90vh] overflow-y-auto" data-testid="partner-audit-dialog">
+          <DialogHeader>
+            <DialogTitle className="font-heading flex items-center gap-2"><ShieldAlert size={18} className="text-amber-600" /> Mess Expense — Partner Audit & Fix</DialogTitle>
+            <DialogDescription className="text-sm text-slate-500">
+              Unpaid Mess purchase expenses that still carry an auto-assigned partner. Fixing sets them to <b>Unassigned</b> so the accountant assigns the correct partner at payment time. Nothing is deleted — old partners are logged for audit.
+            </DialogDescription>
+          </DialogHeader>
+          {auditLoading ? (
+            <div className="text-sm text-slate-500 p-8 text-center">Scanning transactions…</div>
+          ) : !auditData ? (
+            <div className="text-sm text-slate-400 p-8 text-center">—</div>
+          ) : auditData.count === 0 ? (
+            <div className="text-center py-10" data-testid="audit-empty">
+              <CircleCheck size={36} className="text-emerald-500 mx-auto mb-2" />
+              <div className="text-slate-700 font-semibold">No wrongly-assigned partners found</div>
+              <div className="text-xs text-slate-500 mt-1">All unpaid mess expenses are already Unassigned or correctly mapped.</div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+                <div className="text-sm text-amber-800"><b>{auditData.count}</b> unpaid expense(s) · total <b>{inr(auditData.total_amount)}</b> with an auto-assigned partner.</div>
+                <Button onClick={runFix} disabled={fixing} className="rounded-lg gap-1.5 bg-amber-600 hover:bg-amber-700 text-white" data-testid="audit-fix-btn">
+                  <AlertTriangle size={14} /> {fixing ? "Fixing…" : "Set all to Unassigned"}
+                </Button>
+              </div>
+              <div className="mt-3 rounded-xl border border-slate-200 overflow-x-auto">
+                <table className="w-full text-xs min-w-[640px]" data-testid="audit-table">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-[10px] uppercase font-semibold text-slate-500">
+                    <tr>
+                      <th className="text-left px-3 py-2">Date</th>
+                      <th className="text-left px-3 py-2">Description</th>
+                      <th className="text-left px-3 py-2">Center</th>
+                      <th className="text-left px-3 py-2">Current Partner</th>
+                      <th className="text-right px-3 py-2">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {auditData.flagged.map((x, i) => (
+                      <tr key={i} data-testid={`audit-row-${i}`} className="hover:bg-amber-50/40">
+                        <td className="px-3 py-2 num text-slate-500 whitespace-nowrap">{x.date}</td>
+                        <td className="px-3 py-2 text-slate-700 max-w-[220px] truncate">{x.description}</td>
+                        <td className="px-3 py-2 text-slate-600">{x.center_name || "—"}</td>
+                        <td className="px-3 py-2 text-rose-600 font-medium">{x.partner_name || "—"}</td>
+                        <td className="px-3 py-2 text-right num font-semibold">{inr(x.amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAuditOpen(false)} className="rounded-lg">Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="rounded-lg max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
