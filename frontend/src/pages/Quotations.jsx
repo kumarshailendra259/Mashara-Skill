@@ -436,9 +436,9 @@ export default function Quotations() {
                   <tr key={q.id} className="border-b border-[var(--border)] last:border-0" data-testid={`quotation-row-${q.id}`}>
                     <td className="p-3 num font-mono text-xs">{q.qrn || <span className="text-[var(--muted)]">—</span>}</td>
                     <td className="p-3">{q.center_name || <span className="text-[var(--muted)]">—</span>}</td>
-                    <td className="p-3" data-testid={`quotation-wo-${q.id}`}>
+                    <td className="p-3 whitespace-nowrap" data-testid={`quotation-wo-${q.id}`}>
                       {q.work_order_no
-                        ? <span className="font-mono text-xs px-1.5 py-0.5 bg-slate-100 border border-slate-200">{q.work_order_no}</span>
+                        ? <span className="font-mono text-xs px-1.5 py-0.5 bg-slate-100 border border-slate-200 whitespace-nowrap">{q.work_order_no}</span>
                         : <span className="text-[var(--muted)]">—</span>}
                     </td>
                     <td className="p-3">

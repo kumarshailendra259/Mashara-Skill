@@ -1,0 +1,34 @@
+{
+  "summary": "Tested the Work Order linkage from Quotation to Payment to Transaction, the Transactions WO column and filter, and the Reports WO tab, both through the API and the UI. All 8 requested features PASS. Pytest: 9/9 passed. UI: the 'Select a center first' hint (q-wo-no-center) shows. A center with no WO shows the empty hint. The Birsa Bharno picker lists WO-BG-SEED-01 and search works. An expense quotation with no WO shows the toast 'Select a Work Order for this expense quotation' and nothing is created. An expense quotation with a WO is created and the list shows the WO-BG-SEED-01 badge. An investment quotation with no WO is created. End to end: a quotation raised in the UI was pushed through 3 quotation approvals, a cash payment and 3 payment approvals (admin, via API). The expense txn it created carries work_order_id and work_order_no. The UI shows this in the Transactions WORK ORDER column and in the drawer's 'Work Order' field. The adv-filter-work-order filter narrows the list to 2 txns, shows the chip, and Clear All restores 1162 rows. The Reports Work Order tab shows Unassigned plus WO-BG-SEED-01 (expense ₹200), and the CSV export downloads with the correct rows. All test data was cleaned up: quotations, payments, txns and bank ledger rows deleted, bank balance restored, QRN counter reset.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/approvals/act (payment final step)", "issue": "The approver can switch txn_center_id to a different center, but the txn still copies work_order_id from the quotation. The WO can then belong to a different center than the txn. Validate this, or clear or warn when the center changes."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Quotations list", "issues": ["The Work Order column is narrow, so the 'WO-BG-SEED-01' badge wraps onto 2 lines. Add whitespace-nowrap or a min width."]},
+      {"screen": "Reports tabs", "issues": ["The 'item' tab label is lowercase while the other tabs are capitalised. This was already there before this change."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_phase90_wo_quotation_linkage.py", "/app/backend/tests/iter90_chain_ui_quote.py", "/app/backend/tests/cleanup_iter90.py", "/app/test_reports/pytest/pytest_iter90.xml"],
+  "action_items": [
+    "(Optional) Check that the WO center matches when the payment approver overrides txn_center_id",
+    "(Optional) Stop the WO badge in the Quotations Work Order column from wrapping"
+  ],
+  "critical_code_review_comments": [
+    "The quotation route is /quotations, not /payment-request as the review request said. The sidebar label is 'Payment Request'.",
+    "The payment-to-txn step copies WO fields without checking them again against the final txn_center_id.",
+    "Quotations.jsx is over 1000 lines and server.py over 28k lines. Consider splitting them."
+  ],
+  "updated_files": ["/app/backend/tests/test_phase90_wo_quotation_linkage.py", "/app/backend/tests/iter90_chain_ui_quote.py", "/app/backend/tests/cleanup_iter90.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@finance.app / Admin@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "None left. All TEST_IT90 data was removed by tests/cleanup_iter90.py.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Quotations page is at /quotations. Birsa Bharno (4d7fc745...) has WO-BG-SEED-01 (6631bff3...). The quotation chain is 3 admin approvals via /approvals/act. The payment chain is 3 approvals, and the final step needs paid_by_name, txn_center_id and bank_account_id. After running test_phase90_wo_quotation_linkage.py, run tests/cleanup_iter90.py: it reverts bank balances and the QRN counter and deletes the test quotes, payments and txns."
+}

@@ -8258,6 +8258,17 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                     eff_project_id = ctx["project_id"]
             # Also refresh center_name if the approver switched centers
             eff_center_name = (_sel_center or {}).get("name") if body.txn_center_id else rec.get("center_name")
+            # Keep the Work Order linkage center-consistent: the WO was validated
+            # against the quotation's center. If the approver switched the txn to a
+            # different center, only carry the WO forward when it belongs to that
+            # final center; otherwise drop it so a WO never crosses centers.
+            eff_work_order_id = rec.get("work_order_id")
+            eff_work_order_no = rec.get("work_order_no")
+            if eff_work_order_id:
+                _wo = await db.work_orders.find_one({"id": eff_work_order_id}, {"_id": 0, "center_id": 1})
+                if _wo and _wo.get("center_id") and _wo["center_id"] != eff_center_id:
+                    eff_work_order_id = None
+                    eff_work_order_no = None
             txn_type = rec.get("category") or "expense"
             pay_date = rec.get("payment_date") or now[:10]
             desc = f"Payment · QRN {rec.get('qrn','')} · {rec.get('vendor_name','')} — {rec.get('description','')}".strip(" ·—")
@@ -8274,8 +8285,8 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "items": [], "attachments": rec.get("attachments") or [],
                 "source": "quotation_payment",
                 "quotation_id": rec.get("quotation_id"),
-                "work_order_id": rec.get("work_order_id"),
-                "work_order_no": rec.get("work_order_no"),
+                "work_order_id": eff_work_order_id,
+                "work_order_no": eff_work_order_no,
                 "payment_id": rec.get("id"),
                 "qrn": rec.get("qrn"),
                 "payment_mode": rec.get("payment_mode"),
