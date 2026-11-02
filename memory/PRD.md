@@ -2979,3 +2979,16 @@ treat TDS as expense in their money math, so Profit & Partner numbers are unchan
 **Tested:** backend curl (type=deduction → 47 rows all tds; type=expense → 0 tds; all →
 47 tds present) + UI screenshots (KPI, list badges, filter chip, detail drawer). Self-tested.
 
+
+
+---
+
+## TDS "Deduction" consistency across Dashboard & Reports (2026-06)
+- Extended `GET /api/dashboard/summary` to bucket TDS rows (`source == "tds_deduction"`, stored as `type=expense`) into a separate `deduction` figure in `totals`, `monthly`, and every `by_*` breakdown.
+- Profit math is **unchanged**: `profit = income − expense(excl TDS) − deduction` ≡ `income − expense(incl TDS)`. Verified ₹1,26,95,953 identical before/after; deduction total ₹1,29,741.
+- Finance **Dashboard.jsx**: added "Total Deductions" KPI (amber, `kpi-deduction`), amber Deduction pie slice, and a Deduction column in the by-dimension table.
+- **Reports.jsx**: added Deduction column (amber) to all dimension tables + CSV export; Expense column now excludes TDS.
+- `KpiCard` gained an amber `accent="deduction"` tone.
+- NOTE: the MIS Dashboard (`/mis/*`) shows skills/training metrics only (enrolled/certified/placement/mobilisation) — it has no income/expense/TDS, so no deduction line applies there.
+- No DB migration; applies to all historic + future TDS rows automatically.
+

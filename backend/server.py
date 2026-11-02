@@ -4561,18 +4561,22 @@ async def dashboard_summary(
             rng["$lte"] = end
         match["date"] = rng
 
-    pipeline = [{"$match": match}, {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}}]
+    # TDS deductions are physically stored as type=expense but presented as a
+    # separate "deduction" bucket. Profit stays identical:
+    # income − expense(excl TDS) − deduction == income − expense(incl TDS).
+    tds_bucket = {"$cond": [{"$eq": ["$source", "tds_deduction"]}, "deduction", "$type"]}
+    pipeline = [{"$match": match}, {"$group": {"_id": tds_bucket, "total": {"$sum": "$amount"}}}]
     agg = await db.transactions.aggregate(pipeline).to_list(100)
-    totals = {"investment": 0.0, "income": 0.0, "expense": 0.0}
+    totals = {"investment": 0.0, "income": 0.0, "expense": 0.0, "deduction": 0.0}
     for row in agg:
         totals[row["_id"]] = row["total"]
-    profit = totals["income"] - totals["expense"]
+    profit = totals["income"] - totals["expense"] - totals["deduction"]
 
     # monthly trend
     monthly_pipeline = [
         {"$match": match},
         {"$group": {
-            "_id": {"month": {"$substr": ["$date", 0, 7]}, "type": "$type"},
+            "_id": {"month": {"$substr": ["$date", 0, 7]}, "type": tds_bucket},
             "total": {"$sum": "$amount"},
         }},
         {"$sort": {"_id.month": 1}},
@@ -4581,7 +4585,7 @@ async def dashboard_summary(
     months_map: dict = {}
     for row in monthly_agg:
         m = row["_id"]["month"]
-        months_map.setdefault(m, {"month": m, "investment": 0, "income": 0, "expense": 0})
+        months_map.setdefault(m, {"month": m, "investment": 0, "income": 0, "expense": 0, "deduction": 0})
         months_map[m][row["_id"]["type"]] = row["total"]
     monthly = sorted(months_map.values(), key=lambda x: x["month"])
 
@@ -4589,7 +4593,7 @@ async def dashboard_summary(
     async def breakdown(group_field: str, collection: str, name_field: str = "name"):
         pipe = [
             {"$match": match},
-            {"$group": {"_id": {"id": f"${group_field}", "type": "$type"}, "total": {"$sum": "$amount"}}},
+            {"$group": {"_id": {"id": f"${group_field}", "type": tds_bucket}, "total": {"$sum": "$amount"}}},
         ]
         rows = await db.transactions.aggregate(pipe).to_list(2000)
         # fetch names
@@ -4600,11 +4604,11 @@ async def dashboard_summary(
         for r in rows:
             eid = r["_id"].get("id") or "—"
             name = name_map.get(eid, "Unassigned")
-            agg_map.setdefault(eid, {"id": eid, "name": name, "investment": 0, "income": 0, "expense": 0})
+            agg_map.setdefault(eid, {"id": eid, "name": name, "investment": 0, "income": 0, "expense": 0, "deduction": 0})
             agg_map[eid][r["_id"]["type"]] = r["total"]
         out = list(agg_map.values())
         for o in out:
-            o["profit"] = o["income"] - o["expense"]
+            o["profit"] = o["income"] - o["expense"] - o["deduction"]
         return sorted(out, key=lambda x: x["profit"], reverse=True)
 
     return {
@@ -4612,6 +4616,7 @@ async def dashboard_summary(
             "investment": totals["investment"],
             "income": totals["income"],
             "expense": totals["expense"],
+            "deduction": totals["deduction"],
             "profit": profit,
         },
         "monthly": monthly,

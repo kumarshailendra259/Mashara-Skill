@@ -22,7 +22,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import RoleWidgets from "@/components/RoleWidgets";
 import UpcomingWidget from "@/components/UpcomingWidget";
 import TodayLiveWidget from "@/components/TodayLiveWidget";
-import { Wallet, TrendingUp, TrendingDown, LineChart as LineChartIcon } from "lucide-react";
+import { Wallet, TrendingUp, TrendingDown, LineChart as LineChartIcon, Percent } from "lucide-react";
 
 const ENTITY_TYPES = ["company", "partner", "center", "project"];
 const BREAKDOWN_TYPES = ["company", "partner", "center", "project", "item"];
@@ -83,12 +83,13 @@ export default function Dashboard() {
     api.get("/dashboard/settlement", { params: p }).then((r) => setSettlement(r.data)).catch(() => setSettlement(null));
   };
 
-  const totals = data?.totals || { investment: 0, income: 0, expense: 0, profit: 0 };
+  const totals = data?.totals || { investment: 0, income: 0, expense: 0, deduction: 0, profit: 0 };
 
   const pieData = [
     { name: t("investment"), value: totals.investment, color: "#002FA7" },
     { name: t("income"), value: totals.income, color: "#00A859" },
     { name: t("expense"), value: totals.expense, color: "#FF2A2A" },
+    { name: t("deduction"), value: totals.deduction, color: "#B45309" },
   ].filter((d) => d.value > 0);
 
   const setF = (k, v) => setFilters((s) => ({ ...s, [k]: v }));
@@ -136,10 +137,11 @@ export default function Dashboard() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <KpiCard label={t("total_investment")} value={totals.investment} tone="investment" icon={Wallet} testId="kpi-investment" />
         <KpiCard label={t("total_income")} value={totals.income} accent="positive" icon={TrendingUp} testId="kpi-income" />
         <KpiCard label={t("total_expense")} value={totals.expense} accent="negative" icon={TrendingDown} testId="kpi-expense" />
+        <KpiCard label={t("total_deductions")} value={totals.deduction} accent="deduction" icon={Percent} testId="kpi-deduction" />
         <KpiCard label={t("net_profit")} value={totals.profit} accent={totals.profit >= 0 ? "positive" : "negative"} icon={LineChartIcon} testId="kpi-profit" />
       </div>
 
@@ -221,6 +223,7 @@ export default function Dashboard() {
                           <th className="text-right">{t("investment")}</th>
                           <th className="text-right">{t("income")}</th>
                           <th className="text-right">{t("expense")}</th>
+                          <th className="text-right">{t("deduction")}</th>
                           <th className="text-right">{t("profit")}</th>
                         </tr>
                       </thead>
@@ -232,6 +235,7 @@ export default function Dashboard() {
                             <td className="num">{inr(r.investment)}</td>
                             <td className="num value-positive">{inr(r.income)}</td>
                             <td className="num value-negative">{inr(r.expense)}</td>
+                            <td className="num text-amber-700">{inr(r.deduction)}</td>
                             <td className={`num font-semibold ${r.profit >= 0 ? "value-positive" : "value-negative"}`}>{inr(r.profit)}</td>
                           </tr>
                         ))}

@@ -8,13 +8,14 @@ import { inr } from "@/lib/i18n";
  * sub (small trend/comparison text), raw (render value as-is instead of inr()).
  */
 export default function KpiCard({ label, value, accent, testId, icon: Icon, tone, sub, raw }) {
-  const t = tone || (accent === "positive" ? "positive" : accent === "negative" ? "negative" : "neutral");
+  const t = tone || (accent === "positive" ? "positive" : accent === "negative" ? "negative" : accent === "deduction" ? "deduction" : "neutral");
   const valueColor =
-    accent === "positive" ? "value-positive" : accent === "negative" ? "value-negative" : "text-[var(--text)]";
+    accent === "positive" ? "value-positive" : accent === "negative" ? "value-negative" : accent === "deduction" ? "text-amber-700" : "text-[var(--text)]";
   const iconBox = {
     investment: "bg-[var(--investment-soft)] text-[var(--investment)]",
     positive: "bg-[var(--success-soft)] text-[var(--success)]",
     negative: "bg-[var(--danger-soft)] text-[var(--danger)]",
+    deduction: "bg-amber-50 text-amber-700",
     neutral: "bg-[var(--brand-soft)] text-[var(--brand)]",
   }[t];
 

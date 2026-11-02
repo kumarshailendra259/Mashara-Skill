@@ -24,8 +24,8 @@ export default function Reports() {
   const exportTable = (key) => {
     if (!summary) return;
     const rows = summary[`by_${key}`] || [];
-    const header = [t(key), t("investment"), t("income"), t("expense"), t("profit")];
-    const lines = [header, ...rows.map((r) => [r.name, r.investment, r.income, r.expense, r.profit])]
+    const header = [t(key), t("investment"), t("income"), t("expense"), t("deduction"), t("profit")];
+    const lines = [header, ...rows.map((r) => [r.name, r.investment, r.income, r.expense, r.deduction || 0, r.profit])]
       .map((row) => row.map((c) => `"${String(c ?? "")}"`).join(","))
       .join("\n");
     const blob = new Blob([lines], { type: "text/csv;charset=utf-8;" });
@@ -74,18 +74,20 @@ export default function Reports() {
                       <th className="text-right p-3">{t("investment")}</th>
                       <th className="text-right p-3">{t("income")}</th>
                       <th className="text-right p-3">{t("expense")}</th>
+                      <th className="text-right p-3">{t("deduction")}</th>
                       <th className="text-right p-3">{t("profit")}</th>
                     </tr>
                   </thead>
                   <tbody>
                     {rows.length === 0 ? (
-                      <tr><td colSpan={5} className="text-center py-8 overline">{t("no_data")}</td></tr>
+                      <tr><td colSpan={6} className="text-center py-8 overline">{t("no_data")}</td></tr>
                     ) : rows.map((r) => (
                       <tr key={r.id} className="border-b border-[var(--border)] hover:bg-gray-50">
                         <td className="p-3 font-medium">{r.name}</td>
                         <td className="p-3 num">{inr(r.investment)}</td>
                         <td className="p-3 num value-positive">{inr(r.income)}</td>
                         <td className="p-3 num value-negative">{inr(r.expense)}</td>
+                        <td className="p-3 num text-amber-700">{inr(r.deduction || 0)}</td>
                         <td className={`p-3 num font-semibold ${r.profit >= 0 ? "value-positive" : "value-negative"}`}>{inr(r.profit)}</td>
                       </tr>
                     ))}
