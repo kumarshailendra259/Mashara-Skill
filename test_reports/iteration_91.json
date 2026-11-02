@@ -1,0 +1,44 @@
+{
+  "summary": "Phase 92 tested end-to-end (backend pytest via public URL + Playwright UI). Everything requested works: Income now requires a Work Order (400 from the API, toast in the UI), ensure_demo creates a DEMO Work Order and is idempotent, the milestone 'Mark Received' dialog shows the WO selector and stamps the WO on all 4 generated txns (income, candidate_recovery, assessment_fee, tds_deduction), and admin bulk-assign fills only empty fields (non-destructive) with a success toast. Bulk-assign returns 403 for company_admin and 401/403 when unauthenticated. KPIs did not regress (Total Deductions = Rs 1,29,741). No critical bugs found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/transactions/bulk-assign", "issue": "No check that the chosen work_order_id (or center_id/project_id) matches each row's center. Bulk-assigning a WO from center A onto a row from center B is accepted, but create_transaction rejects the same mismatch. Consider skipping or reporting mismatched rows."},
+      {"endpoint": "POST /api/transactions/bulk-assign", "issue": "Entity ids (company/partner/center/project) are not checked for existence before update_many. A bad id is written as-is."},
+      {"endpoint": "POST /api/transactions (manual income/expense)", "issue": "Only work_order_id is saved. work_order_no is filled in at GET time, while milestone and bulk-assign rows store work_order_no. Storage is inconsistent but harmless."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Transactions > Bulk Assign dialog", "issues": ["2-col grid: Center sits alone on row 2 with an empty right cell, because Project is col-span-2. Consider Center+Project on one row and Work Order full width."]},
+      {"screen": "Programs > Mark Received dialog", "issues": ["The WO dropdown shows both '— Auto (DEMO Work Order) —' and 'DEMO Work Order' when the center only has the demo WO. The duplicate is a bit confusing."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase92_wo_income_bulk_assign.py",
+    "/app/backend/tests/seed_phase92_ui.py",
+    "/app/test_reports/pytest/pytest_phase92.xml"
+  ],
+  "action_items": [
+    "(Optional) Validate WO/center consistency per row in bulk-assign, or show a warning in the dialog when the selected rows span several centers.",
+    "(Optional) Validate entity ids in bulk-assign.",
+    "(Optional) Fix the stale regression test tests/test_receive_idempotency.py. It seeds status='planned' but the endpoint now requires 'pending', so it fails with 400 for every call. This is a test-data issue, not a product regression."
+  ],
+  "critical_code_review_comments": [
+    "server.py is ~28.7k lines and Transactions.jsx is 1217 lines. Both are far over the 700-line guideline and should be split.",
+    "receive_batch_payment: WO validation runs after the idempotency lock and calls _rollback correctly. Verified that a wrong-center WO gives 400, the payment returns to pending, and 0 txns are created.",
+    "The frontend income/expense WO validation is skipped while editing (the !editing guard). Old income rows without a WO can still be edited, which is probably intentional."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase92_wo_income_bulk_assign.py",
+    "/app/backend/tests/seed_phase92_ui.py"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (milestone receive WO, income WO mandatory, bulk-assign only-empty, non-admin hidden)"},
+  "seed_data_creation": "Temporary data was seeded by test scripts and then cleaned up: TEST_ctr-*/TEST_batch-* fixtures, the TEST_ui92_batch with a pending 1st milestone at TEST_Center_Phase72, a milestone income txn, and a manual income txn. All of it is deleted. The DEMO Work Order 5d3b236b-71e7-46d0-93a9-ddd0ae0a1041 on TEST_Center_Phase72 was created earlier by the main agent and was kept.",
+  "test_credentials": "admin@finance.app/Admin@123; companyadmin1@x.com/Test@1234. After login, company_admin lands on /select-company and then /hrms. /transactions redirects to /hrms because this tenant has no finance module, so the Assign button cannot appear by construction. The API-level 403 was verified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && python -m pytest tests/test_phase92_wo_income_bulk_assign.py (it reads the URL from frontend/.env and the Mongo settings from backend/.env). For a UI receive test: python3 tests/seed_phase92_ui.py seed, then Programs > tab BIRSA Palojori > batch 'TEST_UI92 Batch' > btn-receive-1st > recv-wo-select > recv-confirm. Afterwards run 'show' and then 'cleanup'. Many older test files (test_finance_api.py, test_phase81, test_phase90) fail on stale seed data or missing env and CSRF handling. Those failures are not related to this phase."
+}

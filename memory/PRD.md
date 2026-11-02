@@ -2992,3 +2992,22 @@ treat TDS as expense in their money math, so Profit & Partner numbers are unchan
 - NOTE: the MIS Dashboard (`/mis/*`) shows skills/training metrics only (enrolled/certified/placement/mobilisation) — it has no income/expense/TDS, so no deduction line applies there.
 - No DB migration; applies to all historic + future TDS rows automatically.
 
+
+
+---
+
+## Phase 92 — Work Order on Income + Milestone, Admin Bulk-Assign, DEMO Work Order (2026-06)
+Request (Hindi): income entry me Work Order option do (milestone me bhi) taki transaction me WO dikhe; aur admin ek saath multiple transactions select karke Work Order/Partner etc assign kar sake. Choice: WO income me bhi **mandatory**; bulk-assign saari fields (WO/Partner/Company/Center/Project) par **sirf khaali rows** bhare (non-destructive); jis center ka WO nahi uske liye auto **"DEMO Work Order"** ban jaye (mandatory rahe, baad me update ho sake).
+
+**Backend (`server.py`)**
+- `_ensure_demo_work_order(center_id)` (~L1269): agar center ke paas koi WO nahi to placeholder `wo_number="DEMO Work Order"`, `is_demo=True` auto-create karta hai (idempotent — ek hi banta hai). Derives company/project via `_derive_context_for_center`, fy via `_current_fy_value()`.
+- `create_transaction` (~L3999): ab `type in (expense, income)` + no `source` par `work_order_id` **mandatory** (400 "Work Order is required for booking"). Auto-sourced rows (milestone/fooding/quotation/stock/mess) exempt.
+- `GET /work-orders` (~L15210): naya `ensure_demo` query param → center diya + `ensure_demo=true` par DEMO WO ensure karke list return.
+- `POST /transactions/bulk-assign` (admin-only, after bulk-delete ~L4140): `{ids, company_id?, partner_id?, center_id?, project_id?, work_order_id?}`. Har field sirf un rows par set hoti hai jahan woh **khaali** (missing/null/"") hai. WO set hone par `work_order_no` bhi denormalize. Returns `{updated, by_field}`.
+- `ReceivePaymentIn` (~L13636): naya `work_order_id` field. `receive_batch_payment` (PATCH `/batch-payments/{pid}/receive`, ~L14375): WO resolve+validate (batch center se match; na ho to DEMO WO fallback), phir **chaaro** generated txn dicts (income, candidate_recovery, assessment_fee, tds_deduction) par `work_order_id`+`work_order_no` stamp. Wrong-center WO → 400 + rollback.
+
+**Frontend**
+- `Transactions.jsx`: WO load effect income+expense dono ke liye chalta hai + `ensure_demo=true`; `save()` validation income+expense par WO zaroori; WO picker dono types par; admin bulk toolbar me **Assign** button (`btn-bulk-assign`) + bulk-assign Dialog (`bulk-assign-dialog`, selectors `bulk-assign-{company,partner,center,project}`, `bulk-assign-work-order`, apply `bulk-assign-apply`).
+- `Programs.jsx`: receive dialog me **Work Order** selector (`recv-wo-select`), center ke WO ensure_demo se load, default first WO; `confirmReceive` body me `work_order_id`.
+
+**Testing**: iteration_91.json — backend 100% (12/12), frontend 100%. Verified: income WO mandatory (400/toast), DEMO WO auto+idempotent, milestone receive stamps WO on all 4 txns, bulk-assign only-empty non-destructive, bulk-assign 403 for non-admin, Deductions KPI unchanged (₹1,29,741). No critical bugs. Minor optional items: bulk-assign doesn't validate WO/center consistency or entity-id existence (create_transaction still rejects WO/center mismatch). UI polish applied: bulk-assign grid 2x2; receive WO placeholder relabeled "Auto-select (center default)".

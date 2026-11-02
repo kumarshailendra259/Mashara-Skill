@@ -1174,7 +1174,7 @@ export default function Transactions() {
           </DialogHeader>
           <div className="grid grid-cols-2 gap-3 py-1">
             {ENTITY_TYPES.map((etype) => (
-              <div key={etype} className={etype === "project" ? "col-span-2" : ""}>
+              <div key={etype}>
                 <Label className="text-xs">{t(etype)}</Label>
                 <Select value={bulkAssign[`${etype}_id`] || "__none"} onValueChange={(v) => setBulkAssign((s) => ({ ...s, [`${etype}_id`]: v === "__none" ? "" : v }))}>
                   <SelectTrigger className="rounded-lg" data-testid={`bulk-assign-${etype}`}><SelectValue placeholder="— leave unchanged —" /></SelectTrigger>

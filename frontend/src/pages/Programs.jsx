@@ -1291,7 +1291,7 @@ export default function Programs() {
                 <Select value={recvWoId || "__none__"} onValueChange={(v) => setRecvWoId(v === "__none__" ? "" : v)}>
                   <SelectTrigger className="rounded-none" data-testid="recv-wo-select"><SelectValue placeholder="Select work order" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__none__">— Auto (DEMO Work Order) —</SelectItem>
+                    <SelectItem value="__none__">— Auto-select (center default) —</SelectItem>
                     {recvWorkOrders.map((w) => <SelectItem key={w.id} value={w.id}>{w.wo_number}</SelectItem>)}
                   </SelectContent>
                 </Select>
