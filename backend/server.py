@@ -3818,7 +3818,7 @@ async def backfill_financial_year(user=Depends(require_role("admin")), dry_run: 
 @api.get("/transactions", response_model=List[TransactionOut])
 async def list_transactions(
     user=Depends(require_finance_visible),
-    type: Optional[TxnType] = None,
+    type: Optional[str] = None,
     status: Optional[TxnStatus] = None,
     company_id: Optional[str] = None,
     partner_id: Optional[str] = None,
@@ -3833,7 +3833,15 @@ async def list_transactions(
     q: dict = {}
     await _enrich_user_with_associations(user)
     q.update(_txn_scope_for_user(user))
-    if type:
+    # TDS deductions are stored as type=expense (so profit/settlement math is unchanged)
+    # but are presented as a separate "Deduction" bucket. The expense filter therefore
+    # EXCLUDES them, and "deduction" is a display-only pseudo-type → source=tds_deduction.
+    if type == "deduction":
+        q["source"] = "tds_deduction"
+    elif type == "expense":
+        q["type"] = "expense"
+        q["source"] = {"$ne": "tds_deduction"}
+    elif type in ("income", "investment"):
         q["type"] = type
     if status:
         q["status"] = status

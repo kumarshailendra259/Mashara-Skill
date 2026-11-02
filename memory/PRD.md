@@ -2944,3 +2944,38 @@ NOT changed (pre-existing, out of scope): brute-force lockout, admin seed passwo
 - Transactions.jsx: new "WORK ORDER" column (cell txn-wo-<id>) after Organization; Advanced Filters drawer has a "Work Order" select (adv-filter-work-order) populated from GET /work-orders (scoped to center filter if set) + active chip + Clear All. Backend GET /api/transactions accepts work_order_id filter.
 - Reports.jsx: DIMS gained "work_order" → new "Work Order" tab (report-tab-work_order) with investment/income/expense/profit grouped by WO (+ Unassigned row) + CSV export. Backend GET /api/dashboard/summary returns by_work_order (breakdown() gained name_field; uses wo_number). i18n: work_order / by_work_order (en + hi).
 - Tested: testing_agent iteration_90 — all 8 features PASS (backend 100%, frontend 100%, pytest 9/9), incl. full quotation→payment→transaction WO propagation verified in Transactions column + drawer, filter, and Reports tab. 2 minor items fixed post-test (center-consistency guard + WO badge whitespace-nowrap). All synthetic test data cleaned (bank balances + QRN counter restored).
+
+
+---
+
+## [2026-06 / Nov session] TDS shown as "Deduction" (not "Expense")
+
+**Request (Hindi):** Milestone TDS deductions were appearing under "Expense" on the
+Transactions page. User wants them presented as a separate **Deduction** category —
+with Profit / Partner-settlement figures UNCHANGED (user explicitly chose "only
+label/group changes"), applied to BOTH existing + new TDS records.
+
+**Approach (display-only reclassification, zero data migration):**
+- TDS txns remain stored as `type: "expense"` with marker `source: "tds_deduction"`.
+  Keeping the stored type = expense means every money calc (dashboard profit,
+  settlement, partner share, MIS, bank reconciliation) stays byte-for-byte identical.
+- They are presented as a distinct "Deduction" bucket wherever shown.
+- Because existing 47 TDS rows already carry `source=tds_deduction`, old+new are both
+  covered automatically — no DB migration.
+
+**Changes:**
+- Backend `GET /api/transactions` (`list_transactions`): `type` param is now `str`.
+  `type=expense` → excludes `source=tds_deduction`; `type=deduction` → returns only
+  `source=tds_deduction`; income/investment unchanged.
+- Frontend `Transactions.jsx`: amber "Deduction" badge (Percent icon) + amber amount for
+  TDS rows (via `txnDispType()` helper keyed on source); new **Total Deductions** KPI card
+  (grid 5→6 cols, Total Expense now excludes TDS); "Deduction" option in the type filter;
+  detail drawer Type/label/icon/color show Deduction.
+- i18n: added `deduction` / `total_deductions` (EN + HI "कटौती" / "कुल कटौती").
+
+**NOT changed (intentionally):** Finance dashboard / MIS / Reports / settlement still
+treat TDS as expense in their money math, so Profit & Partner numbers are unchanged.
+
+**Tested:** backend curl (type=deduction → 47 rows all tds; type=expense → 0 tds; all →
+47 tds present) + UI screenshots (KPI, list badges, filter chip, detail drawer). Self-tested.
+

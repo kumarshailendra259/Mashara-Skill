@@ -25,7 +25,7 @@ import {
   Search, Filter, X, ChevronDown, ChevronLeft, ChevronRight, Eye, Check, Ban,
   FileText, Clock, Building2, Rows, LayoutGrid, TrendingUp, TrendingDown,
   Wallet, CircleCheck, CircleX, Hourglass, ListChecks, ArrowRightLeft, RefreshCw,
-  ShieldAlert, AlertTriangle,
+  ShieldAlert, AlertTriangle, Percent,
 } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import FYSwitcher from "@/components/FYSwitcher";
@@ -39,8 +39,12 @@ const TYPE_STYLE = {
   income: "bg-emerald-50 text-emerald-700 border-emerald-200",
   expense: "bg-rose-50 text-rose-700 border-rose-200",
   investment: "bg-blue-50 text-blue-700 border-blue-200",
+  deduction: "bg-amber-50 text-amber-700 border-amber-200",
 };
-const TYPE_ICON = { income: TrendingUp, expense: TrendingDown, investment: ArrowRightLeft };
+const TYPE_ICON = { income: TrendingUp, expense: TrendingDown, investment: ArrowRightLeft, deduction: Percent };
+
+// TDS deductions are stored as type=expense but shown as a distinct "Deduction".
+const txnDispType = (it) => (it && it.source === "tds_deduction" ? "deduction" : (it ? it.type : undefined));
 const STATUS_STYLE = {
   approved: "bg-emerald-50 text-emerald-700 border-emerald-200",
   rejected: "bg-rose-50 text-rose-700 border-rose-200",
@@ -215,11 +219,12 @@ export default function Transactions() {
   // ---- KPIs from the loaded (server-filtered, status-agnostic) set ----
   const kpis = useMemo(() => {
     const total = items.length;
-    const expense = items.filter((i) => i.type === "expense").reduce((s, i) => s + Number(i.amount || 0), 0);
+    const expense = items.filter((i) => i.type === "expense" && i.source !== "tds_deduction").reduce((s, i) => s + Number(i.amount || 0), 0);
+    const deduction = items.filter((i) => i.source === "tds_deduction").reduce((s, i) => s + Number(i.amount || 0), 0);
     const pending = items.filter((i) => (i.status || "pending") === "pending").length;
     const approved = items.filter((i) => i.status === "approved").length;
     const rejected = items.filter((i) => i.status === "rejected").length;
-    return { total, expense, pending, approved, rejected };
+    return { total, expense, deduction, pending, approved, rejected };
   }, [items]);
 
   // ---- Client filter (status + search) + sort ----
@@ -445,6 +450,7 @@ export default function Transactions() {
   const renderRow = (it) => {
     const attN = (it.attachments?.length || 0);
     const itemN = (it.items?.length || 0);
+    const dt = txnDispType(it);
     return (
       <tr
         key={it.id}
@@ -460,7 +466,7 @@ export default function Transactions() {
         <td className={`${rowPad} whitespace-nowrap text-slate-600 num`}>{it.date}</td>
         <td className={rowPad}>
           <div className="flex items-center gap-2 flex-wrap">
-            <TypeBadge type={it.type} t={t} />
+            <TypeBadge type={dt} t={t} />
             {attN > 0 && <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-500" title={`${attN} attachments`}><Paperclip size={11} /> {attN}</span>}
             {itemN > 0 && <span className="inline-flex items-center gap-0.5 text-[10px] text-blue-600" title={`${itemN} items`}><List size={11} /> {itemN}</span>}
           </div>
@@ -479,7 +485,7 @@ export default function Transactions() {
             : <span className="text-slate-300">—</span>}
         </td>
         <td className={`${rowPad} text-right whitespace-nowrap`}>
-          <span className={`text-base font-heading font-black tracking-tight ${it.type === "income" ? "text-emerald-600" : it.type === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(it.amount)}</span>
+          <span className={`text-base font-heading font-black tracking-tight ${dt === "income" ? "text-emerald-600" : dt === "deduction" ? "text-amber-600" : dt === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(it.amount)}</span>
           {it.payment_status && (
             <div className="mt-0.5 text-[10px] text-slate-500 num" data-testid={`txn-paid-${it.id}`}>
               Paid {inr(it.paid_amount || 0)} · Bal <span className={Number(it.balance) > 0 ? "text-rose-600 font-semibold" : "text-emerald-600"}>{inr(it.balance != null ? it.balance : it.amount)}</span>
@@ -572,9 +578,10 @@ export default function Transactions() {
       </div>
 
       {/* KPI cards */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <KPI id="total" icon={ListChecks} label="Total Transactions" value={kpiLoading ? <Skel /> : kpis.total} tone="bg-blue-50 text-blue-600" active={!statusFilter && !filters.type} onClick={() => { setStatusFilter(""); setF("type", ""); }} />
         <KPI id="expense" icon={Wallet} label="Total Expense" value={kpiLoading ? <Skel w="w-20" /> : inr(kpis.expense)} tone="bg-rose-50 text-rose-600" active={filters.type === "expense"} onClick={() => setF("type", filters.type === "expense" ? "" : "expense")} />
+        <KPI id="deduction" icon={Percent} label={t("total_deductions")} value={kpiLoading ? <Skel w="w-20" /> : inr(kpis.deduction)} tone="bg-amber-50 text-amber-600" active={filters.type === "deduction"} onClick={() => setF("type", filters.type === "deduction" ? "" : "deduction")} />
         <KPI id="pending" icon={Hourglass} label="Pending Approval" value={kpiLoading ? <Skel /> : kpis.pending} tone="bg-amber-50 text-amber-600" active={statusFilter === "pending"} onClick={() => setStatusFilter(statusFilter === "pending" ? "" : "pending")} />
         <KPI id="approved" icon={CircleCheck} label="Approved" value={kpiLoading ? <Skel /> : kpis.approved} tone="bg-emerald-50 text-emerald-600" active={statusFilter === "approved"} onClick={() => setStatusFilter(statusFilter === "approved" ? "" : "approved")} />
         <KPI id="rejected" icon={CircleX} label="Rejected" value={kpiLoading ? <Skel /> : kpis.rejected} tone="bg-rose-50 text-rose-600" active={statusFilter === "rejected"} onClick={() => setStatusFilter(statusFilter === "rejected" ? "" : "rejected")} />
@@ -620,6 +627,7 @@ export default function Transactions() {
             <SelectContent>
               <SelectItem value="__all">{t("type")}: {t("all")}</SelectItem>
               {TXN_TYPES.map((tt) => <SelectItem key={tt} value={tt}>{t(tt)}</SelectItem>)}
+              <SelectItem value="deduction">{t("deduction")}</SelectItem>
             </SelectContent>
           </Select>
           <Button variant="outline" onClick={() => setFiltersOpen(true)} className="rounded-lg h-9 gap-2" data-testid="btn-advanced-filters"><Filter size={14} /> Advanced Filters</Button>
@@ -753,11 +761,11 @@ export default function Transactions() {
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center">{React.createElement(TYPE_ICON[drawer.type] || Wallet, { size: 16 })}</span>
+                      <span className="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center">{React.createElement(TYPE_ICON[txnDispType(drawer)] || Wallet, { size: 16 })}</span>
                       <span className="font-mono text-xs text-slate-500">TRX-{String(drawer.id).slice(0, 8).toUpperCase()}</span>
                     </div>
-                    <div className="mt-2 text-lg font-heading font-black tracking-tight">{drawer.description || t(drawer.type)}</div>
-                    <div className={`mt-1 text-2xl font-heading font-black ${drawer.type === "income" ? "text-emerald-600" : drawer.type === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(drawer.amount)}</div>
+                    <div className="mt-2 text-lg font-heading font-black tracking-tight">{drawer.description || t(txnDispType(drawer))}</div>
+                    <div className={`mt-1 text-2xl font-heading font-black ${txnDispType(drawer) === "income" ? "text-emerald-600" : txnDispType(drawer) === "deduction" ? "text-amber-600" : txnDispType(drawer) === "expense" ? "text-rose-600" : "text-slate-800"}`}>{inr(drawer.amount)}</div>
                   </div>
                   <StatusBadge status={drawer.status} title={drawer.rejected_reason} />
                 </div>
@@ -772,7 +780,7 @@ export default function Transactions() {
                   <TabsContent value="overview" className="mt-4 space-y-3">
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       <DField label={t("date")} value={drawer.date} />
-                      <DField label={t("type")} value={t(drawer.type)} />
+                      <DField label={t("type")} value={t(txnDispType(drawer))} />
                       <DField label={t("company")} value={nameOf("company", drawer.company_id)} />
                       <DField label={t("partner")} value={nameOf("partner", drawer.partner_id)} />
                       <DField label={t("center")} value={nameOf("center", drawer.center_id)} />
