@@ -2142,17 +2142,37 @@ function PendingApprovalsTab() {
       <div className="space-y-2.5">
         {rows.map((r) => {
           const summary = r.summary || {};
+          const reqName = r.requester_name || r.requester?.name;
+          const reqMeta = [r.requester?.employee_code, r.requester?.designation || r.requester?.department].filter(Boolean).join(" · ");
+          const isLeave = r.request_type === "leave";
+          const leaveDays = (isLeave && summary.start_date && summary.end_date)
+            ? (() => { try { const s = new Date(summary.start_date); const e = new Date(summary.end_date); const d = Math.round((e - s) / 86400000) + 1; return d > 0 ? d : null; } catch { return null; } })()
+            : null;
           return (
             <div key={`${r.request_type}-${r.request_id}`} className="swiss-card p-4" data-testid={`approval-row-${r.request_id}`}>
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-[10px] uppercase tracking-widest text-[var(--brand)] font-bold">{typeLabel(r.request_type)}</div>
                   <div className="font-semibold text-sm mt-0.5 truncate">
-                    {summary.description || "Approval request"}
+                    {summary.description || summary.purpose || "Approval request"}
                   </div>
+                  {reqName && (
+                    <div className="flex items-center gap-1.5 text-[12px] text-[var(--foreground)] mt-1.5" data-testid={`approval-requester-${r.request_id}`}>
+                      <Users size={13} className="text-[var(--muted)] shrink-0" />
+                      <span className="font-medium truncate">{reqName}</span>
+                      {reqMeta && <span className="text-[var(--muted)] truncate">· {reqMeta}</span>}
+                    </div>
+                  )}
+                  {isLeave && (summary.start_date || summary.end_date) && (
+                    <div className="flex items-center gap-1.5 text-[12px] text-[var(--foreground)] mt-1" data-testid={`approval-leave-period-${r.request_id}`}>
+                      <CalendarDays size={13} className="text-[var(--muted)] shrink-0" />
+                      <span>{summary.start_date || "—"} <span className="text-[var(--muted)]">→</span> {summary.end_date || "—"}</span>
+                      {leaveDays != null && <span className="text-[var(--muted)]">· {leaveDays} day{leaveDays === 1 ? "" : "s"}</span>}
+                    </div>
+                  )}
                   <div className="text-[11px] text-[var(--muted)] mt-1 flex items-center gap-3 flex-wrap">
                     {summary.amount != null && <span>₹ <span className="num font-medium">{inr(summary.amount).replace("₹", "").trim()}</span></span>}
-                    {summary.date && <span>Date: {summary.date}</span>}
+                    {!isLeave && summary.date && <span>Date: {summary.date}</span>}
                     <span>Step {r.current_level}/{r.total_steps}</span>
                     <span className="text-[var(--muted)]">· {r.step_label}</span>
                   </div>

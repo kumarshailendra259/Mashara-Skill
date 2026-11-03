@@ -8762,6 +8762,9 @@ async def list_pending_approvals(user=Depends(get_current_user)):
                 "summary": {
                     "amount": rec.get("amount") or rec.get("est_amount") or rec.get("actual_amount") or rec.get("estimated_amount") or (rec.get("net_payable") if req_type == "payroll" else None),
                     "date": rec.get("date") or rec.get("start_date") or rec.get("required_date") or rec.get("effective_date") or rec.get("payment_date"),
+                    # Leave / tour span — approver needs to see "from → to".
+                    "start_date": rec.get("start_date"),
+                    "end_date": rec.get("end_date"),
                     "purpose": (
                         rec.get("purpose")
                         or rec.get("reason")

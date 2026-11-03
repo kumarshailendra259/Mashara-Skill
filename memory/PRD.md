@@ -3011,3 +3011,12 @@ Request (Hindi): income entry me Work Order option do (milestone me bhi) taki tr
 - `Programs.jsx`: receive dialog me **Work Order** selector (`recv-wo-select`), center ke WO ensure_demo se load, default first WO; `confirmReceive` body me `work_order_id`.
 
 **Testing**: iteration_91.json — backend 100% (12/12), frontend 100%. Verified: income WO mandatory (400/toast), DEMO WO auto+idempotent, milestone receive stamps WO on all 4 txns, bulk-assign only-empty non-destructive, bulk-assign 403 for non-admin, Deductions KPI unchanged (₹1,29,741). No critical bugs. Minor optional items: bulk-assign doesn't validate WO/center consistency or entity-id existence (create_transaction still rejects WO/center mismatch). UI polish applied: bulk-assign grid 2x2; receive WO placeholder relabeled "Auto-select (center default)".
+
+---
+
+## Phase 93 — Approvals card: show Requester + Leave period (Staff App) (2026-06)
+Bug (Hindi): Staff App Approvals screen par (a) requester ka detail show nahi ho raha tha; (b) Leave request par "kab se kab tak" (from–to) dates approver ko nahi dikh rahi thi.
+- Root cause: `/approvals/pending` already returned `requester_name` + `requester{employee_code,department,designation}`, but the Staff App card in `CheckIn.jsx` `PendingApprovalsTab` never rendered them; and the `summary` only had `date` (=start_date) with no `end_date` for leave.
+- Backend (`server.py`, ~L8764): added `start_date` + `end_date` to the pending-approval `summary` dict.
+- Frontend (`CheckIn.jsx` `PendingApprovalsTab` card): now renders a requester line (Users icon + name · employee_code · designation/department, testid `approval-requester-<id>`) and, for `request_type==="leave"`, a period line (CalendarDays icon + `start → end · N days`, testid `approval-leave-period-<id>`). Leave cards hide the redundant single "Date:" chip.
+- Verified: curl payload has requester + start/end; screenshot shows requester on all 220 cards and leave period on 28 leave rows. Self-tested (no regression to approve/sendback/reject).
