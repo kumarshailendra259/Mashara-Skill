@@ -56,15 +56,21 @@ function StaffTodayChip({ status }) {
     absent:  { label: "Absent",  cls: "bg-red-50 text-red-700 border-red-300" },
     leave:   { label: "On Leave", cls: "bg-blue-50 text-blue-700 border-blue-300" },
     half:    { label: "Half-day",  cls: "bg-amber-50 text-amber-700 border-amber-300" },
+    resigned: { label: "Resigned", cls: "bg-slate-200 text-slate-700 border-slate-400" },
   };
   const m = map[status];
   if (!m) return <span className="text-xs text-[var(--muted)]">—</span>;
+  const dot = status === "present" ? "bg-emerald-500"
+    : status === "absent" ? "bg-red-500"
+    : status === "leave" ? "bg-blue-500"
+    : status === "resigned" ? "bg-slate-500"
+    : "bg-amber-500";
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold uppercase border rounded-none ${m.cls}`}
       data-testid={`today-chip-${status}`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full ${status === "present" ? "bg-emerald-500" : status === "absent" ? "bg-red-500" : status === "leave" ? "bg-blue-500" : "bg-amber-500"}`} />
+      <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
       {m.label}
     </span>
   );
@@ -297,6 +303,7 @@ export default function HRMS() {
   // Attendance state
   const [attDate, setAttDate] = useState(new Date().toISOString().slice(0,10));
   const [attMap, setAttMap] = useState({}); // staff_id -> status
+  const [todaySummary, setTodaySummary] = useState(null); // active-employee KPI snapshot for attDate
   // Phase 37 — paid-off info for current date (weekly-off + holiday)
   const [dayPaidOff, setDayPaidOff] = useState({ isWeeklyOff: false, isHoliday: false });
   const [attRecent, setAttRecent] = useState([]);
@@ -388,6 +395,10 @@ export default function HRMS() {
       (res.data || []).forEach((a) => { m[a.staff_id] = a.status; });
       setAttMap(m);
     }).catch(() => {});
+    // Active-employee KPI snapshot (resigned excluded; unmarked → Absent; approved leave → On Leave)
+    api.get(`/hrms/today-summary`, { params: { date: attDate } })
+      .then((res) => setTodaySummary(res.data || null))
+      .catch(() => setTodaySummary(null));
     // Phase 37 — figure out if this date is a Weekly Off / Holiday
     api.get(`/attendance/paid-off-days?start=${attDate}&end=${attDate}`).then((res) => {
       const d = res.data || {};
@@ -995,17 +1006,18 @@ export default function HRMS() {
             </div>
             <PrintButton />
           </div>
-          {/* KPI strip — Attendance-focused snapshot for the selected date.
-              All 4 counters derive from `attMap` (staff_id → status for `attDate`)
-              so numbers stay perfectly aligned with the employee attendance grid
-              below and refresh automatically whenever the date changes. */}
+          {/* KPI strip — Active-employee snapshot for the selected date.
+              Counts come from `/hrms/today-summary`: resigned staff (exit_date
+              passed) are excluded, unmarked non-resigned → Absent, approved
+              leave → On Leave. Falls back to the local attMap if the summary
+              call hasn't resolved yet. */}
           <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-3">
             {(() => {
               const statuses = Object.values(attMap || {});
-              const presentCount = statuses.filter((s) => s === "present" || s === "half").length;
-              const absentCount  = statuses.filter((s) => s === "absent").length;
-              const leaveCount   = statuses.filter((s) => s === "leave").length;
-              const totalEmployees = staffTotal || staff.length || 0;
+              const presentCount = todaySummary?.present ?? statuses.filter((s) => s === "present" || s === "half").length;
+              const absentCount  = todaySummary?.absent ?? statuses.filter((s) => s === "absent").length;
+              const leaveCount   = todaySummary?.leave ?? statuses.filter((s) => s === "leave").length;
+              const totalEmployees = todaySummary?.total_active ?? (staffTotal || staff.length || 0);
               const cards = [
                 { key: "total",   icon: Users,         label: "Total Employees", value: totalEmployees, tone: "text-indigo-700 bg-indigo-50 border-indigo-200" },
                 { key: "present", icon: CheckCircle2,  label: "Present Today",   value: presentCount,   tone: "text-emerald-700 bg-emerald-50 border-emerald-200" },

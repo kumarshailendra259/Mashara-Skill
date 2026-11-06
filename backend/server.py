@@ -6113,6 +6113,9 @@ async def list_staff(
     docs = await cursor.to_list(min(limit or 2000, 2000))
     # Phase 33 — Bulk-join today's attendance status so the HR list can render
     # color chips without a per-row API roundtrip.
+    # Phase 94 — status precedence: Resigned (exit_date passed) > Present/Half >
+    # On Leave (approved leave covering today) > explicit Absent/Leave > Absent
+    # (not marked yet). A non-resigned staff with no attendance is now "absent".
     if include_today_status and docs:
         try:
             today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
@@ -6124,8 +6127,26 @@ async def list_staff(
             {"_id": 0, "staff_id": 1, "status": 1},
         ).to_list(3000)
         att_map = {r["staff_id"]: r.get("status") for r in att_rows}
+        lv_rows = await db.leaves.find(
+            {"staff_id": {"$in": sids}, "status": "approved",
+             "start_date": {"$lte": today_ist}, "end_date": {"$gte": today_ist}},
+            {"_id": 0, "staff_id": 1},
+        ).to_list(3000)
+        on_leave = {r["staff_id"] for r in lv_rows}
         for d in docs:
-            d["today_status"] = att_map.get(d["id"])
+            ex = d.get("exit_date")
+            if ex and str(ex) <= today_ist:
+                d["today_status"] = "resigned"
+                continue
+            st = att_map.get(d["id"])
+            if st in ("present", "half"):
+                d["today_status"] = st
+            elif d["id"] in on_leave:
+                d["today_status"] = "leave"
+            elif st:
+                d["today_status"] = st
+            else:
+                d["today_status"] = "absent"
     from fastapi import Response
     # Emit total via response header so pagination UIs don't need a second call.
     # Return the plain list body (matches historical response_model).
@@ -6152,6 +6173,51 @@ async def list_staff(
         content=content,
         headers={"X-Total-Count": str(total), "Access-Control-Expose-Headers": "X-Total-Count"},
     )
+
+
+@api.get("/hrms/today-summary")
+async def hrms_today_summary(date: Optional[str] = None, user=Depends(get_current_user)):
+    """Active-employee attendance snapshot for a date (default today, IST).
+
+    Resigned staff (exit_date set and <= date) are EXCLUDED from every active
+    count. A non-resigned staff with no attendance row AND no approved leave
+    covering the date counts as Absent. Approved-leave → On Leave. Present/Half
+    → Present. Drives the HR Command Centre KPI strip.
+    """
+    try:
+        today_ist = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+    except Exception:
+        today_ist = datetime.now(timezone.utc).date().isoformat()
+    the_date = (date or today_ist).strip()
+    scope = _center_scope_query(user, field="center_id")
+    if scope.get("_never_"):
+        return {"date": the_date, "total_active": 0, "present": 0, "absent": 0, "leave": 0, "resigned": 0}
+    base = dict(scope) if scope else {}
+    staff_docs = await db.staff.find(base, {"_id": 0, "id": 1, "exit_date": 1}).to_list(5000)
+    ids = [d["id"] for d in staff_docs]
+    att_rows = await db.attendance.find(
+        {"staff_id": {"$in": ids}, "date": the_date}, {"_id": 0, "staff_id": 1, "status": 1}).to_list(5000)
+    att_map = {r["staff_id"]: r.get("status") for r in att_rows}
+    lv_rows = await db.leaves.find(
+        {"staff_id": {"$in": ids}, "status": "approved",
+         "start_date": {"$lte": the_date}, "end_date": {"$gte": the_date}},
+        {"_id": 0, "staff_id": 1}).to_list(5000)
+    on_leave = {r["staff_id"] for r in lv_rows}
+    present = absent = leave = resigned = 0
+    for d in staff_docs:
+        ex = d.get("exit_date")
+        if ex and str(ex) <= the_date:
+            resigned += 1
+            continue
+        st = att_map.get(d["id"])
+        if st in ("present", "half"):
+            present += 1
+        elif d["id"] in on_leave or st == "leave":
+            leave += 1
+        else:
+            absent += 1
+    return {"date": the_date, "total_active": present + absent + leave,
+            "present": present, "absent": absent, "leave": leave, "resigned": resigned}
 
 
 async def _next_employee_code() -> str:

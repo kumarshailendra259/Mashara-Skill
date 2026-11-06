@@ -3020,3 +3020,13 @@ Bug (Hindi): Staff App Approvals screen par (a) requester ka detail show nahi ho
 - Backend (`server.py`, ~L8764): added `start_date` + `end_date` to the pending-approval `summary` dict.
 - Frontend (`CheckIn.jsx` `PendingApprovalsTab` card): now renders a requester line (Users icon + name · employee_code · designation/department, testid `approval-requester-<id>`) and, for `request_type==="leave"`, a period line (CalendarDays icon + `start → end · N days`, testid `approval-leave-period-<id>`). Leave cards hide the redundant single "Date:" chip.
 - Verified: curl payload has requester + start/end; screenshot shows requester on all 220 cards and leave period on 28 leave rows. Self-tested (no regression to approve/sendback/reject).
+
+---
+
+## Phase 94 — HRMS TODAY status: Resigned / Absent / On Leave + active-only KPIs (2026-06)
+Request (Hindi): jiska last working day (exit_date) set hai use "Resigned" dikhao (Present ki jagah) aur active employee dashboard me mat ginno; jo resigned nahi hai par attendance mark nahi kiya → "Absent"; us date ka leave approved ho → "On Leave".
+- Backend `/staff` (`today_status`): precedence = Resigned (`exit_date` set & <= today IST) > Present/Half (attendance) > On Leave (approved leave covering today) > explicit Absent/Leave > **Absent** (unmarked non-resigned). Earlier unmarked returned null ("—"); ab "absent".
+- Backend new `GET /hrms/today-summary?date=` → `{date,total_active,present,absent,leave,resigned}`. Resigned excluded from all active counts; unmarked non-resigned = Absent; approved leave = On Leave; present incl half. Center-scoped via `_center_scope_query`.
+- Frontend `HRMS.jsx`: `StaffTodayChip` me naya `resigned` → slate "Resigned" badge. KPI strip ab `/hrms/today-summary` (attDate) se aata hai — Total Employees = active only (resigned excluded), Absent Today = unmarked non-resigned, Leave Today = approved leaves. Falls back to local attMap until summary resolves.
+- Leave final status confirmed = "approved" (approval engine, server.py ~L8200s).
+- Verified (preview, 257 staff): summary total_active=250, resigned=7 (excluded), unmarked → absent=250; inserted approved leave → leave=1/absent=249 and that staff today_status="leave"; resigned rows today_status="resigned". Screenshot: Total 250 / Absent 250 (pehle 0 tha). Self-tested (curl + mongo + screenshot), test leave cleaned up.
