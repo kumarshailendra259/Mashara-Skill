@@ -3030,3 +3030,22 @@ Request (Hindi): jiska last working day (exit_date) set hai use "Resigned" dikha
 - Frontend `HRMS.jsx`: `StaffTodayChip` me naya `resigned` → slate "Resigned" badge. KPI strip ab `/hrms/today-summary` (attDate) se aata hai — Total Employees = active only (resigned excluded), Absent Today = unmarked non-resigned, Leave Today = approved leaves. Falls back to local attMap until summary resolves.
 - Leave final status confirmed = "approved" (approval engine, server.py ~L8200s).
 - Verified (preview, 257 staff): summary total_active=250, resigned=7 (excluded), unmarked → absent=250; inserted approved leave → leave=1/absent=249 and that staff today_status="leave"; resigned rows today_status="resigned". Screenshot: Total 250 / Absent 250 (pehle 0 tha). Self-tested (curl + mongo + screenshot), test leave cleaned up.
+
+---
+
+## Phase 95 — Payroll HR Review → Submit for Approval (all centers, idempotent) (2026-06)
+Request: After HR Review, provide a clear "Submit for Approval" (bulk, all centers). Previous finalisation moved only some employees to Approval Pending; rest stuck in HR Review. Must be idempotent (no duplicate payroll entries, preserve existing finalized records + approval history), hold employees with attendance/salary issues separately with reasons, and show a pre-submit summary (Total Centers, Total Employees, Already Approval Pending, Remaining HR Review, Employees with Issues).
+
+**Root cause**: `payroll_finalise` had a per-CENTER duplicate guard — if a center already had any active batch for the month, the ENTIRE center's remaining draft rows were skipped. Batched payroll rows keep `status="draft"` (only `batch_status` flips), so remaining employees never got re-batched → stuck in HR Review.
+
+**Backend (`server.py`)**:
+- `_ACTIVE_BATCH_STATUSES` + `_payroll_issue_reason(row)` (hold when valid attendance days <=0 or net<0). (~L12360)
+- `payroll_finalise` rewritten: selects draft rows NOT already in an active batch (idempotent — excludes by batch_status), splits per center into eligible vs held (issues), creates a NEW batch for eligible even if the center already has one (incremental, no dup rows), returns `{batches, held_for_issues, skipped_duplicates:[]}`. (~L12440)
+- NEW `GET /payroll/finalise-preview` — non-mutating summary counts + issues list. (~L12600)
+- `payroll_run` guard fixed: skip rows where `batch_status in _ACTIVE_BATCH_STATUSES` or `locked` (was only checking `status != draft`, which wrongly recalculated batched rows). (~L9930)
+- `finalize_attendance` auto-LOP loop skips staff already in an active batch (prevents modifying finalized records). (~L12710)
+- Row↔batch status sync: auto-approve branch + final-approval branch now set payroll rows' `batch_status="pending_payment"` so UI chips match the batch. (~L8588, ~L12584)
+
+**Frontend (`HRMS.jsx`)**: "Submit for Approval" button (always visible to admin/HR, even when a batch exists/locked) → opens preview dialog (`submit-approval-dialog`) with 6 stat cards + held-list w/ reasons + remarks; confirm disabled when remaining=0; posts finalize-attendance (all centers or scoped). `PreviewStat` component added.
+
+**Testing**: iteration_92.json (found HIGH recalc bug + status-sync gap — both fixed). Dedicated pytest `tests/test_phase93_payroll_submit_for_approval.py` → 11/11 PASS after fixes (incremental batching despite existing batch, idempotency, issue-hold, preview counts, no duplicate rows, paid skipped, rejected resubmittable, batched rows NOT recalculated on re-run, row status synced). Frontend dialog flow verified 100% by testing agent. NOT YET on production — needs deploy.

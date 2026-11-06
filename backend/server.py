@@ -8594,6 +8594,11 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "rejected_reason": None,
                 "audit_log": audit_log,
             }
+            # Keep the payroll rows' batch_status in sync with the batch so the UI
+            # status chips (row.batch_status) match the batch's workflow state.
+            await db.payroll.update_many(
+                {"batch_id": rec["id"]}, {"$set": {"batch_status": "pending_payment"}},
+            )
             # Notify accountants that a batch is ready for payment.
             accs = await db.users.find({"role": "accountant"}, {"_id": 0, "id": 1}).to_list(200)
             for _acc in accs:
@@ -9926,8 +9931,13 @@ async def payroll_run(
 
         existing = await db.payroll.find_one({"staff_id": s["id"], "month": month, "year": year})
         if existing:
-            # Update DRAFT rows in-place; locked rows are left untouched.
-            if existing.get("status") != "draft":
+            # Update DRAFT rows in-place; locked / already-batched rows are left
+            # untouched. NOTE: a batched row keeps status='draft' (only its
+            # batch_status flips to pending_approval), so we must also guard on
+            # batch_status/locked — otherwise re-running payroll would silently
+            # recalculate an already-submitted employee and desync the batch total.
+            if existing.get("status") != "draft" or existing.get("locked") \
+                    or existing.get("batch_status") in _ACTIVE_BATCH_STATUSES:
                 skipped_locked += 1
                 continue
             merged = {**existing, **computed}
@@ -12586,6 +12596,11 @@ async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("a
                                                            "remarks": "No approval chain configured — auto-approved",
                                                            "old_status": "pending_approval", "new_status": "pending_payment"}]}},
             )
+            # Keep the payroll rows' batch_status in sync with the batch so the UI
+            # status chips (which read row.batch_status) match the batch state.
+            await db.payroll.update_many(
+                {"id": {"$in": payroll_ids}}, {"$set": {"batch_status": "pending_payment"}},
+            )
         created_batches.append(await _payroll_batch_out(batch_id))
 
     return {"batches": created_batches, "held_for_issues": held_for_issues,
@@ -12700,9 +12715,19 @@ async def finalize_attendance(body: AttendanceFinalizeIn, user=Depends(require_r
     if cid:
         staff_query["center_id"] = cid
     staff_docs = await db.staff.find(staff_query, {"_id": 0}).to_list(5000)
+    # Staff already locked into an active batch for this month must NOT be
+    # re-LOP'd (their attendance belongs to a finalized batch — touching it would
+    # desync the batch totals). Build the exclusion set once.
+    already_batched_rows = await db.payroll.find(
+        {"month": m, "year": y, "batch_status": {"$in": list(_ACTIVE_BATCH_STATUSES)}},
+        {"_id": 0, "staff_id": 1},
+    ).to_list(5000)
+    already_batched_sids = {r.get("staff_id") for r in already_batched_rows}
     total_converted_days = 0
     affected_employees = 0
     for s in staff_docs:
+        if s.get("id") in already_batched_sids:
+            continue  # already submitted — leave their attendance/payroll intact
         conv = await _auto_lop_unmarked_for_staff(s, m, y, paid_off_dates, weekly_off_weekdays, now, user)
         if conv:
             total_converted_days += len(conv)
