@@ -967,6 +967,52 @@ export default function HRMS() {
     }
   };
 
+  // Phase 94 — Bulk "Submit for Approval" (all centers). Shows a non-mutating
+  // preview first (Total Centers / Employees / Already Pending / Remaining HR
+  // Review / Issues), then submits every ELIGIBLE employee across all centers.
+  // Idempotent on the backend — already-submitted rows are skipped, issue rows
+  // are held in HR Review, no duplicate payroll entries are created.
+  const [submitOpen, setSubmitOpen] = useState(false);
+  const [submitPreview, setSubmitPreview] = useState(null);
+  const [submitBusy, setSubmitBusy] = useState(false);
+  const [submitRemarks, setSubmitRemarks] = useState("");
+  const openSubmitForApproval = async () => {
+    try {
+      const params = { month: pMonth, year: pYear };
+      if (pCenterId) params.center_id = pCenterId;
+      const { data } = await api.get("/payroll/finalise-preview", { params });
+      setSubmitPreview(data);
+      setSubmitRemarks("");
+      setSubmitOpen(true);
+    } catch (e) { toast.error(formatError(e)); }
+  };
+  const confirmSubmitForApproval = async () => {
+    setSubmitBusy(true);
+    try {
+      const { data } = await api.post("/payroll/finalize-attendance", {
+        month: pMonth, year: pYear, center_id: pCenterId || null, remarks: submitRemarks || "",
+      });
+      const batches = data.batches || [];
+      const held = data.held_for_issues || [];
+      const staffTotal = batches.reduce((s, b) => s + (b.staff_count || 0), 0);
+      const netTotal = batches.reduce((s, b) => s + (b.net_payable || 0), 0);
+      const lop = data.auto_lop || {};
+      toast.success(
+        `${staffTotal} employee(s) across ${batches.length} center-batch(es) submitted for approval · ₹${netTotal.toLocaleString("en-IN")}`,
+        { duration: 6000 },
+      );
+      if (lop.converted_days > 0) {
+        toast.info(`Auto-converted ${lop.converted_days} unmarked day(s) → Absent (LOP) for ${lop.affected_employees} employee(s).`, { duration: 7000 });
+      }
+      if (held.length > 0) {
+        toast.info(`${held.length} employee(s) held in HR Review (attendance/salary issues — resolve, then submit again).`, { duration: 8000 });
+      }
+      setSubmitOpen(false);
+      loadBatches(); loadAll(); loadLockStatus();
+    } catch (e) { toast.error(formatError(e)); }
+    finally { setSubmitBusy(false); }
+  };
+
   const reopenAttendance = async () => {
     const cid = pCenterId || (lockInfo.locked_centers || [])[0];
     if (!cid) { toast.error("Select the specific center to reopen."); return; }
@@ -2051,14 +2097,14 @@ export default function HRMS() {
                       <TrendingUp size={14} /> Refresh
                     </Button>
                   )}
-                  {(isAdmin || user?.role === "hr") && !lockInfo.locked && !currentBatch && (
+                  {(isAdmin || user?.role === "hr") && (
                     <Button
-                      onClick={finalizeAttendance}
+                      onClick={openSubmitForApproval}
                       className="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white h-9 px-4 gap-1.5"
-                      data-testid="finalize-attendance"
-                      title="Locks attendance, auto-generates payroll & sends to Approval"
+                      data-testid="submit-for-approval"
+                      title="Preview, then submit every eligible employee across all centers to the Approval Workflow"
                     >
-                      <ShieldCheck size={14} /> Finalize Attendance
+                      <ShieldCheck size={14} /> Submit for Approval
                     </Button>
                   )}
                   {(isAdmin || user?.role === "hr") && lockInfo.locked && (
@@ -2092,6 +2138,86 @@ export default function HRMS() {
 
           {/* --- Summary cards + progress + attention --- */}
           <PayrollSummary payroll={payroll} total={payrollTotal} />
+
+          {/* Phase 94 — Submit for Approval preview dialog (Bulk, All Centers) */}
+          <Dialog open={submitOpen} onOpenChange={setSubmitOpen}>
+            <DialogContent className="rounded-lg max-w-2xl" data-testid="submit-approval-dialog">
+              <DialogHeader>
+                <DialogTitle className="font-heading tracking-tight">
+                  Submit for Approval — {pMonth}/{pYear}
+                </DialogTitle>
+                <DialogDescription>
+                  {pCenterId
+                    ? `Scope: ${centers.find((x) => x.id === pCenterId)?.name || "selected center"}.`
+                    : "Scope: ALL centers (one batch per center)."}{" "}
+                  Eligible employees move from HR Review → Approval Pending. Already-submitted rows are skipped and employees with issues stay in HR Review.
+                </DialogDescription>
+              </DialogHeader>
+
+              {submitPreview && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
+                    <PreviewStat label="Total Centers" value={submitPreview.total_centers} testid="prev-total-centers" />
+                    <PreviewStat label="Total Employees" value={submitPreview.total_employees} testid="prev-total-employees" />
+                    <PreviewStat label="Already Approval Pending" value={submitPreview.already_approval_pending} tone="text-orange-700" testid="prev-already-pending" />
+                    <PreviewStat label="Remaining HR Review" value={submitPreview.remaining_hr_review} tone="text-emerald-700" testid="prev-remaining" />
+                    <PreviewStat label="Employees with Issues" value={submitPreview.employees_with_issues} tone="text-rose-700" testid="prev-issues" />
+                    <PreviewStat label="Already Paid" value={submitPreview.paid} tone="text-slate-500" testid="prev-paid" />
+                  </div>
+
+                  {submitPreview.employees_with_issues > 0 && (
+                    <div className="border border-rose-200 bg-rose-50 rounded-lg p-3" data-testid="prev-issues-list">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-rose-700 mb-2">
+                        Held in HR Review — resolve then submit again
+                      </div>
+                      <div className="max-h-48 overflow-auto space-y-1.5">
+                        {(submitPreview.issues || []).map((it) => (
+                          <div key={it.payroll_id} className="flex items-center justify-between gap-3 text-xs" data-testid={`prev-issue-${it.staff_id}`}>
+                            <div className="min-w-0">
+                              <span className="font-semibold text-slate-800 truncate">{it.staff_name || "—"}</span>
+                              <span className="text-slate-400"> · {it.center_name || "—"}</span>
+                            </div>
+                            <span className="text-rose-600 shrink-0">{it.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {submitPreview.remaining_hr_review === 0 ? (
+                    <div className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5" data-testid="prev-nothing">
+                      No eligible employees to submit right now{submitPreview.employees_with_issues > 0 ? " — resolve the issues above first." : "."}
+                    </div>
+                  ) : (
+                    <div>
+                      <Label className="text-xs">Remarks for approver (optional)</Label>
+                      <Input
+                        value={submitRemarks}
+                        onChange={(e) => setSubmitRemarks(e.target.value)}
+                        placeholder="e.g. September payroll — all centers"
+                        className="rounded-md"
+                        data-testid="submit-remarks"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setSubmitOpen(false)} className="rounded-md" data-testid="submit-cancel">Cancel</Button>
+                <Button
+                  onClick={confirmSubmitForApproval}
+                  disabled={submitBusy || !submitPreview || submitPreview.remaining_hr_review === 0}
+                  className="rounded-md bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
+                  data-testid="submit-confirm"
+                >
+                  <ShieldCheck size={14} />
+                  {submitBusy ? "Submitting…" : `Submit ${submitPreview?.remaining_hr_review || 0} for Approval`}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
 
           {/* --- Payroll batches list (Phase 60) — every center's batch for
               the selected month/year, with dynamic "Pending At" + filters. --- */}
@@ -3385,6 +3511,15 @@ function QuickFilterChips({ value, onChange, counts }) {
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function PreviewStat({ label, value, tone = "text-slate-800", testid }) {
+  return (
+    <div className="border border-slate-200 rounded-lg px-3 py-2.5 bg-white" data-testid={testid}>
+      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">{label}</div>
+      <div className={`text-2xl font-black tabular-nums mt-0.5 ${tone}`}>{value ?? 0}</div>
     </div>
   );
 }

@@ -12422,6 +12422,28 @@ async def _derive_pending_at(batch: dict) -> dict:
             "pending_at_names": [], "is_terminal": False}
 
 
+# Active batch states — a payroll row in one of these has already been submitted
+# to (or through) the approval workflow and must NOT be re-batched (idempotency).
+_ACTIVE_BATCH_STATUSES = {"pending_approval", "approved", "pending_payment", "processing", "paid"}
+
+
+def _payroll_issue_reason(r: dict) -> Optional[str]:
+    """Return a human reason when a payroll row has an unresolved attendance /
+    salary issue and must be HELD in HR Review (never auto-submitted), else None.
+
+    Note: unmarked working days are auto-converted to Absent (LOP) during
+    finalisation, so they are NOT treated as a blocking issue here — only a
+    genuine zero-attendance month or a negative net pay holds an employee back.
+    """
+    present = (r.get("present_days") if r.get("present_days") is not None else r.get("days_present")) or 0
+    valid_days = present + (r.get("half_days") or 0) + (r.get("paid_leave_days") or 0)
+    if valid_days <= 0:
+        return "Zero attendance — no payable days this month"
+    if float(r.get("net") or 0) < 0:
+        return "Negative net pay — salary components need review"
+    return None
+
+
 @api.post("/payroll/finalise")
 async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("admin", "hr"))):
     """HR (or admin) locks the month's Draft payroll rows into a batch and pushes
@@ -12439,19 +12461,25 @@ async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("a
     m, y = body.month, body.year
     center_id = body.center_id if (body.center_id and body.center_id != "all") else None
 
-    # Load draft rows for the month.
-    draft_rows = await db.payroll.find(
+    # Load draft/reopened/rejected rows for the month that are NOT already locked
+    # into an ACTIVE batch. A payroll row keeps status="draft" even after it is
+    # batched (only its batch_status flips to pending_approval), so we must exclude
+    # by batch_status — otherwise a second submission would re-batch the same
+    # employee and create a duplicate. This is what makes the flow idempotent and
+    # lets HR resubmit ONLY the remaining employees across all centers.
+    all_draft = await db.payroll.find(
         {"month": m, "year": y, "status": {"$in": [None, "draft", "reopened"]}},
         {"_id": 0},
     ).to_list(5000)
+    draft_rows = [r for r in all_draft if (r.get("batch_status") not in _ACTIVE_BATCH_STATUSES)]
     if not draft_rows:
-        raise HTTPException(400, f"No Draft payroll rows found for {m:02d}/{y}. Run Payroll first.")
+        raise HTTPException(400, f"No eligible payroll rows to submit for {m:02d}/{y}. Everything is already submitted, or run Payroll first.")
 
     # Enrich rows with their staff.center_id + center_name so we can group.
     staff_ids = list({r["staff_id"] for r in draft_rows if r.get("staff_id")})
     staff_by_id = {}
     if staff_ids:
-        for s in await db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0, "id": 1, "center_id": 1}).to_list(5000):
+        for s in await db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0, "id": 1, "center_id": 1, "name": 1}).to_list(5000):
             staff_by_id[s["id"]] = s
     center_ids_used = {(staff_by_id.get(r["staff_id"]) or {}).get("center_id") for r in draft_rows}
     center_ids_used = {c for c in center_ids_used}
@@ -12479,23 +12507,35 @@ async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("a
 
     now = datetime.now(timezone.utc).isoformat()
     created_batches: list = []
-    skipped_dupes: list = []
+    held_for_issues: list = []
 
     for cid, rows_for_center in grouped.items():
-        # Duplicate guard — enforced per (center_id, month, year, active_status).
-        dup = await db.payroll_batches.find_one(
-            {"month": m, "year": y, "center_id": cid,
-             "status": {"$in": ["pending_approval", "approved", "pending_payment", "processing", "paid"]}},
-            {"_id": 0, "id": 1, "status": 1},
-        )
-        if dup:
-            skipped_dupes.append({"center_id": cid, "existing_batch_id": dup["id"], "status": dup["status"]})
-            continue
+        # Hold back employees with unresolved attendance / salary issues — they
+        # stay in HR Review and are reported separately (never auto-submitted).
+        # Everyone else is ELIGIBLE and gets batched, even if this center already
+        # has a prior batch for the month (a new supplementary batch is created
+        # for the remaining employees — no duplicate rows because batched rows are
+        # excluded from `draft_rows` above).
+        eligible = []
+        for r in rows_for_center:
+            reason = _payroll_issue_reason(r)
+            if reason:
+                s = staff_by_id.get(r["staff_id"]) or {}
+                held_for_issues.append({
+                    "payroll_id": r["id"], "staff_id": r.get("staff_id"),
+                    "staff_name": r.get("staff_name") or s.get("name"),
+                    "center_id": cid, "center_name": center_name_by_id.get(cid) if cid else "Unassigned",
+                    "net": round(float(r.get("net") or 0), 2), "reason": reason,
+                })
+            else:
+                eligible.append(r)
+        if not eligible:
+            continue  # whole center held for issues — nothing to batch
 
-        payroll_ids = [r["id"] for r in rows_for_center]
-        gross = sum(float(r.get("gross") or 0) for r in rows_for_center)
-        deductions = sum(float(r.get("deductions") or 0) for r in rows_for_center)
-        net_payable = sum(float(r.get("net") or 0) for r in rows_for_center)
+        payroll_ids = [r["id"] for r in eligible]
+        gross = sum(float(r.get("gross") or 0) for r in eligible)
+        deductions = sum(float(r.get("deductions") or 0) for r in eligible)
+        net_payable = sum(float(r.get("net") or 0) for r in eligible)
         c_name = center_name_by_id.get(cid) if cid else "Unassigned"
 
         batch_id = str(uuid.uuid4())
@@ -12548,7 +12588,72 @@ async def payroll_finalise(body: PayrollFinaliseIn, user=Depends(require_role("a
             )
         created_batches.append(await _payroll_batch_out(batch_id))
 
-    return {"batches": created_batches, "skipped_duplicates": skipped_dupes}
+    return {"batches": created_batches, "held_for_issues": held_for_issues,
+            "skipped_duplicates": []}
+
+
+@api.get("/payroll/finalise-preview")
+async def payroll_finalise_preview(
+    month: int = Query(..., ge=1, le=12),
+    year: int = Query(..., ge=2020, le=2100),
+    center_id: Optional[str] = None,
+    user=Depends(require_role("admin", "hr")),
+):
+    """Non-mutating snapshot shown BEFORE 'Submit for Approval'. Reports
+    Total Centers, Total Employees, Already Approval Pending, Remaining HR Review
+    (eligible to move) and Employees with Issues (held back, with reasons)."""
+    m, y = month, year
+    scope_cid = center_id if (center_id and center_id != "all") else None
+    rows = await db.payroll.find({"month": m, "year": y}, {"_id": 0}).to_list(5000)
+    staff_ids = list({r["staff_id"] for r in rows if r.get("staff_id")})
+    staff_by_id = {}
+    if staff_ids:
+        for s in await db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0, "id": 1, "center_id": 1, "name": 1}).to_list(5000):
+            staff_by_id[s["id"]] = s
+    if scope_cid:
+        rows = [r for r in rows if (staff_by_id.get(r["staff_id"]) or {}).get("center_id") == scope_cid]
+    center_ids = {(staff_by_id.get(r["staff_id"]) or {}).get("center_id") for r in rows}
+    real_ids = [c for c in center_ids if c]
+    center_name_by_id = {}
+    if real_ids:
+        for c in await db.centers.find({"id": {"$in": real_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(2000):
+            center_name_by_id[c["id"]] = c.get("name")
+
+    already = eligible = held = paid = 0
+    issues: list = []
+    centers_set: set = set()
+    for r in rows:
+        s = staff_by_id.get(r["staff_id"]) or {}
+        cid = s.get("center_id")
+        centers_set.add(cid)
+        bs = r.get("batch_status")
+        if r.get("status") == "paid" or bs == "paid":
+            paid += 1
+            continue
+        if bs in _ACTIVE_BATCH_STATUSES:
+            already += 1
+            continue
+        reason = _payroll_issue_reason(r)
+        if reason:
+            held += 1
+            issues.append({
+                "payroll_id": r["id"], "staff_id": r.get("staff_id"),
+                "staff_name": r.get("staff_name") or s.get("name"),
+                "center_id": cid, "center_name": center_name_by_id.get(cid) if cid else "Unassigned",
+                "net": round(float(r.get("net") or 0), 2), "reason": reason,
+            })
+        else:
+            eligible += 1
+    return {
+        "month": m, "year": y,
+        "total_centers": len(centers_set),
+        "total_employees": len(rows),
+        "already_approval_pending": already,
+        "paid": paid,
+        "remaining_hr_review": eligible,
+        "employees_with_issues": held,
+        "issues": issues,
+    }
 
 
 @api.get("/payroll/attendance-lock")
