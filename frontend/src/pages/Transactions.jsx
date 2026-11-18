@@ -158,7 +158,7 @@ export default function Transactions() {
     setWoLoading(true);
     // ensure_demo=true → if the center has no WO yet, backend auto-creates a
     // placeholder "DEMO Work Order" so the mandatory picker is never empty.
-    api.get("/work-orders", { params: { center_id: form.center_id, include_inactive: false, ensure_demo: true } })
+    api.get("/work-orders", { params: { center_id: form.center_id, include_inactive: true, ensure_demo: true } })
       .then((r) => { if (!cancelled) setWorkOrders(r.data || []); })
       .catch(() => { if (!cancelled) setWorkOrders([]); })
       .finally(() => { if (!cancelled) setWoLoading(false); });

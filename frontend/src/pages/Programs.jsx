@@ -542,7 +542,7 @@ export default function Programs() {
     const cid = activeBatch?.center_id;
     if (!recvOpen || !cid) { setRecvWorkOrders([]); return; }
     let cancelled = false;
-    api.get("/work-orders", { params: { center_id: cid, include_inactive: false, ensure_demo: true } })
+    api.get("/work-orders", { params: { center_id: cid, include_inactive: true, ensure_demo: true } })
       .then((r) => { if (!cancelled) { const list = r.data || []; setRecvWorkOrders(list); setRecvWoId((prev) => prev || (list[0]?.id || "")); } })
       .catch(() => { if (!cancelled) setRecvWorkOrders([]); });
     return () => { cancelled = true; };

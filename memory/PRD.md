@@ -3049,3 +3049,12 @@ Request: After HR Review, provide a clear "Submit for Approval" (bulk, all cente
 **Frontend (`HRMS.jsx`)**: "Submit for Approval" button (always visible to admin/HR, even when a batch exists/locked) → opens preview dialog (`submit-approval-dialog`) with 6 stat cards + held-list w/ reasons + remarks; confirm disabled when remaining=0; posts finalize-attendance (all centers or scoped). `PreviewStat` component added.
 
 **Testing**: iteration_92.json (found HIGH recalc bug + status-sync gap — both fixed). Dedicated pytest `tests/test_phase93_payroll_submit_for_approval.py` → 11/11 PASS after fixes (incremental batching despite existing batch, idempotency, issue-hold, preview counts, no duplicate rows, paid skipped, rejected resubmittable, batched rows NOT recalculated on re-run, row status synced). Frontend dialog flow verified 100% by testing agent. NOT YET on production — needs deploy.
+
+---
+
+## Phase 96 — Fix: Work Order not showing in Transactions picker for a center that has one (2026-06)
+Bug (production finance.masharaskills.com/transactions): After selecting a Center in New Transaction, WO picker shows "Is center ke liye koi Work Order nahi mila" even though a Work Order exists in Batch Management for that center.
+- Root cause: the Transactions form WO loader (and milestone receive loader) called `GET /work-orders` with `include_inactive=false`, which drops any WO whose effective_status is EXPIRED (expiry_date in the past) / cancelled / completed. A center whose WO had a past expiry_date therefore returned 0 results. `ensure_demo` did NOT add a placeholder because a WO *does* exist (it just got filtered out) → empty picker.
+- Reproduced in preview: center with one WO (expiry 2026-01-01) → `include_inactive=false&ensure_demo=true` returns count 0; `include_inactive=true` returns the WO (effective_status "expired").
+- Fix (frontend only): `Transactions.jsx` (L161) and `Programs.jsx` (L545) WO loaders now send `include_inactive=true` so every existing WO for the center is shown regardless of expiry/active status. The Transactions picker already appends the status (e.g. "· expired") for non-active WOs so HR can tell. No backend change.
+- Status: fixed + backend-verified in PREVIEW. Needs DEPLOY to reach production. If after deploy a center still shows none, the WO's stored center_id likely differs from the selected center (data issue) — investigate separately.
