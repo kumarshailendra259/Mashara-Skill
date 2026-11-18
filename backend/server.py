@@ -227,7 +227,7 @@ MENU_REGISTRY = [
     {"id": "org.projects", "label": "Projects", "parent": "org", "prefixes": []},
     {"id": "org.users", "label": "Users", "parent": "org", "prefixes": ["/api/users"]},
     {"id": "org.roles", "label": "Roles & Permissions", "parent": "org", "prefixes": ["/api/rbac"]},
-    {"id": "batch", "label": "Batch Management", "parent": None, "prefixes": ["/api/batches", "/api/batch-targets", "/api/batch-management", "/api/work-orders"]},
+    {"id": "batch", "label": "Batch Management", "parent": None, "prefixes": ["/api/batches", "/api/batch-targets", "/api/batch-management"]},
     {"id": "batch.targets", "label": "Target Allocation", "parent": "batch", "prefixes": []},
     {"id": "batch.creation", "label": "Batch Creation", "parent": "batch", "prefixes": []},
     {"id": "batch.enrollment", "label": "Candidate Enrollment", "parent": "batch", "prefixes": []},
@@ -15408,8 +15408,13 @@ async def list_work_orders(
     q: Optional[str] = None,                # search: wo_number / loi / project / center / company name
     include_inactive: bool = Query(True, description="Include expired/cancelled (client filters/badges)"),
     ensure_demo: bool = Query(False, description="Auto-create a placeholder DEMO Work Order when the center has none"),
-    user=Depends(require_role(*WO_READ_ROLES)),
+    user=Depends(get_current_user),
 ):
+    # Work Orders are reference data needed by pickers across the app (expense /
+    # income booking, milestone receive, quotations, bank guarantees, batch mgmt).
+    # Any authenticated user may READ the list so the picker works in EVERY login;
+    # data isolation is still enforced by _wo_center_filter (center managers only
+    # see their assigned centres). Creating/editing WOs stays admin-restricted.
     # When booking a txn against a center that has no Work Orders yet, make sure a
     # placeholder 'DEMO Work Order' exists so the mandatory picker is never empty.
     if ensure_demo and center_id:

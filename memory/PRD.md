@@ -3058,3 +3058,18 @@ Bug (production finance.masharaskills.com/transactions): After selecting a Cente
 - Reproduced in preview: center with one WO (expiry 2026-01-01) → `include_inactive=false&ensure_demo=true` returns count 0; `include_inactive=true` returns the WO (effective_status "expired").
 - Fix (frontend only): `Transactions.jsx` (L161) and `Programs.jsx` (L545) WO loaders now send `include_inactive=true` so every existing WO for the center is shown regardless of expiry/active status. The Transactions picker already appends the status (e.g. "· expired") for non-active WOs so HR can tell. No backend change.
 - Status: fixed + backend-verified in PREVIEW. Needs DEPLOY to reach production. If after deploy a center still shows none, the WO's stored center_id likely differs from the selected center (data issue) — investigate separately.
+
+---
+
+## Phase 97 — Work Order picker visible in ALL logins (not just admin) (2026-06)
+Bug (production): WO picker/choose option only appeared for the admin login; other logins (manager "Shailendra Kumar", company_admin, partner, etc.) saw nothing. Request: give the right to all logins, everywhere a WO can be chosen.
+- Root cause (two layers, both blocking non-super-admins):
+  1. `GET /work-orders` endpoint gate was `require_role(*WO_READ_ROLES)` → excluded partner, company_admin, center_staff.
+  2. RBAC menu middleware: `/api/work-orders` was in the Batch Management menu's view `prefixes`, so ANY role whose Batch Management "view" permission is OFF (e.g. production manager had it disabled; company_admin defaults to all-off since it's a non-system role) got `403 "you do not have 'view' permission for this section"`. super_admin bypasses (ADMIN_ROLE_KEYS) → that's why only admin worked.
+- Fix (backend):
+  1. `GET /work-orders` list gate → `Depends(get_current_user)` (any authenticated user). `_wo_center_filter` still isolates center_manager to assigned centres; write endpoints stay `require_role(*TARGET_ADMIN_ROLES)` (admin/manager/senior_manager).
+  2. Removed `/api/work-orders` from the `batch` menu `prefixes` in MENU_REGISTRY → WO-list VIEW no longer requires Batch Management permission. Writes still enforced via `_ACTION_PREFIX_MENU` (`/api/work-orders`→batch for create/edit/delete) + the endpoint role gate.
+- Fix (frontend): `Quotations.jsx` WO loader now `include_inactive:true` for consistency with the other pickers.
+- Verified (preview): company_admin (zero menu perms) WO read 403→200 (3 WOs); partner/manager 200; center with no WO → DEMO Work Order auto-created so picker never empty; center_manager 200 (center-scoped); WO CREATE still blocked for non-privileged roles (manager allowed, reaches validation). All WO pickers (Transactions expense/income, Milestone receive, Quotations, Bank Guarantees, Batch Mgmt) share this endpoint → fixed everywhere at once.
+- NOTE: test_credentials.md labels kumarshailendra259@gmail.com as "partner" but /auth/me returns role "manager" (stale label).
+- Status: fixed + verified in PREVIEW. Needs DEPLOY to reach production.

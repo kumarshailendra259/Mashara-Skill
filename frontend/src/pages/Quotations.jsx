@@ -69,7 +69,7 @@ export default function Quotations() {
     if (!openQ || !qForm.center_id) { setWorkOrders([]); return; }
     let cancelled = false;
     setWoLoading(true);
-    api.get("/work-orders", { params: { center_id: qForm.center_id, include_inactive: false } })
+    api.get("/work-orders", { params: { center_id: qForm.center_id, include_inactive: true } })
       .then((r) => { if (!cancelled) setWorkOrders(r.data || []); })
       .catch(() => { if (!cancelled) setWorkOrders([]); })
       .finally(() => { if (!cancelled) setWoLoading(false); });
