@@ -3073,3 +3073,12 @@ Bug (production): WO picker/choose option only appeared for the admin login; oth
 - Verified (preview): company_admin (zero menu perms) WO read 403→200 (3 WOs); partner/manager 200; center with no WO → DEMO Work Order auto-created so picker never empty; center_manager 200 (center-scoped); WO CREATE still blocked for non-privileged roles (manager allowed, reaches validation). All WO pickers (Transactions expense/income, Milestone receive, Quotations, Bank Guarantees, Batch Mgmt) share this endpoint → fixed everywhere at once.
 - NOTE: test_credentials.md labels kumarshailendra259@gmail.com as "partner" but /auth/me returns role "manager" (stale label).
 - Status: fixed + verified in PREVIEW. Needs DEPLOY to reach production.
+
+---
+
+## Phase 98 — Mess Goods Receipt: Work Order picker (replaces PO No.) + Remarks (2026-06)
+Request: Mess → New Goods Receipt me PO No. ki jagah center-wise Work Order choose option do; aur Remarks field do taaki approver remarks padhkar approve kar sake.
+- Backend (`server.py`): `MessReceiptIn` + fields `work_order_id`, `work_order_no`, `remarks` (po_no kept optional for back-compat). `mess_create_receipt` validates WO + denormalises wo_number, stores remarks, and appends remarks into the approval `description` (so it shows on the Pending-Approvals card). `_mess_post_receipt` stamps `work_order_id`+`work_order_no` onto the generated mess-purchase expense transaction → shows in Transactions/Reports under the WO.
+- Frontend (`MessManagement.jsx` ReceiptDialog): removed PO No. input; added center-scoped Work Order `<select>` (`receipt-work-order`, include_inactive=true + ensure_demo=true → never empty) and a full-width Remarks `<textarea>` (`receipt-remarks`). Payload now sends work_order_id/work_order_no/remarks.
+- Verified (preview): created a receipt with WO+remarks → doc stored work_order_id/work_order_no/remarks; approver-facing description = "1 item(s) from Shree Traders · Remarks: ...". Frontend screenshot: PO field gone, WO picker + Remarks present, WO options populate on center select (DEMO Work Order). Test receipt cleaned up.
+- Status: fixed + verified in PREVIEW. Needs DEPLOY for production.

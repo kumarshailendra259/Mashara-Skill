@@ -25806,6 +25806,9 @@ class MessReceiptIn(BaseModel):
     invoice_no: str
     invoice_date: str
     po_no: Optional[str] = None
+    work_order_id: Optional[str] = None
+    work_order_no: Optional[str] = None
+    remarks: Optional[str] = None
     lines: List[MessReceiptLine]
     attachments: List[dict] = []
     notes: Optional[str] = None
@@ -26183,12 +26186,29 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
                           "line_total": line_total, "accepted_cost": accepted_cost})
     cen = await db.centers.find_one({"id": body.center_id}, {"_id": 0, "name": 1})
     n_items = len(out_lines)
+    # Work Order (replaces the old free-text PO No.) — validate + denormalise the
+    # number so it shows on the receipt, the generated expense txn and in reports.
+    wo_id = body.work_order_id
+    wo_no = body.work_order_no
+    if wo_id:
+        _wo = await db.work_orders.find_one({"id": wo_id}, {"_id": 0, "id": 1, "wo_number": 1})
+        if not _wo:
+            raise HTTPException(400, "Selected Work Order does not exist")
+        wo_no = _wo.get("wo_number")
+    remarks = (body.remarks or "").strip() or None
+    # Surface the submitter's remarks in the approval card so the approver can
+    # read them before approving.
+    desc = f"{n_items} item(s) from {body.supplier_name or 'supplier'}"
+    if remarks:
+        desc = f"{desc} · Remarks: {remarks}"
     doc = {
         "id": str(uuid.uuid4()), "center_id": body.center_id,
         "center_name": (cen or {}).get("name"),
         "supplier_id": body.supplier_id, "supplier_name": body.supplier_name,
         "invoice_no": body.invoice_no.strip(), "invoice_date": body.invoice_date,
-        "po_no": body.po_no, "lines": out_lines, "attachments": body.attachments,
+        "po_no": body.po_no, "work_order_id": wo_id, "work_order_no": wo_no,
+        "remarks": remarks,
+        "lines": out_lines, "attachments": body.attachments,
         "notes": body.notes, "total_amount": round(total, 2),
         "status": "pending", "payment_status": "unpaid",
         "expense_txn_id": None,
@@ -26200,7 +26220,7 @@ async def mess_create_receipt(body: MessReceiptIn, user=Depends(require_role(*ME
         "date": body.invoice_date,
         "vendor_name": body.supplier_name,
         "purpose": f"Mess Purchase · Inv {body.invoice_no.strip()}",
-        "description": f"{n_items} item(s) from {body.supplier_name or 'supplier'}",
+        "description": desc,
     }
     await _attach_chain_to_request("mess_receipt", doc)
     await db.mess_receipts.insert_one(doc)
@@ -26253,6 +26273,7 @@ async def _mess_post_receipt(rec: dict, user: dict) -> dict:
         "project_id": ctx["project_id"], "items": [], "attachments": rec.get("attachments") or [],
         "source": "mess_purchase", "mess_receipt_id": rec["id"],
         "vendor_name": rec.get("supplier_name"),
+        "work_order_id": rec.get("work_order_id"), "work_order_no": rec.get("work_order_no"),
         # Payment tracking: the bill is Approved but still Unpaid until payment is approved.
         "payment_status": "unpaid", "paid_amount": 0.0, "balance": amt,
         "created_by": user["id"], "created_at": now,

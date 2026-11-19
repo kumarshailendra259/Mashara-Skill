@@ -1186,7 +1186,7 @@ const num = (v) => Number(v) || 0;
 const newReceiptLine = () => ({ item_id: "", qty: "", unit: "", unit_price: "", discount: 0, tax: 0, gst_rate: "0", hsn_sac: "", accepted_qty: "", rejected_qty: 0 });
 
 function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose, onSaved }) {
-  const [f, setF] = useState({ center_id: centerId || "", supplier_id: "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), po_no: "", attachments: [] });
+  const [f, setF] = useState({ center_id: centerId || "", supplier_id: "", supplier_name: "", invoice_no: "", invoice_date: todayStr(), work_order_id: "", work_order_no: "", remarks: "", attachments: [] });
   const [lines, setLines] = useState(() => {
     if (prefillItemId) {
       const it = items.find((x) => x.id === prefillItemId);
@@ -1195,10 +1195,24 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
     return [newReceiptLine()];
   });
   const [vendors, setVendors] = useState([]);
+  const [workOrders, setWorkOrders] = useState([]);
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
 
   useEffect(() => { api.get("/vendors").then((r) => setVendors(Array.isArray(r.data) ? r.data : [])).catch(() => setVendors([])); }, []);
+
+  // Work Orders for the selected center (replaces the old free-text PO No.).
+  // ensure_demo=true → a placeholder "DEMO Work Order" is auto-created if the
+  // center has none, so the picker is never empty. include_inactive=true so
+  // existing (even expired) work orders always show.
+  useEffect(() => {
+    if (!f.center_id) { setWorkOrders([]); return; }
+    let cancelled = false;
+    api.get("/work-orders", { params: { center_id: f.center_id, include_inactive: true, ensure_demo: true } })
+      .then((r) => { if (!cancelled) setWorkOrders(r.data || []); })
+      .catch(() => { if (!cancelled) setWorkOrders([]); });
+    return () => { cancelled = true; };
+  }, [f.center_id]);
 
   const pickVendor = (id) => {
     const v = vendors.find((x) => x.id === id);
@@ -1300,7 +1314,29 @@ function ReceiptDialog({ items, units, centers, centerId, prefillItemId, onClose
               </select>
               {vendors.length === 0 && <div className="text-[11px] text-amber-600 mt-1">No vendors found — add suppliers in Procurement → Vendors.</div>}
             </div>
-            <div><Label>PO No. <span className="text-slate-400 normal-case">(optional)</span></Label><Input value={f.po_no} onChange={(e) => setF({ ...f, po_no: e.target.value })} placeholder="Enter PO number" className="rounded-lg h-9" data-testid="receipt-po" /></div>
+            <div><Label>Work Order <span className="text-slate-400 normal-case">(center-wise)</span></Label>
+              <select
+                value={f.work_order_id}
+                onChange={(e) => { const wo = workOrders.find((w) => w.id === e.target.value); setF({ ...f, work_order_id: e.target.value, work_order_no: wo?.wo_number || "" }); }}
+                className={inputCls}
+                data-testid="receipt-work-order"
+                disabled={!f.center_id}
+              >
+                <option value="">{f.center_id ? "Select Work Order" : "Pehle center chunein"}</option>
+                {workOrders.map((w) => <option key={w.id} value={w.id}>{w.wo_number}{w.effective_status && w.effective_status !== "active" ? ` (${w.effective_status})` : ""}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <Label>Remarks <span className="text-slate-400 normal-case">(approver ke liye — optional)</span></Label>
+            <textarea
+              value={f.remarks}
+              onChange={(e) => setF({ ...f, remarks: e.target.value })}
+              rows={2}
+              placeholder="e.g. Camp ke liye urgent kharid; rates market se verify ki gayi hain"
+              className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-sm resize-y focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"
+              data-testid="receipt-remarks"
+            />
           </div>
 
           {/* Items table */}
