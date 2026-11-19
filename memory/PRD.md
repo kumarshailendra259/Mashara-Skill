@@ -3082,3 +3082,17 @@ Request: Mess → New Goods Receipt me PO No. ki jagah center-wise Work Order ch
 - Frontend (`MessManagement.jsx` ReceiptDialog): removed PO No. input; added center-scoped Work Order `<select>` (`receipt-work-order`, include_inactive=true + ensure_demo=true → never empty) and a full-width Remarks `<textarea>` (`receipt-remarks`). Payload now sends work_order_id/work_order_no/remarks.
 - Verified (preview): created a receipt with WO+remarks → doc stored work_order_id/work_order_no/remarks; approver-facing description = "1 item(s) from Shree Traders · Remarks: ...". Frontend screenshot: PO field gone, WO picker + Remarks present, WO options populate on center select (DEMO Work Order). Test receipt cleaned up.
 - Status: fixed + verified in PREVIEW. Needs DEPLOY for production.
+
+---
+
+## Phase 99 — Global Work Order Mandatory Mapping + Work Order P&L report (2026-06)
+Request: EVERY financial transaction (income & expense) must carry a Work Order, sourced from Batch Management WO Master, center-scoped. Auto-generated records inherit WO from source; centerless manual flows pick center-then-WO; consolidated payments keep WO at line level; add a "Work Order P&L" Reports tab. Existing records/IDs/accounting/approval history MUST stay untouched.
+- Backend (`server.py`):
+  - Central helper `_derive_wo_for_txn(center_id)` → resolves a center's WO (DEMO fallback via `_ensure_demo_work_order`) for auto-created forward flows.
+  - Forward flows wired to stamp work_order_id/work_order_no: reimbursement, asset, payment branch, reimbursement payment, payroll payment, fooding, advance release, advance settlement/write-off.
+  - Reversal/refund flows (payroll batch reversal x3) INHERIT work_order_id/work_order_no from the ORIGINAL txn (source inheritance).
+  - New report endpoint `GET /api/reports/work-order-pnl` → aggregates db.transactions by work_order_id: {rows:[{work_order_id, work_order_no, center_name, income, expense, net}], totals}. WO-less historical txns grouped as "— Unassigned —"; existing docs never mutated (SHA-256 snapshot of 1160 historical rows identical pre/post run).
+  - create_transaction now also denormalises work_order_no onto the stored doc + response; update_transaction PRESERVES existing work_order_id/work_order_no when the caller omits it (TransactionIn defaults it None) → no silent data loss on partial edits.
+- Frontend (`Reports.jsx`): new "Work Order P&L" tab (data-testid report-tab-wo_pnl, wo-pnl-table, wo-pnl-row-*, export-wo_pnl) — WO-wise Income/Receipts, Expense/Payments, Net + Center column + totals footer + CSV export.
+- Testing (iteration_93): new suite 18 passed / 2 failed (both fixed this turn: POST response missing work_order_no; PUT erasing WO), phase90 + phase92 re-ran green. Both fixes curl-verified in preview (create returns work_order_no; edit amount keeps WO).
+- Status: implemented + verified in PREVIEW. Needs DEPLOY for production.

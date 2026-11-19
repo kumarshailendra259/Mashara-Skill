@@ -4133,11 +4133,12 @@ async def create_transaction(
     # Validate the Work Order exists and belongs to the selected center (reuse of
     # Batch Management's Work Order master — never a duplicate).
     if body.work_order_id:
-        wo = await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1})
+        wo = await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1, "wo_number": 1})
         if not wo:
             raise HTTPException(400, "Selected Work Order does not exist")
         if body.center_id and wo.get("center_id") and wo["center_id"] != body.center_id:
             raise HTTPException(400, "Selected Work Order does not belong to the chosen center")
+        doc["work_order_no"] = wo.get("wo_number")
     # Stamp the Financial Year from the (normalized) transaction date so it is
     # permanently saved with the record (used by FY reports / exports).
     doc["financial_year"] = _fy_for_date(doc.get("date"))
@@ -4237,11 +4238,17 @@ async def update_transaction(tid: str, body: TransactionIn, user=Depends(get_cur
     # Validate Work Order linkage on edit (exists + center match). Not force-required
     # here so legacy expenses without a WO remain editable.
     if body.work_order_id:
-        wo = await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1})
+        wo = await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1, "center_id": 1, "wo_number": 1})
         if not wo:
             raise HTTPException(400, "Selected Work Order does not exist")
         if body.center_id and wo.get("center_id") and wo["center_id"] != body.center_id:
             raise HTTPException(400, "Selected Work Order does not belong to the chosen center")
+        update["work_order_no"] = wo.get("wo_number")
+    else:
+        # Caller omitted the WO (TransactionIn defaults it to None) — never silently
+        # wipe an existing mapping on a partial edit. Preserve what was stored.
+        update["work_order_id"] = existing.get("work_order_id")
+        update["work_order_no"] = existing.get("work_order_no")
     # Editing an approved entry sets it back to pending (unless admin)
     if not is_admin and existing.get("status") == "approved":
         update["status"] = "pending"

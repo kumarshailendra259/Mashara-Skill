@@ -1,0 +1,39 @@
+{
+  "summary": "Backend-only test of the Global Work Order mandatory mapping and the Work Order P&L report. New suite tests/test_phase94_global_wo_mandatory.py: 18 passed, 2 failed, 1 skipped. Passing: WO required on manual income/expense (400 when missing, unknown, or belonging to another center); income WO persisted and work_order_no filled in on the list; WO kept after pending->approve; payroll-batch reopen reversal copies work_order_id/work_order_no from the original txn; DEMO WO idempotent, both sequential and with 12 concurrent calls; GET /work-orders?center_id readable by company_admin, center_manager and manager-role users (200, center-scoped); /reports/work-order-pnl shape is correct, net = income - expense per row, totals = sum of rows, the test WO's row matches the DB exactly, Unassigned row present with counts matching WO-less txns; a SHA-256 snapshot of all 1160 historical WO-less transactions was identical after the run. Failing: (1) POST /transactions response does not include work_order_no; (2) PUT /transactions without work_order_id erases the WO mapping. Also re-ran phase90 (quotation->payment WO) and phase92 (income/bulk-assign): all pass. phase81 has 9 failures from stale test data, not code regressions.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "PUT /api/transactions/{tid}", "issue": "update = body.model_dump() always sets work_order_id=None when the client leaves it out, so any edit that doesn't resend the WO silently erases the mapping. Edit also doesn't require a WO, so a WO-mapped txn can become WO-less. Reproduced: created expense with DEMO WO, PUT without work_order_id -> DB work_order_id is None.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/transactions", "issue": "Response work_order_no is null. Only GET /transactions fills it in. create_transaction should set doc['work_order_no'] from the WO lookup it already does at line ~4136, and so should the PUT response."},
+      {"endpoint": "_ensure_demo_work_order / _derive_wo_for_txn (server.py ~1269-1325)", "issue": "Returns the FIRST WO found for the center with no filter on status or sort order. For centers with several WOs, auto-generated txns (payroll pay, reimbursement pay, fooding, asset, payment fallback) get an arbitrary WO, which may be expired or cancelled. The review asks for 'no active WO -> DEMO', but the code only creates the DEMO WO when the center has no WO of any status. Also, nothing prevents duplicate DEMO WOs in the DB (no unique index or upsert): a race was not reproduced with 12 threads but is still possible."},
+      {"endpoint": "POST /api/payroll-batches/{id}/pay", "issue": "A multi-center batch is booked as ONE txn under the first staff member's center WO. This breaks approved rule (3): WO should be kept at line level for consolidated payments."},
+      {"endpoint": "GET /api/reports/work-order-pnl", "issue": "Pending (unapproved) txns are counted; only status=rejected is excluded. Reversal txns are counted as income. Net is correct, but gross income is inflated. Txns with work_order_id '' and with null/missing land in two separate 'Unassigned' rows. center_name comes from the WO's center, not the txn's center."},
+      {"endpoint": "DEMO Work Order", "issue": "DEMO WOs are created with project_id ''. PUT /work-orders/{wid} rejects with 'project_id does not exist' unless a valid project is supplied, so the 'edit later' step needs a project picker. Four DEMO WOs already exist in the DB, three of them with an empty project_id."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_phase94_global_wo_mandatory.py", "/app/test_reports/pytest/pytest_phase94.xml"],
+  "action_items": [
+    "PUT /transactions: keep the existing work_order_id when the body leaves it out or sends null (e.g. model_dump(exclude_unset=True), or fall back to existing), or require a WO on edit for income/expense",
+    "POST /transactions (and PUT): fill in work_order_no in the response",
+    "_ensure_demo_work_order/_derive_wo_for_txn: prefer an ACTIVE WO with a deterministic sort; create DEMO when there is no active WO; make creation atomic (upsert on center_id+is_demo, or a unique partial index)",
+    "Payroll batch pay: split the txn per center/WO, or record a per-line WO breakdown for multi-center batches",
+    "WO P&L: decide whether pending txns should count (probably approved only); merge ''/null into one Unassigned row",
+    "Update stale tests in test_phase81_work_orders.py: scope_ids picks a DEMO WO with project_id ''; partner-403 tests are out of date (WO read is now open, and the kumarshailendra259 account is now role=manager)",
+    "Update /app/memory/test_credentials.md: test_center_manager_c6912430@x.com is now role center_manager with assigned_center_ids=[] (not accountant); kumarshailendra259@gmail.com is role manager (not partner)"
+  ],
+  "critical_code_review_comments": [
+    "server.py is about 29k lines; split it into routers",
+    "create_transaction lets a center_manager with no assigned centers create a pending txn on any center_id. No center-scope check was seen on create; worth checking separately",
+    "No customer data was changed by this run except as listed in seed_data_creation"
+  ],
+  "updated_files": ["/app/backend/tests/test_phase94_global_wo_mandatory.py"],
+  "success_rate": {"backend": "90% (18/20 executed, 1 skipped)", "frontend": "not tested (backend only requested)"},
+  "test_credentials": "admin@finance.app/Admin@123 works. The credentials file is stale for test_center_manager_c6912430 (role is now center_manager, no centers) and kumarshailendra259 (role is now manager).",
+  "seed_data_creation": "The suite seeds TEST_WO_CENTER_*/TEST_WO_RACE_* centers, DEMO WOs on them, TEST_WO_* txns and a year-2099 payroll batch, then deletes all of it by id. It also creates a DEMO WO on the real center 9cf18e69 (which had no WO) and removes it at teardown. Leftovers after the run were checked and are zero.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: cd /app/backend && REACT_APP_BACKEND_URL=<url> python -m pytest tests/test_phase94_global_wo_mandatory.py -v -p no:xdist. It seeds via pymongo and cleans up by id. Auth is cookie + X-CSRF-Token from the csrf_token cookie. test_phase90 and test_phase92 need REACT_APP_BACKEND_URL exported. The phase81 failures come from stale test data.",
+  "rca of the issue": "PUT wipe: update_transaction does update = body.model_dump() and then $set, so the TransactionIn default work_order_id=None overwrites the stored value. Missing work_order_no on create: create_transaction checks the WO but never writes wo_number into doc, and TransactionOut(**doc) therefore returns None."
+}
