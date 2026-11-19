@@ -1306,6 +1306,98 @@ async def _ensure_demo_work_order(center_id: Optional[str]) -> Optional[dict]:
     return {"id": doc["id"], "wo_number": doc["wo_number"]}
 
 
+async def _derive_wo_for_txn(center_id: Optional[str], prefer_wo_id: Optional[str] = None) -> tuple:
+    """Resolve (work_order_id, work_order_no) for an auto-created financial txn so
+    EVERY transaction stays Work-Order-linked (global WO-wise reporting).
+
+    * If `prefer_wo_id` is given and valid → use it (source record already had a WO).
+    * Else fall back to the center's Work Order — real one if it exists, otherwise an
+      auto-created 'DEMO Work Order' (so a center-linked txn is never WO-less).
+    * No center → (None, None); the caller's upstream validation covers manual entry.
+    """
+    if prefer_wo_id:
+        wo = await db.work_orders.find_one({"id": prefer_wo_id}, {"_id": 0, "id": 1, "wo_number": 1})
+        if wo:
+            return prefer_wo_id, wo.get("wo_number")
+    demo = await _ensure_demo_work_order(center_id)
+    if demo:
+        return demo["id"], demo.get("wo_number")
+    return None, None
+
+
+@api.get("/reports/work-order-pnl")
+async def work_order_pnl(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    center_id: Optional[str] = None,
+    user=Depends(require_finance_visible),
+):
+    """Consolidated Work-Order-wise financials: Income, Expense, Payments,
+    Receipts and Net (Income−Expense), plus the owning Center for each WO.
+    Honours center-based data isolation and optional date/center filters."""
+    await _enrich_user_with_associations(user)
+    scope = _center_scope_query(user)
+    if scope.get("_never_"):
+        return {"rows": [], "totals": {"income": 0, "expense": 0, "net": 0, "receipts": 0, "payments": 0}}
+    match: dict = {"status": {"$ne": "rejected"}}
+    if scope:
+        match.update(scope)
+    if center_id:
+        match["center_id"] = center_id
+    if start or end:
+        d: dict = {}
+        if start:
+            d["$gte"] = start
+        if end:
+            d["$lte"] = end
+        match["date"] = d
+    pipeline = [
+        {"$match": match},
+        {"$group": {
+            "_id": "$work_order_id",
+            "income": {"$sum": {"$cond": [{"$eq": ["$type", "income"]}, "$amount", 0]}},
+            "expense": {"$sum": {"$cond": [{"$eq": ["$type", "expense"]}, "$amount", 0]}},
+            "count": {"$sum": 1},
+        }},
+    ]
+    agg = await db.transactions.aggregate(pipeline).to_list(5000)
+    wo_ids = [a["_id"] for a in agg if a.get("_id")]
+    wo_map = {}
+    if wo_ids:
+        for w in await db.work_orders.find({"id": {"$in": wo_ids}}, {"_id": 0, "id": 1, "wo_number": 1, "center_id": 1}).to_list(5000):
+            wo_map[w["id"]] = w
+    center_ids = list({(wo_map.get(a["_id"]) or {}).get("center_id") for a in agg if a.get("_id")})
+    cen_map = {}
+    real = [c for c in center_ids if c]
+    if real:
+        for c in await db.centers.find({"id": {"$in": real}}, {"_id": 0, "id": 1, "name": 1}).to_list(2000):
+            cen_map[c["id"]] = c.get("name")
+    rows = []
+    tot = {"income": 0.0, "expense": 0.0, "net": 0.0}
+    for a in agg:
+        wid = a.get("_id")
+        wo = wo_map.get(wid) if wid else None
+        inc = round(float(a.get("income") or 0), 2)
+        exp = round(float(a.get("expense") or 0), 2)
+        rows.append({
+            "work_order_id": wid,
+            "work_order_no": (wo or {}).get("wo_number") or ("— Unassigned —" if not wid else "(deleted WO)"),
+            "center_id": (wo or {}).get("center_id"),
+            "center_name": cen_map.get((wo or {}).get("center_id")) or "—",
+            "income": inc, "expense": exp, "net": round(inc - exp, 2),
+            "receipts": inc, "payments": exp, "count": a.get("count", 0),
+        })
+        tot["income"] += inc
+        tot["expense"] += exp
+    tot["net"] = round(tot["income"] - tot["expense"], 2)
+    tot["income"] = round(tot["income"], 2)
+    tot["expense"] = round(tot["expense"], 2)
+    tot["receipts"] = tot["income"]
+    tot["payments"] = tot["expense"]
+    rows.sort(key=lambda r: r["net"], reverse=True)
+    return {"rows": rows, "totals": tot}
+
+
 async def _enrich_user_with_associations(user: dict) -> dict:
     """Mutates `user` to add scope hints per role.
 
@@ -8252,6 +8344,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                     eff_partner_id = center_ctx["partner_id"]
                 if eff_company_id is None:
                     eff_company_id = center_ctx["company_id"]
+            _woid, _wono = await _derive_wo_for_txn(eff_center_id)
             txn = {
                 "id": str(uuid.uuid4()),
                 "type": "expense",
@@ -8262,6 +8355,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 "partner_id": eff_partner_id,
                 "center_id": eff_center_id,
                 "project_id": None,
+                "work_order_id": _woid, "work_order_no": _wono,
                 "items": [], "attachments": rec.get("attachments") or [],
                 "source": "reimbursement",
                 "reimbursement_id": rec.get("id"),
@@ -8317,6 +8411,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
             txn = None
             if asset["purchase_amount"] > 0:
                 asset_ctx = await _derive_context_for_center(asset.get("center_id"))
+                _woid, _wono = await _derive_wo_for_txn(asset.get("center_id"))
                 txn = {
                     "id": str(uuid.uuid4()),
                     "type": "expense",
@@ -8327,6 +8422,7 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                     "partner_id": asset_ctx["partner_id"],
                     "center_id": asset.get("center_id"),
                     "project_id": None,
+                    "work_order_id": _woid, "work_order_no": _wono,
                     "items": [], "attachments": asset.get("attachments") or [],
                     "created_by": user["id"], "created_at": now,
                     "status": "approved", "approved_by": user["id"], "approved_at": now,
@@ -8436,6 +8532,11 @@ async def approval_act(body: ApprovalActionIn, user=Depends(get_current_user)):
                 if _wo and _wo.get("center_id") and _wo["center_id"] != eff_center_id:
                     eff_work_order_id = None
                     eff_work_order_no = None
+            # Global WO-mandatory: if the quotation carried no WO (or it was dropped
+            # on a center switch), fall back to the final center's WO/DEMO so the
+            # payment txn is never Work-Order-less.
+            if not eff_work_order_id:
+                eff_work_order_id, eff_work_order_no = await _derive_wo_for_txn(eff_center_id)
             txn_type = rec.get("category") or "expense"
             pay_date = rec.get("payment_date") or now[:10]
             desc = f"Payment · QRN {rec.get('qrn','')} · {rec.get('vendor_name','')} — {rec.get('description','')}".strip(" ·—")
@@ -9395,6 +9496,7 @@ async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant", "
     now = datetime.now(timezone.utc).isoformat()
     staff = await db.staff.find_one({"id": rec["staff_id"]}, {"_id": 0, "name": 1, "center_id": 1})
     reimb_ctx = await _derive_context_for_center((staff or {}).get("center_id"))
+    _woid, _wono = await _derive_wo_for_txn((staff or {}).get("center_id"))
     # Auto-create an expense transaction (approved) for ledger sync
     txn = {
         "id": str(uuid.uuid4()),
@@ -9406,6 +9508,7 @@ async def reimb_pay(rid: str, user=Depends(require_role("admin", "accountant", "
         "partner_id": reimb_ctx["partner_id"],
         "center_id": (staff or {}).get("center_id"),
         "project_id": None,
+        "work_order_id": _woid, "work_order_no": _wono,
         "items": [], "attachments": rec.get("attachments") or [],
         "created_by": user["id"], "created_at": now,
         "status": "approved", "approved_by": user["id"], "approved_at": now,
@@ -13041,6 +13144,7 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
     first_staff = await db.staff.find_one({"id": first_sid}, {"_id": 0, "center_id": 1})
     ctx = await _derive_context_for_center((first_staff or {}).get("center_id"))
     partner_id = body.partner_id or ctx["partner_id"]
+    _woid, _wono = await _derive_wo_for_txn((first_staff or {}).get("center_id"))
 
     txn_amount = float(net_pay)
     paid_count = len(target_rows)
@@ -13054,6 +13158,7 @@ async def pay_payroll_batch(batch_id: str, body: PayrollBatchPayIn, user=Depends
         "partner_id": partner_id,
         "center_id": (first_staff or {}).get("center_id"),
         "project_id": None,
+        "work_order_id": _woid, "work_order_no": _wono,
         "items": [], "attachments": [{"path": body.attachment_path, "filename": body.attachment_filename}] if body.attachment_path else [],
         "source": "payroll_batch",
         "payroll_batch_id": batch_id,
@@ -13193,6 +13298,7 @@ async def reopen_payroll_batch(batch_id: str, body: PayrollBatchReopenIn, user=D
                 "partner_id": orig.get("partner_id"),
                 "center_id": orig.get("center_id"),
                 "project_id": None, "items": [], "attachments": [],
+                "work_order_id": orig.get("work_order_id"), "work_order_no": orig.get("work_order_no"),
                 "source": "payroll_batch_reversal",
                 "payroll_batch_id": batch_id,
                 "reverses_txn_id": batch["transaction_id"],
@@ -13354,6 +13460,7 @@ async def reopen_payroll_row(pid: str, user=Depends(require_role("admin"))):
                 "company_id": orig.get("company_id"), "partner_id": orig.get("partner_id"),
                 "center_id": orig.get("center_id"), "project_id": None,
                 "items": [], "attachments": [], "source": "payroll_row_reversal",
+                "work_order_id": orig.get("work_order_id"), "work_order_no": orig.get("work_order_no"),
                 "payroll_id": pid, "reverses_txn_id": rec["txn_id"],
                 "created_by": user["id"], "created_at": now,
                 "status": "approved", "approved_by": user["id"], "approved_at": now,
@@ -13398,6 +13505,7 @@ async def delete_payroll_row(pid: str, user=Depends(require_role("admin"))):
                     "company_id": orig.get("company_id"), "partner_id": orig.get("partner_id"),
                     "center_id": orig.get("center_id"), "project_id": None,
                     "items": [], "attachments": [], "source": "payroll_row_delete_reversal",
+                    "work_order_id": orig.get("work_order_id"), "work_order_no": orig.get("work_order_no"),
                     "payroll_id": pid, "reverses_txn_id": rec["txn_id"],
                     "created_by": user["id"], "created_at": now,
                     "status": "approved", "approved_by": user["id"], "approved_at": now,
@@ -17585,6 +17693,7 @@ async def receive_fooding(fid: str, body: FoodingReceiveIn = FoodingReceiveIn(),
 
     partner_pool = round(gross * partner_share_pct / 100.0, 2) if partner_ids and partner_share_pct > 0 else 0.0
     company_amount = round(gross - partner_pool, 2)
+    _fooding_woid, _fooding_wono = await _derive_wo_for_txn((batch or {}).get("center_id"))
     splits: list[tuple[Optional[str], float, str]] = []
     if company_amount > 0:
         sfx = f" (company {round(100.0 - partner_share_pct, 2)}% share)" if partner_pool > 0 else ""
@@ -17610,6 +17719,7 @@ async def receive_fooding(fid: str, body: FoodingReceiveIn = FoodingReceiveIn(),
             "partner_id": pid_split,
             "center_id": (batch or {}).get("center_id"),
             "project_id": (batch or {}).get("project_id"),
+            "work_order_id": _fooding_woid, "work_order_no": _fooding_wono,
             "items": [], "attachments": [],
             "source": "fooding",
             "milestone": None,
@@ -19000,6 +19110,7 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
     # Payee bank/UPI details captured at request-time flow through here so accounts
     # doesn't have to re-key them, and the ledger row shows exactly where the money went.
     txn_id = str(uuid.uuid4())
+    _woid, _wono = await _derive_wo_for_txn(eff_center_id, prefer_wo_id=row.get("work_order_id"))
     txn_doc = {
         "id": txn_id,
         "date": body.payment_date or now_iso[:10],
@@ -19011,6 +19122,7 @@ async def release_advance(aid: str, body: AdvanceReleaseIn, user=Depends(require
         "center_id": eff_center_id,
         "project_id": row.get("project_id"),
         "partner_id": eff_partner_id,
+        "work_order_id": _woid, "work_order_no": _wono,
         "payment_mode": body.payment_mode,
         "paid_by_user_id": eff_paid_by_user_id,
         "paid_by_name": payer,
@@ -19132,6 +19244,7 @@ async def settle_advance(
 
     # Create a transaction for real-cash-movement types
     ctx = await _derive_context_for_center(row.get("center_id")) if row.get("center_id") else {}
+    _woid, _wono = await _derive_wo_for_txn(row.get("center_id"), prefer_wo_id=row.get("work_order_id"))
     txn = None
     if body.settlement_type == "cash_repayment":
         txn = {
@@ -19144,6 +19257,7 @@ async def settle_advance(
             "partner_id": ctx.get("partner_id"),
             "center_id": row.get("center_id"),
             "project_id": None,
+            "work_order_id": _woid, "work_order_no": _wono,
             "items": [],
             "attachments": entry["attachments"],
             "payment_mode": body.payment_mode,
@@ -19171,6 +19285,7 @@ async def settle_advance(
             "partner_id": ctx.get("partner_id"),
             "center_id": row.get("center_id"),
             "project_id": None,
+            "work_order_id": _woid, "work_order_no": _wono,
             "items": [],
             "attachments": entry["attachments"],
             "source": "advance_writeoff",

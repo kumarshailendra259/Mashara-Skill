@@ -15,10 +15,12 @@ export default function Reports() {
   const { t } = useLang();
   const { fy } = useFY();
   const [summary, setSummary] = useState(null);
+  const [woPnl, setWoPnl] = useState(null);
 
   useEffect(() => {
     const params = (fy && fy !== "all") ? { fy } : {};
     api.get("/dashboard/summary", { params }).then((r) => setSummary(r.data)).catch(() => {});
+    api.get("/reports/work-order-pnl").then((r) => setWoPnl(r.data)).catch(() => setWoPnl(null));
   }, [fy]);
 
   const exportTable = (key) => {
@@ -56,6 +58,10 @@ export default function Reports() {
               {t(d)}
             </TabsTrigger>
           ))}
+          <TabsTrigger value="wo_pnl" data-testid="report-tab-wo_pnl"
+            className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
+            Work Order P&amp;L
+          </TabsTrigger>
         </TabsList>
         {DIMS.map((d) => {
           const rows = summary?.[`by_${d}`] || [];
@@ -97,6 +103,67 @@ export default function Reports() {
             </TabsContent>
           );
         })}
+        <TabsContent value="wo_pnl" className="mt-4">
+          {(() => {
+            const rows = woPnl?.rows || [];
+            const tot = woPnl?.totals || { income: 0, expense: 0, net: 0 };
+            const exportWo = () => {
+              const header = ["Work Order", "Center", "Income", "Expense", "Net"];
+              const lines = [header, ...rows.map((r) => [r.work_order_no, r.center_name, r.income, r.expense, r.net])]
+                .map((row) => row.map((c) => `"${String(c ?? "")}"`).join(",")).join("\n");
+              const blob = new Blob([lines], { type: "text/csv;charset=utf-8;" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url; a.download = `work_order_pnl_${Date.now()}.csv`; a.click();
+              URL.revokeObjectURL(url);
+            };
+            return (
+              <>
+                <div className="flex justify-end mb-3">
+                  <Button variant="outline" onClick={exportWo} className="rounded-none gap-2" data-testid="export-wo_pnl">
+                    <Download size={14} /> {t("export_csv")}
+                  </Button>
+                </div>
+                <div className="swiss-card overflow-x-auto" data-testid="wo-pnl-table">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[var(--border)] overline bg-gray-50">
+                        <th className="text-left p-3">Work Order</th>
+                        <th className="text-left p-3">{t("center")}</th>
+                        <th className="text-right p-3">{t("income")} / Receipts</th>
+                        <th className="text-right p-3">{t("expense")} / Payments</th>
+                        <th className="text-right p-3">Net</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.length === 0 ? (
+                        <tr><td colSpan={5} className="text-center py-8 overline">{t("no_data")}</td></tr>
+                      ) : rows.map((r) => (
+                        <tr key={r.work_order_id || "none"} className="border-b border-[var(--border)] hover:bg-gray-50" data-testid={`wo-pnl-row-${r.work_order_id || "none"}`}>
+                          <td className="p-3 font-medium">{r.work_order_no}</td>
+                          <td className="p-3">{r.center_name}</td>
+                          <td className="p-3 num value-positive">{inr(r.income)}</td>
+                          <td className="p-3 num value-negative">{inr(r.expense)}</td>
+                          <td className={`p-3 num font-semibold ${r.net >= 0 ? "value-positive" : "value-negative"}`}>{inr(r.net)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    {rows.length > 0 && (
+                      <tfoot>
+                        <tr className="border-t-2 border-[var(--border)] font-bold bg-gray-50">
+                          <td className="p-3" colSpan={2}>Total</td>
+                          <td className="p-3 num value-positive">{inr(tot.income)}</td>
+                          <td className="p-3 num value-negative">{inr(tot.expense)}</td>
+                          <td className={`p-3 num ${tot.net >= 0 ? "value-positive" : "value-negative"}`}>{inr(tot.net)}</td>
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
+                </div>
+              </>
+            );
+          })()}
+        </TabsContent>
       </Tabs>
     </div>
   );
