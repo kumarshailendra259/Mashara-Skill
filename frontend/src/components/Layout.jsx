@@ -163,6 +163,9 @@ function SidebarBody({
   search, setSearch, searchResults, searchActive, setSearchActive, searchRef,
   activeIdx, setActiveIdx, onSearchKeyDown, collapsible, collapsed, setCollapsed,
 }) {
+  // Only show Favorites/Recent for items the current user can still see.
+  const favResolved = favorites.filter((to) => itemIndex.has(to));
+  const recentResolved = recent.filter((to) => itemIndex.has(to));
   const renderItemLink = (it, { inFav = false } = {}) => {
     const Icon = it.icon;
     const badge = badgeFor(it.key);
@@ -329,30 +332,28 @@ function SidebarBody({
         )}
 
         {/* Favorites */}
-        {favorites.length > 0 && (
+        {favResolved.length > 0 && (
           <div className="mt-2 mb-1" data-testid="sidebar-favorites">
             <div className="px-4 py-1.5 flex items-center gap-2">
               <Star size={11} className="text-[var(--sb-badge)]" fill="currentColor" />
               <span className="sb-section-label flex-1">{t("favorites")}</span>
             </div>
-            {favorites.map((to) => {
+            {favResolved.map((to) => {
               const it = itemIndex.get(to);
-              if (!it) return null;
               return <div key={to} className="sb-fav-row">{renderItemLink(it, { inFav: true })}</div>;
             })}
           </div>
         )}
 
         {/* Recent pages */}
-        {recent.length > 0 && (
+        {recentResolved.length > 0 && (
           <div className="mt-2 mb-1" data-testid="sidebar-recent">
             <div className="px-4 py-1.5 flex items-center gap-2">
               <Clock size={11} className="text-[var(--sb-text2)]" />
               <span className="sb-section-label flex-1">{t("recent_pages")}</span>
             </div>
-            {recent.map((to) => {
+            {recentResolved.map((to) => {
               const it = itemIndex.get(to);
-              if (!it) return null;
               const Icon = it.icon;
               return (
                 <NavLink
@@ -532,7 +533,8 @@ export default function Layout({ children }) {
   const [search, setSearch] = useState("");
   const [searchActive, setSearchActive] = useState(false);
   const [activeIdx, setActiveIdx] = useState(0);
-  const searchRef = useRef(null);
+  const desktopSearchRef = useRef(null);
+  const drawerSearchRef = useRef(null);
 
   useEffect(() => {
     if (!user) return;
@@ -686,28 +688,36 @@ export default function Layout({ children }) {
     if (e.key === "ArrowDown") { e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, Math.max(0, searchResults.length - 1))); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); }
     else if (e.key === "Enter") { e.preventDefault(); const r = searchResults[activeIdx]; if (r) r.onSelect(); }
-    else if (e.key === "Escape") { setSearch(""); setSearchActive(false); searchRef.current?.blur(); }
+    else if (e.key === "Escape") { setSearch(""); setSearchActive(false); desktopSearchRef.current?.blur(); drawerSearchRef.current?.blur(); }
   };
 
+  // Expand the desktop sidebar and focus its search input (used by the rail
+  // search icon and desktop Ctrl/Cmd+K). Never touches the mobile drawer.
   const focusSearch = useCallback(() => {
     setCollapsed(false);
     setSearchActive(true);
-    setTimeout(() => searchRef.current?.focus(), 60);
+    setTimeout(() => desktopSearchRef.current?.focus(), 60);
   }, [setCollapsed]);
 
-  // Global Ctrl/Cmd+K to open search.
+  // Global Ctrl/Cmd+K — viewport-aware so it never opens the (hidden) mobile
+  // Sheet on desktop, whose overlay would otherwise block the whole page.
   useEffect(() => {
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
         e.preventDefault();
-        if (collapsed) setCollapsed(false);
-        setMobileOpen(true);
-        focusSearch();
+        const isMobile = window.matchMedia("(max-width: 767px)").matches;
+        if (isMobile) {
+          setMobileOpen(true);
+          setSearchActive(true);
+          setTimeout(() => drawerSearchRef.current?.focus(), 90);
+        } else {
+          focusSearch();
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [collapsed, setCollapsed, focusSearch]);
+  }, [focusSearch]);
 
   // Close search dropdown on route change.
   useEffect(() => { setSearchActive(false); }, [location.pathname]);
@@ -741,7 +751,7 @@ export default function Layout({ children }) {
     openGroup, toggleGroup, currentPath: location.pathname,
     blockedModules: scope?.blocked_modules || [],
     favorites, recent, toggleFav, itemIndex, onLogout: handleLogout,
-    search, setSearch, searchResults, searchActive, setSearchActive, searchRef,
+    search, setSearch, searchResults, searchActive, setSearchActive,
     activeIdx, setActiveIdx, onSearchKeyDown,
   };
 
@@ -760,14 +770,14 @@ export default function Layout({ children }) {
             openGroupInExpanded={openGroupInExpanded} setCollapsed={setCollapsed} onLogout={handleLogout} focusSearch={focusSearch}
           />
         ) : (
-          <SidebarBody {...sharedBodyProps} collapsible collapsed={collapsed} setCollapsed={setCollapsed} />
+          <SidebarBody {...sharedBodyProps} searchRef={desktopSearchRef} collapsible collapsed={collapsed} setCollapsed={setCollapsed} />
         )}
       </aside>
 
       {/* Mobile drawer */}
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent side="left" className="p-0 w-72 max-w-[85vw] flex flex-col md:hidden bg-[var(--sb-bg)] border-r-0" data-testid="mobile-drawer">
-          <SidebarBody {...sharedBodyProps} onNavigate={() => setMobileOpen(false)} collapsible={false} collapsed={false} setCollapsed={setCollapsed} />
+          <SidebarBody {...sharedBodyProps} searchRef={drawerSearchRef} onNavigate={() => setMobileOpen(false)} collapsible={false} collapsed={false} setCollapsed={setCollapsed} />
         </SheetContent>
       </Sheet>
 

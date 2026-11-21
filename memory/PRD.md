@@ -3096,3 +3096,18 @@ Request: EVERY financial transaction (income & expense) must carry a Work Order,
 - Frontend (`Reports.jsx`): new "Work Order P&L" tab (data-testid report-tab-wo_pnl, wo-pnl-table, wo-pnl-row-*, export-wo_pnl) — WO-wise Income/Receipts, Expense/Payments, Net + Center column + totals footer + CSV export.
 - Testing (iteration_93): new suite 18 passed / 2 failed (both fixed this turn: POST response missing work_order_no; PUT erasing WO), phase90 + phase92 re-ran green. Both fixes curl-verified in preview (create returns work_order_no; edit amount keeps WO).
 - Status: implemented + verified in PREVIEW. Needs DEPLOY for production.
+
+---
+
+## Phase 100 — Advanced category-based Sidebar redesign (frontend-only) (2026-06)
+Request: Redesign the sidebar into a modern enterprise navigation — standalone Dashboard, 9 business categories + a bottom "System & Administration" section, smart single-accordion, collapsible icon-rail with tooltips, global search (Ctrl/Cmd+K), Favorites/Pinned, Recent Pages, category color identity, responsive drawer. HARD CONSTRAINT: no changes to routes, RBAC, permissions, center-mapping, badges, or backend. User choices: omit non-existent pages (Masters/Settings/Help), keep /reports as single reports entry, persist preferences on-device (localStorage).
+- Implementation (`components/Layout.jsx`, full rewrite): central `navGroups` config (9 categories, each with `color`) + `systemGroup` (Subscription, Companies Super-Admin, Roles & Permissions, Login History) + standalone `dashboardNav`. Reuses every existing route/icon/role-gate/`module`. RBAC preserved exactly: `canSee()` logic unchanged + per-item `menu` gate via `usePerm().can` (relocated admin items keep their original menu), group-level `can(menu,'view')` kept.
+  - Single-accordion: `openGroup` string state; opening one closes others; active route auto-expands its category.
+  - Collapse rail: `SidebarRail` icon-only mode, persisted in localStorage `sb_collapsed`; category icon click expands + opens group.
+  - Search: built from `itemIndex` (visible items only → permission-safe), match highlight, parent-category label, arrow/enter/escape keys, empty state; Ctrl/Cmd+K viewport-aware (desktop focuses sidebar input, mobile opens drawer).
+  - Favorites (`sb_fav_<uid>`) via per-item pin button; Recent (`sb_recent_<uid>`, max 5, newest-first, dedup, excludes dashboard home). Both sections only render when ≥1 item resolves in the permission-filtered index.
+  - Badges preserved (`badgeFor`): Transactions, HRMS, Pending Approvals + summed group badge when collapsed.
+  - CSS: new `.sb-*` classes in index.css. i18n: new keys in i18n.js (EN+HI).
+- Testing (iteration_94): RBAC parity verified across admin/company_admin/hr/center_manager (0 extra items, 0 search leaks), 41/41 routes load, all features work. 1 CRITICAL fixed: Ctrl/Cmd+K opened the hidden mobile Sheet on desktop (overlay blocked clicks) — fixed with viewport check + separate desktop/drawer search refs. Also fixed empty Favorites/Recent header. All 3 fixes screenshot-verified.
+- KNOWN (not fixed, reported to user): collapsed-rail styled tooltip clipped by overflow (native title tooltip still works); /hrms/financial-history highlights both HRMS+child (not longest-prefix); pin hidden on touch; company_admin sees near-empty sidebar because backend returns all-false menu perms (pre-existing, not a regression).
+- Status: implemented + verified in PREVIEW. Needs DEPLOY for production.
