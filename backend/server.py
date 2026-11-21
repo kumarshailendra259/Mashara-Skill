@@ -4843,30 +4843,44 @@ async def dashboard_overview(
         if r.get("_id") in tx:
             tx[r["_id"]] = r["n"]
 
-    # --- Org counts (center-scoped) ---
+    # --- Org counts (center-scoped; narrowed further when a center is focused) ---
     allowed_centers = _scoped_center_ids(user)
     cscope: dict = {}
     if allowed_centers is not None:
         cscope = {"center_id": {"$in": allowed_centers}} if allowed_centers else {"center_id": "__none__"}
+    if center_id:
+        cscope = {**cscope, "center_id": center_id}
     active_batches = await db.batches.count_documents({**cscope, "status": {"$ne": "closed"}})
     user_filter: dict = {"is_active": {"$ne": False}}
     if user.get("role") != "admin" and user.get("company_id"):
         user_filter["company_id"] = user["company_id"]
+    if center_id:
+        # A focused center narrows "active users" to those mapped to that center.
+        user_filter["assigned_center_ids"] = center_id
     active_users = await db.users.count_documents(user_filter)
+
+    # Extra filter applied to center-bearing pending queues when a center is focused.
+    cfilter = {"center_id": center_id} if center_id else {}
 
     # --- Pending actions ---
     try:
-        pending_approvals = len(await list_pending_approvals(user=user))
+        pending_approvals = len(await list_pending_approvals(user=user, center_id=center_id))
+    except TypeError:
+        # list_pending_approvals may not accept center_id — fall back to the full inbox.
+        try:
+            pending_approvals = len(await list_pending_approvals(user=user))
+        except Exception:
+            pending_approvals = 0
     except Exception:
         pending_approvals = 0
     payment_requests = await db.quotations.count_documents(
-        {"status": {"$nin": ["paid", "rejected", "cancelled", "completed"]}}
+        {**cfilter, "status": {"$nin": ["paid", "rejected", "cancelled", "completed"]}}
     )
-    advances_pending = await db.advance_requests.count_documents({"status": "pending"})
+    advances_pending = await db.advance_requests.count_documents({**cfilter, "status": "pending"})
     reimb_pending = await db.reimbursements.count_documents(
-        {"status": {"$in": ["submitted", "l1_approved", "accountant_approved"]}}
+        {**cfilter, "status": {"$in": ["submitted", "l1_approved", "accountant_approved"]}}
     )
-    payroll_pending = await db.payroll.count_documents({"status": {"$ne": "paid"}})
+    payroll_pending = await db.payroll.count_documents({**cfilter, "status": {"$ne": "paid"}})
     hr_actions = reimb_pending + payroll_pending
     try:
         settlement_pending = await db.settlements.count_documents({"status": {"$in": ["pending", "open"]}})

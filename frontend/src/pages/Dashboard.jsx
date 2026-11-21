@@ -200,7 +200,16 @@ export default function Dashboard() {
           <p className="text-white/80 text-sm md:text-base mt-1">Here's your business operations overview.</p>
           <div className="flex flex-wrap items-center gap-2 mt-4">
             <span className="dash-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium" data-testid="hero-company"><Building2 size={13} /> {companyLine}</span>
-            <span className="dash-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium"><MapPin size={13} /> {filters.center_id ? (entities.center.find((c) => c.id === filters.center_id)?.name || "Center") : "All Centers"}</span>
+            <Select value={filters.center_id || "__all"} onValueChange={(v) => setF("center_id", v === "__all" ? "" : v)}>
+              <SelectTrigger data-testid="dashboard-center-focus" className="dash-chip h-auto w-auto gap-1.5 rounded-full border-0 px-3 py-1 text-xs font-medium text-white focus:ring-0 focus:ring-offset-0 [&>svg]:opacity-70">
+                <MapPin size={13} />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all">All Centers</SelectItem>
+                {entities.center.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
             <span className="dash-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium"><Clock size={13} /> {fy && fy !== "all" ? `FY ${fy}` : "All Financial Years"}</span>
             {lastUpdated && <span className="dash-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium"><Activity size={13} /> Updated {lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>}
           </div>
