@@ -4815,6 +4815,99 @@ async def dashboard_summary(
         "by_item": await _items_breakdown(match),
     }
 
+@api.get("/dashboard/overview")
+async def dashboard_overview(
+    user=Depends(require_finance_visible),
+    center_id: Optional[str] = None,
+    fy: Optional[str] = None,
+):
+    """Operational overview for the redesigned Dashboard hero: transaction
+    status counts, pending-action counters, org counts and a recent-activity
+    feed. Everything is scoped to the caller (reuses existing helpers).
+    READ-ONLY — no data is mutated and no existing endpoint is changed."""
+    await _enrich_user_with_associations(user)
+    scope = _txn_scope_for_user(user)
+    if center_id:
+        allowed = _scoped_center_ids(user)
+        if allowed is not None and center_id not in set(allowed):
+            raise HTTPException(403, "Not authorized for this center")
+        scope = {**scope, "center_id": center_id}
+
+    # --- Transaction status counts ---
+    status_rows = await db.transactions.aggregate(
+        [{"$match": scope}, {"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+    ).to_list(50)
+    tx = {"total": 0, "approved": 0, "pending": 0, "rejected": 0}
+    for r in status_rows:
+        tx["total"] += r["n"]
+        if r.get("_id") in tx:
+            tx[r["_id"]] = r["n"]
+
+    # --- Org counts (center-scoped) ---
+    allowed_centers = _scoped_center_ids(user)
+    cscope: dict = {}
+    if allowed_centers is not None:
+        cscope = {"center_id": {"$in": allowed_centers}} if allowed_centers else {"center_id": "__none__"}
+    active_batches = await db.batches.count_documents({**cscope, "status": {"$ne": "closed"}})
+    user_filter: dict = {"is_active": {"$ne": False}}
+    if user.get("role") != "admin" and user.get("company_id"):
+        user_filter["company_id"] = user["company_id"]
+    active_users = await db.users.count_documents(user_filter)
+
+    # --- Pending actions ---
+    try:
+        pending_approvals = len(await list_pending_approvals(user=user))
+    except Exception:
+        pending_approvals = 0
+    payment_requests = await db.quotations.count_documents(
+        {"status": {"$nin": ["paid", "rejected", "cancelled", "completed"]}}
+    )
+    advances_pending = await db.advance_requests.count_documents({"status": "pending"})
+    reimb_pending = await db.reimbursements.count_documents(
+        {"status": {"$in": ["submitted", "l1_approved", "accountant_approved"]}}
+    )
+    payroll_pending = await db.payroll.count_documents({"status": {"$ne": "paid"}})
+    hr_actions = reimb_pending + payroll_pending
+    try:
+        settlement_pending = await db.settlements.count_documents({"status": {"$in": ["pending", "open"]}})
+    except Exception:
+        settlement_pending = 0
+
+    # --- Recent activity (last 6 scoped transactions) ---
+    recent_txns = await db.transactions.find(
+        scope,
+        {"_id": 0, "id": 1, "type": 1, "amount": 1, "description": 1, "created_at": 1, "status": 1, "created_by": 1},
+    ).sort("created_at", -1).to_list(6)
+    uids = list({t.get("created_by") for t in recent_txns if t.get("created_by")})
+    unames: dict = {}
+    if uids:
+        udocs = await db.users.find({"id": {"$in": uids}}, {"_id": 0, "id": 1, "name": 1, "email": 1}).to_list(100)
+        unames = {u["id"]: (u.get("name") or u.get("email")) for u in udocs}
+    activity = [{
+        "id": t.get("id"),
+        "type": t.get("type"),
+        "amount": t.get("amount"),
+        "description": t.get("description") or f"{(t.get('type') or 'transaction').title()} recorded",
+        "status": t.get("status"),
+        "at": t.get("created_at"),
+        "by": unames.get(t.get("created_by"), "—"),
+    } for t in recent_txns]
+
+    return {
+        "transactions": tx,
+        "org": {"active_batches": active_batches, "active_users": active_users},
+        "pending_actions": {
+            "approvals": pending_approvals,
+            "payment_requests": payment_requests,
+            "advances": advances_pending,
+            "hr_actions": hr_actions,
+            "partner_settlement": settlement_pending,
+        },
+        "recent_activity": activity,
+    }
+
+
+
 
 async def _items_breakdown(match: dict) -> list:
     """Aggregate transaction.items[] grouped by item name across the matched txns."""

@@ -122,6 +122,23 @@ aside.sb-aside { transition: width 220ms cubic-bezier(.4,0,.2,1); }
 }
 .sb-rail-btn:hover .sb-tip { opacity: 1; }
 
+/* ---------- Dashboard hero (operational overview) ---------- */
+.dash-hero {
+  background:
+    radial-gradient(1200px 300px at 90% -40%, rgba(37,99,235,0.25), transparent 60%),
+    linear-gradient(120deg, #0B1F3A 0%, #15418f 55%, #2563EB 100%);
+}
+.dash-chip {
+  background: rgba(255,255,255,0.14);
+  border: 1px solid rgba(255,255,255,0.18);
+  color: #fff;
+}
+.dash-kpi { transition: transform 180ms ease, box-shadow 180ms ease; }
+.dash-kpi:hover { transform: translateY(-3px); box-shadow: 0 14px 30px rgba(15,23,42,0.1); }
+.dash-qa { transition: transform 150ms ease, box-shadow 150ms ease; }
+.dash-qa:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(15,23,42,0.08); }
+.dash-bar { transition: width 700ms cubic-bezier(.4,0,.2,1); }
+
 /* Mobile drawer (navy) close button — make the X legible on dark bg */
 [data-testid="mobile-drawer"] > button { color: var(--sb-text); opacity: 0.85; }
 [data-testid="mobile-drawer"] > button:hover { opacity: 1; }
