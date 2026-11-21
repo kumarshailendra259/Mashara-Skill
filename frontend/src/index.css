@@ -66,6 +66,62 @@
 }
 .sb-chevron { transition: transform 200ms ease; }
 
+/* ---- Redesigned sidebar: search, favorites, recent, rail, pins ---- */
+aside.sb-aside { transition: width 220ms cubic-bezier(.4,0,.2,1); }
+.sb-section-label {
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--sb-text2); font-weight: 700;
+}
+.sb-search-field {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--sb-divider);
+  color: var(--sb-text);
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+.sb-search-field::placeholder { color: var(--sb-text2); opacity: 0.8; }
+.sb-search-field:focus {
+  outline: none;
+  border-color: var(--sb-active);
+  background: rgba(255,255,255,0.1);
+}
+.sb-result {
+  transition: background-color 120ms ease;
+  color: var(--sb-text2);
+}
+.sb-result:hover, .sb-result.sb-result-active {
+  background: var(--sb-hover);
+  color: #fff;
+}
+.sb-hl { color: var(--sb-badge); font-weight: 700; background: transparent; }
+.sb-pin {
+  opacity: 0; transition: opacity 120ms ease, color 120ms ease, transform 120ms ease;
+  color: var(--sb-text2);
+}
+.sb-link:hover .sb-pin, .sb-fav-row:hover .sb-pin { opacity: 0.75; }
+.sb-pin:hover { color: var(--sb-badge); transform: scale(1.15); opacity: 1 !important; }
+.sb-pin-active { opacity: 1 !important; color: var(--sb-badge); }
+.sb-cat-dot { width: 7px; height: 7px; border-radius: 9999px; flex-shrink: 0; }
+/* Collapsed rail: icon buttons with native-ish tooltip */
+.sb-rail-btn {
+  position: relative;
+  color: var(--sb-text2);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+.sb-rail-btn:hover { background: var(--sb-hover); color: #fff; }
+.sb-rail-btn.sb-rail-active { color: #fff; }
+.sb-rail-btn.sb-rail-active::before {
+  content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  height: 55%; width: 3px; border-radius: 9999px; background: var(--sb-active);
+}
+.sb-tip {
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+  white-space: nowrap; background: #0d1b2f; color: #fff; font-size: 11px; font-weight: 600;
+  padding: 5px 9px; border-radius: 6px; border: 1px solid var(--sb-divider);
+  opacity: 0; pointer-events: none; transition: opacity 120ms ease; z-index: 60;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+}
+.sb-rail-btn:hover .sb-tip { opacity: 1; }
+
 /* Mobile drawer (navy) close button — make the X legible on dark bg */
 [data-testid="mobile-drawer"] > button { color: var(--sb-text); opacity: 0.85; }
 [data-testid="mobile-drawer"] > button:hover { opacity: 1; }
