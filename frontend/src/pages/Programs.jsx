@@ -31,11 +31,36 @@ const CATEGORY_LABEL = {
   "3": "Category 3 (₹36.85/hr)",
   other: "Other (custom rate)",
 };
-// Returns the effective hourly rate for a job-role row (cat 1/2/3 use fixed table, "other" uses custom_rate)
+// Returns the effective hourly rate for a job-role row. A custom_rate (>0) always
+// wins so a Work-Order-derived row can carry the batch's authoritative final_rate.
 const rateForRow = (r) => {
-  if (String(r?.category) === "other") return parseFloat(r?.custom_rate) || 0;
+  const custom = parseFloat(r?.custom_rate) || 0;
+  if (custom > 0) return custom;
+  if (String(r?.category) === "other") return 0;
   return CATEGORY_RATES[String(r?.category)] || 0;
 };
+// Normalise a batch category (I/II/III or 1/2/3) → "1"/"2"/"3".
+const normCat = (c) => ({ I: "1", II: "2", III: "3", "1": "1", "2": "2", "3": "3" }[String(c ?? "").trim().toUpperCase()] || "1");
+// Milestone role-total basis — AUTO-derived from the batch's Work Order / Course
+// allocation (candidates × final_rate × hours) so nothing is typed on the Finance
+// page. Falls back to any stored job_roles for legacy batches without a WO.
+function effectiveJobRoles(b) {
+  if (!b) return [];
+  const cand = parseInt(b.num_candidates, 10) || 0;
+  const hrs = parseFloat(b.job_role_hours) || 0;
+  if (cand > 0 && hrs > 0) {
+    const rate = parseFloat(b.final_rate) || 0;
+    return [{
+      category: normCat(b.category),
+      job_role: b.job_role || "",
+      candidates: cand,
+      hours: hrs,
+      custom_rate: rate,
+      _fromWO: true,
+    }];
+  }
+  return b.job_roles || [];
+}
 const UNIFORM_PER_CANDIDATE = 1000;
 const SHARES = { "1st": 0.30, "2nd": 0.40, "3rd": 0.30 };
 // 2-decimal INR formatter, used for TDS / net amounts (gross/role/uniform stay integer via inr())
@@ -354,14 +379,26 @@ export default function Programs() {
     () => computeMilestones(bForm.job_roles, bForm.passed_candidates, bForm.placed_candidates),
     [bForm.job_roles, bForm.passed_candidates, bForm.placed_candidates],
   );
+  // Effective job roles for the active batch — auto-derived from its Work Order / Course.
+  const activeRoles = useMemo(() => effectiveJobRoles(activeBatch), [activeBatch]);
   // For showing on active batch summary card — uses persisted passed/placed
   const activeBatchBreakdown = useMemo(
     () => activeBatch ? computeMilestones(
-      activeBatch.job_roles || [],
+      activeRoles,
       activeBatch.passed_candidates || 0,
       activeBatch.placed_candidates || 0,
     ) : null,
-    [activeBatch],
+    [activeBatch, activeRoles],
+  );
+  // Read-only breakdown for the Edit dialog, sourced entirely from Batch Management.
+  const editRoles = useMemo(() => effectiveJobRoles(editingBatch), [editingBatch]);
+  const editBreakdown = useMemo(
+    () => editingBatch ? computeMilestones(
+      editRoles,
+      editingBatch.passed_candidates || 0,
+      editingBatch.placed_candidates || 0,
+    ) : null,
+    [editingBatch, editRoles],
   );
 
   // Job-role row helpers (used inside the batch dialog)
@@ -401,39 +438,23 @@ export default function Programs() {
     setBatchOpen(true);
   };
   const saveBatch = async () => {
-    if (!bForm.name.trim()) { toast.error("Batch name required"); return; }
-    if (!bForm.project_id) { toast.error("Project required"); return; }
+    if (!editingBatch) { setBatchOpen(false); return; }
     try {
-      // Auto-compute total_beneficiaries from job_roles when present
-      const computedBeneficiaries = (bForm.job_roles || []).reduce((s, r) => s + (parseInt(r.candidates, 10) || 0), 0);
+      // Finance page only owns Company + Partner split. Everything else (job roles,
+      // candidates, hours, passed, placed) is preserved as-is from Batch Management.
       const payload = {
-        ...bForm,
-        total_beneficiaries: computedBeneficiaries || +bForm.total_beneficiaries || 0,
-        center_id: bForm.center_id || null,
+        ...editingBatch,
         company_id: bForm.company_id || null,
         partner_ids: bForm.partner_ids || [],
-        passed_candidates: parseInt(bForm.passed_candidates, 10) || 0,
-        placed_candidates: parseInt(bForm.placed_candidates, 10) || 0,
         partner_share_percent: parseFloat(bForm.partner_share_percent) || 0,
-        job_roles: (bForm.job_roles || []).map((r) => ({
-          category: String(r.category || "1"),
-          job_role: r.job_role || "",
-          candidates: parseInt(r.candidates, 10) || 0,
-          hours: parseFloat(r.hours) || 0,
-          custom_rate: String(r.category) === "other" ? (parseFloat(r.custom_rate) || 0) : 0,
-        })),
       };
-      if (editingBatch) await api.put(`/batches/${editingBatch.id}`, payload);
-      else {
-        const r = await api.post("/batches", payload);
-        setSelectedBatchId(r.data.id);
-      }
+      await api.put(`/batches/${editingBatch.id}`, payload);
       setBatchOpen(false);
       const params = { project_id: activeProjectId };
       if (selectedCenterId && selectedCenterId !== "__all") params.center_id = selectedCenterId;
       const r = await api.get("/batches", { params });
       setBatches(r.data);
-      toast.success("Batch saved");
+      toast.success("Settings saved");
     } catch (e) { toast.error(formatError(e)); }
   };
   const deleteBatch = async (b) => {
@@ -459,7 +480,7 @@ export default function Programs() {
     setEditingPay(null);
     if (activeBatch) {
       const bd = computeMilestones(
-        activeBatch.job_roles || [],
+        activeRoles,
         activeBatch.passed_candidates || 0,
         activeBatch.placed_candidates || 0,
       );
@@ -787,7 +808,7 @@ export default function Programs() {
                             </tr>
                           </thead>
                           <tbody>
-                            {(activeBatch.job_roles || []).map((r, i) => {
+                            {activeRoles.map((r, i) => {
                               const rate = rateForRow(r);
                               const c = parseInt(r.candidates, 10) || 0;
                               const h = parseFloat(r.hours) || 0;
@@ -1004,149 +1025,77 @@ export default function Programs() {
 
       {/* Batch dialog */}
       <Dialog open={batchOpen} onOpenChange={setBatchOpen}>
-        <DialogContent className="rounded-none max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader><DialogTitle className="font-heading">{editingBatch ? "Edit" : "New"} Batch</DialogTitle></DialogHeader>
+        <DialogContent className="rounded-2xl max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader><DialogTitle className="font-heading">Batch &amp; Partner Settings</DialogTitle></DialogHeader>
           <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-slate-600 flex items-start gap-2">
+              <Database size={14} className="text-[var(--brand)] mt-0.5 shrink-0" />
+              <span>Ye numbers (job role, candidates, hours, passed, placed) <b>Batch Management</b> se automatic aate hain. Inhe badalne ke liye <a href="/batch-management" className="text-[var(--brand)] underline">Batch Management</a> me batch edit karein.</span>
+            </div>
             <div className="col-span-2">
-              <Label>Batch Name</Label>
-              <Input value={bForm.name} onChange={(e) => setBForm({ ...bForm, name: e.target.value })} placeholder="e.g. Batch 2026-A" className="rounded-none" data-testid="batch-name" />
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Batch</div>
+              <div className="font-semibold text-slate-800" data-testid="ro-batch-name">{bForm.name || "—"}</div>
             </div>
             <div>
-              <Label>Project</Label>
-              <Select value={bForm.project_id} onValueChange={(v) => setBForm({ ...bForm, project_id: v })}>
-                <SelectTrigger className="rounded-none"><SelectValue placeholder="Select project" /></SelectTrigger>
-                <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
-              </Select>
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Project</div>
+              <div className="font-medium text-slate-800 truncate">{projects.find((p) => p.id === bForm.project_id)?.name || "—"}</div>
             </div>
             <div>
-              <Label>Center</Label>
-              <Select value={bForm.center_id || "__none"} onValueChange={(v) => setBForm({ ...bForm, center_id: v === "__none" ? "" : v })}>
-                <SelectTrigger className="rounded-none"><SelectValue placeholder="—" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none">—</SelectItem>
-                  {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Label>Start Date</Label>
-              <Input type="date" value={bForm.start_date} onChange={(e) => setBForm({ ...bForm, start_date: e.target.value })} className="rounded-none" />
-            </div>
-            <div>
-              <Label>End Date</Label>
-              <Input type="date" value={bForm.end_date} onChange={(e) => setBForm({ ...bForm, end_date: e.target.value })} className="rounded-none" />
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Center</div>
+              <div className="font-medium text-slate-800 truncate">{bForm.center_id ? centerName(bForm.center_id) : "—"}</div>
             </div>
 
-            {/* Job Roles dynamic list */}
-            <div className="col-span-2 border-t border-[var(--border)] pt-3 mt-1">
-              <div className="flex items-center justify-between mb-2">
+            {/* Milestone basis — auto from Work Order / Course (read-only) */}
+            <div className="col-span-2 border-t border-slate-200 pt-3 mt-1">
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold mb-2">Milestone Basis · auto from Work Order / Course</div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-lg border border-slate-200 p-3" data-testid="batch-readonly-info">
                 <div>
-                  <Label className="overline">Job Roles · drives 1st milestone amount</Label>
-                  <p className="text-xs text-[var(--muted)]">Add one row per job role. Rates: Cat 1 ₹56.35/hr · Cat 2 ₹52.50/hr · Cat 3 ₹36.85/hr. Uniform ₹1000 per candidate added automatically.</p>
+                  <div className="text-[10px] text-slate-400">Job Role</div>
+                  <div className="font-medium text-sm truncate" data-testid="ro-job-role">{editRoles[0]?.job_role || editingBatch?.job_role || "—"}</div>
                 </div>
-                <Button type="button" size="sm" variant="outline" onClick={addJobRoleRow} className="rounded-none gap-1" data-testid="add-job-role">
-                  <Plus size={12} /> Add Role
-                </Button>
+                <div>
+                  <div className="text-[10px] text-slate-400">Candidates</div>
+                  <div className="num font-medium text-sm" data-testid="ro-candidates">{editRoles[0]?.candidates || editingBatch?.num_candidates || 0}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">Hours</div>
+                  <div className="num font-medium text-sm" data-testid="ro-hours">{editRoles[0]?.hours || editingBatch?.job_role_hours || 0}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">Rate / hr</div>
+                  <div className="num font-medium text-sm">{inr(rateForRow(editRoles[0] || {}))}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">Role Total</div>
+                  <div className="num font-bold text-sm text-[var(--brand)]" data-testid="ro-role-total">{inr(editBreakdown?.roleTotal || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">1st (30% + Uniform)</div>
+                  <div className="num font-semibold text-sm" data-testid="ro-m1">{inr(editBreakdown?.first.amount || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">2nd (net)</div>
+                  <div className="num font-semibold text-sm" data-testid="ro-m2">{inr(editBreakdown?.second.amount || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">3rd (placed)</div>
+                  <div className="num font-semibold text-sm" data-testid="ro-m3">{inr(editBreakdown?.third.amount || 0)}</div>
+                </div>
               </div>
-              {(bForm.job_roles || []).length === 0 ? (
-                <div className="text-center text-xs text-[var(--muted)] py-4 border border-dashed border-[var(--border)]">
-                  No job roles. Click &quot;Add Role&quot; to define candidates × hours × category rate.
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {bForm.job_roles.map((r, idx) => {
-                    const rate = rateForRow(r);
-                    const subtotal = (parseInt(r.candidates, 10) || 0) * (parseFloat(r.hours) || 0) * rate;
-                    const isOther = String(r.category) === "other";
-                    return (
-                      <div key={`jr-${idx}`} className="grid grid-cols-12 gap-2 items-end border border-[var(--border)] p-2" data-testid={`job-role-row-${idx}`}>
-                        <div className={isOther ? "col-span-2" : "col-span-3"}>
-                          <div className="overline text-xs mb-1">Category</div>
-                          <Select value={String(r.category)} onValueChange={(v) => updateJobRoleRow(idx, { category: v, custom_rate: v === "other" ? (r.custom_rate || 0) : 0 })}>
-                            <SelectTrigger className="rounded-none h-9" data-testid={`jr-cat-${idx}`}><SelectValue /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="1">{CATEGORY_LABEL["1"]}</SelectItem>
-                              <SelectItem value="2">{CATEGORY_LABEL["2"]}</SelectItem>
-                              <SelectItem value="3">{CATEGORY_LABEL["3"]}</SelectItem>
-                              <SelectItem value="other">{CATEGORY_LABEL.other}</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        {isOther && (
-                          <div className="col-span-1">
-                            <div className="overline text-xs mb-1">Rate/hr</div>
-                            <Input
-                              type="number" min="0" step="0.01"
-                              value={r.custom_rate || 0}
-                              onChange={(e) => updateJobRoleRow(idx, { custom_rate: e.target.value })}
-                              className="rounded-none h-9 num"
-                              data-testid={`jr-rate-${idx}`}
-                            />
-                          </div>
-                        )}
-                        <div className={isOther ? "col-span-3" : "col-span-3"}>
-                          <div className="overline text-xs mb-1">Job Role</div>
-                          <Input value={r.job_role || ""} onChange={(e) => updateJobRoleRow(idx, { job_role: e.target.value })} placeholder="e.g. Trainer" className="rounded-none h-9" data-testid={`jr-name-${idx}`} />
-                        </div>
-                        <div className="col-span-2">
-                          <div className="overline text-xs mb-1">Candidates</div>
-                          <Input type="number" min="0" value={r.candidates} onChange={(e) => updateJobRoleRow(idx, { candidates: e.target.value })} className="rounded-none h-9 num" data-testid={`jr-cand-${idx}`} />
-                        </div>
-                        <div className="col-span-2">
-                          <div className="overline text-xs mb-1">Hours</div>
-                          <Input type="number" min="0" step="0.5" value={r.hours} onChange={(e) => updateJobRoleRow(idx, { hours: e.target.value })} className="rounded-none h-9 num" data-testid={`jr-hours-${idx}`} />
-                        </div>
-                        <div className="col-span-2 flex items-end justify-between gap-1">
-                          <div className="flex-1">
-                            <div className="overline text-xs mb-1">Subtotal</div>
-                            <div className="num font-medium text-sm">{inr(subtotal)}</div>
-                          </div>
-                          <Button type="button" size="icon" variant="ghost" onClick={() => removeJobRoleRow(idx)} className="rounded-none h-9 w-9 hover:text-[var(--danger)]" data-testid={`jr-remove-${idx}`}>
-                            <Trash2 size={14} />
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div className="border-t border-[var(--border)] pt-2 mt-2 bg-blue-50 px-3 py-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-sm" data-testid="job-roles-totals">
-                    <div>
-                      <div className="overline text-xs">Role total</div>
-                      <div className="num font-bold">{inr(bFormBreakdown.roleTotal)}</div>
-                    </div>
-                    <div>
-                      <div className="overline text-xs">1st (30% + Uniform)</div>
-                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.first.amount)}</div>
-                    </div>
-                    <div>
-                      <div className="overline text-xs">2nd net (40%×P − recovery)</div>
-                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.second.amount)}</div>
-                    </div>
-                    <div>
-                      <div className="overline text-xs">3rd (30%×Placed)</div>
-                      <div className="num font-bold text-[var(--brand)]">{inr(bFormBreakdown.third.amount)}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
 
-            <div className="col-span-2 grid grid-cols-2 gap-3 border-t border-[var(--border)] pt-3">
+            <div className="col-span-2 grid grid-cols-2 gap-3 border-t border-slate-200 pt-3">
               <div>
-                <Label>Passed Candidates <span className="overline text-[10px]">(drives 2nd milestone)</span></Label>
-                <Input type="number" min="0" value={bForm.passed_candidates}
-                  onChange={(e) => setBForm({ ...bForm, passed_candidates: e.target.value })}
-                  className="rounded-none num" data-testid="batch-passed" />
+                <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Passed · drives 2nd</div>
+                <div className="num font-semibold text-slate-800" data-testid="batch-passed-ro">{editingBatch?.passed_candidates || 0}</div>
               </div>
               <div>
-                <Label>Placed Candidates <span className="overline text-[10px]">(drives 3rd milestone)</span></Label>
-                <Input type="number" min="0" value={bForm.placed_candidates}
-                  onChange={(e) => setBForm({ ...bForm, placed_candidates: e.target.value })}
-                  className="rounded-none num" data-testid="batch-placed" />
+                <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Placed · drives 3rd</div>
+                <div className="num font-semibold text-slate-800" data-testid="batch-placed-ro">{editingBatch?.placed_candidates || 0}</div>
               </div>
-              {bFormBreakdown.failed > 0 && (
-                <div className="col-span-2 text-xs text-[var(--muted)] border-l-2 border-[var(--danger)] pl-2 py-1">
-                  ⚠ {bFormBreakdown.failed} failed candidate{bFormBreakdown.failed === 1 ? "" : "s"} · 2nd milestone recovery
-                  = {inr(bFormBreakdown.second.recovery)} (30% × {bFormBreakdown.failed}/{bFormBreakdown.totalCandidates} of role)
+              {editBreakdown?.failed > 0 && (
+                <div className="col-span-2 text-xs text-slate-500 border-l-2 border-[var(--danger)] pl-2 py-1">
+                  ⚠ {editBreakdown.failed} failed · 2nd milestone recovery = {inr(editBreakdown.second.recovery)}
                 </div>
               )}
             </div>
@@ -1213,14 +1162,10 @@ export default function Programs() {
                 })}
               </div>
             </div>
-            <div className="col-span-2">
-              <Label>Description</Label>
-              <Textarea value={bForm.description} onChange={(e) => setBForm({ ...bForm, description: e.target.value })} className="rounded-none" rows={2} />
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setBatchOpen(false)} className="rounded-none">Cancel</Button>
-            <Button onClick={saveBatch} className="brand-btn rounded-none" data-testid="batch-save">Save</Button>
+            <Button onClick={saveBatch} className="brand-btn rounded-none" data-testid="batch-save">Save Settings</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

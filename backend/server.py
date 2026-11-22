@@ -14019,9 +14019,13 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
     total_candidates = 0
     for r in (job_roles or []):
         cat = str(r.get("category", "")).strip()
-        # "other" → use per-row custom_rate (default 0 if not set). Cat 1/2/3 use the fixed table.
-        if cat == "other":
-            rate = float(r.get("custom_rate") or 0)
+        # A custom_rate (>0) always wins — lets a Work-Order-derived row carry the
+        # batch's authoritative final_rate regardless of category label.
+        _cr = float(r.get("custom_rate") or 0)
+        if _cr > 0:
+            rate = _cr
+        elif cat == "other":
+            rate = 0.0
         else:
             rate = JOB_CATEGORY_RATES.get(cat, 0.0)
         candidates = int(r.get("candidates") or 0)
@@ -14089,6 +14093,27 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
 
 
 # Backward-compat alias for the older endpoint name
+def _batch_effective_job_roles(batch: dict) -> list:
+    """Milestone role-total basis — auto-derived from the batch's Work Order / Course
+    allocation (candidates × final_rate × hours) so nothing is entered manually on the
+    Finance page. Falls back to any stored job_roles for legacy batches without a WO."""
+    b = batch or {}
+    cand = int(b.get("num_candidates") or 0)
+    hrs = float(b.get("job_role_hours") or 0)
+    if cand > 0 and hrs > 0:
+        rate = float(b.get("final_rate") or 0)
+        cat_map = {"I": "1", "II": "2", "III": "3", "1": "1", "2": "2", "3": "3"}
+        cat = cat_map.get(str(b.get("category") or "").strip().upper(), "1")
+        return [{
+            "category": cat,
+            "job_role": b.get("job_role") or "",
+            "candidates": cand,
+            "hours": hrs,
+            "custom_rate": rate,
+        }]
+    return list(b.get("job_roles") or [])
+
+
 def _compute_1st_milestone(job_roles: list) -> dict:
     """Legacy: returns the 1st-milestone-only breakdown (role + uniform). Retained for back-compat."""
     bd = _compute_batch_milestones(job_roles, passed=0, placed=0)
@@ -14279,6 +14304,9 @@ async def create_batch(body: BatchIn, user=Depends(require_role("admin", "manage
 @api.put("/batches/{bid}", response_model=BatchOut)
 async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin", "manager", "senior_manager", "accountant", "hr", "center_manager"))):
     # Re-validate same FKs as create (project/center/partners)
+    existing = await db.batches.find_one({"id": bid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Not found")
     if not await db.projects.find_one({"id": body.project_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "project_id does not exist")
     if body.center_id and not await db.centers.find_one({"id": body.center_id}, {"_id": 0, "id": 1}):
@@ -14287,12 +14315,12 @@ async def update_batch(bid: str, body: BatchIn, user=Depends(require_role("admin
         cnt = await db.partners.count_documents({"id": {"$in": body.partner_ids}})
         if cnt != len(set(body.partner_ids)):
             raise HTTPException(400, "one or more partner_ids do not exist")
-    if body.work_order_id and not await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1}):
+    # Only validate the WO link when it actually changes — tolerate a pre-existing
+    # (possibly stale) reference so unrelated edits (e.g. partner share) don't fail.
+    if body.work_order_id and body.work_order_id != existing.get("work_order_id") \
+            and not await db.work_orders.find_one({"id": body.work_order_id}, {"_id": 0, "id": 1}):
         raise HTTPException(400, "work_order_id does not exist")
     # Lifecycle-based lock enforcement (admin bypasses locks).
-    existing = await db.batches.find_one({"id": bid}, {"_id": 0})
-    if not existing:
-        raise HTTPException(404, "Not found")
     role = user.get("role")
     if role == "center_manager":
         assigned = set(user.get("assigned_center_ids") or [])
@@ -14737,7 +14765,7 @@ async def compute_first_milestone(bid: str, _=Depends(get_current_user)):
     batch = await db.batches.find_one({"id": bid}, {"_id": 0})
     if not batch:
         raise HTTPException(404, "Batch not found")
-    breakdown = _compute_1st_milestone(batch.get("job_roles") or [])
+    breakdown = _compute_1st_milestone(_batch_effective_job_roles(batch))
     breakdown["rates"] = JOB_CATEGORY_RATES
     breakdown["uniform_per_candidate"] = UNIFORM_PER_CANDIDATE
     return breakdown
@@ -14756,7 +14784,7 @@ async def compute_milestones(bid: str, _=Depends(get_current_user)):
     if not batch:
         raise HTTPException(404, "Batch not found")
     return _compute_batch_milestones(
-        batch.get("job_roles") or [],
+        _batch_effective_job_roles(batch),
         passed=int(batch.get("passed_candidates") or 0),
         placed=int(batch.get("placed_candidates") or 0),
     )

@@ -7,6 +7,15 @@ Web application for company-wise, partner-wise, center-wise, project-wise tracki
 - Production URL: https://finance.masharaskills.com
 - Preview is separate dev env; user clicks "Deploy" to push code from preview to prod.
 
+## [2026-06 · Milestone auto-fetch from Batch Management]
+User ask: "Milestone me automatic data Batch management se Fetch kare, kuchh bhi manually dalna na pade."
+Decisions: role-total from the batch's Work Order/Course; passed/placed from Batch Management (Assessment/Placement stages); those numbers LOCKED read-only on Finance page; Company + Partner Share % + Partners stay editable on Finance (Company defaults from the batch).
+Implemented:
+- `/app/frontend/src/pages/Programs.jsx`: new `effectiveJobRoles(batch)` + `normCat()` derive the milestone basis from WO fields (`num_candidates × final_rate × job_role_hours`, category I/II/III→1/2/3); `rateForRow` now prefers a row's `custom_rate` (the WO `final_rate`). `activeBatchBreakdown`, the auto-calc table, and `openNewPayment` auto-fill all use `activeRoles`. Edit Batch dialog slimmed to read-only auto-fetched info (job role, candidates, hours, rate, role total, 1st/2nd/3rd, passed, placed) + editable Company/Partner Share %/Partners only. `saveBatch` now merges the 3 editable fields onto the full existing batch (prevents the old destructive full-replace that wiped WO/job_roles/passed/placed).
+- `/app/backend/server.py`: `_compute_batch_milestones` prefers `custom_rate>0`; new `_batch_effective_job_roles(batch)`; `GET /batches/{bid}/compute-milestones` and `/compute-1st-milestone` auto-derive from WO. `update_batch` now fetches `existing` first and validates `work_order_id` ONLY when it changes (fixes rejecting edits on batches with a stale WO ref).
+- Verified: compute-milestones curl → role_total ₹2,479.40 @ ₹61.985 WO rate, 1st ₹5,743.82; frontend auto-calc card + slim dialog screenshots correct; slim PUT preserves all WO fields while updating partner share.
+
+
 ## Tech Stack
 - Frontend: React 18 + Tailwind + Shadcn UI + Recharts + Sonner toasts
 - Backend: FastAPI + Motor (async MongoDB) — single monolith server.py (~5000 lines)
