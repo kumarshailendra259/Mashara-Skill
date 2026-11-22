@@ -193,6 +193,11 @@ export default function Dashboard() {
 
       {/* ===== Welcome hero ===== */}
       <div className="dash-hero rounded-2xl px-5 py-6 md:px-8 md:py-7 relative overflow-hidden" data-testid="dashboard-welcome">
+        {/* Controls: in normal flow on mobile (avoids overlapping the title), floated on md+ */}
+        <div className="flex items-center justify-end gap-2 mb-3 md:mb-0 md:absolute md:top-4 md:right-4 z-20">
+          <FYSwitcher variant="inline" />
+          <PrintButton />
+        </div>
         <div className="relative z-10 max-w-3xl">
           <h1 className="font-heading font-black tracking-tight text-2xl md:text-3xl text-white">
             Welcome back, {user?.name || user?.email?.split("@")[0] || "there"}!
@@ -213,10 +218,6 @@ export default function Dashboard() {
             <span className="dash-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium"><Clock size={13} /> {fy && fy !== "all" ? `FY ${fy}` : "All Financial Years"}</span>
             {lastUpdated && <span className="dash-chip inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium"><Activity size={13} /> Updated {lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>}
           </div>
-        </div>
-        <div className="flex items-center gap-2 absolute top-4 right-4 z-10">
-          <FYSwitcher variant="inline" />
-          <PrintButton />
         </div>
         {/* decorative */}
         <div className="hidden lg:flex items-end gap-1.5 absolute right-10 bottom-5 opacity-80 z-0" aria-hidden>

@@ -48,11 +48,11 @@ export default function CompanySwitcher() {
           variant="outline"
           size="sm"
           disabled={busy}
-          className="rounded-none gap-1.5 h-9 max-w-[180px] border-[var(--brand)]/40"
+          className="rounded-none gap-1.5 h-9 max-w-[44px] sm:max-w-[180px] px-2 sm:px-3 border-[var(--brand)]/40"
           data-testid="company-switcher"
         >
           <Building2 size={14} className="text-[var(--brand)] shrink-0" />
-          <span className="truncate font-semibold">{active?.name || "Select Company"}</span>
+          <span className="truncate font-semibold hidden sm:inline">{active?.name || "Select Company"}</span>
           <ChevronDown size={13} className="shrink-0 text-[var(--muted)]" />
         </Button>
       </DropdownMenuTrigger>

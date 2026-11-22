@@ -784,10 +784,15 @@ export default function Layout({ children }) {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="h-14 border-b border-[var(--border)] bg-white flex items-center justify-between px-3 md:px-6 sticky top-0 z-30">
           <div className="flex items-center gap-2 min-w-0">
-            <button type="button" onClick={() => setMobileOpen(true)} className="md:hidden inline-flex items-center justify-center h-9 w-9 -ml-1 text-[var(--ink)] hover:bg-gray-100 active:bg-gray-200 rounded-none" aria-label="Open menu" data-testid="mobile-menu-toggle">
+            <button type="button" onClick={() => setMobileOpen(true)} className="md:hidden inline-flex items-center justify-center h-10 w-10 -ml-1 text-[var(--ink)] hover:bg-gray-100 active:bg-gray-200 rounded-lg" aria-label="Open menu" data-testid="mobile-menu-toggle">
               <Menu size={22} />
             </button>
-            <div className="md:hidden font-heading font-black tracking-tight text-lg truncate">{t("app_name")}</div>
+            <div className="md:hidden flex items-center gap-2 min-w-0">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[var(--brand)] to-[#15418f] flex items-center justify-center shrink-0">
+                <Landmark size={16} className="text-white" />
+              </div>
+              <span className="font-heading font-black tracking-tight text-base leading-none">Mashara</span>
+            </div>
             <div className="hidden md:flex items-center gap-1.5 text-[12px]" data-testid="breadcrumb">
               {breadcrumb ? (
                 <>
@@ -801,7 +806,7 @@ export default function Layout({ children }) {
             </div>
           </div>
           <div className="flex items-center gap-1.5 md:gap-2">
-            <FYSwitcher />
+            <div className="hidden md:block"><FYSwitcher /></div>
             <CompanySwitcher />
             {totalApprovalBadge > 0 && (
               <button type="button" onClick={() => nav("/pending-approvals")} data-testid="pending-requests-pill" title="Pending requests" className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors">
@@ -862,8 +867,11 @@ export default function Layout({ children }) {
 
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="rounded-md max-w-[120px] md:max-w-none truncate" data-testid="user-menu">
-                  <span className="truncate">{user?.name || user?.email}</span>
+                <Button variant="outline" size="sm" className="rounded-md gap-2 px-2 md:px-3 md:max-w-none" data-testid="user-menu">
+                  <span className="sm:hidden w-6 h-6 rounded-full bg-[var(--brand)]/10 text-[var(--brand)] text-[11px] font-bold flex items-center justify-center shrink-0">
+                    {(user?.name || user?.email || "U").trim().charAt(0).toUpperCase()}
+                  </span>
+                  <span className="hidden sm:inline truncate max-w-[140px]">{user?.name || user?.email}</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="rounded-none">
