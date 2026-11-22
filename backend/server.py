@@ -14098,7 +14098,9 @@ def _batch_effective_job_roles(batch: dict) -> list:
     allocation (candidates × final_rate × hours) so nothing is entered manually on the
     Finance page. Falls back to any stored job_roles for legacy batches without a WO."""
     b = batch or {}
-    cand = int(b.get("num_candidates") or 0)
+    # THIS batch's own candidate count — the capacity set for the batch, NOT the
+    # Work Order's course-level allocation (num_candidates spans the whole WO).
+    cand = int(b.get("total_beneficiaries") or 0) or int(b.get("enrolled") or 0) or int(b.get("num_candidates") or 0)
     hrs = float(b.get("job_role_hours") or 0)
     if cand > 0 and hrs > 0:
         rate = float(b.get("final_rate") or 0)

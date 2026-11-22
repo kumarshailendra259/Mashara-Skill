@@ -46,7 +46,9 @@ const normCat = (c) => ({ I: "1", II: "2", III: "3", "1": "1", "2": "2", "3": "3
 // page. Falls back to any stored job_roles for legacy batches without a WO.
 function effectiveJobRoles(b) {
   if (!b) return [];
-  const cand = parseInt(b.num_candidates, 10) || 0;
+  // THIS batch's own candidate count — the capacity set for the batch, NOT the
+  // Work Order's course-level allocation (num_candidates spans the whole WO).
+  const cand = parseInt(b.total_beneficiaries, 10) || parseInt(b.enrolled, 10) || parseInt(b.num_candidates, 10) || 0;
   const hrs = parseFloat(b.job_role_hours) || 0;
   if (cand > 0 && hrs > 0) {
     const rate = parseFloat(b.final_rate) || 0;
