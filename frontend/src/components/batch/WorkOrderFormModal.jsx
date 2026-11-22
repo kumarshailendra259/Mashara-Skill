@@ -17,6 +17,7 @@ const EMPTY_COURSE = {
   course_master_id: null,
   sector: "", sub_sector: "", course: "", qp_code: "", category: "1", nsqf_level: "",
   course_hours: 0, cost_per_hour: 0, boarding_per_day: 0, boarding_days: 0, beneficiaries: 0,
+  uniform_cost: 0,
 };
 
 const rowFee = (c) => {
@@ -127,6 +128,7 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
           boarding_per_day: Number(c.boarding_per_day) || 0,
           boarding_days: Number(c.boarding_days) || 0,
           beneficiaries: Number(c.beneficiaries) || 0,
+          uniform_cost: Number(c.uniform_cost) || 0,
         })),
         company_id: f.company_id || null,
       };
@@ -214,13 +216,14 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
             <Button size="sm" variant="outline" onClick={addCourse} className="h-7 text-[11px]" data-testid="wo-add-course"><Plus size={12} /> Add Course</Button>
           </div>
           <div className="overflow-x-auto border border-[var(--border)] rounded-md">
-            <table className="w-full text-[11px] min-w-[1250px]">
+            <table className="w-full text-[11px] min-w-[1360px]">
               <thead className="bg-slate-50">
                 <tr className="[&>th]:p-1.5 [&>th]:text-left [&>th]:overline [&>th]:text-[9px] [&>th]:whitespace-nowrap">
                   <th>Job Role / Course</th>
                   <th>Sector</th><th>Sub Sector</th><th>QP Code</th><th>Cat</th><th>NSQF</th>
                   <th className="text-right">Hours</th><th className="text-right">Cost/Hr</th>
                   <th className="text-right">Board/Day</th><th className="text-right">Days</th><th className="text-right">Benef.</th>
+                  <th className="text-right">Uniform/Cand</th>
                   <th className="text-right">Total Fee</th><th></th>
                 </tr>
               </thead>
@@ -264,6 +267,7 @@ export default function WorkOrderFormModal({ open, initial, onClose, onSaved, pr
                       <td>{numCell("boarding_per_day", "w-20")}</td>
                       <td>{numCell("boarding_days", "w-14")}</td>
                       <td><Input type="number" value={c.beneficiaries} onChange={(e) => setCourse(i, "beneficiaries", e.target.value)} className="h-7 text-[11px] w-16 text-right" /></td>
+                      <td><Input type="number" value={c.uniform_cost} onChange={(e) => setCourse(i, "uniform_cost", e.target.value)} className="h-7 text-[11px] w-16 text-right" data-testid={`wo-uniform-${i}`} /></td>
                       <td className="text-right num font-semibold whitespace-nowrap">{inr(r.total)}</td>
                       <td><Button size="icon" variant="ghost" onClick={() => delCourse(i)} className="h-6 w-6 hover:text-red-600"><Trash2 size={12} /></Button></td>
                     </tr>

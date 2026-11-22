@@ -13963,6 +13963,10 @@ class BatchIn(BaseModel):
     job_role: Optional[str] = ""              # Phase 87 · role name (from linked WO course)
     job_role_hours: float = Field(default=0, ge=0)
     num_candidates: int = Field(default=0, ge=0)
+    # Per-candidate uniform allowance (₹ per trainee). Added to the 1st milestone only
+    # (uniform_total = batch candidate count × uniform_cost). 0 = no uniform. Inherited
+    # from the linked Work Order course; editable per batch.
+    uniform_cost: float = Field(default=0, ge=0)
     # Derived (backend-authoritative — frontend value ignored on save).
     is_lwe: Optional[bool] = None
     base_rate: float = 0
@@ -14002,7 +14006,7 @@ UNIFORM_PER_CANDIDATE = 1000.0  # one-time uniform allowance, applied ONLY on 1s
 MILESTONE_SHARES = {"1st": 0.30, "2nd": 0.40, "3rd": 0.30}
 
 
-def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0) -> dict:
+def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0, uniform_per_candidate: float = 0.0) -> dict:
     """Return per-milestone breakdown.
 
     Formula (per user spec):
@@ -14040,7 +14044,7 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
             "custom_rate": float(r.get("custom_rate") or 0) if cat == "other" else None,
         })
     role_total = round(role_total, 2)
-    uniform_total = round(total_candidates * UNIFORM_PER_CANDIDATE, 2)
+    uniform_total = round(total_candidates * float(uniform_per_candidate or 0), 2)
     total_candidates = int(total_candidates or 0)
     passed = max(0, min(int(passed or 0), total_candidates))
     placed = max(0, min(int(placed or 0), total_candidates))
@@ -14063,7 +14067,7 @@ def _compute_batch_milestones(job_roles: list, passed: int = 0, placed: int = 0)
         "placed_candidates": placed,
         "shares": MILESTONE_SHARES,
         "rates": JOB_CATEGORY_RATES,
-        "uniform_per_candidate": UNIFORM_PER_CANDIDATE,
+        "uniform_per_candidate": float(uniform_per_candidate or 0),
         "by_milestone": {
             "1st": {
                 "share_of_role": MILESTONE_SHARES["1st"],
@@ -14116,9 +14120,9 @@ def _batch_effective_job_roles(batch: dict) -> list:
     return list(b.get("job_roles") or [])
 
 
-def _compute_1st_milestone(job_roles: list) -> dict:
+def _compute_1st_milestone(job_roles: list, uniform_per_candidate: float = 0.0) -> dict:
     """Legacy: returns the 1st-milestone-only breakdown (role + uniform). Retained for back-compat."""
-    bd = _compute_batch_milestones(job_roles, passed=0, placed=0)
+    bd = _compute_batch_milestones(job_roles, passed=0, placed=0, uniform_per_candidate=uniform_per_candidate)
     first = bd["by_milestone"]["1st"]
     return {
         "rows": bd["rows"],
@@ -14767,9 +14771,9 @@ async def compute_first_milestone(bid: str, _=Depends(get_current_user)):
     batch = await db.batches.find_one({"id": bid}, {"_id": 0})
     if not batch:
         raise HTTPException(404, "Batch not found")
-    breakdown = _compute_1st_milestone(_batch_effective_job_roles(batch))
+    breakdown = _compute_1st_milestone(_batch_effective_job_roles(batch), uniform_per_candidate=float(batch.get("uniform_cost") or 0))
     breakdown["rates"] = JOB_CATEGORY_RATES
-    breakdown["uniform_per_candidate"] = UNIFORM_PER_CANDIDATE
+    breakdown["uniform_per_candidate"] = float(batch.get("uniform_cost") or 0)
     return breakdown
 
 
@@ -14789,6 +14793,7 @@ async def compute_milestones(bid: str, _=Depends(get_current_user)):
         _batch_effective_job_roles(batch),
         passed=int(batch.get("passed_candidates") or 0),
         placed=int(batch.get("placed_candidates") or 0),
+        uniform_per_candidate=float(batch.get("uniform_cost") or 0),
     )
 
 
@@ -15462,6 +15467,9 @@ class WorkOrderCourseIn(BaseModel):
     boarding_per_day: float = Field(default=0, ge=0)
     boarding_days: float = Field(default=0, ge=0)
     beneficiaries: int = Field(default=0, ge=0)
+    # Per-candidate uniform allowance (₹ per trainee) for this course. Seeds the batch's
+    # uniform_cost and feeds the 1st-milestone uniform total. 0 = no uniform.
+    uniform_cost: float = Field(default=0, ge=0)
 
 
 class WorkOrderIn(BaseModel):
@@ -15583,6 +15591,7 @@ def _compute_work_order(courses: list, pbg_percent: float, value_override) -> di
             "category": c.get("category", "") or "", "nsqf_level": c.get("nsqf_level", "") or "",
             "course_hours": hours, "cost_per_hour": cph, "boarding_per_day": bpd,
             "boarding_days": days, "beneficiaries": benef,
+            "uniform_cost": float(c.get("uniform_cost") or 0),
             "total_classroom_fee": classroom, "total_boarding_cost": boarding, "total_fee": total_fee,
         })
         total_classroom += classroom

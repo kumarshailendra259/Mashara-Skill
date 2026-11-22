@@ -73,7 +73,7 @@ const EMPTY_BATCH = {
   total_target: 0,
   // Phase 38 · Work Order Allocation
   fy_year: "", category: "", job_role_master_id: "",
-  job_role_hours: 0, num_candidates: 0,
+  job_role_hours: 0, num_candidates: 0, uniform_cost: 0,
   work_order_id: "",
 };
 
@@ -335,6 +335,7 @@ export default function BatchManagement() {
         if (!prev.category) patch.category = c.category || "";
         if (!prev.job_role_hours) patch.job_role_hours = Number(c.course_hours) || 0;
         if (!prev.num_candidates) patch.num_candidates = Number(c.beneficiaries) || 0;
+        if (!prev.uniform_cost) patch.uniform_cost = Number(c.uniform_cost) || 0;
       }
       return Object.keys(patch).length ? { ...prev, ...patch } : prev;
     });
@@ -518,6 +519,7 @@ export default function BatchManagement() {
       category: c.category || prev.category,
       job_role_hours: Number(c.course_hours) || prev.job_role_hours,
       num_candidates: Number(c.beneficiaries) || prev.num_candidates,
+      uniform_cost: Number(c.uniform_cost) || prev.uniform_cost,
     }) : prev);
   };
 
@@ -1205,6 +1207,11 @@ export default function BatchManagement() {
                   <div>
                     <Label className="overline text-[10px]">No. of Candidate *</Label>
                     <Input type="number" min={1} value={bEdit.num_candidates || ""} onChange={(e) => setBEdit({ ...bEdit, num_candidates: Number(e.target.value) || 0 })} className="rounded-none" data-testid="bm-batch-inp-numcands" />
+                  </div>
+                  <div>
+                    <Label className="overline text-[10px]">Uniform Cost / Candidate</Label>
+                    <Input type="number" min={0} step="0.01" value={bEdit.uniform_cost || ""} onChange={(e) => setBEdit({ ...bEdit, uniform_cost: Number(e.target.value) || 0 })} placeholder="0" className="rounded-none" data-testid="bm-batch-inp-uniform" />
+                    <div className="text-[9px] text-[var(--muted)] mt-0.5">Added to 1st milestone (× candidates). 0 = no uniform.</div>
                   </div>
                   <div>
                     <Label className="overline text-[10px]">Per Hour Rate (auto)</Label>

@@ -23,7 +23,8 @@ import {
 const MILESTONES = ["1st", "2nd", "3rd", "other"];
 const MILESTONE_LABEL = { "1st": "1st", "2nd": "2nd", "3rd": "3rd", other: "Other (manual)" };
 
-// Must match backend constants in server.py (JOB_CATEGORY_RATES + UNIFORM_PER_CANDIDATE + MILESTONE_SHARES)
+// Must match backend constants in server.py (JOB_CATEGORY_RATES + MILESTONE_SHARES).
+// Uniform is now per-batch (batch.uniform_cost × candidates), not a hardcoded constant.
 const CATEGORY_RATES = { "1": 56.35, "2": 52.50, "3": 36.85 };
 const CATEGORY_LABEL = {
   "1": "Category 1 (₹56.35/hr)",
@@ -63,7 +64,6 @@ function effectiveJobRoles(b) {
   }
   return b.job_roles || [];
 }
-const UNIFORM_PER_CANDIDATE = 1000;
 const SHARES = { "1st": 0.30, "2nd": 0.40, "3rd": 0.30 };
 // 2-decimal INR formatter, used for TDS / net amounts (gross/role/uniform stay integer via inr())
 const inr2 = (n) => new Intl.NumberFormat("en-IN", {
@@ -75,7 +75,7 @@ const TDS_OPTIONS = [
   { v: "10", label: "10%" },
 ];
 
-function computeMilestones(rows, passed, placed) {
+function computeMilestones(rows, passed, placed, uniformPerCandidate = 0) {
   let roleTotal = 0;
   let totalCandidates = 0;
   (rows || []).forEach((r) => {
@@ -86,7 +86,7 @@ function computeMilestones(rows, passed, placed) {
     totalCandidates += c;
   });
   roleTotal = Math.round(roleTotal * 100) / 100;
-  const uniform = totalCandidates * UNIFORM_PER_CANDIDATE;
+  const uniform = totalCandidates * (parseFloat(uniformPerCandidate) || 0);
   const p = Math.max(0, Math.min(parseInt(passed, 10) || 0, totalCandidates));
   const pl = Math.max(0, Math.min(parseInt(placed, 10) || 0, totalCandidates));
   const failed = Math.max(0, totalCandidates - p);
@@ -107,8 +107,8 @@ function computeMilestones(rows, passed, placed) {
 }
 
 // Back-compat alias used by older sections
-const computeFirstMilestone = (rows) => {
-  const b = computeMilestones(rows, 0, 0);
+const computeFirstMilestone = (rows, uniformPerCandidate = 0) => {
+  const b = computeMilestones(rows, 0, 0, uniformPerCandidate);
   return { roleTotal: b.roleTotal, uniformTotal: b.uniform, total: b.first.amount, totalCandidates: b.totalCandidates };
 };
 
@@ -389,6 +389,7 @@ export default function Programs() {
       activeRoles,
       activeBatch.passed_candidates || 0,
       activeBatch.placed_candidates || 0,
+      activeBatch.uniform_cost || 0,
     ) : null,
     [activeBatch, activeRoles],
   );
@@ -399,6 +400,7 @@ export default function Programs() {
       editRoles,
       editingBatch.passed_candidates || 0,
       editingBatch.placed_candidates || 0,
+      editingBatch.uniform_cost || 0,
     ) : null,
     [editingBatch, editRoles],
   );
@@ -485,12 +487,15 @@ export default function Programs() {
         activeRoles,
         activeBatch.passed_candidates || 0,
         activeBatch.placed_candidates || 0,
+        activeBatch.uniform_cost || 0,
       );
       if (milestone === "1st" && bd.first.amount > 0) {
         setPForm({
           batch_id: selectedBatchId, milestone, amount: bd.first.amount,
           expected_date: "",
-          description: `Auto · 30% × ₹${bd.roleTotal.toLocaleString("en-IN")} role + uniform ₹${bd.uniform.toLocaleString("en-IN")} (${bd.totalCandidates} candidates × ₹1000)`,
+          description: bd.uniform > 0
+            ? `Auto · 30% × ₹${bd.roleTotal.toLocaleString("en-IN")} role + uniform ₹${bd.uniform.toLocaleString("en-IN")} (${bd.totalCandidates} candidates × ₹${(activeBatch.uniform_cost || 0).toLocaleString("en-IN")})`
+            : `Auto · 30% × ₹${bd.roleTotal.toLocaleString("en-IN")} role total`,
           uniform_amount: bd.uniform, recovery_amount: 0,
         });
         setAutoFilled(true); setPayOpen(true); return;
@@ -838,7 +843,9 @@ export default function Programs() {
                           <div className="font-semibold text-blue-700">1st Milestone · 30%</div>
                           <div className="space-y-1 mt-2.5">
                             <div className="flex justify-between text-slate-600"><span>Role 30%</span><span className="num">{inr(activeBatchBreakdown.first.rolePortion)}</span></div>
-                            <div className="flex justify-between text-slate-600"><span>Lumpsum</span><span className="num">+{inr(activeBatchBreakdown.uniform)}</span></div>
+                            {activeBatchBreakdown.uniform > 0 && (
+                              <div className="flex justify-between text-slate-600"><span>Uniform</span><span className="num">+{inr(activeBatchBreakdown.uniform)}</span></div>
+                            )}
                             <div className="flex justify-between border-t border-blue-200 pt-1.5 mt-1 font-bold"><span className="text-slate-700">Total</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.first.amount)}</span></div>
                           </div>
                         </div>
@@ -1195,7 +1202,7 @@ export default function Programs() {
             </div>
             {pForm.milestone === "1st" && (
               <div className="col-span-2">
-                <Label>Uniform Amount (excluded from TDS) <span className="overline text-[10px]">{UNIFORM_PER_CANDIDATE} × candidates</span></Label>
+                <Label>Uniform Amount (excluded from TDS) <span className="overline text-[10px]">uniform cost × candidates</span></Label>
                 <Input type="number" step="0.01" value={pForm.uniform_amount} onChange={(e) => setPForm({ ...pForm, uniform_amount: e.target.value })} className="rounded-none num" data-testid="pay-uniform" />
               </div>
             )}
