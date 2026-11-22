@@ -3135,3 +3135,17 @@ Scope (user-chosen): clean up the top header on mobile; priority flows = Dashboa
 - Verified in preview at 390px: dashboard + HRMS headers clean, no overflow, hero title no longer overlapped.
 - KNOWN/deferred (reported to user): language (EN/HI) toggle is hidden on mobile header (pre-existing, `hidden xs:/sm:`); wide tables still side-scroll; forms/dialogs and tap-target pass not done.
 - Status: implemented + verified in PREVIEW. Needs DEPLOY for production.
+
+## Phase 103 — Finance (Milestones) page visual redesign to match mockup (2026-06)
+Request: redesign the Finance page (`/programs`, `pages/Programs.jsx`) to match a provided screenshot exactly, including colors. PURE visual restyle — all data, handlers, state and data-testids preserved; no backend/logic change.
+- Hero: gradient rounded card (brand→violet) with BarChart3 icon in rounded square, title "Projects · Batches · Milestones" + subtitle + Print/admin buttons.
+- Project tabs: rounded pill style (active = brand-soft).
+- Center/Batch selectors: rounded card, icons inside triggers (Building2/Users), rounded New Batch + edit/lock/delete icon buttons.
+- 4 summary cards with colored icon tiles: Batch (blue Database), Center (orange CalendarDays), Total Configured (purple Settings2, purple tint), Total Received (green CheckCircle2, emerald tint).
+- Milestone Auto-Calculation: rounded card, Calculator icon tile, blue candidates/passed/placed/failed badge, bordered table with category chips + role-total row, 3 colored milestone boxes — 1st blue ("Role 30% / Lumpsum / Total"), 2nd purple ("40% + Passed", red recovery), 3rd green ("30% + Placed").
+- Income Split: rounded card, Users icon, company card (blue tint + %badge + "(For N)") and partner cards with green "✓ Received" line.
+- Tabs: segmented pill style (active brand bg); renamed "Fooding Income" → "Feeding Income".
+- Milestone cards (MilestoneCard): rounded white cards, pill status badges (green Received / gray Not configured / amber Pending), colored amounts (TDS/Recovery/Assessment red, Net emerald), empty-state with illustration + Configure button, outline Update button. "Other (manual)" rendered full-width below the 1st/2nd/3rd grid.
+- Milestone Details: rounded card with Receipt icon header + "All Milestones" chip, table with green RECEIVED / amber status chips.
+- Verified in preview with real batch data (TEST_proj_659ed6 / TEST_batch_91c6c3): hero, selectors, 4 cards, auto-calc table + 3 colored boxes all render correctly; compiles clean.
+- Status: implemented + verified in PREVIEW. Needs DEPLOY for production.

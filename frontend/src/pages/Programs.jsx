@@ -13,7 +13,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Check, Clock, Calculator, Lock, LockOpen, Utensils } from "lucide-react";
+import { Plus, Pencil, Trash2, Check, Clock, Calculator, Lock, LockOpen, Utensils, BarChart3, Building2, CalendarDays, Settings2, CheckCircle2, RefreshCw, ChevronDown, Users, Receipt, Database, FileText } from "lucide-react";
 import PrintButton from "@/components/PrintButton";
 import FoodingTab from "@/components/FoodingTab";
 import {
@@ -97,85 +97,91 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
     disbursed:  "border-emerald-300 text-emerald-700",
   };
   return (
-    <div className={`swiss-card p-4 ${received ? "border-[var(--success)]" : empty ? "border-dashed" : ""}`} data-testid={`milestone-${milestone}`}>
-      <div className="flex items-center justify-between mb-2">
+    <div className={`rounded-2xl border bg-white p-5 transition-shadow hover:shadow-md ${received ? "border-emerald-200" : empty ? "border-dashed border-slate-300" : "border-slate-200"}`} data-testid={`milestone-${milestone}`}>
+      <div className="flex items-center justify-between mb-3">
         <div>
-          <div className="overline text-xs">Milestone</div>
-          <div className="font-heading font-black text-xl tracking-tight">{MILESTONE_LABEL[milestone] || milestone}</div>
+          <div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Milestone</div>
+          <div className="font-heading font-black text-2xl tracking-tight text-slate-800">{MILESTONE_LABEL[milestone] || milestone}</div>
         </div>
         {received ? (
-          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-[var(--success)] text-[var(--success)]">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700">
             <Check size={12} /> Received
           </span>
         ) : empty ? (
-          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-dashed border-[var(--muted)] text-[var(--muted)]">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full bg-slate-50 border border-slate-200 text-slate-500">
             Not configured
           </span>
         ) : (
-          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs border border-[var(--warning)] text-[#9a7a00]">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-full bg-amber-50 border border-amber-200 text-amber-700">
             <Clock size={12} /> Pending
           </span>
         )}
       </div>
       {empty ? (
         canEdit ? (
-          <Button onClick={onAdd} className="w-full brand-btn rounded-none mt-2 gap-1" data-testid={`btn-add-${milestone}`}>
-            <Plus size={14} /> Configure {milestone}
-          </Button>
+          <div className="flex flex-col items-center text-center py-2">
+            <Button onClick={onAdd} className="w-full rounded-xl mt-1 mb-4 gap-1.5 bg-[var(--brand)] hover:bg-[var(--brand-hover)] text-white font-semibold h-11" data-testid={`btn-add-${milestone}`}>
+              <Plus size={16} /> Configure {MILESTONE_LABEL[milestone] || milestone}
+            </Button>
+            <div className="w-16 h-16 rounded-2xl bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-300">
+              <FileText size={26} />
+            </div>
+            <div className="text-xs text-slate-400 mt-3">Configure details for {MILESTONE_LABEL[milestone] || milestone} milestone</div>
+          </div>
         ) : (
-          <div className="text-sm text-[var(--muted)] py-3">No payment set</div>
+          <div className="text-sm text-slate-400 py-3">No payment set</div>
         )
       ) : (
         <>
-          <div className="space-y-1.5 text-sm">
-            <div className="flex justify-between"><span className="overline">Gross</span><span className="num font-bold">{inr(payment.amount)}</span></div>
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between"><span className="text-slate-500">Gross</span><span className="num font-bold text-slate-800">{inr(payment.amount)}</span></div>
             {milestone === "1st" && payment.uniform_amount > 0 && (
-              <div className="flex justify-between"><span className="overline">Uniform</span><span className="num">{inr(payment.uniform_amount)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Uniform</span><span className="num text-slate-700">{inr(payment.uniform_amount)}</span></div>
             )}
             {received && payment.recovery_amount > 0 && (
-              <div className="flex justify-between text-[var(--danger)]"><span className="overline">Recovery</span><span className="num">−{inr2(payment.recovery_amount)}</span></div>
+              <div className="flex justify-between text-[var(--danger)]"><span>Recovery</span><span className="num">−{inr2(payment.recovery_amount)}</span></div>
             )}
             {received && payment.assessment_fee_total > 0 && (
-              <div className="flex justify-between text-[var(--danger)]"><span className="overline">Assessment fee</span><span className="num">−{inr2(payment.assessment_fee_total)}</span></div>
+              <div className="flex justify-between text-[var(--danger)]"><span>Assessment Fee</span><span className="num">−{inr2(payment.assessment_fee_total)}</span></div>
             )}
             {received && payment.tds_percent > 0 && (
               <>
-                <div className="flex justify-between text-[var(--danger)]"><span className="overline">TDS ({payment.tds_percent}%)</span><span className="num">−{inr2(payment.tds_amount)}</span></div>
-                <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - payment.tds_amount))}</span></div>
+                <div className="flex justify-between text-[var(--danger)]"><span>TDS ({payment.tds_percent}%)</span><span className="num">−{inr2(payment.tds_amount)}</span></div>
+                <div className="flex justify-between border-t border-slate-100 pt-2 mt-1"><span className="text-slate-500">Net Received</span><span className="num font-bold text-emerald-600">{inr2(payment.net_amount || (payment.amount - payment.tds_amount))}</span></div>
               </>
             )}
             {received && payment.tds_percent === 0 && (payment.recovery_amount > 0 || payment.assessment_fee_total > 0) && (
-              <div className="flex justify-between border-t border-[var(--border)] pt-1.5 mt-1"><span className="overline">Net Received</span><span className="num font-bold value-positive">{inr2(payment.net_amount || (payment.amount - (payment.recovery_amount || 0) - (payment.assessment_fee_total || 0)))}</span></div>
+              <div className="flex justify-between border-t border-slate-100 pt-2 mt-1"><span className="text-slate-500">Net Received</span><span className="num font-bold text-emerald-600">{inr2(payment.net_amount || (payment.amount - (payment.recovery_amount || 0) - (payment.assessment_fee_total || 0)))}</span></div>
             )}
             {payment.expected_date && (
-              <div className="flex justify-between"><span className="overline">Expected</span><span className="num">{payment.expected_date}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Expected</span><span className="num text-slate-700">{payment.expected_date}</span></div>
             )}
             {received && payment.received_date && (
-              <div className="flex justify-between"><span className="overline">Received</span><span className="num">{payment.received_date}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Received</span><span className="num text-slate-700">{payment.received_date}</span></div>
             )}
-            {payment.description && <div className="text-xs text-[var(--muted)] pt-1 border-t border-[var(--border)]">{payment.description}</div>}
+            {payment.description && <div className="text-xs text-slate-400 pt-2 border-t border-slate-100">{payment.description}</div>}
           </div>
-          {/* Phase 40 — Bill Status (linked Invoice stage) */}
+          {/* Bill Status (linked Invoice stage) */}
           {canEdit && (
-            <div className="mt-3 pt-2 border-t border-[var(--border)]">
+            <div className="mt-4 pt-3 border-t border-slate-100">
               <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="overline text-[10px]">Bill Status</div>
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Bill Status</div>
                   {billStatus?.linked && stageId ? (
                     <div className="mt-0.5">
-                      <span className={`inline-flex items-center px-1.5 py-0.5 text-[11px] border font-medium ${STAGE_TONE[stageId] || "border-slate-300"}`}>
+                      <span className={`inline-flex items-center px-1.5 py-0.5 text-[11px] border rounded-md font-medium ${STAGE_TONE[stageId] || "border-slate-300"}`}>
                         {billStatus.current_stage_label}
                       </span>
                       {billStatus.invoice_no && (
-                        <div className="text-[10px] text-[var(--muted)] mt-0.5 truncate">{billStatus.invoice_no}</div>
+                        <div className="text-[10px] text-slate-400 mt-0.5 truncate">{billStatus.invoice_no}</div>
                       )}
                     </div>
                   ) : (
-                    <div className="text-[11px] text-[var(--muted)] mt-0.5">Not started</div>
+                    <div className="text-[12px] text-slate-500 mt-0.5">Not started</div>
                   )}
                 </div>
                 {(!billStatus?.current_stage || billStatus.current_stage < 5) && (
-                  <Button size="sm" variant="outline" onClick={() => onOpenBillStatus(payment, billStatus)} className="rounded-none text-[11px] h-7 px-2" data-testid={`btn-bill-status-${milestone}`}>
+                  <Button size="sm" variant="outline" onClick={() => onOpenBillStatus(payment, billStatus)} className="rounded-lg text-[12px] h-8 px-3 border-[var(--brand)]/40 text-[var(--brand)] hover:bg-[var(--brand-soft)] font-semibold" data-testid={`btn-bill-status-${milestone}`}>
                     Update
                   </Button>
                 )}
@@ -184,14 +190,14 @@ function MilestoneCard({ milestone, payment, canEdit, canReceive, onAdd, onRecei
           )}
           <div className="flex gap-2 mt-3 no-print">
             {!received && canReceive && (
-              <Button size="sm" onClick={() => onReceive(payment)} className="brand-btn rounded-none flex-1 gap-1" data-testid={`btn-receive-${milestone}`}>
+              <Button size="sm" onClick={() => onReceive(payment)} className="rounded-xl flex-1 gap-1.5 bg-[var(--brand)] hover:bg-[var(--brand-hover)] text-white font-semibold h-10" data-testid={`btn-receive-${milestone}`}>
                 <Check size={14} /> Mark Received
               </Button>
             )}
             {canEdit && !received && (
               <>
-                <Button size="icon" variant="ghost" onClick={() => onEdit(payment)} className="rounded-none h-8 w-8"><Pencil size={14} /></Button>
-                <Button size="icon" variant="ghost" onClick={() => onDelete(payment)} className="rounded-none h-8 w-8 hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
+                <Button size="icon" variant="ghost" onClick={() => onEdit(payment)} className="rounded-lg h-9 w-9 text-slate-500"><Pencil size={14} /></Button>
+                <Button size="icon" variant="ghost" onClick={() => onDelete(payment)} className="rounded-lg h-9 w-9 text-slate-500 hover:text-[var(--danger)]"><Trash2 size={14} /></Button>
               </>
             )}
           </div>
@@ -614,37 +620,45 @@ export default function Programs() {
 
   return (
     <div className="space-y-5" data-testid="programs-page">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <div className="overline">Programs</div>
-          <h1 className="font-heading font-black tracking-tight text-3xl mt-1">Projects · Batches · Milestones</h1>
-        </div>
-        <div className="flex items-center gap-2">
-          {user?.role === "admin" && (
-            <>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={runRegenerateMissing}
-                className="rounded-none"
-                title="Rebuild income transactions for Received milestone payments that lost their txns"
-                data-testid="btn-regenerate-missing"
-              >
-                Regenerate Missing Txns
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={runOrphanCleanup}
-                className="rounded-none"
-                title="Backfill or delete milestone transactions whose parent batch no longer exists"
-                data-testid="btn-cleanup-orphans"
-              >
-                Cleanup Orphan Txns
-              </Button>
-            </>
-          )}
-          <PrintButton />
+      {/* Hero */}
+      <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br from-[#eef3ff] via-white to-[#f5f0ff] px-5 py-5 md:px-7 md:py-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-[var(--brand)] to-[#5b2bd9] flex items-center justify-center shrink-0 shadow-lg">
+              <BarChart3 size={26} className="text-white" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="font-heading font-black tracking-tight text-2xl md:text-3xl text-slate-800">Projects · Batches · Milestones</h1>
+              <p className="text-slate-500 text-sm mt-0.5">Track milestone progress, configure &amp; manage project wise details.</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {user?.role === "admin" && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={runRegenerateMissing}
+                  className="rounded-lg no-print"
+                  title="Rebuild income transactions for Received milestone payments that lost their txns"
+                  data-testid="btn-regenerate-missing"
+                >
+                  Regenerate Missing Txns
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={runOrphanCleanup}
+                  className="rounded-lg no-print"
+                  title="Backfill or delete milestone transactions whose parent batch no longer exists"
+                  data-testid="btn-cleanup-orphans"
+                >
+                  Cleanup Orphan Txns
+                </Button>
+              </>
+            )}
+            <PrintButton />
+          </div>
         </div>
       </div>
 
@@ -652,17 +666,17 @@ export default function Programs() {
         <div className="swiss-card p-8 text-center overline">No projects yet — create one under <a href="/projects" className="text-[var(--brand)] hover:underline">Projects</a> first.</div>
       ) : (
         <>
-          <div className="flex flex-wrap gap-1 border-b border-[var(--border)] no-print" data-testid="project-tabs">
+          <div className="flex flex-wrap gap-2 no-print" data-testid="project-tabs">
             {projects.map((p) => (
               <button
                 key={p.id}
                 type="button"
                 onClick={() => setActiveProjectId(p.id)}
                 data-testid={`tab-project-${p.id}`}
-                className={`px-4 py-2 text-sm border-b-2 transition-colors ${
+                className={`px-4 py-2 text-sm rounded-xl border transition-colors ${
                   activeProjectId === p.id
-                    ? "border-[var(--brand)] text-[var(--brand)] font-medium"
-                    : "border-transparent text-[var(--muted)] hover:text-[var(--text)]"
+                    ? "border-[var(--brand)] bg-[var(--brand-soft)] text-[var(--brand)] font-semibold"
+                    : "border-slate-200 bg-white text-slate-500 hover:text-slate-800 hover:border-slate-300"
                 }`}
               >
                 {p.name}
@@ -672,89 +686,104 @@ export default function Programs() {
 
           {activeProject && (
             <>
-              <div className="swiss-card p-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <Label className="overline">Center</Label>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 flex flex-col md:flex-row md:items-end gap-3">
+                <div className="flex-1">
+                  <Label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Center</Label>
                   <Select value={selectedCenterId} onValueChange={setSelectedCenterId}>
-                    <SelectTrigger className="rounded-none" data-testid="filter-center"><SelectValue placeholder="All centers" /></SelectTrigger>
+                    <SelectTrigger className="rounded-xl h-11 mt-1 border-slate-200" data-testid="filter-center">
+                      <span className="flex items-center gap-2 min-w-0"><Building2 size={15} className="text-[var(--brand)] shrink-0" /><SelectValue placeholder="All centers" /></span>
+                    </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__all">All centers</SelectItem>
                       {centers.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </div>
-                <div>
-                  <Label className="overline">Batch</Label>
-                  <div className="flex gap-2">
-                    <Select value={selectedBatchId || "__none"} onValueChange={(v) => setSelectedBatchId(v === "__none" ? "" : v)} disabled={batches.length === 0}>
-                      <SelectTrigger className="rounded-none" data-testid="filter-batch"><SelectValue placeholder={batches.length ? "Pick a batch" : "No batches"} /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none">—</SelectItem>
-                        {batches.map((b) => <SelectItem key={b.id} value={b.id}>{b.name}{b.center_id ? ` · ${centerName(b.center_id)}` : ""}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
+                <div className="flex-1">
+                  <Label className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Batch</Label>
+                  <Select value={selectedBatchId || "__none"} onValueChange={(v) => setSelectedBatchId(v === "__none" ? "" : v)} disabled={batches.length === 0}>
+                    <SelectTrigger className="rounded-xl h-11 mt-1 border-slate-200" data-testid="filter-batch">
+                      <span className="flex items-center gap-2 min-w-0"><Users size={15} className="text-[var(--brand)] shrink-0" /><SelectValue placeholder={batches.length ? "Pick a batch" : "No batches"} /></span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none">—</SelectItem>
+                      {batches.map((b) => <SelectItem key={b.id} value={b.id}>{b.name}{b.center_id ? ` · ${centerName(b.center_id)}` : ""}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="flex items-end gap-2 no-print">
                   {canCreateBatch && (
-                    <a href="/batch-management" className="brand-btn rounded-none gap-1 inline-flex items-center px-3 py-2 text-sm" data-testid="btn-goto-batch-management" title="Batch creation is centralised in the new Batch Management module.">
+                    <a href="/batch-management" className="rounded-xl gap-1 inline-flex items-center px-3 h-11 text-sm font-semibold bg-[var(--brand)] hover:bg-[var(--brand-hover)] text-white transition-colors" data-testid="btn-goto-batch-management" title="Batch creation is centralised in the new Batch Management module.">
                       <Plus size={14} /> New Batch →
                     </a>
                   )}
                   {activeBatch && canEditBatch && (
                     <>
-                      <Button variant="outline" onClick={() => openEditBatch(activeBatch)} className="rounded-none" data-testid="btn-edit-batch"><Pencil size={14} /></Button>
+                      <Button variant="outline" size="icon" onClick={() => openEditBatch(activeBatch)} className="rounded-xl h-11 w-11 border-slate-200" data-testid="btn-edit-batch"><Pencil size={15} /></Button>
                       {activeBatch.closed ? (
-                        <Button variant="outline" onClick={() => toggleClose(activeBatch, false)} className="rounded-none" data-testid="btn-reopen-batch" title="Reopen batch">
-                          <LockOpen size={14} />
+                        <Button variant="outline" size="icon" onClick={() => toggleClose(activeBatch, false)} className="rounded-xl h-11 w-11 border-slate-200" data-testid="btn-reopen-batch" title="Reopen batch">
+                          <LockOpen size={15} />
                         </Button>
                       ) : (
-                        <Button variant="outline" onClick={() => toggleClose(activeBatch, true)} className="rounded-none" data-testid="btn-close-batch" title="Close batch (stops new fooding entries)">
-                          <Lock size={14} />
+                        <Button variant="outline" size="icon" onClick={() => toggleClose(activeBatch, true)} className="rounded-xl h-11 w-11 border-slate-200" data-testid="btn-close-batch" title="Close batch (stops new fooding entries)">
+                          <Lock size={15} />
                         </Button>
                       )}
                     </>
                   )}
                   {activeBatch && canDeleteBatch && (
-                    <Button variant="outline" onClick={() => deleteBatch(activeBatch)} className="rounded-none hover:text-[var(--danger)]" data-testid="btn-delete-batch"><Trash2 size={14} /></Button>
+                    <Button variant="outline" size="icon" onClick={() => deleteBatch(activeBatch)} className="rounded-xl h-11 w-11 border-slate-200 hover:text-[var(--danger)]" data-testid="btn-delete-batch"><Trash2 size={15} /></Button>
                   )}
                 </div>
               </div>
 
               {!activeBatch ? (
-                <div className="swiss-card p-8 text-center overline" data-testid="no-batch-msg">Select or create a batch under {activeProject.name} to manage milestone payments.</div>
+                <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400 text-sm" data-testid="no-batch-msg">Select or create a batch under {activeProject.name} to manage milestone payments.</div>
               ) : (
                 <>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <div className="swiss-card p-3"><div className="overline">Batch</div><div className="font-heading font-bold text-lg truncate">{activeBatch.name}</div></div>
-                    <div className="swiss-card p-3"><div className="overline">Center</div><div className="font-heading font-bold text-lg truncate">{activeBatch.center_id ? centerName(activeBatch.center_id) : "—"}</div></div>
-                    <div className="swiss-card p-3"><div className="overline">Total Configured</div><div className="num font-bold text-xl">{inr(totalConfigured)}</div></div>
-                    <div className="swiss-card p-3"><div className="overline">Total Received</div><div className="num font-bold text-xl value-positive">{inr(totalReceived)}</div></div>
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center shrink-0"><Database size={20} /></div>
+                      <div className="min-w-0"><div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Batch</div><div className="font-heading font-bold text-lg truncate text-slate-800">{activeBatch.name}</div></div>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-white p-4 flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center shrink-0"><CalendarDays size={20} /></div>
+                      <div className="min-w-0"><div className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">Center</div><div className="font-heading font-bold text-lg truncate text-slate-800">{activeBatch.center_id ? centerName(activeBatch.center_id) : "—"}</div></div>
+                    </div>
+                    <div className="rounded-2xl border border-purple-200 bg-purple-50/50 p-4 flex items-center gap-3" data-testid="card-total-configured">
+                      <div className="w-11 h-11 rounded-xl bg-purple-100 text-purple-600 flex items-center justify-center shrink-0"><Settings2 size={20} /></div>
+                      <div className="min-w-0"><div className="text-[11px] uppercase tracking-wider text-purple-500 font-semibold">Total Configured</div><div className="num font-black text-xl text-slate-800">{inr(totalConfigured)}</div></div>
+                    </div>
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-4 flex items-center gap-3" data-testid="card-total-received">
+                      <div className="w-11 h-11 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0"><CheckCircle2 size={20} /></div>
+                      <div className="min-w-0"><div className="text-[11px] uppercase tracking-wider text-emerald-600 font-semibold">Total Received</div><div className="num font-black text-xl text-emerald-700">{inr(totalReceived)}</div></div>
+                    </div>
                   </div>
 
                   {/* Job roles breakdown card (auto all 3 milestones) */}
                   {activeBatchBreakdown && activeBatchBreakdown.roleTotal > 0 && (
-                    <div className="swiss-card p-4" data-testid="job-roles-breakdown">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="flex items-center gap-2">
-                          <Calculator size={16} className="text-[var(--brand)]" />
-                          <div className="overline">Milestone Auto-Calculation</div>
+                    <div className="rounded-2xl border border-slate-200 bg-white p-5" data-testid="job-roles-breakdown">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-9 h-9 rounded-xl bg-[var(--brand-soft)] text-[var(--brand)] flex items-center justify-center"><Calculator size={17} /></div>
+                          <div className="font-heading font-bold text-lg text-slate-800">Milestone Auto-Calculation</div>
                         </div>
-                        <div className="text-xs text-[var(--muted)]">
+                        <div className="inline-flex items-center gap-1.5 text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-3 py-1">
+                          <Users size={13} />
                           {activeBatchBreakdown.totalCandidates} candidates · {activeBatchBreakdown.passed} passed · {activeBatchBreakdown.placed} placed
                           {activeBatchBreakdown.failed > 0 && <> · <span className="text-[var(--danger)]">{activeBatchBreakdown.failed} failed</span></>}
                         </div>
                       </div>
-                      <div className="overflow-x-auto">
+                      <div className="overflow-x-auto rounded-xl border border-slate-100">
                         <table className="w-full text-sm">
                           <thead>
-                            <tr className="overline bg-gray-50 border-b border-[var(--border)]">
-                              <th className="text-left p-2">Job Role</th>
-                              <th className="text-left p-2">Category</th>
-                              <th className="text-right p-2">Candidates</th>
-                              <th className="text-right p-2">Hours</th>
-                              <th className="text-right p-2">Rate/hr</th>
-                              <th className="text-right p-2">Subtotal</th>
+                            <tr className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold bg-slate-50 border-b border-slate-100">
+                              <th className="text-left p-3">Job Role</th>
+                              <th className="text-left p-3">Category</th>
+                              <th className="text-right p-3">Candidates</th>
+                              <th className="text-right p-3">Hours</th>
+                              <th className="text-right p-3">Rate/HR</th>
+                              <th className="text-right p-3">Subtotal</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -763,48 +792,48 @@ export default function Programs() {
                               const c = parseInt(r.candidates, 10) || 0;
                               const h = parseFloat(r.hours) || 0;
                               return (
-                                <tr key={`${r.category}-${r.job_role}-${i}`} className="border-b border-[var(--border)]">
-                                  <td className="p-2">{r.job_role || <span className="text-[var(--muted)]">—</span>}</td>
-                                  <td className="p-2 overline text-xs">{r.category === "other" ? "Other" : `Cat ${r.category}`}</td>
-                                  <td className="p-2 text-right num">{c}</td>
-                                  <td className="p-2 text-right num">{h}</td>
-                                  <td className="p-2 text-right num">₹{rate.toFixed(2)}</td>
-                                  <td className="p-2 text-right num font-medium">{inr(c * rate * h)}</td>
+                                <tr key={`${r.category}-${r.job_role}-${i}`} className="border-b border-slate-100">
+                                  <td className="p-3 font-medium text-slate-700">{r.job_role || <span className="text-slate-400">—</span>}</td>
+                                  <td className="p-3"><span className="inline-block text-xs bg-slate-100 text-slate-600 rounded-md px-2 py-0.5">{r.category === "other" ? "Other" : `Cat ${r.category}`}</span></td>
+                                  <td className="p-3 text-right num text-slate-700">{c}</td>
+                                  <td className="p-3 text-right num text-slate-700">{h}</td>
+                                  <td className="p-3 text-right num text-slate-700">₹{rate.toFixed(2)}</td>
+                                  <td className="p-3 text-right num font-semibold text-slate-800">{inr(c * rate * h)}</td>
                                 </tr>
                               );
                             })}
-                            <tr className="border-t-2 border-[var(--border)]">
-                              <td className="p-2 font-medium" colSpan={5}>Role total (basis for milestone split)</td>
-                              <td className="p-2 text-right num font-bold">{inr(activeBatchBreakdown.roleTotal)}</td>
+                            <tr className="bg-slate-50/60">
+                              <td className="p-3 font-semibold text-slate-700" colSpan={5}>Role total (basis for milestone split)</td>
+                              <td className="p-3 text-right num font-black text-slate-900">{inr(activeBatchBreakdown.roleTotal)}</td>
                             </tr>
                           </tbody>
                         </table>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-                        <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm" data-testid="bd-1st">
-                          <div className="overline">1st Milestone · 30%</div>
-                          <div className="space-y-0.5 mt-2">
-                            <div className="flex justify-between"><span>Role 30%</span><span className="num">{inr(activeBatchBreakdown.first.rolePortion)}</span></div>
-                            <div className="flex justify-between"><span>Uniform</span><span className="num">+{inr(activeBatchBreakdown.uniform)}</span></div>
-                            <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1 font-bold"><span>Total</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.first.amount)}</span></div>
+                        <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-4 text-sm" data-testid="bd-1st">
+                          <div className="font-semibold text-blue-700">1st Milestone · 30%</div>
+                          <div className="space-y-1 mt-2.5">
+                            <div className="flex justify-between text-slate-600"><span>Role 30%</span><span className="num">{inr(activeBatchBreakdown.first.rolePortion)}</span></div>
+                            <div className="flex justify-between text-slate-600"><span>Lumpsum</span><span className="num">+{inr(activeBatchBreakdown.uniform)}</span></div>
+                            <div className="flex justify-between border-t border-blue-200 pt-1.5 mt-1 font-bold"><span className="text-slate-700">Total</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.first.amount)}</span></div>
                           </div>
                         </div>
-                        <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm" data-testid="bd-2nd">
-                          <div className="overline">2nd Milestone · 40% × passed</div>
-                          <div className="space-y-0.5 mt-2">
-                            <div className="flex justify-between"><span>{activeBatchBreakdown.second.basedOn}</span><span className="num">{inr(activeBatchBreakdown.second.gross)}</span></div>
+                        <div className="rounded-xl border border-purple-200 bg-purple-50/60 p-4 text-sm" data-testid="bd-2nd">
+                          <div className="font-semibold text-purple-700">2nd Milestone · 40% + Passed</div>
+                          <div className="space-y-1 mt-2.5">
+                            <div className="flex justify-between text-slate-600"><span>{activeBatchBreakdown.second.basedOn}</span><span className="num">{inr(activeBatchBreakdown.second.gross)}</span></div>
                             {activeBatchBreakdown.failed > 0 && (
                               <div className="flex justify-between text-[var(--danger)]"><span>Recovery ({activeBatchBreakdown.failed} failed)</span><span className="num">−{inr(activeBatchBreakdown.second.recovery)}</span></div>
                             )}
-                            <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1 font-bold"><span>Net</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.second.amount)}</span></div>
+                            <div className="flex justify-between border-t border-purple-200 pt-1.5 mt-1 font-bold"><span className="text-slate-700">Net</span><span className="num text-purple-700">{inr(activeBatchBreakdown.second.amount)}</span></div>
                           </div>
                         </div>
-                        <div className="border-l-2 border-[var(--brand)] bg-blue-50 p-3 text-sm" data-testid="bd-3rd">
-                          <div className="overline">3rd Milestone · 30% × placed</div>
-                          <div className="space-y-0.5 mt-2">
-                            <div className="flex justify-between"><span>{activeBatchBreakdown.third.basedOn}</span><span className="num">{inr(activeBatchBreakdown.third.amount)}</span></div>
-                            <div className="flex justify-between border-t border-[var(--border)] pt-1 mt-1 font-bold"><span>Total</span><span className="num text-[var(--brand)]">{inr(activeBatchBreakdown.third.amount)}</span></div>
+                        <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 text-sm" data-testid="bd-3rd">
+                          <div className="font-semibold text-emerald-700">3rd Milestone · 30% + Placed</div>
+                          <div className="space-y-1 mt-2.5">
+                            <div className="flex justify-between text-slate-600"><span>{activeBatchBreakdown.third.basedOn}</span><span className="num">{inr(activeBatchBreakdown.third.amount)}</span></div>
+                            <div className="flex justify-between border-t border-emerald-200 pt-1.5 mt-1 font-bold"><span className="text-slate-700">Total</span><span className="num text-emerald-700">{inr(activeBatchBreakdown.third.amount)}</span></div>
                           </div>
                         </div>
                       </div>
@@ -812,15 +841,17 @@ export default function Programs() {
                   )}
 
                   {((activeBatch.partner_ids || []).length > 0 || (activeBatch.partner_share_percent || 0) > 0) && (
-                    <div className="swiss-card p-4" data-testid="partner-split-section">
-                      <div className="flex items-center justify-between mb-3">
-                        <div className="overline">
-                          Income split · Partner pool {activeBatch.partner_share_percent || 0}% of gross
-                          {(activeBatch.partner_ids || []).length > 1 && ` ÷ ${(activeBatch.partner_ids || []).length} partners`}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-5" data-testid="partner-split-section">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-9 h-9 rounded-xl bg-[var(--brand-soft)] text-[var(--brand)] flex items-center justify-center"><Users size={17} /></div>
+                          <div className="font-heading font-bold text-lg text-slate-800">
+                            Income Split <span className="text-sm font-medium text-slate-400">· Partner Pool {activeBatch.partner_share_percent || 0}% of Gross{(activeBatch.partner_ids || []).length >= 1 && ` + ${(activeBatch.partner_ids || []).length} Partner${(activeBatch.partner_ids || []).length > 1 ? "s" : ""}`}</span>
+                          </div>
                         </div>
-                        <span className="overline">Company keeps {(100 - (activeBatch.partner_share_percent || 0)).toFixed(2)}%</span>
+                        <span className="text-sm font-semibold text-slate-600">Company Keeps {(100 - (activeBatch.partner_share_percent || 0)).toFixed(2)}%</span>
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         {(() => {
                           const pct = activeBatch.partner_share_percent || 0;
                           const nP = (activeBatch.partner_ids || []).length;
@@ -832,32 +863,25 @@ export default function Programs() {
                           const companyShareRecv = totalReceived - partnerPoolReceived;
                           return (
                             <>
-                              <div className="border border-[var(--brand)] p-2 text-sm bg-blue-50" data-testid="company-share-card">
-                                <div className="font-medium truncate flex items-center gap-1">
-                                  <span className="overline text-[10px] bg-[var(--brand)] text-white px-1">COMPANY</span>
-                                  <span className="truncate">{companies.find((c) => c.id === activeBatch.company_id)?.name || "Unassigned"}</span>
-                                </div>
-                                <div className="overline text-xs mt-1">Configured ({(100 - pct).toFixed(2)}%)</div>
-                                <div className="num font-bold">{inr(companyShare)}</div>
+                              <div className="rounded-xl border border-blue-200 bg-blue-50/60 p-4 text-sm relative" data-testid="company-share-card">
+                                {pct > 0 && <span className="absolute top-3 right-3 text-[11px] font-bold bg-[var(--brand)] text-white rounded-full px-2 py-0.5">{pct}%</span>}
+                                <div className="font-bold text-slate-800 truncate pr-12">{companies.find((c) => c.id === activeBatch.company_id)?.name || "Unassigned"}</div>
+                                {nP >= 1 && <div className="text-[11px] text-blue-600 font-medium">(For {nP})</div>}
+                                <div className="text-xs text-slate-500 mt-2">Configured ({(100 - pct).toFixed(2)}%)</div>
+                                <div className="num font-black text-lg text-slate-800">{inr(companyShare)}</div>
                                 {companyShareRecv > 0 && (
-                                  <>
-                                    <div className="overline text-xs mt-1">Received</div>
-                                    <div className="num font-bold value-positive">{inr(companyShareRecv)}</div>
-                                  </>
+                                  <div className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 mt-1.5"><CheckCircle2 size={13} /> Received {inr(companyShareRecv)}</div>
                                 )}
                               </div>
                               {(activeBatch.partner_ids || []).map((pid) => {
                                 const name = partners.find((p) => p.id === pid)?.name || pid;
                                 return (
-                                  <div key={pid} className="border border-[var(--border)] p-2 text-sm" data-testid={`partner-split-${pid}`}>
-                                    <div className="font-medium truncate">{name}</div>
-                                    <div className="overline text-xs mt-1">Configured share ({nP > 0 ? (pct / nP).toFixed(2) : 0}%)</div>
-                                    <div className="num font-bold">{inr(perPartner)}</div>
+                                  <div key={pid} className="rounded-xl border border-slate-200 bg-white p-4 text-sm" data-testid={`partner-split-${pid}`}>
+                                    <div className="font-bold text-slate-800 truncate">{name}</div>
+                                    <div className="text-xs text-slate-500 mt-2">Configured Share ({nP > 0 ? (pct / nP).toFixed(2) : 0}%)</div>
+                                    <div className="num font-black text-lg text-slate-800">{inr(perPartner)}</div>
                                     {perPartnerRecv > 0 && (
-                                      <>
-                                        <div className="overline text-xs mt-1">Received</div>
-                                        <div className="num font-bold value-positive">{inr(perPartnerRecv)}</div>
-                                      </>
+                                      <div className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 mt-1.5"><CheckCircle2 size={13} /> Received {inr(perPartnerRecv)}</div>
                                     )}
                                   </div>
                                 );
@@ -870,20 +894,20 @@ export default function Programs() {
                   )}
 
                   <Tabs defaultValue="milestones" data-testid="programs-income-tabs">
-                    <TabsList className="rounded-none bg-transparent border-b border-[var(--border)] p-0 h-auto">
+                    <TabsList className="rounded-xl bg-slate-100 p-1 h-auto gap-1 inline-flex">
                       <TabsTrigger value="milestones" data-testid="tab-milestones"
-                        className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
-                        <Calculator size={14} className="mr-1.5" /> Milestone Income
+                        className="rounded-lg data-[state=active]:bg-[var(--brand)] data-[state=active]:text-white data-[state=active]:shadow text-slate-600 px-4 py-2 font-semibold">
+                        <BarChart3 size={14} className="mr-1.5" /> Milestone Income
                       </TabsTrigger>
                       <TabsTrigger value="fooding" data-testid="tab-fooding"
-                        className="rounded-none data-[state=active]:bg-transparent data-[state=active]:border-b-2 data-[state=active]:border-[var(--brand)] data-[state=active]:text-[var(--brand)] px-4 py-2">
-                        <Utensils size={14} className="mr-1.5" /> Fooding Income
+                        className="rounded-lg data-[state=active]:bg-[var(--brand)] data-[state=active]:text-white data-[state=active]:shadow text-slate-600 px-4 py-2 font-semibold">
+                        <Utensils size={14} className="mr-1.5" /> Feeding Income
                       </TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="milestones" className="mt-4 space-y-4">
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-3" data-testid="milestones-grid">
-                        {MILESTONES.map((m) => (
+                        {["1st", "2nd", "3rd"].map((m) => (
                           <MilestoneCard
                             key={m}
                             milestone={m}
@@ -900,34 +924,64 @@ export default function Programs() {
                         ))}
                       </div>
 
-                      <div className="swiss-card overflow-x-auto" data-testid="payments-table">
-                        <table className="w-full text-sm">
-                          <thead><tr className="border-b border-[var(--border)] overline bg-gray-50">
-                            <th className="text-left p-3">Milestone</th>
-                            <th className="text-right p-3">Gross</th>
-                            <th className="text-right p-3">TDS</th>
-                            <th className="text-right p-3">Net</th>
-                            <th className="text-left p-3">Expected</th>
-                            <th className="text-left p-3">Status</th>
-                            <th className="text-left p-3">Received</th>
-                          </tr></thead>
-                          <tbody>
-                            {MILESTONES.map((m) => {
-                              const p = paymentByMilestone[m];
-                              return (
-                                <tr key={m} className="border-b border-[var(--border)]">
-                                  <td className="p-3 font-medium">{MILESTONE_LABEL[m] || m}</td>
-                                  <td className="p-3 num text-right">{p ? inr(p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
-                                  <td className="p-3 num text-right">{p && p.tds_percent > 0 ? `${p.tds_percent}% · ${inr2(p.tds_amount)}` : <span className="text-[var(--muted)]">—</span>}</td>
-                                  <td className="p-3 num text-right font-medium">{p && p.status === "received" ? inr2(p.net_amount || p.amount) : <span className="text-[var(--muted)]">—</span>}</td>
-                                  <td className="p-3 num">{p?.expected_date || "—"}</td>
-                                  <td className="p-3 overline text-xs">{p?.status || "—"}</td>
-                                  <td className="p-3 num">{p?.received_date || "—"}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                      {/* Other (manual) — full width */}
+                      <MilestoneCard
+                        milestone="other"
+                        payment={paymentByMilestone["other"]}
+                        canEdit={canEditPayments}
+                        canReceive={canReceive}
+                        onAdd={() => openNewPayment("other")}
+                        onReceive={openReceive}
+                        onEdit={openEditPayment}
+                        onDelete={deletePayment}
+                        billStatus={paymentByMilestone["other"] ? billStatuses[paymentByMilestone["other"].id] : null}
+                        onOpenBillStatus={openBillStatus}
+                      />
+
+                      <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden" data-testid="payments-table">
+                        <div className="flex items-center justify-between gap-2 px-5 py-4 border-b border-slate-100">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-9 h-9 rounded-xl bg-[var(--brand-soft)] text-[var(--brand)] flex items-center justify-center"><Receipt size={17} /></div>
+                            <div className="font-heading font-bold text-lg text-slate-800">Milestone Details</div>
+                          </div>
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1">All Milestones <ChevronDown size={13} /></span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm">
+                            <thead><tr className="text-[11px] uppercase tracking-wider text-slate-400 font-semibold bg-slate-50 border-b border-slate-100">
+                              <th className="text-left p-3.5">Milestone</th>
+                              <th className="text-right p-3.5">Gross</th>
+                              <th className="text-right p-3.5">TDS</th>
+                              <th className="text-right p-3.5">Net</th>
+                              <th className="text-right p-3.5">Expected</th>
+                              <th className="text-center p-3.5">Status</th>
+                              <th className="text-right p-3.5">Received</th>
+                            </tr></thead>
+                            <tbody>
+                              {MILESTONES.map((m) => {
+                                const p = paymentByMilestone[m];
+                                const isRecv = p?.status === "received";
+                                return (
+                                  <tr key={m} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50">
+                                    <td className="p-3.5 font-semibold text-slate-700">{MILESTONE_LABEL[m] || m}</td>
+                                    <td className="p-3.5 num text-right text-slate-700">{p ? inr(p.amount) : <span className="text-slate-300">–</span>}</td>
+                                    <td className="p-3.5 num text-right">{p && p.tds_percent > 0 ? <span className="text-[var(--danger)]">{p.tds_percent}% · {inr2(p.tds_amount)}</span> : <span className="text-slate-300">–</span>}</td>
+                                    <td className="p-3.5 num text-right font-semibold text-slate-800">{isRecv ? inr2(p.net_amount || p.amount) : <span className="text-slate-300">–</span>}</td>
+                                    <td className="p-3.5 num text-right text-slate-600">{p?.expected_date || <span className="text-slate-300">–</span>}</td>
+                                    <td className="p-3.5 text-center">
+                                      {!p ? <span className="text-slate-300">–</span> : isRecv ? (
+                                        <span className="inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full px-2.5 py-1">Received</span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide bg-amber-50 text-amber-700 border border-amber-200 rounded-full px-2.5 py-1">{p.status}</span>
+                                      )}
+                                    </td>
+                                    <td className="p-3.5 num text-right text-slate-700">{isRecv ? inr2(p.net_amount || p.amount) : <span className="text-slate-300">–</span>}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
                     </TabsContent>
 
